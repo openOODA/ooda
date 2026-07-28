@@ -1,10 +1,11 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.21.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.22.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
 > **DESIGN.md** is the north star (unchanged by alpha releases).  
-> Userland is **`.oo`**; the compiler bootstrap is still **Rust** until self-host.
+> Userland is **`.oo`**. **CHS self-host frontend** is green (`oodac` native + fixed-point referee).  
+> Full SPEC product self-host is **not** claimed.
 
 ---
 
@@ -24,7 +25,7 @@ cargo build --release
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.21.0-alpha
+ooda --version   # 0.22.0-alpha
 ```
 
 ```ooda
@@ -34,31 +35,25 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.21.0-alpha (M0 CHS host surface)
+## What's real in v0.22.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
-| `while` loops | Real (interp + LLVM + WAT) |
-| `else if` chains | Real |
-| Unary `!` (and `-`) | Real |
-| `.is_err()` / `.is_ok()` | Real |
-| `import "file.oo"` / `import std::name` | Real |
+| `while` / `else if` / unary `!` | Real (interp + LLVM/WAT subset) |
 | Option / Result / must-use / let mut | Real |
-| `ooda check` | Real |
-| Caps + call-graph handles | Real |
-| LLVM Int/Bool/Float + while | Real (clang to link) |
-| WAT Int subset + while/if | Real subset |
-| **CHS M0:** real `read_file`/`write_file` under `&FsCap` | Real (interpreter; sealed) |
-| **CHS M0:** `List[T]` + `list_*` | Real (interpreter; LLVM host-only until M4) |
-| **CHS M0:** `chars_len` / `char_at` / `str_slice` / char class | Real (interpreter) |
-| **CHS M0:** `type T = struct { … }` + field access | Real (interpreter) |
-| **CHS M0:** `main(args: List[String])` via `ooda run f.oo -- …` | Real |
+| Caps + sealed effects | Real (static + runtime) |
+| **CHS:** `List`, string walk, structs, real FS, argv | Real on interpreter |
+| **CHS C backend** (`ooda build --target c`) | Real — gcc + `runtime/chs_rt.c` (no clang required) |
+| **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
+| **oodac** (`oodac/main.oo`) lex/parse/check/smoke-build | Real (interp + native) |
+| **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
+| LLVM Int/Bool/Float + while | Real (clang to link when present) |
 
 ## Not implemented (fail non-zero)
 
-LSP, pkg install, migrate, replay, full WASM product, PyTorch, `for` sugar, self-host / fixed-point, LLVM lower of List/String/struct (documented host-only kill date M4).
+LSP, pkg install, migrate, replay, full WASM product, PyTorch, `for` sugar, full SPEC self-host (only **CHS frontend** fixed-point is claimed).
 
-See `bootstrap/CHS.md` for the Compiler Host Subset plan.
+See `bootstrap/CHS.md`.
 
 ---
 

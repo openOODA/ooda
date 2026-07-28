@@ -465,17 +465,61 @@ impl TypeChecker {
                     last = Ty::Void;
                 }
                 Statement::Expr(expr, span) => {
-                    let t = self.infer_expr(expr, env)?;
-                    // DESIGN must-use: discarded Result/Option is a hard error.
-                    if matches!(t, Ty::Result(_, _) | Ty::Option(_)) {
-                        return Err(anyhow!(
-                            "Type error at {}:{}: unused {} value (must-use); handle it or bind with `let _ = ...` is not enough — use `let` and match, or `?`",
-                            span.line,
-                            span.col,
-                            t.display()
-                        ));
+                    // Statement-level if/while must inherit mutability so
+                    // `let mut x` can be assigned inside branches (CHS oodac).
+                    match expr {
+                        Expression::If {
+                            cond,
+                            then_branch,
+                            else_branch,
+                            span: ispan,
+                        } => {
+                            let ct = self.infer_expr(cond, env)?;
+                            if !Ty::unifyable(&ct, &Ty::Bool) && !matches!(ct, Ty::Unknown) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: 'if' condition must be Bool, found {}",
+                                    ispan.line,
+                                    ispan.col,
+                                    ct.display()
+                                ));
+                            }
+                            self.check_block(then_branch, env, mutable, "if-then")?;
+                            if let Some(eb) = else_branch {
+                                self.check_block(eb, env, mutable, "if-else")?;
+                            }
+                            last = Ty::Void;
+                        }
+                        Expression::While {
+                            cond,
+                            body,
+                            span: wspan,
+                        } => {
+                            let ct = self.infer_expr(cond, env)?;
+                            if !Ty::unifyable(&ct, &Ty::Bool) && !matches!(ct, Ty::Unknown) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: while condition must be Bool, found {}",
+                                    wspan.line,
+                                    wspan.col,
+                                    ct.display()
+                                ));
+                            }
+                            self.check_block(body, env, mutable, "while-expr-stmt")?;
+                            last = Ty::Void;
+                        }
+                        _ => {
+                            let t = self.infer_expr(expr, env)?;
+                            // DESIGN must-use: discarded Result/Option is a hard error.
+                            if matches!(t, Ty::Result(_, _) | Ty::Option(_)) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: unused {} value (must-use); handle it or bind with `let _ = ...` is not enough — use `let` and match, or `?`",
+                                    span.line,
+                                    span.col,
+                                    t.display()
+                                ));
+                            }
+                            last = t;
+                        }
                     }
-                    last = t;
                 }
                 Statement::While { cond, body, span } => {
                     let ct = self.infer_expr(cond, env)?;
@@ -493,7 +537,33 @@ impl TypeChecker {
             }
         }
         if let Some(expr) = &block.expr {
-            last = self.infer_expr(expr, env)?;
+            // Tail expression may be a nested `else if` chain — keep mut map.
+            match expr.as_ref() {
+                Expression::If {
+                    cond,
+                    then_branch,
+                    else_branch,
+                    span: ispan,
+                } => {
+                    let ct = self.infer_expr(cond, env)?;
+                    if !Ty::unifyable(&ct, &Ty::Bool) && !matches!(ct, Ty::Unknown) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: 'if' condition must be Bool, found {}",
+                            ispan.line,
+                            ispan.col,
+                            ct.display()
+                        ));
+                    }
+                    self.check_block(then_branch, env, mutable, "if-then-tail")?;
+                    if let Some(eb) = else_branch {
+                        self.check_block(eb, env, mutable, "if-else-tail")?;
+                    }
+                    last = Ty::Void;
+                }
+                _ => {
+                    last = self.infer_expr(expr, env)?;
+                }
+            }
         }
         Ok(last)
     }

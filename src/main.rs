@@ -18,6 +18,8 @@ mod replay;
 mod migrate;
 
 mod codegen_wasm;
+mod codegen_c;
+mod dump;
 mod loader;
 
 use clap::{Parser as ClapParser, Subcommand};
@@ -33,13 +35,15 @@ use capabilities::CapabilityChecker;
 use typecheck::TypeChecker;
 use codegen::LlvmCodeGen;
 use codegen_wasm::WasmCodeGen;
+use codegen_c::{runtime_c_path, CCodeGen};
 use loader::load_program;
 use ast::Program;
+use dump::{format_ast_dump, format_check_err, format_check_ok, format_token_dump};
 
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.21.0-alpha")]
+#[command(version = "0.22.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -242,6 +246,14 @@ enum Commands {
         #[arg(long, default_value = "2026")]
         edition: String,
     },
+    /// Canonical dumps for CHS golden parity (tokens / ast / check)
+    Dump {
+        /// What to dump: tokens | ast | check
+        #[arg(value_parser = ["tokens", "ast", "check"])]
+        kind: String,
+        /// Path to the .oo file
+        file: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -292,7 +304,8 @@ fn main() -> Result<()> {
             CapabilityChecker::check_program(&program)?;
             TypeChecker::check_program(&program)?;
 
-            if target.to_lowercase() == "wasm" {
+            let target_l = target.to_lowercase();
+            if target_l == "wasm" {
                 let wat = WasmCodeGen::emit_wat(&program)?;
                 let out_wat = file.with_extension("wat");
                 fs::write(&out_wat, &wat)?;
@@ -306,17 +319,45 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
+            let out_bin = file.with_extension("");
+
+            // Prefer CHS C backend + gcc for native (stage-1 path; no clang required).
+            if target_l == "c" || target_l == "native" || target_l == "chs" {
+                let rt = runtime_c_path();
+                match CCodeGen::build_native(&program, &out_bin, &rt) {
+                    Ok(()) => {
+                        println!(
+                            "🚀 [openOODA CHS C Backend] Native executable: {} (runtime {})",
+                            out_bin.display(),
+                            rt.display()
+                        );
+                        if emit_llvm {
+                            let c = CCodeGen::emit_c(&program)?;
+                            println!("\n--- Generated C ---\n{}", c);
+                        }
+                        return Ok(());
+                    }
+                    Err(e) if target_l == "c" || target_l == "chs" => {
+                        return Err(e);
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "⚠️  [openOODA CHS C Backend] failed ({}); trying LLVM integer subset…",
+                            e
+                        );
+                    }
+                }
+            }
+
             let llvm_ir = LlvmCodeGen::emit_llvm_ir(&program).with_context(|| {
                 format!(
-                    "LLVM integer-subset codegen failed for '{}'. \
-                     Supported: Int/Bool straight-line functions, println(Int), main. \
-                     Use `ooda run` for String programs and full language surface.",
+                    "Codegen failed for '{}'. CHS C backend and LLVM integer-subset both unavailable/failed. \
+                     Use `ooda run` for interpreter, or `ooda build --target c` with gcc.",
                     file.display()
                 )
             })?;
 
             let out_ll = file.with_extension("ll");
-            let out_bin = file.with_extension("");
             fs::write(&out_ll, &llvm_ir)?;
 
             println!(
@@ -341,7 +382,7 @@ fn main() -> Result<()> {
                 }
                 NativeLinkResult::NoTool => {
                     println!(
-                        "💡 [openOODA Native Build] No clang in PATH; IR only at {}. Install clang (not gcc) to link LLVM IR.",
+                        "💡 [openOODA Native Build] No clang in PATH; IR only at {}. Use --target c with gcc, or install clang.",
                         out_ll.display()
                     );
                 }
@@ -349,6 +390,56 @@ fn main() -> Result<()> {
 
             if emit_llvm {
                 println!("\n--- Generated LLVM IR ---\n{}", llvm_ir);
+            }
+        }
+        Commands::Dump { kind, file } => {
+            let src = fs::read_to_string(&file)
+                .with_context(|| format!("read {}", file.display()))?;
+            match kind.as_str() {
+                "tokens" => {
+                    let mut lexer = Lexer::new(&src);
+                    match lexer.tokenize() {
+                        Ok(tokens) => {
+                            print!("{}", format_token_dump(&tokens));
+                        }
+                        Err(e) => {
+                            eprint!("{}", format_check_err("lex", &format!("{}", e)));
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                "ast" => {
+                    let mut lexer = Lexer::new(&src);
+                    let tokens = match lexer.tokenize() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            eprint!("{}", format_check_err("lex", &format!("{}", e)));
+                            std::process::exit(1);
+                        }
+                    };
+                    let mut parser = Parser::new(tokens);
+                    match parser.parse_program() {
+                        Ok(prog) => print!("{}", format_ast_dump(&prog)),
+                        Err(e) => {
+                            eprint!("{}", format_check_err("parse", &format!("{}", e)));
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                "check" => {
+                    match load_and_analyze(&file, false) {
+                        Ok(_) => print!("{}", format_check_ok()),
+                        Err(_code) => {
+                            // load_and_analyze already printed; emit stable ERR for harness
+                            eprint!("{}", format_check_err("check", "failed"));
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                other => {
+                    eprintln!("unknown dump kind '{}'; use tokens|ast|check", other);
+                    std::process::exit(2);
+                }
             }
         }
         Commands::Test { file, fuzz } => {

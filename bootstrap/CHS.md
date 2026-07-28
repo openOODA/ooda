@@ -1,77 +1,80 @@
-# CHS_lang / OODA₀ — Compiler Host Subset (draft, freeze at M1)
+# CHS_lang / OODA₀ — Compiler Host Subset (**FROZEN at M1**)
 
-**Status:** M0 stage-0 surface landed (interpreter host).  
-**LLVM / native:** List, String, struct, FsCap remain **host-only** until progressive EMIT (kill date: M4).  
-**Constitution:** `DESIGN.md` unchanged.
+**Status:** Frozen for bootstrap (M1+). Stage-0 host + C backend native emit.  
+**Constitution:** `DESIGN.md` unchanged.  
+**Self-host:** CHS frontend fixed-point green via `scripts/fixed_point.sh` (native `oodac` + token digests + smoke C).
 
-## Dual-engine done-definition
+## Dual-engine / multi-backend done-definition
 
-A feature is fully **in CHS** when the corpus passes `ooda run` **and** `ooda build` (native) **and** trap tests.  
-Until EMIT catches up, features below are **CHS host surface** (usable for oodac.oo on the interpreter).
+| Surface | Interpreter (`ooda run`) | Native |
+|---|---|---|
+| CHS host surface (M0) | Required | C backend (`ooda build --target c`) + `runtime/chs_rt.c` + gcc |
+| LLVM integer subset | N/A | clang link when available (optional) |
+| Full SPEC product | Not required for CHS | Not required |
 
-## Types
+A feature is **CHS-complete for bootstrap** when:
 
-| Type | Status |
+1. Interpreter tests pass, and  
+2. C backend can emit+link programs that use it (or it is I/O/runtime-only with sealed caps), and  
+3. Unfinished product work still fails non-zero.
+
+## Types (in)
+
+| Type | Notes |
 |---|---|
-| `Int`, `Bool`, `String`, `Void` | host + (Int/Bool/Float LLVM subset) |
-| `Option[T]`, `Result[T, E]` | host |
-| `List[T]` | host (`list_new`, `list_push`, `list_get`, `list_len`, `.len`) |
-| `struct` via `type Name = struct { fields }` | host; field access `t.field` |
-| `&FsCap`, `&EnvCap`, … | host tokens; real FS/env builtins |
+| `Int`, `Bool`, `String`, `Void` | |
+| `Option[T]`, `Result[T, E]` | host; C lowers Result as `OoResS`/`OoResV` |
+| `List[Int]`, `List[String]` | `list_new` / `list_push` / `list_get` / `list_len` / `.len` |
+| `type T = struct { fields }` | field access `t.f`; arena+int tags for AST |
+| `&FsCap`, `&EnvCap`, … | opaque tokens; real FS/env builtins |
 
-## Control
+## Control (in)
 
-`fn` / `pub fn`, `let` / `let mut`, `if` / `else if`, `while`, `match` on Option/Result, `import`, `return`.
+`fn` / `pub fn`, `let` / `let mut`, `if` / `else if`, `while`, `match` Option/Result, `import`, `return` (including nested in `if`).
 
-## String walk (unicode scalar)
+## String walk (in)
 
 | API | Notes |
 |---|---|
-| `.len()` | **byte** length (Rust `String::len`) |
-| `chars_len(s)` | unicode scalar count |
-| `char_at(s, i)` | i-th scalar as 1-char String |
-| `str_slice(s, start, end)` | char indices `[start, end)` |
+| `.len()` | **byte** length |
+| `chars_len` / `char_at` / `str_slice` | unicode scalar indices |
 | `char_is_digit` / `char_is_alpha` / `char_is_space` | single-char String |
 
-## I/O (sealed, real)
+## I/O (in, sealed)
 
-| API | Requires | Behavior |
-|---|---|---|
-| `read_file(path)` / `.read_file` | `&FsCap` on caller | `Result[String, String]` disk read |
-| `write_file(path, content)` / `.write_file` | `&FsCap` | `Result[Void, String]` disk write |
-| `env_get(key)` | `&EnvCap` | `Result[String, String]` |
+`read_file` / `write_file` under `&FsCap`; `env_get` under `&EnvCap`.
 
-## Process surface
+## Process (in)
 
-- `ooda run file.oo -- arg1 arg2 …` injects argv into `main(args: List[String], …)` (also `argv`).
-- Capability params (`fs: &FsCap`, …) still injected as opaque tokens.
+`ooda run f.oo -- args…` → `main(args: List[String], …)`.
 
-## oodac representation convention
+## Explicitly OUT of freeze
+
+`for` sugar, user enums, traits, net/async/crypto/json product, LSP/pkg, full WASM product, PyTorch.
+
+## Canonical dumps (stage-0)
 
 ```
-type Token = struct {
-    kind: Int,
-    line: Int,
-    col: Int,
-    text: String
-};
-// AST: arena of records + Int node kinds + child indices (not recursive user enums)
+ooda dump tokens <file>   # KIND\tLINE\tCOL\tTEXT
+ooda dump ast <file>      # structural line dump
+ooda dump check <file>    # OK / ERR\t…
 ```
 
-## Explicitly out of freeze
+## oodac
 
-`for` sugar, user enums, net/async/crypto/json product surface, LSP/pkg, full SPEC, WASM as bootstrap gate.
+- Source: `oodac/main.oo` (CHS only)
+- Native: `ooda build --target c oodac/main.oo` → `oodac/main` (rename `oodac/oodac`)
+- Commands: `tokens|ast|check|build <file>`
+- Parity: `scripts/chs_parity.sh`
+- Fixed-point: `scripts/fixed_point.sh`
 
-## Host-only kill dates
+## Metric (M5)
 
-| Feature | Host | LLVM native | Kill / target |
-|---|---|---|---|
-| List / String walk / struct | M0 | deferred | M4 progressive EMIT |
-| FsCap I/O / argv | M0 | N/A (runtime) | runtime support or host lib at M4 |
+1. stage-0 C-builds oodac → stage-1  
+2. stage-1 token dump SHA-256 == stage-0 dump for corpus  
+3. stage-1 `check` + smoke C (`chs-smoke-ok`)  
+4. rebuild stage-2; stage-1 ≡ stage-2 token digests  
+5. normalized C emit of CHS example is stable  
+6. intentional digest drift fails  
 
-## Examples
-
-- `examples/chs_fs_roundtrip.oo`
-- `examples/chs_list_string.oo`
-- `examples/chs_struct_token.oo`
-- `examples/chs_token_walk.oo` — integration golden
+Not used: raw binary hash alone.

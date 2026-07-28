@@ -116,6 +116,9 @@ pub struct Interpreter {
     argv: Vec<String>,
     /// Named struct layouts from `type Name = struct { ... }`.
     struct_defs: HashMap<String, Vec<(String, Type)>>,
+    /// When `return` executes inside nested if/while blocks, set this so outer
+    /// frames propagate out of the function (CHS oodac relies on this).
+    pending_return: Option<Value>,
 }
 
 impl Interpreter {
@@ -145,6 +148,7 @@ impl Interpreter {
             next_thread_id: 1,
             argv: Vec::new(),
             struct_defs,
+            pending_return: None,
         }
     }
 
@@ -680,9 +684,16 @@ impl Interpreter {
         // 2. Evaluate Function Body
         let prev_func = self.current_func.take();
         self.current_func = Some(name.to_string());
+        let prev_ret = self.pending_return.take();
         let body_result = self.eval_block(&func.body, &mut local_env);
+        let early = self.pending_return.take();
+        self.pending_return = prev_ret;
         self.current_func = prev_func;
-        let return_val = body_result?;
+        let return_val = if let Some(v) = early {
+            v
+        } else {
+            body_result?
+        };
 
         // 3. Evaluate Postconditions (ensures)
         if !func.ensures.is_empty() {
@@ -706,6 +717,9 @@ impl Interpreter {
 
     fn eval_block(&mut self, block: &Block, env: &mut HashMap<String, Value>) -> Result<Value> {
         for stmt in &block.stmts {
+            if self.pending_return.is_some() {
+                break;
+            }
             match stmt {
                 Statement::Let { name, init, .. } => {
                     let val = self.eval_expr(init, env)?;
@@ -719,28 +733,48 @@ impl Interpreter {
                     env.insert(name.clone(), val);
                 }
                 Statement::Return(Some(expr), _) => {
-                    return self.eval_expr(expr, env);
+                    let v = self.eval_expr(expr, env)?;
+                    self.pending_return = Some(v.clone());
+                    return Ok(v);
                 }
                 Statement::Return(None, _) => {
+                    self.pending_return = Some(Value::Void);
                     return Ok(Value::Void);
                 }
                 Statement::Expr(expr, _) => {
                     self.eval_expr(expr, env)?;
+                    if self.pending_return.is_some() {
+                        break;
+                    }
                 }
                 Statement::While { cond, body, .. } => {
                     loop {
+                        if self.pending_return.is_some() {
+                            break;
+                        }
                         let c = self.eval_expr(cond, env)?;
                         if c != Value::Bool(true) {
                             break;
                         }
                         self.eval_block(body, env)?;
+                        if self.pending_return.is_some() {
+                            break;
+                        }
                     }
                 }
             }
         }
 
+        if self.pending_return.is_some() {
+            return Ok(self.pending_return.clone().unwrap_or(Value::Void));
+        }
+
         if let Some(expr) = &block.expr {
-            self.eval_expr(expr, env)
+            let v = self.eval_expr(expr, env)?;
+            if self.pending_return.is_some() {
+                return Ok(self.pending_return.clone().unwrap_or(v));
+            }
+            Ok(v)
         } else {
             Ok(Value::Void)
         }
@@ -809,6 +843,7 @@ impl Interpreter {
                 } else {
                     Ok(Value::Void)
                 }
+                // pending_return (if any) is inspected by eval_block / call_function
             }
             Expression::StructLit { name, fields, .. } => {
                 let def = self.struct_defs.get(name).cloned().ok_or_else(|| {
@@ -1260,6 +1295,26 @@ mod tests {
             "#,
         );
         let mut interp = Interpreter::new(prog).with_argv(vec!["a".into(), "b".into()]);
+        assert!(interp.execute_all().is_ok());
+    }
+
+    #[test]
+    fn return_inside_if_returns_from_function() {
+        let prog = parse(
+            r#"
+            pub fn pick(x: Int) -> Int {
+                if x > 0 {
+                    return 1;
+                }
+                return 2;
+            }
+            pub fn main() {
+                assert_eq(pick(5), 1);
+                assert_eq(pick(0), 2);
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
         assert!(interp.execute_all().is_ok());
     }
 }
