@@ -276,13 +276,13 @@ impl TypeChecker {
                     }
                     last = Ty::Void;
                 }
-                Statement::Return(Some(expr)) => {
+                Statement::Return(Some(expr), _) => {
                     last = self.infer_expr(expr, env)?;
                 }
-                Statement::Return(None) => {
+                Statement::Return(None, _) => {
                     last = Ty::Void;
                 }
-                Statement::Expr(expr) => {
+                Statement::Expr(expr, _) => {
                     last = self.infer_expr(expr, env)?;
                 }
             }
@@ -295,20 +295,20 @@ impl TypeChecker {
 
     fn infer_expr(&self, expr: &Expression, env: &HashMap<String, Ty>) -> Result<Ty> {
         match expr {
-            Expression::Literal(Literal::Int(_)) => Ok(Ty::Int),
-            Expression::Literal(Literal::Float(_)) => Ok(Ty::Float),
-            Expression::Literal(Literal::String(_)) => Ok(Ty::String),
-            Expression::Literal(Literal::Bool(_)) => Ok(Ty::Bool),
-            Expression::Literal(Literal::Void) => Ok(Ty::Void),
-            Expression::Variable(name) => env
+            Expression::Literal(Literal::Int(_), _) => Ok(Ty::Int),
+            Expression::Literal(Literal::Float(_), _) => Ok(Ty::Float),
+            Expression::Literal(Literal::String(_), _) => Ok(Ty::String),
+            Expression::Literal(Literal::Bool(_), _) => Ok(Ty::Bool),
+            Expression::Literal(Literal::Void, _) => Ok(Ty::Void),
+            Expression::Variable(name, _) => env
                 .get(name)
                 .cloned()
                 .or_else(|| {
                     // Allow unbound in incomplete programs only for method receivers we can't type yet
                     None
                 })
-                .ok_or_else(|| anyhow!("Type error: undefined variable '{}'", name)),
-            Expression::Binary { op, left, right } => {
+                .ok_or_else(|| anyhow!("Type error at {}:{}: undefined variable '{}'", expr.span().line, expr.span().col, name)),
+            Expression::Binary { op, left, right, .. } => {
                 let lt = self.infer_expr(left, env)?;
                 let rt = self.infer_expr(right, env)?;
                 match op {
@@ -328,7 +328,9 @@ impl TypeChecker {
                                             && matches!(lt, Ty::Int | Ty::Float)
                                     {
                                         return Err(anyhow!(
-                                            "Type error: cannot concatenate {} and {} with '+'; convert with .to_string() first",
+                                            "Type error at {}:{}: cannot concatenate {} and {} with '+'; convert with .to_string() first",
+                                            expr.span().line,
+                                            expr.span().col,
                                             lt.display(),
                                             rt.display()
                                         ));
@@ -346,7 +348,9 @@ impl TypeChecker {
                             return Ok(Ty::Unknown);
                         }
                         Err(anyhow!(
-                            "Type error: operator '+' not defined for {} and {}",
+                            "Type error at {}:{}: operator '+' not defined for {} and {}",
+                            expr.span().line,
+                            expr.span().col,
                             lt.display(),
                             rt.display()
                         ))
@@ -362,7 +366,9 @@ impl TypeChecker {
                             Ok(Ty::Unknown)
                         } else {
                             Err(anyhow!(
-                                "Type error: arithmetic operator requires numeric operands, found {} and {}",
+                                "Type error at {}:{}: arithmetic operator requires numeric operands, found {} and {}",
+                            expr.span().line,
+                            expr.span().col,
                                 lt.display(),
                                 rt.display()
                             ))
@@ -377,7 +383,9 @@ impl TypeChecker {
                             Ok(Ty::Bool)
                         } else {
                             Err(anyhow!(
-                                "Type error: comparison requires numeric operands, found {} and {}",
+                                "Type error at {}:{}: comparison requires numeric operands, found {} and {}",
+                            expr.span().line,
+                            expr.span().col,
                                 lt.display(),
                                 rt.display()
                             ))
@@ -390,7 +398,9 @@ impl TypeChecker {
                             Ok(Ty::Bool)
                         } else {
                             Err(anyhow!(
-                                "Type error: logical operator requires Bool operands, found {} and {}",
+                                "Type error at {}:{}: logical operator requires Bool operands, found {} and {}",
+                            expr.span().line,
+                            expr.span().col,
                                 lt.display(),
                                 rt.display()
                             ))
@@ -415,7 +425,9 @@ impl TypeChecker {
                                 Ok(Ty::Int)
                             } else {
                                 Err(anyhow!(
-                                    "Type error: .len() requires String receiver, found {}",
+                                    "Type error at {}:{}: .len() requires String receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
                                     recv_ty.display()
                                 ))
                             }
@@ -440,7 +452,9 @@ impl TypeChecker {
                         for (i, (pt, at)) in params.iter().zip(arg_tys.iter()).enumerate() {
                             if !Ty::unifyable(pt, at) {
                                 return Err(anyhow!(
-                                    "Type error: function '{}' argument {} expects {}, found {}",
+                                    "Type error at {}:{}: function '{}' argument {} expects {}, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
                                     name,
                                     i,
                                     pt.display(),
@@ -459,11 +473,14 @@ impl TypeChecker {
                 cond,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 let ct = self.infer_expr(cond, env)?;
                 if !Ty::unifyable(&ct, &Ty::Bool) && !matches!(ct, Ty::Unknown) {
                     return Err(anyhow!(
-                        "Type error: 'if' condition must be Bool, found {}",
+                        "Type error at {}:{}: 'if' condition must be Bool, found {}",
+                        expr.span().line,
+                        expr.span().col,
                         ct.display()
                     ));
                 }
@@ -481,7 +498,7 @@ impl TypeChecker {
                     Ok(t1)
                 }
             }
-            Expression::Match { expr, arms } => {
+            Expression::Match { expr, arms, .. } => {
                 self.infer_expr(expr, env)?;
                 let mut result = Ty::Unknown;
                 for arm in arms {
@@ -546,5 +563,25 @@ mod tests {
             }
         "#;
         assert!(check(src).is_err());
+    }
+
+    #[test]
+    fn type_error_includes_real_source_span() {
+        // `missing_var` is on line 4, col 26 (after 12 spaces of indent).
+        let src = "pub fn main() {\n    let x = 1;\n    let y = 2;\n    let z = missing_var;\n}\n";
+        let err = check(src).unwrap_err();
+        let msg = format!("{}", err);
+        // The error message must carry the actual line:col of the
+        // offending identifier so --json-errors can surface it.
+        assert!(
+            msg.contains("at 4:"),
+            "expected error to carry span line 4, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("missing_var"),
+            "expected error to name the variable, got: {}",
+            msg
+        );
     }
 }

@@ -5,11 +5,17 @@ use anyhow::{anyhow, Result};
 pub struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
+    /// Span of the most recently consumed token (used to populate AST spans).
+    last_span: Span,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<SpannedToken>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            last_span: Span::synthetic(),
+        }
     }
 
     fn loc(&self) -> (usize, usize) {
@@ -29,13 +35,22 @@ impl Parser {
 
     fn advance(&mut self) -> Token {
         let idx = self.pos;
-        if self.pos < self.tokens.len() {
+        if let Some(t) = self.tokens.get(idx) {
+            self.last_span = Span {
+                line: t.line,
+                col: t.col,
+            };
             self.pos += 1;
+            t.token.clone()
+        } else {
+            Token::Eof
         }
-        self.tokens
-            .get(idx)
-            .map(|t| t.token.clone())
-            .unwrap_or(Token::Eof)
+    }
+
+    /// Span of the most recently consumed token. Used to stamp AST nodes
+    /// with the location of their leading token.
+    fn last_span(&self) -> Span {
+        self.last_span
     }
 
     fn consume(&mut self, expected: Token) -> Result<()> {
@@ -169,6 +184,7 @@ impl Parser {
         Ok(FunctionDecl {
             is_pub,
             name,
+            span: self.last_span(),
             params,
             return_type,
             requires,
@@ -224,12 +240,12 @@ impl Parser {
                 let expr = self.parse_expression()?;
                 if self.peek() == &Token::Semi {
                     self.advance();
-                    stmts.push(Statement::Expr(expr));
+                    stmts.push(Statement::Expr(expr, self.last_span()));
                 } else if self.peek() == &Token::RBrace {
                     final_expr = Some(Box::new(expr));
                     break;
                 } else {
-                    stmts.push(Statement::Expr(expr));
+                    stmts.push(Statement::Expr(expr, self.last_span()));
                 }
             }
         }
@@ -268,6 +284,7 @@ impl Parser {
             mutable,
             type_annotation,
             init,
+            span: self.last_span(),
         })
     }
 
@@ -279,7 +296,7 @@ impl Parser {
             None
         };
         self.consume(Token::Semi)?;
-        Ok(Statement::Return(expr))
+        Ok(Statement::Return(expr, self.last_span()))
     }
 
     fn parse_expression(&mut self) -> Result<Expression> {
@@ -300,6 +317,7 @@ impl Parser {
                 op,
                 left: Box::new(left),
                 right: Box::new(right),
+                span: self.last_span(),
             };
         }
 
@@ -330,7 +348,7 @@ impl Parser {
         let mut primary = self.parse_primary()?;
 
         loop {
-            if let Expression::Variable(name) = &primary {
+            if let Expression::Variable(name, _) = &primary {
                 let func_name = name.clone();
                 if self.peek() == &Token::Exclamation {
                     self.advance(); // consume !
@@ -362,6 +380,7 @@ impl Parser {
                         name: func_name,
                         args,
                         propagate_err: propagate,
+                        span: self.last_span(),
                     };
                     continue;
                 }
@@ -400,6 +419,7 @@ impl Parser {
                     name: format!(".{}", method),
                     args: method_args,
                     propagate_err: propagate,
+                    span: self.last_span(),
                 };
                 continue;
             }
@@ -417,11 +437,11 @@ impl Parser {
                 match self.peek().clone() {
                     Token::IntLit(n) => {
                         self.advance();
-                        Ok(Expression::Literal(Literal::Int(-n)))
+                        Ok(Expression::Literal(Literal::Int(-n), self.last_span()))
                     }
                     Token::FloatLit(f) => {
                         self.advance();
-                        Ok(Expression::Literal(Literal::Float(-f)))
+                        Ok(Expression::Literal(Literal::Float(-f), self.last_span()))
                     }
                     other => { let (l,c)=self.loc(); Err(anyhow!("Expected number after '-' at {}:{}, found {:?}", l, c, other)) },
                 }
@@ -440,6 +460,7 @@ impl Parser {
                     cond: Box::new(cond),
                     then_branch,
                     else_branch,
+                    span: self.last_span(),
                 })
             }
             Token::Match => {
@@ -460,19 +481,20 @@ impl Parser {
                 Ok(Expression::Match {
                     expr: Box::new(expr),
                     arms,
+                    span: self.last_span(),
                 })
             }
-            Token::IntLit(n) => { self.advance(); Ok(Expression::Literal(Literal::Int(n))) }
-            Token::FloatLit(f) => { self.advance(); Ok(Expression::Literal(Literal::Float(f))) }
-            Token::StringLit(s) => { self.advance(); Ok(Expression::Literal(Literal::String(s))) }
-            Token::True => { self.advance(); Ok(Expression::Literal(Literal::Bool(true))) }
-            Token::False => { self.advance(); Ok(Expression::Literal(Literal::Bool(false))) }
-            Token::Ident(id) => { self.advance(); Ok(Expression::Variable(id)) }
+            Token::IntLit(n) => { let s = self.last_span(); self.advance(); Ok(Expression::Literal(Literal::Int(n), s)) }
+            Token::FloatLit(f) => { let s = self.last_span(); self.advance(); Ok(Expression::Literal(Literal::Float(f), s)) }
+            Token::StringLit(s) => { let sp = self.last_span(); self.advance(); Ok(Expression::Literal(Literal::String(s), sp)) }
+            Token::True => { let s = self.last_span(); self.advance(); Ok(Expression::Literal(Literal::Bool(true), s)) }
+            Token::False => { let s = self.last_span(); self.advance(); Ok(Expression::Literal(Literal::Bool(false), s)) }
+            Token::Ident(id) => { let s = self.last_span(); self.advance(); Ok(Expression::Variable(id, s)) }
             Token::LParen => {
                 self.advance();
                 if self.peek() == &Token::RParen {
                     self.advance();
-                    Ok(Expression::Literal(Literal::Void))
+                    Ok(Expression::Literal(Literal::Void, self.last_span()))
                 } else {
                     let expr = self.parse_expression()?;
                     self.consume(Token::RParen)?;

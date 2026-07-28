@@ -87,9 +87,9 @@ impl LlvmCodeGen {
                     }
                     Self::check_expr_subset(init, ctx)?;
                 }
-                Statement::Return(Some(e)) => Self::check_expr_subset(e, ctx)?,
-                Statement::Return(None) => {}
-                Statement::Expr(e) => Self::check_expr_subset(e, ctx)?,
+                Statement::Return(Some(e), _) => Self::check_expr_subset(e, ctx)?,
+                Statement::Return(None, _) => {}
+                Statement::Expr(e, _) => Self::check_expr_subset(e, ctx)?,
             }
         }
         if let Some(e) = &block.expr {
@@ -100,15 +100,15 @@ impl LlvmCodeGen {
 
     fn check_expr_subset(expr: &Expression, ctx: &str) -> Result<()> {
         match expr {
-            Expression::Literal(Literal::String(_)) => bail!(
+            Expression::Literal(Literal::String(_), _) => bail!(
                 "LLVM integer-subset backend does not support string literals in '{}'. Use `ooda run`.",
                 ctx
             ),
-            Expression::Literal(Literal::Float(_)) => bail!(
+            Expression::Literal(Literal::Float(_), _) => bail!(
                 "LLVM integer-subset backend does not support float literals in '{}'.",
                 ctx
             ),
-            Expression::Literal(_) | Expression::Variable(_) => Ok(()),
+            Expression::Literal(_, _) | Expression::Variable(_, _) => Ok(()),
             Expression::Binary { left, right, .. } => {
                 Self::check_expr_subset(left, ctx)?;
                 Self::check_expr_subset(right, ctx)
@@ -138,6 +138,7 @@ impl LlvmCodeGen {
                 cond,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 Self::check_expr_subset(cond, ctx)?;
                 Self::check_block_subset(then_branch, ctx)?;
@@ -146,7 +147,7 @@ impl LlvmCodeGen {
                 }
                 Ok(())
             }
-            Expression::Match { expr, arms } => {
+            Expression::Match { expr, arms, .. } => {
                 Self::check_expr_subset(expr, ctx)?;
                 for arm in arms {
                     Self::check_expr_subset(&arm.body, ctx)?;
@@ -242,7 +243,7 @@ impl LlvmCodeGen {
                     f_ir.push_str(&format!("  store {} {}, {}* %var_{}\n", vty, val, vty, name));
                     locals.insert(name.clone(), vty);
                 }
-                Statement::Return(Some(expr)) => {
+                Statement::Return(Some(expr), _) => {
                     let (val, code, r, vty) = Self::emit_expr(expr, reg, &locals)?;
                     reg = r;
                     f_ir.push_str(&code);
@@ -264,7 +265,7 @@ impl LlvmCodeGen {
                     }
                     returned = true;
                 }
-                Statement::Return(None) => {
+                Statement::Return(None, _) => {
                     if is_main {
                         f_ir.push_str("  ret i32 0\n");
                     } else if ret_ty == "void" {
@@ -274,7 +275,7 @@ impl LlvmCodeGen {
                     }
                     returned = true;
                 }
-                Statement::Expr(expr) => {
+                Statement::Expr(expr, _) => {
                     let (_val, code, r, _vty) = Self::emit_expr(expr, reg, &locals)?;
                     reg = r;
                     f_ir.push_str(&code);
@@ -315,22 +316,22 @@ impl LlvmCodeGen {
     ) -> Result<(String, String, usize, &'static str)> {
         let mut code = String::new();
         match expr {
-            Expression::Literal(Literal::Int(n)) => Ok((format!("{}", n), code, reg, "i64")),
-            Expression::Literal(Literal::Bool(b)) => {
+            Expression::Literal(Literal::Int(n), _) => Ok((format!("{}", n), code, reg, "i64")),
+            Expression::Literal(Literal::Bool(b), _) => {
                 Ok((format!("{}", if *b { 1 } else { 0 }), code, reg, "i1"))
             }
-            Expression::Literal(Literal::Void) => Ok(("0".into(), code, reg, "i64")),
-            Expression::Literal(Literal::Float(_)) | Expression::Literal(Literal::String(_)) => {
+            Expression::Literal(Literal::Void, _) => Ok(("0".into(), code, reg, "i64")),
+            Expression::Literal(Literal::Float(_), _) | Expression::Literal(Literal::String(_), _) => {
                 bail!("internal: non-integer literal reached LLVM emit")
             }
-            Expression::Variable(name) => {
+            Expression::Variable(name, _) => {
                 let vty = locals.get(name).copied().unwrap_or("i64");
                 let r = format!("%r{}", reg);
                 reg += 1;
                 code.push_str(&format!("  {} = load {}, {}* %var_{}\n", r, vty, vty, name));
                 Ok((r, code, reg, vty))
             }
-            Expression::Binary { op, left, right } => {
+            Expression::Binary { op, left, right, .. } => {
                 let (l, lc, r1, lty) = Self::emit_expr(left, reg, locals)?;
                 let (r, rc, r2, _rty) = Self::emit_expr(right, r1, locals)?;
                 code.push_str(&lc);
@@ -421,7 +422,7 @@ impl LlvmCodeGen {
                     Ok((res, code, reg, "i64"))
                 }
             }
-            Expression::If { cond, then_branch, else_branch } => {
+            Expression::If { cond, then_branch, else_branch, .. } => {
                 let (c_val, c_code, mut r_curr, _) = Self::emit_expr(cond, reg, locals)?;
                 code.push_str(&c_code);
                 
@@ -435,7 +436,7 @@ impl LlvmCodeGen {
                 code.push_str(&format!("\n{}:\n", then_label));
                 for stmt in &then_branch.stmts {
                     match stmt {
-                        Statement::Return(Some(ex)) => {
+                        Statement::Return(Some(ex), _) => {
                             let (val, scode, rnext, _) = Self::emit_expr(ex, r_curr, locals)?;
                             r_curr = rnext;
                             code.push_str(&scode);
@@ -452,7 +453,7 @@ impl LlvmCodeGen {
                 if let Some(eb) = else_branch {
                     for stmt in &eb.stmts {
                         match stmt {
-                            Statement::Return(Some(ex)) => {
+                            Statement::Return(Some(ex), _) => {
                                 let (val, scode, rnext, _) = Self::emit_expr(ex, r_curr, locals)?;
                                 r_curr = rnext;
                                 code.push_str(&scode);

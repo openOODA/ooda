@@ -453,13 +453,13 @@ impl Interpreter {
                     let val = self.eval_expr(init, env)?;
                     env.insert(name.clone(), val);
                 }
-                Statement::Return(Some(expr)) => {
+                Statement::Return(Some(expr), _) => {
                     return self.eval_expr(expr, env);
                 }
-                Statement::Return(None) => {
+                Statement::Return(None, _) => {
                     return Ok(Value::Void);
                 }
-                Statement::Expr(expr) => {
+                Statement::Expr(expr, _) => {
                     self.eval_expr(expr, env)?;
                 }
             }
@@ -474,22 +474,22 @@ impl Interpreter {
 
     fn eval_expr(&mut self, expr: &Expression, env: &mut HashMap<String, Value>) -> Result<Value> {
         match expr {
-            Expression::Literal(Literal::Int(n)) => Ok(Value::Int(*n)),
-            Expression::Literal(Literal::Float(f)) => Ok(Value::Float(*f)),
-            Expression::Literal(Literal::String(s)) => Ok(Value::String(s.clone())),
-            Expression::Literal(Literal::Bool(b)) => Ok(Value::Bool(*b)),
-            Expression::Literal(Literal::Void) => Ok(Value::Void),
-            Expression::Variable(name) => {
+            Expression::Literal(Literal::Int(n), _) => Ok(Value::Int(*n)),
+            Expression::Literal(Literal::Float(f), _) => Ok(Value::Float(*f)),
+            Expression::Literal(Literal::String(s), _) => Ok(Value::String(s.clone())),
+            Expression::Literal(Literal::Bool(b), _) => Ok(Value::Bool(*b)),
+            Expression::Literal(Literal::Void, _) => Ok(Value::Void),
+            Expression::Variable(name, _) => {
                 env.get(name).cloned()
                     .or_else(|| self.globals.get(name).cloned())
                     .ok_or_else(|| anyhow!("Undefined variable '{}'", name))
             }
-            Expression::Binary { op, left, right } => {
+            Expression::Binary { op, left, right, .. } => {
                 let l_val = self.eval_expr(left, env)?;
                 let r_val = self.eval_expr(right, env)?;
                 self.eval_binary_op(op, l_val, r_val)
             }
-            Expression::Call { name, args, propagate_err } => {
+            Expression::Call { name, args, propagate_err, .. } => {
                 let mut arg_vals = Vec::new();
                 for arg in args {
                     arg_vals.push(self.eval_expr(arg, env)?);
@@ -506,7 +506,7 @@ impl Interpreter {
                     Ok(res)
                 }
             }
-            Expression::If { cond, then_branch, else_branch } => {
+            Expression::If { cond, then_branch, else_branch, .. } => {
                 let cond_val = self.eval_expr(cond, env)?;
                 if cond_val == Value::Bool(true) {
                     self.eval_block(then_branch, env)
@@ -516,7 +516,7 @@ impl Interpreter {
                     Ok(Value::Void)
                 }
             }
-            Expression::Match { expr, arms } => {
+            Expression::Match { expr, arms, .. } => {
                 let target = self.eval_expr(expr, env)?;
                 for arm in arms {
                     let mut arm_env = env.clone();

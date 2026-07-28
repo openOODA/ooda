@@ -203,9 +203,9 @@ impl CapabilityChecker {
         for stmt in &block.stmts {
             match stmt {
                 Statement::Let { init, .. } => Self::check_expr(init, func)?,
-                Statement::Return(Some(expr)) => Self::check_expr(expr, func)?,
-                Statement::Expr(expr) => Self::check_expr(expr, func)?,
-                Statement::Return(None) => {}
+                Statement::Return(Some(expr), _) => Self::check_expr(expr, func)?,
+                Statement::Expr(expr, _) => Self::check_expr(expr, func)?,
+                Statement::Return(None, _) => {}
             }
         }
         if let Some(expr) = &block.expr {
@@ -261,6 +261,7 @@ impl CapabilityChecker {
                 cond,
                 then_branch,
                 else_branch,
+                ..
             } => {
                 Self::check_expr(cond, func)?;
                 Self::check_block(then_branch, func)?;
@@ -268,13 +269,13 @@ impl CapabilityChecker {
                     Self::check_block(else_b, func)?;
                 }
             }
-            Expression::Match { expr, arms } => {
+            Expression::Match { expr, arms, .. } => {
                 Self::check_expr(expr, func)?;
                 for arm in arms {
                     Self::check_expr(&arm.body, func)?;
                 }
             }
-            Expression::Literal(_) | Expression::Variable(_) => {}
+            Expression::Literal(_, _) | Expression::Variable(_, _) => {}
         }
         Ok(())
     }
@@ -282,7 +283,7 @@ impl CapabilityChecker {
     /// Cap handle is either a parameter of the right type, or a variable known to be that param.
     fn expr_is_cap_handle(expr: &Expression, kind: CapKind, func: &FunctionDecl) -> bool {
         match expr {
-            Expression::Variable(name) => func
+            Expression::Variable(name, _) => func
                 .params
                 .iter()
                 .any(|p| p.name == *name && kind.matches_type(&p.param_type)),
