@@ -12,6 +12,7 @@ mod reflect;
 mod bench;
 mod pkg;
 mod lsp;
+mod context;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -28,7 +29,7 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.1.9-alpha")]
+#[command(version = "0.2.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -108,6 +109,13 @@ enum Commands {
     },
     /// Start Language Server Protocol daemon for VSCode/Cursor IDEs
     Lsp,
+    /// Build < 200-token micro-context payload for 8GB VRAM GPU LLMs
+    Context {
+        /// Path to the .oo file
+        file: PathBuf,
+        /// Target symbol
+        symbol: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -272,6 +280,10 @@ fn main() -> Result<()> {
         }
         Commands::Lsp => {
             lsp::LspDaemon::start()?;
+        }
+        Commands::Context { file, symbol } => {
+            let ctx = context::ContextEngine::build_micro_context(&file.display().to_string(), &symbol)?;
+            println!("🤖 [8GB VRAM Micro-Context Payload]:\n{}", ctx);
         }
     }
 
