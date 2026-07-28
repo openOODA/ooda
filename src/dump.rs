@@ -4,7 +4,6 @@
 // ===================================================================
 use crate::ast::*;
 use crate::lexer::{SpannedToken, Token};
-use anyhow::Result;
 
 /// Stable token kind name used by goldens and oodac.
 pub fn token_kind_name(tok: &Token) -> String {
