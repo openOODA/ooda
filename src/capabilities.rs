@@ -1,3 +1,7 @@
+// ===================================================================
+// openOODA AST-Based Type-State Capability Security Checker
+// Enforces default-deny access control across function call graphs
+// ===================================================================
 use crate::ast::*;
 use anyhow::{anyhow, Result};
 
@@ -50,6 +54,21 @@ impl CapabilityChecker {
         Ok(())
     }
 
+    fn is_net_io(name: &str) -> bool {
+        let s = name.to_lowercase();
+        s.contains("http") || s.contains("fetch") || s.contains("downloaddata") || s.contains("exfiltrate") || s.contains("query_remote_api") || s.contains("net_connect")
+    }
+
+    fn is_fs_io(name: &str) -> bool {
+        let s = name.to_lowercase();
+        s.contains("read_file") || s.contains("write_file") || s.contains("fs_read") || s.contains("fs_write") || s.contains("fs.read_file")
+    }
+
+    fn is_sys_io(name: &str) -> bool {
+        let s = name.to_lowercase();
+        s.contains("exec") || s.contains("spawn") || s.contains("async_spawn") || s.contains("sys_exec")
+    }
+
     fn check_expr(
         expr: &Expression,
         func: &FunctionDecl,
@@ -59,34 +78,28 @@ impl CapabilityChecker {
     ) -> Result<()> {
         match expr {
             Expression::Call { name, args, .. } => {
-                if name.contains("get") || name.contains("fetch") || name.contains("http") {
-                    if !has_net {
-                        return Err(anyhow!(
-                            "Security Capability Violation: Function '{}' attempts network access via '{}' without receiving a '&NetCap' capability token.",
-                            func.name,
-                            name
-                        ));
-                    }
+                if Self::is_net_io(name) && !has_net {
+                    return Err(anyhow!(
+                        "Security Capability Violation: Function '{}' attempts unauthorized network access via '{}' without receiving a '&NetCap' capability handle.",
+                        func.name,
+                        name
+                    ));
                 }
 
-                if name.contains("write_file") || name.contains("read_file") {
-                    if !has_fs {
-                        return Err(anyhow!(
-                            "Security Capability Violation: Function '{}' attempts file system access via '{}' without receiving a '&FsCap' capability token.",
-                            func.name,
-                            name
-                        ));
-                    }
+                if Self::is_fs_io(name) && !has_fs {
+                    return Err(anyhow!(
+                        "Security Capability Violation: Function '{}' attempts unauthorized file system access via '{}' without receiving a '&FsCap' capability handle.",
+                        func.name,
+                        name
+                    ));
                 }
 
-                if name.contains("exec") || name.contains("spawn") {
-                    if !has_sys {
-                        return Err(anyhow!(
-                            "Security Capability Violation: Function '{}' attempts system process access via '{}' without receiving a '&SysCap' capability token.",
-                            func.name,
-                            name
-                        ));
-                    }
+                if Self::is_sys_io(name) && !has_sys {
+                    return Err(anyhow!(
+                        "Security Capability Violation: Function '{}' attempts unauthorized system process access via '{}' without receiving a '&SysCap' capability handle.",
+                        func.name,
+                        name
+                    ));
                 }
 
                 for arg in args {
