@@ -80,10 +80,13 @@ fn format_type(t: &Type) -> String {
         Type::Bool => "Bool".into(),
         Type::Void => "Void".into(),
         Type::Custom(s) => s.clone(),
-        Type::NetCap => "&NetCap".into(),
-        Type::FsCap => "&FsCap".into(),
-        Type::EnvCap => "&EnvCap".into(),
-        Type::SysCap => "&SysCap".into(),
+        // Capability types do NOT include the leading `&` here —
+        // `format_param` adds it based on the parameter's `is_ref`
+        // flag, so emitting `&` here would produce `&&NetCap`.
+        Type::NetCap => "NetCap".into(),
+        Type::FsCap => "FsCap".into(),
+        Type::EnvCap => "EnvCap".into(),
+        Type::SysCap => "SysCap".into(),
         Type::Option(inner) => format!("Option[{}]", format_type(inner)),
         Type::Result(ok, err) => {
             format!("Result[{}, {}]", format_type(ok), format_type(err))
@@ -224,6 +227,39 @@ mod tests {
         assert!(outline.contains("fn greet(name: String) -> String"));
         assert!(outline.contains("requires name.len() > 0"));
         assert!(outline.contains("ensures result.len() > 0"));
+    }
+
+    #[test]
+    fn outline_formats_capability_params_with_single_ampersand() {
+        // Regression: `format_type` used to return `"&NetCap"` for the
+        // NetCap type, and `format_param` also prepended `&` based on
+        // `is_ref`, producing `&&NetCap` in the outline. Capability
+        // types should not carry the leading `&` so that the
+        // `is_ref` flag is the single source of truth.
+        let src = r#"
+            pub fn fetch_user_profile(net: &NetCap, user_id: Int) -> Result[String, String] {
+                return Ok("");
+            }
+            pub fn log_event(fs: &FsCap, message: String) -> Result[Void, String] {
+                return Ok(());
+            }
+            pub fn run_shell(sys: &SysCap, cmd: String) -> Result[Int, String] {
+                return Ok(0);
+            }
+            pub fn read_env(env: &EnvCap, key: String) -> String {
+                return "";
+            }
+        "#;
+        let outline = generate_outline(&parse(src));
+        assert!(
+            !outline.contains("&&"),
+            "outline contains a double ampersand:\n{}",
+            outline
+        );
+        assert!(outline.contains("net: &NetCap"));
+        assert!(outline.contains("fs: &FsCap"));
+        assert!(outline.contains("sys: &SysCap"));
+        assert!(outline.contains("env: &EnvCap"));
     }
 
     #[test]
