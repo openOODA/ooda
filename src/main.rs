@@ -17,6 +17,8 @@ mod context;
 mod replay;
 mod migrate;
 
+mod codegen_wasm;
+
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
 use std::fs;
@@ -29,11 +31,12 @@ use diagnostics::AiDiagnostic;
 use capabilities::CapabilityChecker;
 use typecheck::TypeChecker;
 use codegen::LlvmCodeGen;
+use codegen_wasm::WasmCodeGen;
 
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.10.0-alpha")]
+#[command(version = "0.10.1-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -266,7 +269,7 @@ fn main() -> Result<()> {
         Commands::Bench { file } => {
             bench::run_empirical_verification_suite(&file)?;
         }
-        Commands::Build { file, release, emit_llvm, target } => {
+        Commands::Build { file, release: _, emit_llvm, target } => {
             let code = fs::read_to_string(&file)?;
             let mut lexer = Lexer::new(&code);
             let tokens = lexer.tokenize()?;
@@ -277,10 +280,17 @@ fn main() -> Result<()> {
             TypeChecker::check_program(&program)?;
 
             if target.to_lowercase() == "wasm" {
-                anyhow::bail!(
-                    "WASM target is not implemented in this alpha (no bytecode emission). \
-                     Use `ooda build` for the integer-subset LLVM IR backend, or `ooda run` for the interpreter."
+                let wat = WasmCodeGen::emit_wat(&program)?;
+                let out_wat = file.with_extension("wat");
+                fs::write(&out_wat, &wat)?;
+                println!(
+                    "⚡ [openOODA WebAssembly Compiler] Successfully compiled WebAssembly module: {}",
+                    out_wat.display()
                 );
+                if emit_llvm {
+                    println!("\n--- Generated WebAssembly Text (.wat) ---\n{}", wat);
+                }
+                return Ok(());
             }
 
             let llvm_ir = LlvmCodeGen::emit_llvm_ir(&program).with_context(|| {

@@ -286,8 +286,7 @@ impl LlvmCodeGen {
         }
 
         if let Some(body_expr) = &func.body.expr {
-            let (val, code, r, vty) = Self::emit_expr(body_expr, reg, &locals)?;
-            reg = r;
+            let (val, code, _r, _vty) = Self::emit_expr(body_expr, reg, &locals)?;
             f_ir.push_str(&code);
             if !is_main && ret_ty != "void" && !f_ir.ends_with("ret ") {
                 f_ir.push_str(&format!("  ret {} {}\n", ret_ty, val));

@@ -66,7 +66,6 @@ pub fn run_empirical_verification_suite(file_path: &Path) -> Result<()> {
             Err(e) => {
                 writeln!(out, "   ❌ Lexer error: {}", e)?;
                 verdict = Verdict::Failed;
-                parse_us = 0;
                 writeln!(out, "   Verdict: {}\n", verdict.label())?;
                 return finalize(&mut out, &[(1, verdict)]);
             }
@@ -77,7 +76,6 @@ pub fn run_empirical_verification_suite(file_path: &Path) -> Result<()> {
             Err(e) => {
                 writeln!(out, "   ❌ Parser error: {}", e)?;
                 verdict = Verdict::Failed;
-                parse_us = 0;
                 writeln!(out, "   Verdict: {}\n", verdict.label())?;
                 return finalize(&mut out, &[(1, verdict)]);
             }

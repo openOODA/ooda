@@ -237,7 +237,7 @@ impl Interpreter {
         Ok(())
     }
 
-    pub fn call_function(&mut self, name: &str, args: Vec<Value>, caller_env: &mut HashMap<String, Value>) -> Result<Value> {
+    pub fn call_function(&mut self, name: &str, args: Vec<Value>, _caller_env: &mut HashMap<String, Value>) -> Result<Value> {
         // ------------------------------------------------------------------
         // Runtime capability gate (default-deny at the point of action).
         // Even if a caller bypasses the static CapabilityChecker, the
