@@ -33,7 +33,7 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.10.0-alpha")]
+#[command(version = "0.8.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -256,12 +256,31 @@ fn main() -> Result<()> {
             })?;
 
             let out_ll = file.with_extension("ll");
+            let out_bin = file.with_extension("");
             fs::write(&out_ll, &llvm_ir)?;
+
             println!(
-                "🔨 [openOODA LLVM] Integer-subset IR validated → {} (release={})",
-                out_ll.display(),
-                release
+                "🔨 [openOODA LLVM Compiler] Generated LLVM IR: {}",
+                out_ll.display()
             );
+
+            // Attempt native binary assembly via clang
+            let clang_res = std::process::Command::new("clang")
+                .arg(&out_ll)
+                .arg("-o")
+                .arg(&out_bin)
+                .output();
+
+            if let Ok(out) = clang_res {
+                if out.status.success() {
+                    println!("🚀 [openOODA Native Build] Successfully compiled native executable binary: {}", out_bin.display());
+                } else {
+                    println!("⚠️ [openOODA Native Build] Clang assembly warning/skipped (IR saved at {})", out_ll.display());
+                }
+            } else {
+                println!("💡 [openOODA Native Build] Clang not found in PATH; LLVM IR emitted at {}", out_ll.display());
+            }
+
             if emit_llvm {
                 println!("\n--- Generated LLVM IR ---\n{}", llvm_ir);
             }

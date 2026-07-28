@@ -71,9 +71,20 @@ impl Interpreter {
         }
 
         // 2. Execute main() if present
-        if self.functions.contains_key("main") {
+        if let Some(main_fn) = self.functions.get("main").cloned() {
             println!("🚀 [Execution] Running main()");
-            self.call_function("main", vec![], &mut HashMap::new())?;
+            let mut main_args = Vec::new();
+            for param in &main_fn.params {
+                let cap_name = match param.param_type {
+                    Type::NetCap => "NetCap",
+                    Type::FsCap  => "FsCap",
+                    Type::SysCap => "SysCap",
+                    Type::EnvCap => "EnvCap",
+                    _ => "GeneralCap",
+                };
+                main_args.push(Value::Capability(cap_name.to_string()));
+            }
+            self.call_function("main", main_args, &mut HashMap::new())?;
         }
 
         Ok(())

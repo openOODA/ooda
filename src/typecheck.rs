@@ -66,6 +66,12 @@ impl Ty {
         if matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown) {
             return true;
         }
+        // Allow () (Void) capability tokens in verify blocks
+        if (matches!(a, Ty::Void) && matches!(b, Ty::NetCap | Ty::FsCap | Ty::SysCap | Ty::EnvCap))
+            || (matches!(b, Ty::Void) && matches!(a, Ty::NetCap | Ty::FsCap | Ty::SysCap | Ty::EnvCap))
+        {
+            return true;
+        }
         // Allow Result[T,E] vs looser Unknown-containing forms
         match (a, b) {
             (Ty::Result(a1, a2), Ty::Result(b1, b2)) => {
