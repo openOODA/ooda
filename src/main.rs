@@ -13,6 +13,7 @@ mod bench;
 mod pkg;
 mod lsp;
 mod context;
+mod replay;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -29,7 +30,7 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.2.3-alpha")]
+#[command(version = "0.2.4-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -121,6 +122,13 @@ enum Commands {
         /// Hardware/LLM VRAM tier (8gb, 16gb, frontier)
         #[arg(long, default_value = "8gb")]
         tier: String,
+    },
+    /// Replay deterministic execution step-by-step for debugging
+    Replay {
+        /// Path to the .oo file
+        file: PathBuf,
+        /// Target function or test name
+        target: String,
     },
 }
 
@@ -295,6 +303,9 @@ fn main() -> Result<()> {
         Commands::Context { file, symbol, tier } => {
             let ctx = context::ContextEngine::build_micro_context(&file.display().to_string(), &symbol, &tier)?;
             println!("🤖 [LLVM/VRAM Dynamic Auto-Scaling Context Payload (Tier: {})]:\n{}", tier, ctx);
+        }
+        Commands::Replay { file, target } => {
+            replay::ReplayEngine::replay_execution(&file.display().to_string(), &target)?;
         }
     }
 
