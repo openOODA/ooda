@@ -487,7 +487,7 @@ fn main() -> Result<()> {
             } else if let Some(repo) = install {
                 pkg::PackageManager::install(&repo)?;
             } else {
-                println!("📦 openOODA Package Manager v0.1.5-alpha. Use --init or --install.");
+                println!("📦 openOODA Package Manager (product {}). Use --init or --install.", env!("CARGO_PKG_VERSION"));
             }
         }
         Commands::Lsp => {
