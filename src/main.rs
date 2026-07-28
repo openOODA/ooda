@@ -10,6 +10,7 @@ mod codegen;
 mod patch;
 mod reflect;
 mod bench;
+mod pkg;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -26,7 +27,7 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.1.3-alpha")]
+#[command(version = "0.1.4-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -94,6 +95,15 @@ enum Commands {
     Outline {
         /// Path to the .oo file
         file: PathBuf,
+    },
+    /// Manage OODA package dependencies and lockfiles
+    Pkg {
+        /// Dependency name or GitHub repository to install
+        #[arg(long)]
+        install: Option<String>,
+        /// Initialize a new package manifest
+        #[arg(long)]
+        init: Option<String>,
     },
 }
 
@@ -247,6 +257,15 @@ fn main() -> Result<()> {
 
             let summary = outline::generate_outline(&program);
             println!("📋 [openOODA Outline] API Summary for {}:\n{}", file.display(), summary);
+        }
+        Commands::Pkg { install, init } => {
+            if let Some(name) = init {
+                pkg::PackageManager::init(&name)?;
+            } else if let Some(repo) = install {
+                pkg::PackageManager::install(&repo)?;
+            } else {
+                println!("📦 openOODA Package Manager v0.1.4-alpha. Use --init or --install.");
+            }
         }
     }
 
