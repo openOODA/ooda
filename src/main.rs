@@ -2,6 +2,9 @@ mod ast;
 mod lexer;
 mod parser;
 mod eval;
+mod diagnostics;
+mod fmt;
+mod outline;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -11,6 +14,7 @@ use anyhow::{Context, Result};
 use lexer::Lexer;
 use parser::Parser;
 use eval::Interpreter;
+use diagnostics::AiDiagnostic;
 
 #[derive(ClapParser)]
 #[command(name = "ooda")]
@@ -52,6 +56,9 @@ enum Commands {
     Fmt {
         /// Path to the .oo file
         file: PathBuf,
+        /// Write formatted code directly back to file
+        #[arg(long)]
+        write: bool,
     },
     /// Emit token-minimized module outline (types & contracts only)
     Outline {
@@ -65,29 +72,59 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Run { file, json_errors } => {
-            let code = fs::read_to_string(&file)
-                .with_context(|| format!("Failed to read file '{}'", file.display()))?;
+            let code = match fs::read_to_string(&file) {
+                Ok(c) => c,
+                Err(e) => {
+                    if json_errors {
+                        AiDiagnostic::new("FileNotFound", &file, 1, 1, format!("{}", e), "Ensure the file path exists and is readable.").print_json();
+                    } else {
+                        eprintln!("Error: Failed to read file '{}': {}", file.display(), e);
+                    }
+                    std::process::exit(1);
+                }
+            };
 
             let mut lexer = Lexer::new(&code);
-            let tokens = lexer.tokenize()
-                .map_err(|e| if json_errors {
-                    eprintln!("{{\"error\": \"LexerError\", \"message\": \"{}\"}}", e);
-                    e
-                } else {
-                    e
-                })?;
+            let tokens = match lexer.tokenize() {
+                Ok(t) => t,
+                Err(e) => {
+                    if json_errors {
+                        AiDiagnostic::new("LexerError", &file, 1, 1, format!("{}", e), "Syntax error encountered during tokenization.")
+                            .with_fix("Fix syntax token", "Ensure brackets, quotes, and operators are balanced.")
+                            .print_json();
+                    } else {
+                        eprintln!("Lexer Error: {}", e);
+                    }
+                    std::process::exit(1);
+                }
+            };
 
             let mut parser = Parser::new(tokens);
-            let program = parser.parse_program()
-                .map_err(|e| if json_errors {
-                    eprintln!("{{\"error\": \"ParserError\", \"message\": \"{}\"}}", e);
-                    e
-                } else {
-                    e
-                })?;
+            let program = match parser.parse_program() {
+                Ok(p) => p,
+                Err(e) => {
+                    if json_errors {
+                        AiDiagnostic::new("ParserError", &file, 1, 1, format!("{}", e), "Structure error encountered during AST parsing.")
+                            .with_fix("Fix AST structure", "Check function headers, contracts, and statement semicolons.")
+                            .print_json();
+                    } else {
+                        eprintln!("Parser Error: {}", e);
+                    }
+                    std::process::exit(1);
+                }
+            };
 
             let mut interpreter = Interpreter::new(program);
-            interpreter.execute_all()?;
+            if let Err(e) = interpreter.execute_all() {
+                if json_errors {
+                    AiDiagnostic::new("RuntimeContractError", &file, 1, 1, format!("{}", e), "Execution failed or precondition/postcondition contract violated.")
+                        .with_fix("Enforce contract preconditions", "Verify argument values passed into functions.")
+                        .print_json();
+                } else {
+                    eprintln!("Runtime Error: {}", e);
+                }
+                std::process::exit(1);
+            }
         }
         Commands::Build { file, release } => {
             println!("🔨 [openOODA LLVM Compiler] Building {} (release={})", file.display(), release);
@@ -107,8 +144,20 @@ fn main() -> Result<()> {
             println!("🧪 [openOODA Test Runner] Running contract verify blocks for {} (fuzz={})", file.display(), fuzz);
             interpreter.execute_all()?;
         }
-        Commands::Fmt { file } => {
-            println!("✨ [openOODA Formatter] Formatting {}", file.display());
+        Commands::Fmt { file, write } => {
+            let code = fs::read_to_string(&file)?;
+            let mut lexer = Lexer::new(&code);
+            let tokens = lexer.tokenize()?;
+            let mut parser = Parser::new(tokens);
+            let program = parser.parse_program()?;
+
+            let formatted = fmt::format_program(&program);
+            if write {
+                fs::write(&file, &formatted)?;
+                println!("✨ Formatted and saved {}", file.display());
+            } else {
+                print!("{}", formatted);
+            }
         }
         Commands::Outline { file } => {
             let code = fs::read_to_string(&file)?;
@@ -117,17 +166,8 @@ fn main() -> Result<()> {
             let mut parser = Parser::new(tokens);
             let program = parser.parse_program()?;
 
-            println!("📋 [openOODA Outline] API Summary for {}:", file.display());
-            for item in program.items {
-                match item {
-                    ast::Item::Function(func) => {
-                        println!("  pub fn {}(...) -> {:?}", func.name, func.return_type);
-                    }
-                    ast::Item::TypeAlias(name, t) => {
-                        println!("  type {} = {:?}", name, t);
-                    }
-                }
-            }
+            let summary = outline::generate_outline(&program);
+            println!("📋 [openOODA Outline] API Summary for {}:\n{}", file.display(), summary);
         }
     }
 
