@@ -278,7 +278,20 @@ impl LlvmCodeGen {
                     let (_val, code, r, _vty) = Self::emit_expr(expr, reg, &locals)?;
                     reg = r;
                     f_ir.push_str(&code);
+                    if matches!(expr, Expression::If { .. }) {
+                        returned = true;
+                    }
                 }
+            }
+        }
+
+        if let Some(body_expr) = &func.body.expr {
+            let (val, code, r, vty) = Self::emit_expr(body_expr, reg, &locals)?;
+            reg = r;
+            f_ir.push_str(&code);
+            if !is_main && ret_ty != "void" && !f_ir.ends_with("ret ") {
+                f_ir.push_str(&format!("  ret {} {}\n", ret_ty, val));
+                returned = true;
             }
         }
 
@@ -409,10 +422,57 @@ impl LlvmCodeGen {
                     Ok((res, code, reg, "i64"))
                 }
             }
-            Expression::If { .. } | Expression::Match { .. } => {
-                // Branching IR is out of the minimal integer subset emitter for now.
+            Expression::If { cond, then_branch, else_branch } => {
+                let (c_val, c_code, mut r_curr, _) = Self::emit_expr(cond, reg, locals)?;
+                code.push_str(&c_code);
+                
+                let then_label = format!("then_{}", r_curr);
+                let else_label = format!("else_{}", r_curr);
+                let merge_label = format!("merge_{}", r_curr);
+                r_curr += 1;
+
+                code.push_str(&format!("  br i1 {}, label %{}, label %{}\n", c_val, then_label, else_label));
+
+                code.push_str(&format!("\n{}:\n", then_label));
+                for stmt in &then_branch.stmts {
+                    match stmt {
+                        Statement::Return(Some(ex)) => {
+                            let (val, scode, rnext, _) = Self::emit_expr(ex, r_curr, locals)?;
+                            r_curr = rnext;
+                            code.push_str(&scode);
+                            code.push_str(&format!("  ret i64 {}\n", val));
+                        }
+                        _ => {}
+                    }
+                }
+                if !code.ends_with("ret i64\n") && !code.contains("ret ") {
+                    code.push_str(&format!("  br label %{}\n", merge_label));
+                }
+
+                code.push_str(&format!("\n{}:\n", else_label));
+                if let Some(eb) = else_branch {
+                    for stmt in &eb.stmts {
+                        match stmt {
+                            Statement::Return(Some(ex)) => {
+                                let (val, scode, rnext, _) = Self::emit_expr(ex, r_curr, locals)?;
+                                r_curr = rnext;
+                                code.push_str(&scode);
+                                code.push_str(&format!("  ret i64 {}\n", val));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if !code.ends_with("ret i64\n") && !code.contains("ret ") {
+                    code.push_str(&format!("  br label %{}\n", merge_label));
+                }
+
+                code.push_str(&format!("\n{}:\n", merge_label));
+                Ok(("%r0".to_string(), code, r_curr, "i64"))
+            }
+            Expression::Match { .. } => {
                 bail!(
-                    "LLVM integer-subset backend does not yet lower if/match expressions. Use `ooda run` or straight-line Int code."
+                    "LLVM integer-subset backend does not lower match expressions. Use `ooda run`."
                 )
             }
         }
@@ -437,6 +497,8 @@ impl LlvmCodeGen {
                 in_func = true;
                 saw_ret = false;
                 define_count += 1;
+            } else if t.ends_with(':') && !t.contains(' ') {
+                saw_ret = false;
             } else if t.starts_with("ret ") {
                 if saw_ret {
                     bail!("LLVM validation failed: multiple ret in the same basic block path (duplicate ret)");
