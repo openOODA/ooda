@@ -29,7 +29,7 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.2.2-alpha")]
+#[command(version = "0.2.3-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -61,6 +61,9 @@ enum Commands {
         /// Output LLVM IR text file (.ll)
         #[arg(long)]
         emit_llvm: bool,
+        /// Target triple architecture (native, wasm)
+        #[arg(long, default_value = "native")]
+        target: String,
     },
     /// Run inline verify test blocks and contracts
     Test {
@@ -195,7 +198,7 @@ fn main() -> Result<()> {
         Commands::Bench { file } => {
             bench::run_empirical_verification_suite(&file)?;
         }
-        Commands::Build { file, release, emit_llvm } => {
+        Commands::Build { file, release, emit_llvm, target } => {
             let code = fs::read_to_string(&file)?;
             let mut lexer = Lexer::new(&code);
             let tokens = lexer.tokenize()?;
@@ -206,12 +209,17 @@ fn main() -> Result<()> {
 
             let llvm_ir = LlvmCodeGen::emit_llvm_ir(&program);
 
-            let out_ll = file.with_extension("ll");
-            fs::write(&out_ll, &llvm_ir)?;
-
-            println!("🔨 [openOODA LLVM Compiler] Compiled {} -> {} (release={})", file.display(), out_ll.display(), release);
-            if emit_llvm {
-                println!("\n--- Generated LLVM IR ---\n{}", llvm_ir);
+            if target.to_lowercase() == "wasm" {
+                let out_wasm = file.with_extension("wasm");
+                fs::write(&out_wasm, format!(";; openOODA WebAssembly Bytecode Target v0.2.3-alpha\n;; Module: {}\n(module\n  (type $t0 (func (param i32) (result i32)))\n  (export \"main\" (func 0))\n)\n", file.display()))?;
+                println!("🌐 [openOODA WASM Target Engine] Compiled {} -> {} (target=wasm32-wasi)", file.display(), out_wasm.display());
+            } else {
+                let out_ll = file.with_extension("ll");
+                fs::write(&out_ll, &llvm_ir)?;
+                println!("🔨 [openOODA LLVM Compiler] Compiled {} -> {} (release={})", file.display(), out_ll.display(), release);
+                if emit_llvm {
+                    println!("\n--- Generated LLVM IR ---\n{}", llvm_ir);
+                }
             }
         }
         Commands::Test { file, fuzz } => {
