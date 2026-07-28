@@ -87,6 +87,7 @@ impl LlvmCodeGen {
                     }
                     Self::check_expr_subset(init, ctx)?;
                 }
+                Statement::Assign { value, .. } => Self::check_expr_subset(value, ctx)?,
                 Statement::Return(Some(e), _) => Self::check_expr_subset(e, ctx)?,
                 Statement::Return(None, _) => {}
                 Statement::Expr(e, _) => Self::check_expr_subset(e, ctx)?,
@@ -242,6 +243,13 @@ impl LlvmCodeGen {
                     f_ir.push_str(&format!("  %var_{} = alloca {}\n", name, vty));
                     f_ir.push_str(&format!("  store {} {}, {}* %var_{}\n", vty, val, vty, name));
                     locals.insert(name.clone(), vty);
+                }
+                Statement::Assign { name, value, .. } => {
+                    let (val, code, r, vty) = Self::emit_expr(value, reg, &locals)?;
+                    reg = r;
+                    f_ir.push_str(&code);
+                    let pty = locals.get(name).copied().unwrap_or(vty);
+                    f_ir.push_str(&format!("  store {} {}, {}* %var_{}\n", pty, val, pty, name));
                 }
                 Statement::Return(Some(expr), _) => {
                     let (val, code, r, vty) = Self::emit_expr(expr, reg, &locals)?;

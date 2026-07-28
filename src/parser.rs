@@ -238,6 +238,20 @@ impl Parser {
                 stmts.push(self.parse_return_stmt()?);
             } else {
                 let expr = self.parse_expression()?;
+                // Assignment: `name = expr;` (Token::Eq, not ==)
+                if let Expression::Variable(name, span) = &expr {
+                    if self.peek() == &Token::Eq {
+                        self.advance();
+                        let value = self.parse_expression()?;
+                        self.consume(Token::Semi)?;
+                        stmts.push(Statement::Assign {
+                            name: name.clone(),
+                            value,
+                            span: *span,
+                        });
+                        continue;
+                    }
+                }
                 if self.peek() == &Token::Semi {
                     self.advance();
                     stmts.push(Statement::Expr(expr, self.last_span()));

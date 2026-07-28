@@ -127,6 +127,12 @@ pub enum Statement {
         init: Expression,
         span: Span,
     },
+    /// Assignment to an existing binding (`x = expr;`). Requires `let mut`.
+    Assign {
+        name: String,
+        value: Expression,
+        span: Span,
+    },
     Return(Option<Expression>, Span),
     Expr(Expression, Span),
 }

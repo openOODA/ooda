@@ -453,6 +453,13 @@ impl Interpreter {
                     let val = self.eval_expr(init, env)?;
                     env.insert(name.clone(), val);
                 }
+                Statement::Assign { name, value, .. } => {
+                    if !env.contains_key(name) {
+                        return Err(anyhow!("Runtime error: assign to undefined variable '{}'", name));
+                    }
+                    let val = self.eval_expr(value, env)?;
+                    env.insert(name.clone(), val);
+                }
                 Statement::Return(Some(expr), _) => {
                     return self.eval_expr(expr, env);
                 }

@@ -36,7 +36,7 @@ use codegen_wasm::WasmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.12.1-alpha")]
+#[command(version = "0.13.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -311,21 +311,27 @@ fn main() -> Result<()> {
                 out_ll.display()
             );
 
-            // Attempt native binary assembly via clang
-            let clang_res = std::process::Command::new("clang")
-                .arg(&out_ll)
-                .arg("-o")
-                .arg(&out_bin)
-                .output();
-
-            if let Ok(out) = clang_res {
-                if out.status.success() {
-                    println!("🚀 [openOODA Native Build] Successfully compiled native executable binary: {}", out_bin.display());
-                } else {
-                    println!("⚠️ [openOODA Native Build] Clang assembly warning/skipped (IR saved at {})", out_ll.display());
+            match try_native_link(&out_ll, &out_bin) {
+                NativeLinkResult::Ok => {
+                    println!(
+                        "🚀 [openOODA Native Build] Native executable: {}",
+                        out_bin.display()
+                    );
                 }
-            } else {
-                println!("💡 [openOODA Native Build] Clang not found in PATH; LLVM IR emitted at {}", out_ll.display());
+                NativeLinkResult::ToolFailed { tool, detail } => {
+                    eprintln!(
+                        "⚠️  [openOODA Native Build] {} link failed (IR kept at {}): {}",
+                        tool,
+                        out_ll.display(),
+                        detail
+                    );
+                }
+                NativeLinkResult::NoTool => {
+                    println!(
+                        "💡 [openOODA Native Build] No clang/cc in PATH; IR only at {}. Install clang to link.",
+                        out_ll.display()
+                    );
+                }
             }
 
             if emit_llvm {
@@ -416,4 +422,67 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+enum NativeLinkResult {
+    Ok,
+    NoTool,
+    ToolFailed { tool: String, detail: String },
+}
+
+/// Try clang / clang-XX / cc / $CC to assemble/link LLVM IR to a native binary.
+fn try_native_link(ll: &std::path::Path, out_bin: &std::path::Path) -> NativeLinkResult {
+    let mut tools: Vec<String> = Vec::new();
+    if let Ok(cc) = std::env::var("CC") {
+        if !cc.is_empty() {
+            tools.push(cc);
+        }
+    }
+    for t in [
+        "clang",
+        "clang-18",
+        "clang-17",
+        "clang-16",
+        "clang-15",
+        "cc",
+        "gcc",
+    ] {
+        if !tools.iter().any(|x| x == t) {
+            tools.push(t.to_string());
+        }
+    }
+
+    let mut last_fail: Option<(String, String)> = None;
+    for tool in tools {
+        let probe = std::process::Command::new(&tool).arg("--version").output();
+        if probe.is_err() {
+            continue;
+        }
+        let out = std::process::Command::new(&tool)
+            .arg(ll)
+            .arg("-Wno-override-module")
+            .arg("-o")
+            .arg(out_bin)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => return NativeLinkResult::Ok,
+            Ok(o) => {
+                let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                last_fail = Some((
+                    tool,
+                    if detail.is_empty() {
+                        format!("exit {}", o.status)
+                    } else {
+                        detail.chars().take(200).collect()
+                    },
+                ));
+            }
+            Err(e) => last_fail = Some((tool, e.to_string())),
+        }
+    }
+    if let Some((tool, detail)) = last_fail {
+        NativeLinkResult::ToolFailed { tool, detail }
+    } else {
+        NativeLinkResult::NoTool
+    }
 }

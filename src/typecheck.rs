@@ -156,10 +156,21 @@ impl TypeChecker {
                 Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
             ),
         );
-        tc.functions
-            .insert("Ok".into(), (vec![Ty::Unknown], Ty::Unknown));
-        tc.functions
-            .insert("Err".into(), (vec![Ty::Unknown], Ty::Unknown));
+        // Ok/Err construct Result — typed as Result[T, _] / Result[_, E] loosely
+        tc.functions.insert(
+            "Ok".into(),
+            (
+                vec![Ty::Unknown],
+                Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+            ),
+        );
+        tc.functions.insert(
+            "Err".into(),
+            (
+                vec![Ty::Unknown],
+                Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
+            ),
+        );
         // Sealed effects (arg types loosely checked)
         for name in [
             "fetch",
@@ -198,8 +209,12 @@ impl TypeChecker {
 
     fn check_function(&self, func: &FunctionDecl) -> Result<()> {
         let mut env: HashMap<String, Ty> = HashMap::new();
+        let mut mutable: HashMap<String, bool> = HashMap::new();
         for p in &func.params {
             env.insert(p.name.clone(), Ty::from_ast(&p.param_type));
+            // Parameters are mutable by default for practical alpha (like many langs);
+            // DESIGN immutability-by-default applies to `let` bindings.
+            mutable.insert(p.name.clone(), true);
         }
 
         for req in &func.requires {
@@ -213,7 +228,7 @@ impl TypeChecker {
             }
         }
 
-        let body_ty = self.check_block(&func.body, &mut env, &func.name)?;
+        let body_ty = self.check_block(&func.body, &mut env, &mut mutable, &func.name)?;
         let expected = Ty::from_ast(&func.return_type);
         if !matches!(expected, Ty::Void)
             && !Ty::unifyable(&body_ty, &expected)
@@ -237,7 +252,13 @@ impl TypeChecker {
 
         if let Some(verify) = &func.verify_block {
             let mut venv = HashMap::new();
-            self.check_block(verify, &mut venv, &format!("verify {}", func.name))?;
+            let mut vmut = HashMap::new();
+            self.check_block(
+                verify,
+                &mut venv,
+                &mut vmut,
+                &format!("verify {}", func.name),
+            )?;
         }
 
         Ok(())
@@ -247,6 +268,7 @@ impl TypeChecker {
         &self,
         block: &Block,
         env: &mut HashMap<String, Ty>,
+        mutable: &mut HashMap<String, bool>,
         ctx: &str,
     ) -> Result<Ty> {
         let mut last = Ty::Void;
@@ -254,8 +276,10 @@ impl TypeChecker {
             match stmt {
                 Statement::Let {
                     name,
+                    mutable: is_mut,
                     type_annotation,
                     init,
+                    span,
                     ..
                 } => {
                     let init_ty = self.infer_expr(init, env)?;
@@ -263,7 +287,9 @@ impl TypeChecker {
                         let want = Ty::from_ast(ann);
                         if !Ty::unifyable(&init_ty, &want) {
                             return Err(anyhow!(
-                                "Type error in '{}': let '{}' annotated as {} but initializer has type {}",
+                                "Type error at {}:{} in '{}': let '{}' annotated as {} but initializer has type {}",
+                                span.line,
+                                span.col,
                                 ctx,
                                 name,
                                 want.display(),
@@ -274,6 +300,39 @@ impl TypeChecker {
                     } else {
                         env.insert(name.clone(), init_ty);
                     }
+                    mutable.insert(name.clone(), *is_mut);
+                    last = Ty::Void;
+                }
+                Statement::Assign { name, value, span } => {
+                    if !env.contains_key(name) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: cannot assign to undefined variable '{}'",
+                            span.line,
+                            span.col,
+                            name
+                        ));
+                    }
+                    if !mutable.get(name).copied().unwrap_or(false) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: cannot assign to immutable binding '{}'; use `let mut {}`",
+                            span.line,
+                            span.col,
+                            name,
+                            name
+                        ));
+                    }
+                    let vty = self.infer_expr(value, env)?;
+                    let want = env.get(name).cloned().unwrap_or(Ty::Unknown);
+                    if !Ty::unifyable(&vty, &want) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: cannot assign {} to '{}' of type {}",
+                            span.line,
+                            span.col,
+                            vty.display(),
+                            name,
+                            want.display()
+                        ));
+                    }
                     last = Ty::Void;
                 }
                 Statement::Return(Some(expr), _) => {
@@ -282,8 +341,18 @@ impl TypeChecker {
                 Statement::Return(None, _) => {
                     last = Ty::Void;
                 }
-                Statement::Expr(expr, _) => {
-                    last = self.infer_expr(expr, env)?;
+                Statement::Expr(expr, span) => {
+                    let t = self.infer_expr(expr, env)?;
+                    // DESIGN must-use: discarded Result/Option is a hard error.
+                    if matches!(t, Ty::Result(_, _) | Ty::Option(_)) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: unused {} value (must-use); handle it or bind with `let _ = ...` is not enough — use `let` and match, or `?`",
+                            span.line,
+                            span.col,
+                            t.display()
+                        ));
+                    }
+                    last = t;
                 }
             }
         }
@@ -485,10 +554,12 @@ impl TypeChecker {
                     ));
                 }
                 let mut env_then = env.clone();
-                let t1 = self.check_block(then_branch, &mut env_then, "if-then")?;
+                let mut mut_then = HashMap::new();
+                let t1 = self.check_block(then_branch, &mut env_then, &mut mut_then, "if-then")?;
                 if let Some(else_b) = else_branch {
                     let mut env_else = env.clone();
-                    let t2 = self.check_block(else_b, &mut env_else, "if-else")?;
+                    let mut mut_else = HashMap::new();
+                    let t2 = self.check_block(else_b, &mut env_else, &mut mut_else, "if-else")?;
                     if Ty::unifyable(&t1, &t2) {
                         Ok(t1)
                     } else {
@@ -583,5 +654,51 @@ mod tests {
             "expected error to name the variable, got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn rejects_unused_result_must_use() {
+        let src = r#"
+            pub fn get() -> Result[Int, String] {
+                return Ok(1);
+            }
+            pub fn main() {
+                get();
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("must-use") || err.contains("unused"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_assign_to_immutable_let() {
+        let src = r#"
+            pub fn main() {
+                let x = 1;
+                x = 2;
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("immutable") || err.contains("let mut"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn accepts_assign_to_let_mut() {
+        let src = r#"
+            pub fn main() {
+                let mut x = 1;
+                x = 2;
+                println(x);
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
     }
 }

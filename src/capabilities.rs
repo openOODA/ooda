@@ -203,6 +203,7 @@ impl CapabilityChecker {
         for stmt in &block.stmts {
             match stmt {
                 Statement::Let { init, .. } => Self::check_expr(init, func)?,
+                Statement::Assign { value, .. } => Self::check_expr(value, func)?,
                 Statement::Return(Some(expr), _) => Self::check_expr(expr, func)?,
                 Statement::Expr(expr, _) => Self::check_expr(expr, func)?,
                 Statement::Return(None, _) => {}
