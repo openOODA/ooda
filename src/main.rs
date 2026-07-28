@@ -14,6 +14,7 @@ mod pkg;
 mod lsp;
 mod context;
 mod replay;
+mod migrate;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -30,7 +31,7 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.2.4-alpha")]
+#[command(version = "0.2.5-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -129,6 +130,14 @@ enum Commands {
         file: PathBuf,
         /// Target function or test name
         target: String,
+    },
+    /// Migrate codebase syntax automatically to latest edition
+    Migrate {
+        /// Path to the .oo file
+        file: PathBuf,
+        /// Target edition (e.g. 2026)
+        #[arg(long, default_value = "2026")]
+        edition: String,
     },
 }
 
@@ -306,6 +315,9 @@ fn main() -> Result<()> {
         }
         Commands::Replay { file, target } => {
             replay::ReplayEngine::replay_execution(&file.display().to_string(), &target)?;
+        }
+        Commands::Migrate { file, edition } => {
+            migrate::MigrationEngine::migrate_codebase(&file.display().to_string(), &edition)?;
         }
     }
 
