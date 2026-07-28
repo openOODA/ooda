@@ -9,6 +9,7 @@ mod capabilities;
 mod codegen;
 mod patch;
 mod reflect;
+mod bench;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -41,6 +42,11 @@ enum Commands {
         /// Output machine-readable JSON errors for AI auto-fixing
         #[arg(long)]
         json_errors: bool,
+    },
+    /// Run empirical benchmarks & claim verification suite on .oo file
+    Bench {
+        /// Path to the .oo file
+        file: PathBuf,
     },
     /// Compile an OODA source file (.oo) into a native binary via LLVM
     Build {
@@ -161,6 +167,9 @@ fn main() -> Result<()> {
                 }
                 std::process::exit(1);
             }
+        }
+        Commands::Bench { file } => {
+            bench::run_empirical_verification_suite(&file)?;
         }
         Commands::Build { file, release, emit_llvm } => {
             let code = fs::read_to_string(&file)?;
