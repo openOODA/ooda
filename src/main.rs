@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.24.0-alpha")]
+#[command(version = "0.26.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -139,11 +139,11 @@ enum Commands {
         /// Path to the .oo file
         file: PathBuf,
     },
-    /// Compile an OODA source file (.oo) into a native binary via LLVM
+    /// Compile .oo to native (CHS→C+gcc preferred; LLVM integer subset fallback)
     Build {
         /// Path to the .oo file
         file: PathBuf,
-        /// Produce optimized release build
+        /// Reserved: optimized release build (ignored in this alpha — no-op)
         #[arg(long)]
         release: bool,
         /// Output LLVM IR text file (.ll)
@@ -687,12 +687,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.24.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.25.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.24.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.25.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
@@ -750,4 +750,26 @@ mod version_consistency_tests {
         }
         panic!("could not locate README version header");
     }
+
+    #[test]
+    fn install_oo_default_pin_matches_canonical() {
+        let install = include_str!("../install/install.oo");
+        let needle = format!("\"{}\"", CANONICAL_VERSION);
+        assert!(
+            install.contains(&needle),
+            "install/install.oo default OODA_VERSION pin must be {}",
+            CANONICAL_VERSION
+        );
+    }
+
+    #[test]
+    fn bootstrap_pin_file_matches_canonical() {
+        let pin = include_str!("../install/BOOTSTRAP_PIN").trim();
+        assert_eq!(
+            pin, CANONICAL_VERSION,
+            "install/BOOTSTRAP_PIN must match Cargo-derived canonical version \
+             (sync openooda-gh-pages install defaults from this file)"
+        );
+    }
+
 }

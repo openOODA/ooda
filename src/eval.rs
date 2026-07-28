@@ -440,6 +440,16 @@ impl Interpreter {
         } else if name == "path_exists" {
             let path = Self::fs_path_arg(name, &args)?;
             return Ok(Value::Bool(std::path::Path::new(&path).exists()));
+        } else if name == "fetch"
+            || name == "http_get"
+            || name == "net_get"
+            || name == "downloadData"
+            || name == ".get"
+        {
+            // HTTPS GET via curl → Result[String, String] body.
+            // Skip optional leading capability token (method receiver or ambient arg).
+            let url = Self::net_url_arg(name, &args)?;
+            return Ok(Self::http_get_body(&url));
         } else if name == "http_download" {
             // url, dest_path (optional leading cap token skipped)
             let (url, dest) = {
@@ -1195,6 +1205,66 @@ impl Interpreter {
         }
     }
 
+    /// URL extraction for free/method net GETs.
+    /// - `fetch(url)` / `http_get(url)` / `net_get(url)` / `downloadData(url)`
+    /// - `.get(cap, url)` / `fetch(net, url)` with leading capability token
+    fn net_url_arg(name: &str, args: &[Value]) -> Result<String> {
+        if name.starts_with('.') || matches!(args.first(), Some(Value::Capability(_))) {
+            match args.get(1) {
+                Some(Value::String(s)) => Ok(s.clone()),
+                Some(other) => Err(anyhow!(
+                    "{}: url must be String, found {}",
+                    name,
+                    other
+                )),
+                None => Err(anyhow!("{}: missing url argument", name)),
+            }
+        } else {
+            match args.get(0) {
+                Some(Value::String(s)) => Ok(s.clone()),
+                Some(other) => Err(anyhow!(
+                    "{}: url must be String, found {}",
+                    name,
+                    other
+                )),
+                None => Err(anyhow!("{}: missing url argument", name)),
+            }
+        }
+    }
+
+    /// Real HTTPS GET of response body via curl. Returns `Ok(body)` or `Err(msg)`.
+    fn http_get_body(url: &str) -> Value {
+        let out = std::process::Command::new("curl")
+            .args([
+                "-fsSL",
+                "--proto",
+                "=https",
+                "--tlsv1.2",
+                "--max-time",
+                "15",
+                url,
+            ])
+            .output();
+        match out {
+            Ok(o) if o.status.success() => {
+                let body = String::from_utf8_lossy(&o.stdout).into_owned();
+                Value::Ok(Box::new(Value::String(body)))
+            }
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr);
+                Value::Err(Box::new(Value::String(format!(
+                    "fetch: curl failed for '{}': {}",
+                    url,
+                    err.chars().take(240).collect::<String>()
+                ))))
+            }
+            Err(e) => Value::Err(Box::new(Value::String(format!(
+                "fetch: curl not available ({}); cannot perform HTTPS GET without curl in this alpha",
+                e
+            )))),
+        }
+    }
+
     /// Path extraction for free/method FS reads.
     /// - `read_file(path)` / `fs_read(path)`
     /// - `read_file(fs, path)` / `.read_file` receiver+path
@@ -1355,7 +1425,8 @@ mod tests {
 
     #[test]
     fn real_read_write_file_roundtrip() {
-        let dir = std::env::temp_dir().join(format!(
+        let base_dir = std::path::PathBuf::from("/home/jeryd/openooda/target/tmp");
+        let dir = base_dir.join(format!(
             "ooda_m0_fs_{}",
             std::process::id()
         ));
@@ -1417,6 +1488,79 @@ mod tests {
         );
         assert!(res.is_err());
         assert!(format!("{}", res.unwrap_err()).contains("&FsCap"));
+    }
+
+    #[test]
+    fn fetch_without_netcap_runtime_denies() {
+        let prog = parse(
+            r#"
+            pub fn rogue() {
+                let r = fetch("https://example.invalid");
+            }
+            pub fn main() {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("rogue".into());
+        let res = interp.call_function(
+            "fetch",
+            vec![Value::String("https://example.invalid".into())],
+            &mut HashMap::new(),
+        );
+        assert!(res.is_err(), "expected runtime deny, got {:?}", res);
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("Runtime Security Capability Violation"), "got: {}", msg);
+        assert!(msg.contains("&NetCap"), "got: {}", msg);
+    }
+
+    #[test]
+    fn fetch_with_netcap_returns_result_not_fake_ok() {
+        // With NetCap granted, fetch is allowed. A refused loopback URL must
+        // yield Err (or Ok if something answers) — never a hard-coded "200 OK".
+        let prog = parse(
+            r#"
+            pub fn ok(net: &NetCap) -> Result[String, String] {
+                return fetch("https://127.0.0.1:1/");
+            }
+            pub fn main() {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("ok".into());
+        let res = interp
+            .call_function(
+                "fetch",
+                vec![Value::String("https://127.0.0.1:1/".into())],
+                &mut HashMap::new(),
+            )
+            .expect("fetch with NetCap must be allowed");
+        match res {
+            Value::Err(e) => {
+                let s = format!("{}", e);
+                assert!(!s.is_empty(), "err message must be non-empty");
+                assert!(!s.contains("200 OK"), "must not fake success: {}", s);
+            }
+            Value::Ok(body) => {
+                // Unexpected but honest if something listened on :1
+                assert!(matches!(*body, Value::String(_)));
+            }
+            other => panic!("fetch must return Result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn where_type_alias_is_fail_closed() {
+        let src = r#"type Port = Int where 1..=65535; pub fn main() {}"#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let err = crate::parser::Parser::new(tokens)
+            .parse_program()
+            .expect_err("where must fail-closed");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("where") && msg.contains("not implemented"),
+            "got: {}",
+            msg
+        );
     }
 
     #[test]

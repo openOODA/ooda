@@ -151,8 +151,18 @@ impl Parser {
                 self.parse_type()?
             };
             if self.peek() == &Token::Where {
-                self.advance();
-                let _expr = self.parse_expression()?;
+                // Fail-closed: DESIGN/SPEC shape `type T = Int where …` is not yet
+                // bound into the type checker. Silently discarding the predicate was
+                // refinement theater — reject so callers use Int[lo..hi] or requires.
+                let (l, c) = self.loc();
+                return Err(anyhow!(
+                    "Parse error at {}:{}: type alias `where` refinement is not implemented in this alpha. \
+                     Use `Int[lo..hi]` annotations or function `requires`/`ensures` contracts instead \
+                     (type alias name: '{}').",
+                    l,
+                    c,
+                    name
+                ));
             }
             self.consume(Token::Semi)?;
             Ok(Item::TypeAlias(name, target_type))

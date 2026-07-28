@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.24.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.25.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -25,7 +25,7 @@ cargo build --release
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.24.0-alpha
+ooda --version   # 0.25.0-alpha
 ```
 
 ```ooda
@@ -35,13 +35,16 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.24.0-alpha (CHS M0–M5)
+## What's real in v0.25.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
 | `while` / `else if` / unary `!` | Real (interp + LLVM/WAT subset) |
 | Option / Result / must-use / let mut | Real |
 | Caps + sealed effects | Real (static + runtime) |
+| Net GET (`fetch` / `http_get` / `.get`) | Real HTTPS via curl under `&NetCap` |
+| AI diagnostics (`--json-errors`) | Real JSON envelope + suggested_fix |
+| `type T = Int where …` | Fail-closed (use `requires` / `Int[lo..hi]`) |
 | **CHS:** `List`, string walk, structs, real FS, argv | Real on interpreter |
 | **CHS C backend** (`ooda build --target c`) | Real — gcc + `runtime/chs_rt.c` (no clang required) |
 | **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
