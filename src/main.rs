@@ -7,6 +7,8 @@ mod fmt;
 mod outline;
 mod capabilities;
 mod codegen;
+mod patch;
+mod reflect;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -58,6 +60,21 @@ enum Commands {
         /// Enable automated fuzzing
         #[arg(long)]
         fuzz: bool,
+    },
+    /// Apply surgical AST JSON diff patch to source code
+    Patch {
+        /// Path to the .oo file
+        file: PathBuf,
+        /// JSON patch string
+        #[arg(long)]
+        diff: String,
+    },
+    /// Inspect symbol reflection metadata (types, contracts, capabilities)
+    Reflect {
+        /// Path to the .oo file
+        file: PathBuf,
+        /// Target symbol name to reflect
+        symbol: String,
     },
     /// Format OODA source code files
     Fmt {
@@ -179,6 +196,23 @@ fn main() -> Result<()> {
             let mut interpreter = Interpreter::new(program);
             println!("🧪 [openOODA Test Runner] Running contract verify blocks for {} (fuzz={})", file.display(), fuzz);
             interpreter.execute_all()?;
+
+            if fuzz {
+                interpreter.fuzz_all()?;
+            }
+        }
+        Commands::Patch { file, diff } => {
+            patch::apply_patch(&file, &diff)?;
+        }
+        Commands::Reflect { file, symbol } => {
+            let code = fs::read_to_string(&file)?;
+            let mut lexer = Lexer::new(&code);
+            let tokens = lexer.tokenize()?;
+            let mut parser = Parser::new(tokens);
+            let program = parser.parse_program()?;
+
+            let metadata = reflect::reflect_symbol(&program, &symbol)?;
+            println!("🔍 [openOODA Symbol Reflection] Symbol '{}':\n{}", symbol, metadata);
         }
         Commands::Fmt { file, write } => {
             let code = fs::read_to_string(&file)?;
