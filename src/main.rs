@@ -33,11 +33,38 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.9.0-alpha")]
+#[command(version = "0.11.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+}
+
+/// Extract `line:col` from messages like `... at 12:3 ...` or `line 12`.
+fn parse_loc(msg: &str) -> (usize, usize) {
+    // Prefer "at LINE:COL"
+    if let Some(idx) = msg.find(" at ") {
+        let rest = &msg[idx + 4..];
+        let coords: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == ':')
+            .collect();
+        let parts: Vec<&str> = coords.split(':').collect();
+        if parts.len() >= 2 {
+            if let (Ok(l), Ok(c)) = (parts[0].parse(), parts[1].parse()) {
+                return (l, c);
+            }
+        }
+    }
+    // "line N"
+    if let Some(idx) = msg.find("line ") {
+        let rest = &msg[idx + 5..];
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(l) = num.parse() {
+            return (l, 1);
+        }
+    }
+    (1, 1)
 }
 
 #[derive(Subcommand)]
@@ -164,8 +191,10 @@ fn main() -> Result<()> {
             let tokens = match lexer.tokenize() {
                 Ok(t) => t,
                 Err(e) => {
+                    let msg = format!("{}", e);
+                    let (line, col) = parse_loc(&msg);
                     if json_errors {
-                        AiDiagnostic::new("LexerError", &file, 1, 1, format!("{}", e), "Syntax error encountered during tokenization.")
+                        AiDiagnostic::new("LexerError", &file, line, col, msg, "Syntax error encountered during tokenization.")
                             .with_fix("Fix syntax token", "Ensure brackets, quotes, and operators are balanced.")
                             .print_json();
                     } else {
@@ -179,8 +208,10 @@ fn main() -> Result<()> {
             let program = match parser.parse_program() {
                 Ok(p) => p,
                 Err(e) => {
+                    let msg = format!("{}", e);
+                    let (line, col) = parse_loc(&msg);
                     if json_errors {
-                        AiDiagnostic::new("ParserError", &file, 1, 1, format!("{}", e), "Structure error encountered during AST parsing.")
+                        AiDiagnostic::new("ParserError", &file, line, col, msg, "Structure error encountered during AST parsing.")
                             .with_fix("Fix AST structure", "Check function headers, contracts, and statement semicolons.")
                             .print_json();
                     } else {
@@ -192,8 +223,10 @@ fn main() -> Result<()> {
 
             // Capability Security Verifier
             if let Err(e) = CapabilityChecker::check_program(&program) {
+                let msg = format!("{}", e);
+                let (line, col) = parse_loc(&msg);
                 if json_errors {
-                    AiDiagnostic::new("CapabilitySecurityViolation", &file, 1, 1, format!("{}", e), "Function attempts I/O without receiving explicit capability token handle.")
+                    AiDiagnostic::new("CapabilitySecurityViolation", &file, line, col, msg, "Function attempts I/O without receiving explicit capability token handle.")
                         .with_fix("Grant Capability Token", "Pass &NetCap or &FsCap in parameter list.")
                         .print_json();
                 } else {
@@ -204,8 +237,10 @@ fn main() -> Result<()> {
 
             // Static type checker
             if let Err(e) = TypeChecker::check_program(&program) {
+                let msg = format!("{}", e);
+                let (line, col) = parse_loc(&msg);
                 if json_errors {
-                    AiDiagnostic::new("TypeError", &file, 1, 1, format!("{}", e), "Static type mismatch detected before execution.")
+                    AiDiagnostic::new("TypeError", &file, line, col, msg, "Static type mismatch detected before execution.")
                         .with_fix("Fix types", "Ensure operands and annotations agree (Int/Float/String/Bool/caps).")
                         .print_json();
                 } else {
@@ -216,8 +251,10 @@ fn main() -> Result<()> {
 
             let mut interpreter = Interpreter::new(program);
             if let Err(e) = interpreter.execute_all() {
+                let msg = format!("{}", e);
+                let (line, col) = parse_loc(&msg);
                 if json_errors {
-                    AiDiagnostic::new("RuntimeContractError", &file, 1, 1, format!("{}", e), "Execution failed or precondition/postcondition contract violated.")
+                    AiDiagnostic::new("RuntimeContractError", &file, line, col, msg, "Execution failed or precondition/postcondition contract violated.")
                         .with_fix("Enforce contract preconditions", "Verify argument values passed into functions.")
                         .print_json();
                 } else {

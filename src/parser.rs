@@ -1,36 +1,54 @@
 use crate::ast::*;
-use crate::lexer::Token;
+use crate::lexer::{SpannedToken, Token};
 use anyhow::{anyhow, Result};
 
 pub struct Parser {
-    tokens: Vec<Token>,
+    tokens: Vec<SpannedToken>,
     pos: usize,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<Token>) -> Self {
+    pub fn new(tokens: Vec<SpannedToken>) -> Self {
         Self { tokens, pos: 0 }
     }
 
-    fn peek(&self) -> &Token {
-        self.tokens.get(self.pos).unwrap_or(&Token::Eof)
+    fn loc(&self) -> (usize, usize) {
+        self.tokens
+            .get(self.pos)
+            .map(|t| (t.line, t.col))
+            .unwrap_or((1, 1))
     }
 
-    fn advance(&mut self) -> &Token {
+    fn peek(&self) -> &Token {
+        static EOF: Token = Token::Eof;
+        self.tokens
+            .get(self.pos)
+            .map(|t| &t.token)
+            .unwrap_or(&EOF)
+    }
+
+    fn advance(&mut self) -> Token {
         let idx = self.pos;
         if self.pos < self.tokens.len() {
             self.pos += 1;
         }
-        self.tokens.get(idx).unwrap_or(&Token::Eof)
+        self.tokens
+            .get(idx)
+            .map(|t| t.token.clone())
+            .unwrap_or(Token::Eof)
     }
 
     fn consume(&mut self, expected: Token) -> Result<()> {
-        let current = self.peek();
-        if std::mem::discriminant(current) == std::mem::discriminant(&expected) {
+        let current = self.peek().clone();
+        if std::mem::discriminant(&current) == std::mem::discriminant(&expected) {
             self.advance();
             Ok(())
         } else {
-            Err(anyhow!("Expected token {:?}, found {:?}", expected, current))
+            let (line, col) = self.loc();
+            Err(anyhow!(
+                "Expected token {:?} at {}:{}, found {:?}",
+                expected, line, col, current
+            ))
         }
     }
 
@@ -55,7 +73,7 @@ impl Parser {
             self.advance();
             let name = match self.advance() {
                 Token::Ident(s) => s.clone(),
-                other => return Err(anyhow!("Expected type name, found {:?}", other)),
+                other => { let (l,c)=self.loc(); return Err(anyhow!("Expected type name at {}:{}, found {:?}", l, c, other)); },
             };
             self.consume(Token::Eq)?;
             let target_type = self.parse_type()?;
@@ -69,7 +87,7 @@ impl Parser {
             let func = self.parse_function_decl(is_pub)?;
             Ok(Item::Function(func))
         } else {
-            Err(anyhow!("Unexpected top-level token: {:?}", self.peek()))
+            Err(anyhow!("Unexpected top-level token at {}:{:?}: {:?}", self.loc().0, self.loc().1, self.peek()))
         }
     }
 
@@ -78,7 +96,7 @@ impl Parser {
 
         let name = match self.advance() {
             Token::Ident(s) => s.clone(),
-            other => return Err(anyhow!("Expected function name, found {:?}", other)),
+            other => { let (l,c)=self.loc(); return Err(anyhow!("Expected function name at {}:{}, found {:?}", l, c, other)); },
         };
 
         self.consume(Token::LParen)?;
@@ -87,7 +105,7 @@ impl Parser {
             loop {
                 let p_name = match self.advance() {
                     Token::Ident(s) => s.clone(),
-                    other => return Err(anyhow!("Expected parameter name, found {:?}", other)),
+                    other => { let (l,c)=self.loc(); return Err(anyhow!("Expected parameter name at {}:{}, found {:?}", l, c, other)); },
                 };
 
                 self.consume(Token::Colon)?;
@@ -188,7 +206,7 @@ impl Parser {
                 }
                 other => Ok(Type::Custom(other.to_string())),
             },
-            other => Err(anyhow!("Expected type, found {:?}", other)),
+            other => { let (l,c)=self.loc(); Err(anyhow!("Expected type at {}:{}, found {:?}", l, c, other)) },
         }
     }
 
@@ -231,7 +249,7 @@ impl Parser {
 
         let name = match self.advance() {
             Token::Ident(s) => s.clone(),
-            other => return Err(anyhow!("Expected variable name, found {:?}", other)),
+            other => { let (l,c)=self.loc(); return Err(anyhow!("Expected variable name at {}:{}, found {:?}", l, c, other)); },
         };
 
         let type_annotation = if self.peek() == &Token::Colon {
@@ -353,7 +371,7 @@ impl Parser {
                 self.advance(); // consume .
                 let method = match self.advance() {
                     Token::Ident(m) => m.clone(),
-                    other => return Err(anyhow!("Expected method name after '.', found {:?}", other)),
+                    other => { let (l,c)=self.loc(); return Err(anyhow!("Expected method name after '.' at {}:{}, found {:?}", l, c, other)); },
                 };
                 let mut method_args = vec![primary];
                 if self.peek() == &Token::LParen {
@@ -405,7 +423,7 @@ impl Parser {
                         self.advance();
                         Ok(Expression::Literal(Literal::Float(-f)))
                     }
-                    other => Err(anyhow!("Expected number after '-', found {:?}", other)),
+                    other => { let (l,c)=self.loc(); Err(anyhow!("Expected number after '-' at {}:{}, found {:?}", l, c, other)) },
                 }
             }
             Token::If => {
@@ -461,7 +479,7 @@ impl Parser {
                     Ok(expr)
                 }
             }
-            other => Err(anyhow!("Unexpected expression token {:?}", other)),
+            other => { let (l,c)=self.loc(); Err(anyhow!("Unexpected expression token {:?} at {}:{}", other, l, c)) },
         }
     }
 
@@ -487,7 +505,7 @@ impl Parser {
             }
             Token::IntLit(n) => { self.advance(); Ok(Pattern::Literal(Literal::Int(n))) }
             Token::StringLit(s) => { self.advance(); Ok(Pattern::Literal(Literal::String(s))) }
-            other => Err(anyhow!("Expected pattern, found {:?}", other)),
+            other => { let (l,c)=self.loc(); Err(anyhow!("Expected pattern at {}:{}, found {:?}", l, c, other)) },
         }
     }
 }

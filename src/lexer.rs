@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 
+/// Lexical token kinds (location is carried by `SpannedToken`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // Keywords
     Fn,
     Pub,
     Let,
@@ -18,14 +18,10 @@ pub enum Token {
     Where,
     True,
     False,
-
-    // Identifiers & Literals
     Ident(String),
     IntLit(i64),
     FloatLit(f64),
     StringLit(String),
-
-    // Symbols & Operators
     Plus,
     Minus,
     Star,
@@ -39,10 +35,10 @@ pub enum Token {
     AndAnd,
     OrOr,
     Eq,
-    Arrow,     // ->
-    FatArrow,  // =>
-    Question,  // ?
-    Exclamation, // !
+    Arrow,
+    FatArrow,
+    Question,
+    Exclamation,
     Colon,
     Semi,
     Comma,
@@ -51,20 +47,48 @@ pub enum Token {
     DotDotEq,
     Ampersand,
     Pipe,
-
-    // Delimiters
     LParen,
     RParen,
     LBrace,
     RBrace,
     LBracket,
     RBracket,
-
     Eof,
 }
 
+/// Token with 1-based source location for diagnostics.
+#[derive(Debug, Clone)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub line: usize,
+    pub col: usize,
+}
+
+impl PartialEq for SpannedToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.token == other.token
+    }
+}
+
+impl PartialEq<Token> for SpannedToken {
+    fn eq(&self, other: &Token) -> bool {
+        &self.token == other
+    }
+}
+
+impl PartialEq<SpannedToken> for Token {
+    fn eq(&self, other: &SpannedToken) -> bool {
+        self == &other.token
+    }
+}
+
+impl SpannedToken {
+    fn new(token: Token, line: usize, col: usize) -> Self {
+        Self { token, line, col }
+    }
+}
+
 pub struct Lexer<'a> {
-    input: &'a str,
     chars: std::iter::Peekable<std::str::Chars<'a>>,
     line: usize,
     col: usize,
@@ -73,7 +97,6 @@ pub struct Lexer<'a> {
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Self {
-            input,
             chars: input.chars().peekable(),
             line: 1,
             col: 1,
@@ -95,10 +118,16 @@ impl<'a> Lexer<'a> {
         self.chars.peek()
     }
 
-    pub fn tokenize(&mut self) -> Result<Vec<Token>> {
+    fn push(&self, tokens: &mut Vec<SpannedToken>, token: Token, line: usize, col: usize) {
+        tokens.push(SpannedToken::new(token, line, col));
+    }
+
+    pub fn tokenize(&mut self) -> Result<Vec<SpannedToken>> {
         let mut tokens = Vec::new();
 
         while let Some(&ch) = self.peek() {
+            let start_line = self.line;
+            let start_col = self.col;
             match ch {
                 ' ' | '\t' | '\r' | '\n' => {
                     self.advance();
@@ -106,7 +135,6 @@ impl<'a> Lexer<'a> {
                 '/' => {
                     self.advance();
                     if let Some('/') = self.peek() {
-                        // Single-line comment
                         while let Some(&c) = self.peek() {
                             if c == '\n' {
                                 break;
@@ -114,101 +142,137 @@ impl<'a> Lexer<'a> {
                             self.advance();
                         }
                     } else {
-                        tokens.push(Token::Slash);
+                        self.push(&mut tokens, Token::Slash, start_line, start_col);
                     }
                 }
-                '+' => { self.advance(); tokens.push(Token::Plus); }
+                '+' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::Plus, start_line, start_col);
+                }
                 '-' => {
                     self.advance();
                     if let Some('>') = self.peek() {
                         self.advance();
-                        tokens.push(Token::Arrow);
+                        self.push(&mut tokens, Token::Arrow, start_line, start_col);
                     } else {
-                        tokens.push(Token::Minus);
+                        self.push(&mut tokens, Token::Minus, start_line, start_col);
                     }
                 }
-                '*' => { self.advance(); tokens.push(Token::Star); }
+                '*' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::Star, start_line, start_col);
+                }
                 '=' => {
                     self.advance();
                     if let Some('=') = self.peek() {
                         self.advance();
-                        tokens.push(Token::EqEq);
+                        self.push(&mut tokens, Token::EqEq, start_line, start_col);
                     } else if let Some('>') = self.peek() {
                         self.advance();
-                        tokens.push(Token::FatArrow);
+                        self.push(&mut tokens, Token::FatArrow, start_line, start_col);
                     } else {
-                        tokens.push(Token::Eq);
+                        self.push(&mut tokens, Token::Eq, start_line, start_col);
                     }
                 }
                 '!' => {
                     self.advance();
                     if let Some('=') = self.peek() {
                         self.advance();
-                        tokens.push(Token::Neq);
+                        self.push(&mut tokens, Token::Neq, start_line, start_col);
                     } else {
-                        tokens.push(Token::Exclamation);
+                        self.push(&mut tokens, Token::Exclamation, start_line, start_col);
                     }
                 }
                 '<' => {
                     self.advance();
                     if let Some('=') = self.peek() {
                         self.advance();
-                        tokens.push(Token::Lte);
+                        self.push(&mut tokens, Token::Lte, start_line, start_col);
                     } else {
-                        tokens.push(Token::Lt);
+                        self.push(&mut tokens, Token::Lt, start_line, start_col);
                     }
                 }
                 '>' => {
                     self.advance();
                     if let Some('=') = self.peek() {
                         self.advance();
-                        tokens.push(Token::Gte);
+                        self.push(&mut tokens, Token::Gte, start_line, start_col);
                     } else {
-                        tokens.push(Token::Gt);
+                        self.push(&mut tokens, Token::Gt, start_line, start_col);
                     }
                 }
                 '&' => {
                     self.advance();
                     if let Some('&') = self.peek() {
                         self.advance();
-                        tokens.push(Token::AndAnd);
+                        self.push(&mut tokens, Token::AndAnd, start_line, start_col);
                     } else {
-                        tokens.push(Token::Ampersand);
+                        self.push(&mut tokens, Token::Ampersand, start_line, start_col);
                     }
                 }
                 '|' => {
                     self.advance();
                     if let Some('|') = self.peek() {
                         self.advance();
-                        tokens.push(Token::OrOr);
+                        self.push(&mut tokens, Token::OrOr, start_line, start_col);
                     } else {
-                        tokens.push(Token::Pipe);
+                        self.push(&mut tokens, Token::Pipe, start_line, start_col);
                     }
                 }
-                '?' => { self.advance(); tokens.push(Token::Question); }
-                ':' => { self.advance(); tokens.push(Token::Colon); }
-                ';' => { self.advance(); tokens.push(Token::Semi); }
-                ',' => { self.advance(); tokens.push(Token::Comma); }
+                '?' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::Question, start_line, start_col);
+                }
+                ':' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::Colon, start_line, start_col);
+                }
+                ';' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::Semi, start_line, start_col);
+                }
+                ',' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::Comma, start_line, start_col);
+                }
                 '.' => {
                     self.advance();
                     if let Some('.') = self.peek() {
                         self.advance();
                         if let Some('=') = self.peek() {
                             self.advance();
-                            tokens.push(Token::DotDotEq);
+                            self.push(&mut tokens, Token::DotDotEq, start_line, start_col);
                         } else {
-                            tokens.push(Token::DotDot);
+                            self.push(&mut tokens, Token::DotDot, start_line, start_col);
                         }
                     } else {
-                        tokens.push(Token::Dot);
+                        self.push(&mut tokens, Token::Dot, start_line, start_col);
                     }
                 }
-                '(' => { self.advance(); tokens.push(Token::LParen); }
-                ')' => { self.advance(); tokens.push(Token::RParen); }
-                '{' => { self.advance(); tokens.push(Token::LBrace); }
-                '}' => { self.advance(); tokens.push(Token::RBrace); }
-                '[' => { self.advance(); tokens.push(Token::LBracket); }
-                ']' => { self.advance(); tokens.push(Token::RBracket); }
+                '(' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::LParen, start_line, start_col);
+                }
+                ')' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::RParen, start_line, start_col);
+                }
+                '{' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::LBrace, start_line, start_col);
+                }
+                '}' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::RBrace, start_line, start_col);
+                }
+                '[' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::LBracket, start_line, start_col);
+                }
+                ']' => {
+                    self.advance();
+                    self.push(&mut tokens, Token::RBracket, start_line, start_col);
+                }
                 '"' => {
                     self.advance();
                     let mut s = String::new();
@@ -233,7 +297,7 @@ impl<'a> Lexer<'a> {
                             self.advance();
                         }
                     }
-                    tokens.push(Token::StringLit(s));
+                    self.push(&mut tokens, Token::StringLit(s), start_line, start_col);
                 }
                 c if c.is_ascii_digit() => {
                     let mut num_str = String::new();
@@ -244,7 +308,7 @@ impl<'a> Lexer<'a> {
                             self.advance();
                         } else if d == '.' && !is_float {
                             let mut peek_iter = self.chars.clone();
-                            peek_iter.next(); // skip current '.'
+                            peek_iter.next();
                             if let Some(&next_c) = peek_iter.peek() {
                                 if next_c.is_ascii_digit() {
                                     is_float = true;
@@ -259,9 +323,19 @@ impl<'a> Lexer<'a> {
                         }
                     }
                     if is_float {
-                        tokens.push(Token::FloatLit(num_str.parse()?));
+                        self.push(
+                            &mut tokens,
+                            Token::FloatLit(num_str.parse()?),
+                            start_line,
+                            start_col,
+                        );
                     } else {
-                        tokens.push(Token::IntLit(num_str.parse()?));
+                        self.push(
+                            &mut tokens,
+                            Token::IntLit(num_str.parse()?),
+                            start_line,
+                            start_col,
+                        );
                     }
                 }
                 c if c.is_ascii_alphabetic() || c == '_' => {
@@ -292,13 +366,20 @@ impl<'a> Lexer<'a> {
                         "false" => Token::False,
                         _ => Token::Ident(ident),
                     };
-                    tokens.push(kw);
+                    self.push(&mut tokens, kw, start_line, start_col);
                 }
-                other => return Err(anyhow!("Unexpected character '{}' at line {}", other, self.line)),
+                other => {
+                    return Err(anyhow!(
+                        "Unexpected character '{}' at {}:{}",
+                        other,
+                        self.line,
+                        self.col
+                    ));
+                }
             }
         }
 
-        tokens.push(Token::Eof);
+        tokens.push(SpannedToken::new(Token::Eof, self.line, self.col));
         Ok(tokens)
     }
 }
