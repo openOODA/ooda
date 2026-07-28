@@ -218,6 +218,34 @@ impl TypeChecker {
         );
         tc.functions
             .insert("process_exit".into(), (vec![Ty::Int], Ty::Void));
+        for (n, ret) in [
+            ("mkdir_p", Ty::Result(Box::new(Ty::Void), Box::new(Ty::String))),
+            ("chmod_exec", Ty::Result(Box::new(Ty::Void), Box::new(Ty::String))),
+            (
+                "copy_file",
+                Ty::Result(Box::new(Ty::Void), Box::new(Ty::String)),
+            ),
+            (
+                "http_download",
+                Ty::Result(Box::new(Ty::Void), Box::new(Ty::String)),
+            ),
+            (
+                "extract_tar_gz",
+                Ty::Result(Box::new(Ty::Void), Box::new(Ty::String)),
+            ),
+        ] {
+            tc.functions
+                .insert(n.into(), (vec![Ty::Unknown], ret));
+        }
+        tc.functions
+            .insert("path_exists".into(), (vec![Ty::String], Ty::Bool));
+        tc.functions.insert(
+            "sys_exec".into(),
+            (
+                vec![Ty::Unknown],
+                Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
+            ),
+        );
         // Real FS / env (sealed effects; arg types loose)
         tc.functions.insert(
             "env_get".into(),

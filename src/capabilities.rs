@@ -118,9 +118,39 @@ pub const EFFECT_BUILTINS: &[EffectBuiltin] = &[
         requires: CapKind::Fs,
         receiver_is_cap: true,
     },
+    EffectBuiltin {
+        name: "mkdir_p",
+        requires: CapKind::Fs,
+        receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: "copy_file",
+        requires: CapKind::Fs,
+        receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: "chmod_exec",
+        requires: CapKind::Fs,
+        receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: "path_exists",
+        requires: CapKind::Fs,
+        receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: "http_download",
+        requires: CapKind::Net,
+        receiver_is_cap: false,
+    },
     // Process / system
     EffectBuiltin {
         name: "sys_exec",
+        requires: CapKind::Sys,
+        receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: "extract_tar_gz",
         requires: CapKind::Sys,
         receiver_is_cap: false,
     },

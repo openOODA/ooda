@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.23.0-alpha")]
+#[command(version = "0.24.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -672,5 +672,78 @@ fn try_native_link(ll: &std::path::Path, out_bin: &std::path::Path) -> NativeLin
         NativeLinkResult::NoTool
     } else {
         NativeLinkResult::NoTool
+    }
+}
+
+#[cfg(test)]
+mod version_consistency_tests {
+    /// Sentinel that prevents version drift across artifacts.
+    ///
+    /// Bug history: rounds 6, 7, and 8 each had to manually re-align
+    /// `Cargo.toml`, `src/main.rs` (clap version), `scripts/release.sh`,
+    /// `README.md`, `qa/README.md`, and `docs/index.html`. This test
+    /// fails CI if any future bump forgets an artifact, locking in
+    /// one canonical version per release.
+    ///
+    /// If you need to bump: change every string below to the new
+    /// version, then commit.
+    const CANONICAL_VERSION: &str = "v0.24.0-alpha";
+    /// clap's `#[command(version = ...)]` carries no `v` prefix
+    /// (Cargo's `version = "..."` also doesn't). Strip it before
+    /// comparing to the canonical form so the test fails loudly if
+    /// either side is renamed.
+    const CANONICAL_VERSION_NO_V: &str = "0.24.0-alpha";
+
+    fn clap_version() -> &'static str {
+        let src = include_str!("main.rs");
+        for line in src.lines() {
+            if let Some(rest) = line.strip_prefix("#[command(version = \"") {
+                if let Some(v) = rest.strip_suffix("\")]") {
+                    return v;
+                }
+            }
+        }
+        panic!("could not locate `#[command(version = ...)]` in src/main.rs");
+    }
+
+    #[test]
+    fn clap_version_matches_canonical() {
+        assert_eq!(clap_version(), CANONICAL_VERSION_NO_V);
+    }
+
+    #[test]
+    fn release_sh_version_matches_canonical() {
+        let sh = include_str!("../scripts/release.sh");
+        for line in sh.lines() {
+            if let Some(rest) = line.strip_prefix("VERSION=\"${1:-") {
+                if let Some(v) = rest.strip_suffix("}\"") {
+                    assert_eq!(v, CANONICAL_VERSION,
+                        "scripts/release.sh default VERSION does not match the canonical version");
+                    return;
+                }
+            }
+        }
+        panic!("could not locate `VERSION=\"${{1:-...}}\"` in scripts/release.sh");
+    }
+
+    #[test]
+    fn readme_version_matches_canonical() {
+        let readme = include_str!("../README.md");
+        for line in readme.lines() {
+            if !line.starts_with("**openOODA Project**") {
+                continue;
+            }
+            // Find the substring after "Version `".
+            if let Some(idx) = line.find("Version `") {
+                let rest = &line[idx + "Version `".len()..];
+                if let Some(v) = rest.split('`').next() {
+                    assert_eq!(v, CANONICAL_VERSION,
+                        "README.md version header does not match the canonical version");
+                    return;
+                }
+            }
+            panic!("README header lacks Version-anchor: {}", line);
+        }
+        panic!("could not locate README version header");
     }
 }

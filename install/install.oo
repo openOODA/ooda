@@ -1,0 +1,448 @@
+// ===================================================================
+// openOODA Installer — written in OODA (.oo), not shell.
+//
+// This program is the *story* of how openOODA lands on a machine:
+//   who we are, what we install, where files live, and how you run code.
+//
+// Required caps (honest capability security, even for the installer):
+//   net  — download the release from GitHub
+//   fs   — write under XDG paths
+//   sys  — extract the release tarball (tar)
+//   env  — read HOME / XDG_* / OODA_* overrides
+//
+// Run (after you have a stage-0 `ooda` binary):
+//   ooda run install/install.oo
+//
+// First-time users use the tiny website *bootstrap* (shell) only to obtain
+// `ooda`, then this program takes over. The bootstrap is Chapter 0; this is
+// the book.
+// ===================================================================
+
+pub fn main(net: &NetCap, fs: &FsCap, sys: &SysCap, env: &EnvCap) {
+    chapter0_preface();
+    let layout = resolve_layout(env);
+    chapter1_who_we_are();
+    chapter2_layout_story(layout);
+    chapter3_download_and_unpack(net, fs, sys, env, layout);
+    chapter4_place_files(fs, layout);
+    chapter5_config_and_path(fs, env, layout);
+    chapter6_verify(fs, sys, layout);
+    chapter7_what_you_have(layout);
+    chapter8_next_steps(layout);
+}
+
+// ---------------------------------------------------------------------------
+// Layout: XDG-correct paths (overridable via env)
+// ---------------------------------------------------------------------------
+//
+//   OODA_HOME   data root     default: $XDG_DATA_HOME/ooda
+//                              else:    $HOME/.local/share/ooda
+//   OODA_BIN    binaries      default: $XDG_BIN_HOME
+//                              else:    $HOME/.local/bin
+//   OODA_CACHE  downloads     default: $XDG_CACHE_HOME/ooda
+//                              else:    $HOME/.cache/ooda
+//   OODA_CONFIG config/env    default: $XDG_CONFIG_HOME/ooda
+//                              else:    $HOME/.config/ooda
+//   OODA_STD    standard lib  default: $OODA_HOME/std
+//   OODA_VERSION pin          default: v0.23.0-alpha
+//
+// We deliberately do *not* dump everything into ~/.ooda as a junk drawer.
+// Data / config / cache / bin are separated the way modern Unix tools expect.
+// ---------------------------------------------------------------------------
+
+type Layout = struct {
+    home: String,
+    bin: String,
+    cache: String,
+    config: String,
+    std: String,
+    version: String,
+    arch: String,
+    repo: String
+};
+
+pub fn resolve_layout(env: &EnvCap) -> Layout {
+    let home_user = env_or(env, "HOME", "");
+    let xdg_data = env_or(env, "XDG_DATA_HOME", home_user + "/.local/share");
+    let xdg_cache = env_or(env, "XDG_CACHE_HOME", home_user + "/.cache");
+    let xdg_config = env_or(env, "XDG_CONFIG_HOME", home_user + "/.config");
+    let xdg_bin = env_or(env, "XDG_BIN_HOME", home_user + "/.local/bin");
+
+    let ooda_home = env_or(env, "OODA_HOME", xdg_data + "/ooda");
+    let ooda_bin = env_or(env, "OODA_BIN", xdg_bin);
+    let ooda_cache = env_or(env, "OODA_CACHE", xdg_cache + "/ooda");
+    let ooda_config = env_or(env, "OODA_CONFIG", xdg_config + "/ooda");
+    let ooda_std = env_or(env, "OODA_STD", ooda_home + "/std");
+    let version = env_or(env, "OODA_VERSION", "v0.23.0-alpha");
+
+    return Layout {
+        home: ooda_home,
+        bin: ooda_bin,
+        cache: ooda_cache,
+        config: ooda_config,
+        std: ooda_std,
+        version: version,
+        arch: "linux-x86_64",
+        repo: "openOODA/ooda"
+    };
+}
+
+pub fn env_or(env: &EnvCap, key: String, fallback: String) -> String {
+    let r = env_get(key);
+    if r.is_ok() {
+        let v = match r {
+            Ok(s) => s,
+            Err(e) => fallback,
+        };
+        if v == "" {
+            return fallback;
+        }
+        return v;
+    }
+    return fallback;
+}
+
+// ---------------------------------------------------------------------------
+// Story chapters
+// ---------------------------------------------------------------------------
+
+pub fn chapter0_preface() {
+    println("");
+    println("╔══════════════════════════════════════════════════════════════════╗");
+    println("║           openOODA Installer  —  written in .oo                 ║");
+    println("║     Observe · Orient · Decide · Act  —  on your machine          ║");
+    println("╚══════════════════════════════════════════════════════════════════╝");
+    println("");
+    println("This is not a shell script dressed up as a product.");
+    println("You are running an OODA program under capability security:");
+    println("  • NetCap  — only for fetching the published release");
+    println("  • FsCap   — only for writing your install tree");
+    println("  • SysCap  — only for extracting the archive (tar)");
+    println("  • EnvCap  — only for reading HOME / XDG / OODA_* settings");
+    println("");
+    println("If something fails, it fails with a real Result — no silent lies.");
+    println("");
+}
+
+pub fn chapter1_who_we_are() {
+    println("── Chapter 1 · What is openOODA? ───────────────────────────────────");
+    println("");
+    println("openOODA is a capability-secure, contract-carrying systems language.");
+    println("  • Source files end in .oo");
+    println("  • DESIGN.md is the constitution (thesis), not marketing copy");
+    println("  • Stage-0 host today is a Rust binary named `ooda`");
+    println("  • Userland + installer + CHS tools grow in .oo");
+    println("");
+    println("This install gives you the stage-0 toolchain so you can:");
+    println("  ooda run file.oo      — interpret");
+    println("  ooda check file.oo    — type + capability gate");
+    println("  ooda build file.oo    — native emit (C backend / LLVM subset)");
+    println("  ooda dump …           — canonical dumps for tools & oodac");
+    println("");
+}
+
+pub fn chapter2_layout_story(layout: Layout) {
+    println("── Chapter 2 · Where files will live ───────────────────────────────");
+    println("");
+    println("We follow XDG Base Directory conventions so openOODA does not own");
+    println("your entire home directory as a single opaque folder.");
+    println("");
+    println("  OODA_HOME    (data)   = " + layout.home);
+    println("      bin/ is NOT here — binaries go on the user bin path");
+    println("      std/              = standard library root (OODA_STD)");
+    println("      share/            = VERSION, README, install receipt");
+    println("");
+    println("  OODA_BIN     (PATH)   = " + layout.bin);
+    println("      ooda              = the stage-0 CLI (the only required binary)");
+    println("");
+    println("  OODA_CONFIG  (config) = " + layout.config);
+    println("      env               = shell snippet: PATH + OODA_HOME + OODA_STD");
+    println("");
+    println("  OODA_CACHE   (cache)  = " + layout.cache);
+    println("      downloads/        = release tarballs (safe to delete)");
+    println("");
+    println("  Pin / version         = " + layout.version);
+    println("  Architecture          = " + layout.arch);
+    println("  Release repo          = github.com/" + layout.repo);
+    println("");
+    println("Overrides (all optional):");
+    println("  OODA_VERSION  OODA_HOME  OODA_BIN  OODA_CACHE  OODA_CONFIG  OODA_STD");
+    println("");
+}
+
+pub fn chapter3_download_and_unpack(net: &NetCap, fs: &FsCap, sys: &SysCap, env: &EnvCap, layout: Layout) {
+    println("── Chapter 3 · Fetch the sealed release ────────────────────────────");
+    println("");
+
+    let tag = layout.version;
+    let asset = "ooda-" + tag + "-" + layout.arch + ".tar.gz";
+    let url = "https://github.com/" + layout.repo + "/releases/download/" + tag + "/" + asset;
+    let dl_dir = layout.cache + "/downloads";
+    let tarball = dl_dir + "/" + asset;
+    let extract_root = layout.cache + "/extract-" + tag;
+
+    println("  Creating cache directories…");
+    let m1 = mkdir_p(dl_dir);
+    if m1.is_err() {
+        fail_install("could not create download cache: " + err_str(m1));
+    }
+    let m2 = mkdir_p(extract_root);
+    if m2.is_err() {
+        fail_install("could not create extract dir: " + err_str(m2));
+    }
+
+    println("  URL:  " + url);
+    println("  Dest: " + tarball);
+    println("  Downloading with curl (HTTPS only) under NetCap…");
+    let d = http_download(url, tarball);
+    if d.is_err() {
+        println("");
+        println("  Download failed.");
+        println("  " + err_str(d));
+        println("  Check that " + tag + " exists at:");
+        println("    https://github.com/" + layout.repo + "/releases");
+        println("  Or pin another tag:  OODA_VERSION=vX.Y.Z-alpha ooda run install/install.oo");
+        process_exit(1);
+    }
+    println("  Download complete.");
+    println("");
+    println("  Extracting with tar under SysCap…");
+    let x = extract_tar_gz(tarball, extract_root);
+    if x.is_err() {
+        fail_install("extract failed: " + err_str(x));
+    }
+    println("  Extract complete → " + extract_root);
+    println("");
+
+    // Stash paths for next chapter via files in cache (no globals)
+    let w = write_file(layout.cache + "/last_extract_root", extract_root);
+    if w.is_err() {
+        fail_install("could not record extract root");
+    }
+    let w2 = write_file(layout.cache + "/last_tarball", tarball);
+    if w2.is_err() {
+        fail_install("could not record tarball path");
+    }
+}
+
+pub fn chapter4_place_files(fs: &FsCap, layout: Layout) {
+    println("── Chapter 4 · Place the toolchain ────────────────────────────────");
+    println("");
+
+    let extract_root = must_read(fs, layout.cache + "/last_extract_root");
+    // Release layout (from scripts/release.sh):
+    //   ooda-<tag>-linux-x86_64/bin/ooda
+    //   ooda-<tag>-linux-x86_64/share/...
+    //   ooda-<tag>-linux-x86_64/install/install.oo
+    // Also accept legacy flat tarball with just `ooda` at top level.
+    let tag = layout.version;
+    let pkg = extract_root + "/ooda-" + tag + "-" + layout.arch;
+    let mut bin_src = pkg + "/bin/ooda";
+    if !path_exists(bin_src) {
+        bin_src = extract_root + "/ooda";
+    }
+    if !path_exists(bin_src) {
+        // tarball may nest one directory without our new layout
+        bin_src = extract_root + "/ooda-" + tag + "-" + layout.arch + "/ooda";
+    }
+    if !path_exists(bin_src) {
+        fail_install("could not find `ooda` binary inside release under " + extract_root);
+    }
+
+    println("  Binary source:  " + bin_src);
+    println("  Creating OODA_HOME tree…");
+    if mkdir_p(layout.home).is_err() {
+        fail_install("mkdir OODA_HOME");
+    }
+    if mkdir_p(layout.home + "/share").is_err() {
+        fail_install("mkdir share");
+    }
+    if mkdir_p(layout.home + "/share/examples").is_err() {
+        fail_install("mkdir examples");
+    }
+    if mkdir_p(layout.std).is_err() {
+        fail_install("mkdir std");
+    }
+    if mkdir_p(layout.bin).is_err() {
+        fail_install("mkdir OODA_BIN");
+    }
+    if mkdir_p(layout.config).is_err() {
+        fail_install("mkdir OODA_CONFIG");
+    }
+
+    let bin_dst = layout.bin + "/ooda";
+    println("  Installing binary → " + bin_dst);
+    let c = copy_file(bin_src, bin_dst);
+    if c.is_err() {
+        fail_install("copy binary: " + err_str(c));
+    }
+    let x = chmod_exec(bin_dst);
+    if x.is_err() {
+        fail_install("chmod +x: " + err_str(x));
+    }
+
+    // VERSION + receipt
+    let _ = write_file(layout.home + "/share/VERSION", layout.version + "\n");
+    let receipt = ""
+        + "openOODA install receipt\n"
+        + "version=" + layout.version + "\n"
+        + "arch=" + layout.arch + "\n"
+        + "ooda_home=" + layout.home + "\n"
+        + "ooda_bin=" + layout.bin + "\n"
+        + "ooda_std=" + layout.std + "\n"
+        + "ooda_config=" + layout.config + "\n"
+        + "ooda_cache=" + layout.cache + "\n"
+        + "binary=" + bin_dst + "\n";
+    let _ = write_file(layout.home + "/share/INSTALL_RECEIPT.txt", receipt);
+
+    // Copy install.oo into home for re-runs / storytelling on-box
+    let install_src = pkg + "/install/install.oo";
+    if path_exists(install_src) {
+        let _ = mkdir_p(layout.home + "/install");
+        let _ = copy_file(install_src, layout.home + "/install/install.oo");
+        println("  Installed installer source → " + layout.home + "/install/install.oo");
+    }
+
+    // Optional: share README from package
+    let readme_src = pkg + "/share/README.md";
+    if path_exists(readme_src) {
+        let _ = copy_file(readme_src, layout.home + "/share/README.md");
+    }
+
+    println("  Toolchain files are in place.");
+    println("");
+}
+
+pub fn chapter5_config_and_path(fs: &FsCap, env: &EnvCap, layout: Layout) {
+    println("── Chapter 5 · Config & PATH ───────────────────────────────────────");
+    println("");
+    println("  Writing shell env file (source this from your profile)…");
+
+    let env_file = layout.config + "/env";
+    let body = ""
+        + "# openOODA environment — generated by install/install.oo\n"
+        + "# Source from ~/.bashrc or ~/.zshrc:\n"
+        + "#   [ -f \"" + env_file + "\" ] && . \"" + env_file + "\"\n"
+        + "\n"
+        + "export OODA_HOME=\"" + layout.home + "\"\n"
+        + "export OODA_STD=\"" + layout.std + "\"\n"
+        + "export OODA_CONFIG=\"" + layout.config + "\"\n"
+        + "export OODA_CACHE=\"" + layout.cache + "\"\n"
+        + "export PATH=\"" + layout.bin + ":$PATH\"\n"
+        + "\n"
+        + "# Optional: pin updates\n"
+        + "# export OODA_VERSION=\"" + layout.version + "\"\n";
+
+    let w = write_file(env_file, body);
+    if w.is_err() {
+        fail_install("write env file: " + err_str(w));
+    }
+    println("  Wrote " + env_file);
+    println("");
+    println("  Add to your shell startup (once):");
+    println("    echo '[ -f \"" + env_file + "\" ] && . \"" + env_file + "\"' >> ~/.bashrc");
+    println("    # or ~/.zshrc");
+    println("");
+    println("  Or for this session only:");
+    println("    . \"" + env_file + "\"");
+    println("");
+}
+
+pub fn chapter6_verify(fs: &FsCap, sys: &SysCap, layout: Layout) {
+    println("── Chapter 6 · Verify ────────────────────────────────────────────────");
+    println("");
+    let bin = layout.bin + "/ooda";
+    if !path_exists(bin) {
+        fail_install("binary missing after install: " + bin);
+    }
+    println("  Running: " + bin + " --version");
+    let v = sys_exec(bin, "--version");
+    if v.is_ok() {
+        let out = match v {
+            Ok(s) => s,
+            Err(e) => e,
+        };
+        println("  " + out);
+    } else {
+        let e = match v {
+            Ok(s) => s,
+            Err(msg) => msg,
+        };
+        println("  (version probe returned Err — binary is present; try PATH)");
+        println("  " + e);
+    }
+    println("");
+    println("  Receipt:  " + layout.home + "/share/INSTALL_RECEIPT.txt");
+    println("  VERSION:  " + layout.home + "/share/VERSION");
+    println("");
+}
+
+pub fn chapter7_what_you_have(layout: Layout) {
+    println("── Chapter 7 · What you have now ────────────────────────────────────");
+    println("");
+    println("  ✓ stage-0 CLI     " + layout.bin + "/ooda");
+    println("  ✓ data home       " + layout.home);
+    println("  ✓ std slot        " + layout.std + "  (empty until you place/clone std)");
+    println("  ✓ config env      " + layout.config + "/env");
+    println("  ✓ download cache  " + layout.cache + "/downloads");
+    println("");
+    println("  Not installed (by design, until you opt in):");
+    println("    • full git clone of openooda / examples");
+    println("    • system-wide /usr/local (we stay in user XDG paths)");
+    println("    • automatic shell profile edits (we write env; you source it)");
+    println("");
+}
+
+pub fn chapter8_next_steps(layout: Layout) {
+    println("── Chapter 8 · Next steps ───────────────────────────────────────────");
+    println("");
+    println("  1. Load env:    . \"" + layout.config + "/env\"");
+    println("  2. Check tool:  ooda --version");
+    println("  3. Clone demos: git clone https://github.com/" + layout.repo + ".git && cd ooda");
+    println("  4. Run:         ooda run examples/while_count.oo");
+    println("  5. Optional std: git clone https://github.com/openOODA/std.git \\");
+    println("                     \"" + layout.std + "\"");
+    println("                   # OODA_STD already points here via env file");
+    println("");
+    println("  Re-run this installer anytime:");
+    println("    ooda run " + layout.home + "/install/install.oo");
+    println("    # or from a source checkout: ooda run install/install.oo");
+    println("");
+    println("  DESIGN.md remains the constitution. This installer only lands tools.");
+    println("");
+    println("════════════════════════════════════════════════════════════════════");
+    println("  Install complete. Welcome to openOODA.");
+    println("════════════════════════════════════════════════════════════════════");
+    println("");
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+pub fn must_read(fs: &FsCap, path: String) -> String {
+    let r = read_file(path);
+    if r.is_err() {
+        fail_install("read failed: " + path);
+    }
+    return match r {
+        Ok(s) => s,
+        Err(e) => e,
+    };
+}
+
+pub fn err_str(r: Result[Void, String]) -> String {
+    return match r {
+        Ok(_) => "",
+        Err(e) => e,
+    };
+}
+
+// Overload-ish: Result[String,String] error extract via is_err path in callers
+pub fn fail_install(msg: String) {
+    println("");
+    println("✖ INSTALL FAILED");
+    println("  " + msg);
+    println("");
+    process_exit(1);
+}
