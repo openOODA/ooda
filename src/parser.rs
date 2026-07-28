@@ -143,7 +143,13 @@ impl Parser {
                 other => { let (l,c)=self.loc(); return Err(anyhow!("Expected type name at {}:{}, found {:?}", l, c, other)); },
             };
             self.consume(Token::Eq)?;
-            let target_type = self.parse_type()?;
+            // `type Token = struct { ... };` — attach the alias name onto the struct.
+            let target_type = if matches!(self.peek(), Token::Ident(s) if s == "struct") {
+                self.advance(); // struct
+                self.parse_struct_type(Some(name.clone()))?
+            } else {
+                self.parse_type()?
+            };
             if self.peek() == &Token::Where {
                 self.advance();
                 let _expr = self.parse_expression()?;
@@ -301,10 +307,45 @@ impl Parser {
                     self.consume(Token::RBracket)?;
                     Ok(Type::Option(Box::new(opt_t)))
                 }
+                "List" => {
+                    self.consume(Token::LBracket)?;
+                    let elem = self.parse_type()?;
+                    self.consume(Token::RBracket)?;
+                    Ok(Type::List(Box::new(elem)))
+                }
+                "struct" => self.parse_struct_type(None),
                 other => Ok(Type::Custom(other.to_string())),
             },
             other => { let (l,c)=self.loc(); Err(anyhow!("Expected type at {}:{}, found {:?}", l, c, other)) },
         }
+    }
+
+    /// Parse `struct { field: Type, ... }` (optionally named via type alias).
+    fn parse_struct_type(&mut self, name: Option<String>) -> Result<Type> {
+        self.consume(Token::LBrace)?;
+        let mut fields = Vec::new();
+        while self.peek() != &Token::RBrace && self.peek() != &Token::Eof {
+            let fname = match self.advance() {
+                Token::Ident(s) => s,
+                other => {
+                    let (l, c) = self.loc();
+                    return Err(anyhow!(
+                        "Expected field name in struct at {}:{}, found {:?}",
+                        l,
+                        c,
+                        other
+                    ));
+                }
+            };
+            self.consume(Token::Colon)?;
+            let fty = self.parse_type()?;
+            fields.push((fname, fty));
+            if self.peek() == &Token::Comma {
+                self.advance();
+            }
+        }
+        self.consume(Token::RBrace)?;
+        Ok(Type::Struct { name, fields })
     }
 
     fn parse_block(&mut self) -> Result<Block> {
@@ -641,6 +682,12 @@ impl Parser {
                         span: s,
                     });
                 }
+                // Struct literal: `Token { field: expr, ... }`
+                // Must not steal `match scrutinee { arms }` or `if cond {` — require
+                // empty `{}` or `field: …` after the brace.
+                if self.peek() == &Token::LBrace && self.looks_like_struct_literal() {
+                    return self.parse_struct_literal(id, s);
+                }
                 Ok(Expression::Variable(id, s))
             }
             Token::LParen => {
@@ -656,6 +703,49 @@ impl Parser {
             }
             other => { let (l,c)=self.loc(); Err(anyhow!("Unexpected expression token {:?} at {}:{}", other, l, c)) },
         }
+    }
+
+    /// True when `{` after a type/name is a struct literal (`T { f: e }`), not a block.
+    fn looks_like_struct_literal(&self) -> bool {
+        // self.pos is at LBrace
+        let after = self.tokens.get(self.pos + 1).map(|t| &t.token);
+        match after {
+            Some(Token::RBrace) => true, // empty struct
+            Some(Token::Ident(_)) => {
+                matches!(
+                    self.tokens.get(self.pos + 2).map(|t| &t.token),
+                    Some(Token::Colon)
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn parse_struct_literal(&mut self, name: String, span: Span) -> Result<Expression> {
+        self.consume(Token::LBrace)?;
+        let mut fields = Vec::new();
+        while self.peek() != &Token::RBrace && self.peek() != &Token::Eof {
+            let fname = match self.advance() {
+                Token::Ident(s) => s,
+                other => {
+                    let (l, c) = self.loc();
+                    return Err(anyhow!(
+                        "Expected field name in struct literal at {}:{}, found {:?}",
+                        l,
+                        c,
+                        other
+                    ));
+                }
+            };
+            self.consume(Token::Colon)?;
+            let fexpr = self.parse_expression()?;
+            fields.push((fname, fexpr));
+            if self.peek() == &Token::Comma {
+                self.advance();
+            }
+        }
+        self.consume(Token::RBrace)?;
+        Ok(Expression::StructLit { name, fields, span })
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern> {

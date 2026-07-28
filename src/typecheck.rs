@@ -19,6 +19,11 @@ pub enum Ty {
     SysCap,
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
+    List(Box<Ty>),
+    Struct {
+        name: Option<String>,
+        fields: Vec<(String, Ty)>,
+    },
     Custom(String),
     /// Unknown / not yet inferred (permissive for incomplete language surface).
     Unknown,
@@ -40,6 +45,14 @@ impl Ty {
             Type::Result(ok, err) => {
                 Ty::Result(Box::new(Ty::from_ast(ok)), Box::new(Ty::from_ast(err)))
             }
+            Type::List(inner) => Ty::List(Box::new(Ty::from_ast(inner))),
+            Type::Struct { name, fields } => Ty::Struct {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), Ty::from_ast(t)))
+                    .collect(),
+            },
             Type::Custom(s) => match s.as_str() {
                 "Int" | "i64" | "u64" | "i32" => Ty::Int,
                 "Float" | "f64" => Ty::Float,
@@ -78,6 +91,18 @@ impl Ty {
                 Ty::unifyable(a1, b1) && Ty::unifyable(a2, b2)
             }
             (Ty::Option(a1), Ty::Option(b1)) => Ty::unifyable(a1, b1),
+            (Ty::List(a1), Ty::List(b1)) => Ty::unifyable(a1, b1),
+            (Ty::Struct { fields: fa, .. }, Ty::Struct { fields: fb, .. }) => {
+                if fa.len() != fb.len() {
+                    return false;
+                }
+                fa.iter().zip(fb.iter()).all(|((na, ta), (nb, tb))| {
+                    na == nb && Ty::unifyable(ta, tb)
+                })
+            }
+            // Named struct alias vs Custom("Token") from annotations
+            (Ty::Struct { name: Some(n), .. }, Ty::Custom(c))
+            | (Ty::Custom(c), Ty::Struct { name: Some(n), .. }) => n == c,
             (Ty::Custom(_), _) | (_, Ty::Custom(_)) => true,
             _ => false,
         }
@@ -96,6 +121,17 @@ impl Ty {
             Ty::SysCap => "SysCap".into(),
             Ty::Option(t) => format!("Option[{}]", t.display()),
             Ty::Result(o, e) => format!("Result[{}, {}]", o.display(), e.display()),
+            Ty::List(t) => format!("List[{}]", t.display()),
+            Ty::Struct { name, fields } => {
+                let body: Vec<String> = fields
+                    .iter()
+                    .map(|(n, t)| format!("{}: {}", n, t.display()))
+                    .collect();
+                match name {
+                    Some(n) => format!("{} {{ {} }}", n, body.join(", ")),
+                    None => format!("struct {{ {} }}", body.join(", ")),
+                }
+            }
             Ty::Custom(s) => s.clone(),
             Ty::Unknown => "_".into(),
         }
@@ -104,13 +140,24 @@ impl Ty {
 
 pub struct TypeChecker {
     functions: HashMap<String, (Vec<Ty>, Ty)>,
+    /// Named type aliases (including named structs) for StructLit typing.
+    type_aliases: HashMap<String, Ty>,
 }
 
 impl TypeChecker {
     pub fn check_program(program: &Program) -> Result<()> {
         let mut tc = TypeChecker {
             functions: HashMap::new(),
+            type_aliases: HashMap::new(),
         };
+
+        // Collect type aliases first (named structs for StructLit).
+        for item in &program.items {
+            if let Item::TypeAlias(name, ty) = item {
+                tc.type_aliases
+                    .insert(name.clone(), Ty::from_ast(ty));
+            }
+        }
 
         // Builtins
         tc.functions
@@ -119,6 +166,50 @@ impl TypeChecker {
             .insert("assert_eq".into(), (vec![Ty::Unknown, Ty::Unknown], Ty::Void));
         tc.functions
             .insert("assert_is_err".into(), (vec![Ty::Unknown], Ty::Void));
+        // CHS list surface
+        tc.functions
+            .insert("list_new".into(), (vec![], Ty::List(Box::new(Ty::Unknown))));
+        tc.functions.insert(
+            "list_push".into(),
+            (
+                vec![Ty::List(Box::new(Ty::Unknown)), Ty::Unknown],
+                Ty::List(Box::new(Ty::Unknown)),
+            ),
+        );
+        tc.functions.insert(
+            "list_get".into(),
+            (
+                vec![Ty::List(Box::new(Ty::Unknown)), Ty::Int],
+                Ty::Unknown,
+            ),
+        );
+        tc.functions.insert(
+            "list_len".into(),
+            (vec![Ty::List(Box::new(Ty::Unknown))], Ty::Int),
+        );
+        // CHS string walk
+        tc.functions
+            .insert("chars_len".into(), (vec![Ty::String], Ty::Int));
+        tc.functions
+            .insert("char_at".into(), (vec![Ty::String, Ty::Int], Ty::String));
+        tc.functions.insert(
+            "str_slice".into(),
+            (vec![Ty::String, Ty::Int, Ty::Int], Ty::String),
+        );
+        tc.functions
+            .insert("char_is_digit".into(), (vec![Ty::String], Ty::Bool));
+        tc.functions
+            .insert("char_is_alpha".into(), (vec![Ty::String], Ty::Bool));
+        tc.functions
+            .insert("char_is_space".into(), (vec![Ty::String], Ty::Bool));
+        // Real FS / env (sealed effects; arg types loose)
+        tc.functions.insert(
+            "env_get".into(),
+            (
+                vec![Ty::Unknown],
+                Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
+            ),
+        );
         tc.functions.insert(
             "crypto_sha256_internal".into(),
             (vec![Ty::String], Ty::String),
@@ -535,11 +626,14 @@ impl TypeChecker {
                     }
                     return match name.as_str() {
                         ".len" => {
-                            if matches!(recv_ty, Ty::String | Ty::Unknown) {
+                            if matches!(
+                                recv_ty,
+                                Ty::String | Ty::List(_) | Ty::Unknown
+                            ) {
                                 Ok(Ty::Int)
                             } else {
                                 Err(anyhow!(
-                                    "Type error at {}:{}: .len() requires String receiver, found {}",
+                                    "Type error at {}:{}: .len() requires String or List receiver, found {}",
                                     expr.span().line,
                                     expr.span().col,
                                     recv_ty.display()
@@ -548,7 +642,52 @@ impl TypeChecker {
                         }
                         ".trim" | ".to_lowercase" | ".to_string" => Ok(Ty::String),
                         ".is_ok" | ".is_err" | ".is_some" | ".is_none" => Ok(Ty::Bool),
-                        ".get" | ".read_file" | ".write_file" | ".env_get" => Ok(Ty::Unknown),
+                        ".get" | ".read_file" | ".write_file" | ".env_get" | ".push" => {
+                            Ok(Ty::Unknown)
+                        }
+                        // Field access on named/anonymous structs (or Custom alias).
+                        other if other.starts_with('.') && args.len() == 1 => {
+                            let field = &other[1..];
+                            match &recv_ty {
+                                Ty::Struct { fields, .. } => {
+                                    if let Some((_, fty)) =
+                                        fields.iter().find(|(n, _)| n == field)
+                                    {
+                                        Ok(fty.clone())
+                                    } else {
+                                        Err(anyhow!(
+                                            "Type error at {}:{}: struct has no field '{}'",
+                                            expr.span().line,
+                                            expr.span().col,
+                                            field
+                                        ))
+                                    }
+                                }
+                                Ty::Custom(name) => {
+                                    if let Some(Ty::Struct { fields, .. }) =
+                                        self.type_aliases.get(name)
+                                    {
+                                        if let Some((_, fty)) =
+                                            fields.iter().find(|(n, _)| n == field)
+                                        {
+                                            Ok(fty.clone())
+                                        } else {
+                                            Err(anyhow!(
+                                                "Type error at {}:{}: struct '{}' has no field '{}'",
+                                                expr.span().line,
+                                                expr.span().col,
+                                                name,
+                                                field
+                                            ))
+                                        }
+                                    } else {
+                                        Ok(Ty::Unknown)
+                                    }
+                                }
+                                Ty::Unknown => Ok(Ty::Unknown),
+                                _ => Ok(Ty::Unknown),
+                            }
+                        }
                         _ => Ok(Ty::Unknown),
                     };
                 }
@@ -656,6 +795,60 @@ impl TypeChecker {
                 let mut m = HashMap::new();
                 self.check_block(body, &mut env.clone(), &mut m, "while-expr")?;
                 Ok(Ty::Void)
+            }
+            Expression::StructLit { name, fields, span } => {
+                let def = self.type_aliases.get(name).cloned().ok_or_else(|| {
+                    anyhow!(
+                        "Type error at {}:{}: unknown struct type '{}'",
+                        span.line,
+                        span.col,
+                        name
+                    )
+                })?;
+                match def {
+                    Ty::Struct {
+                        name: sn,
+                        fields: def_fields,
+                    } => {
+                        for (fname, fexpr) in fields {
+                            let fty = self.infer_expr(fexpr, env)?;
+                            if let Some((_, want)) =
+                                def_fields.iter().find(|(n, _)| n == fname)
+                            {
+                                if !Ty::unifyable(&fty, want) {
+                                    return Err(anyhow!(
+                                        "Type error at {}:{}: field '{}' of '{}' expects {}, found {}",
+                                        span.line,
+                                        span.col,
+                                        fname,
+                                        name,
+                                        want.display(),
+                                        fty.display()
+                                    ));
+                                }
+                            } else {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: struct '{}' has no field '{}'",
+                                    span.line,
+                                    span.col,
+                                    name,
+                                    fname
+                                ));
+                            }
+                        }
+                        Ok(Ty::Struct {
+                            name: sn.or_else(|| Some(name.clone())),
+                            fields: def_fields,
+                        })
+                    }
+                    other => Err(anyhow!(
+                        "Type error at {}:{}: '{}' is not a struct type (found {})",
+                        span.line,
+                        span.col,
+                        name,
+                        other.display()
+                    )),
+                }
             }
             Expression::Match { expr, arms, span, .. } => {
                 let scrutinee_ty = self.infer_expr(expr, env)?;

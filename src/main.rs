@@ -39,7 +39,7 @@ use ast::Program;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.20.0-alpha")]
+#[command(version = "0.21.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -139,6 +139,9 @@ enum Commands {
         /// Output machine-readable JSON errors for AI auto-fixing
         #[arg(long)]
         json_errors: bool,
+        /// Program arguments injected into `main(args: List[String], …)` (use `--` before them)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Run empirical benchmarks & claim verification suite on .oo file
     Bench {
@@ -245,13 +248,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file, json_errors } => {
+        Commands::Run {
+            file,
+            json_errors,
+            args,
+        } => {
             let program = match load_and_analyze(&file, json_errors) {
                 Ok(p) => p,
                 Err(code) => std::process::exit(code),
             };
 
-            let mut interpreter = Interpreter::new(program);
+            let mut interpreter = Interpreter::new(program).with_argv(args);
             if let Err(e) = interpreter.execute_all() {
                 let msg = format!("{}", e);
                 let (line, col) = parse_loc(&msg);

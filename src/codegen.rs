@@ -63,6 +63,14 @@ impl LlvmCodeGen {
                 "LLVM integer-subset backend does not support Option/Result in '{}'.",
                 ctx
             ),
+            Type::List(_) => bail!(
+                "LLVM CHS emit does not yet lower List in '{}' (host-only until M4 progressive EMIT). Use `ooda run`.",
+                ctx
+            ),
+            Type::Struct { .. } => bail!(
+                "LLVM CHS emit does not yet lower struct in '{}' (host-only until M4 progressive EMIT). Use `ooda run`.",
+                ctx
+            ),
             Type::Custom(s) => match s.as_str() {
                 "Int" | "i64" | "i32" | "u64" | "Bool" | "Void" => Ok(()),
                 other => bail!(
@@ -103,6 +111,10 @@ impl LlvmCodeGen {
         match expr {
             Expression::Literal(Literal::String(_), _) => bail!(
                 "LLVM integer-subset backend does not support string literals in '{}'. Use `ooda run`.",
+                ctx
+            ),
+            Expression::StructLit { .. } => bail!(
+                "LLVM CHS emit does not yet lower struct literals in '{}' (host-only until M4). Use `ooda run`.",
                 ctx
             ),
             Expression::Literal(_, _) | Expression::Variable(_, _) => Ok(()),
@@ -543,6 +555,11 @@ impl LlvmCodeGen {
             Expression::Match { .. } => {
                 bail!(
                     "LLVM integer-subset backend does not lower match expressions. Use `ooda run`."
+                )
+            }
+            Expression::StructLit { .. } => {
+                bail!(
+                    "LLVM CHS emit does not yet lower struct literals (host-only until M4). Use `ooda run`."
                 )
             }
         }

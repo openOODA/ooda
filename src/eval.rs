@@ -54,6 +54,13 @@ pub enum Value {
     Some(Box<Value>),
     None,
     Capability(String),
+    /// Homogeneous list (element types checked loosely at runtime).
+    List(Vec<Value>),
+    /// Named product type instance from a struct literal / type alias.
+    Record {
+        type_name: String,
+        fields: HashMap<String, Value>,
+    },
 }
 
 impl std::fmt::Display for Value {
@@ -69,6 +76,28 @@ impl std::fmt::Display for Value {
             Value::Some(v) => write!(f, "Some({})", v),
             Value::None => write!(f, "None"),
             Value::Capability(c) => write!(f, "<Capability: {}>", c),
+            Value::List(items) => {
+                write!(f, "[")?;
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
+            Value::Record { type_name, fields } => {
+                write!(f, "{} {{", type_name)?;
+                let mut first = true;
+                for (k, v) in fields {
+                    if !first {
+                        write!(f, ", ")?;
+                    }
+                    first = false;
+                    write!(f, " {}: {}", k, v)?;
+                }
+                write!(f, " }}")
+            }
         }
     }
 }
@@ -83,17 +112,25 @@ pub struct Interpreter {
     /// Live OS threads spawned by `async_spawn_internal`. Keyed by numeric handle id.
     threads: HashMap<u64, std::thread::JoinHandle<String>>,
     next_thread_id: u64,
+    /// CLI / host-injected program arguments for `main(args: List[String], ...)`.
+    argv: Vec<String>,
+    /// Named struct layouts from `type Name = struct { ... }`.
+    struct_defs: HashMap<String, Vec<(String, Type)>>,
 }
 
 impl Interpreter {
     pub fn new(program: Program) -> Self {
         let mut functions = HashMap::new();
         let mut func_caps = HashMap::new();
+        let mut struct_defs = HashMap::new();
         for item in program.items {
             match item {
                 Item::Function(func) => {
                     func_caps.insert(func.name.clone(), CapSet::from_params(&func));
                     functions.insert(func.name.clone(), func);
+                }
+                Item::TypeAlias(name, Type::Struct { fields, .. }) => {
+                    struct_defs.insert(name, fields);
                 }
                 Item::TypeAlias(..) | Item::Import { .. } => {}
             }
@@ -106,7 +143,15 @@ impl Interpreter {
             last_call_span: Span::synthetic(),
             threads: HashMap::new(),
             next_thread_id: 1,
+            argv: Vec::new(),
+            struct_defs,
         }
+    }
+
+    /// Inject host argv for CHS programs whose `main` takes `List[String]` (or named `args`).
+    pub fn with_argv(mut self, argv: Vec<String>) -> Self {
+        self.argv = argv;
+        self
     }
 
     pub fn execute_all(&mut self) -> Result<()> {
@@ -129,14 +174,26 @@ impl Interpreter {
             println!("🚀 [Execution] Running main()");
             let mut main_args = Vec::new();
             for param in &main_fn.params {
-                let cap_name = match param.param_type {
-                    Type::NetCap => "NetCap",
-                    Type::FsCap  => "FsCap",
-                    Type::SysCap => "SysCap",
-                    Type::EnvCap => "EnvCap",
-                    _ => "GeneralCap",
+                let arg = match &param.param_type {
+                    Type::NetCap => Value::Capability("NetCap".into()),
+                    Type::FsCap => Value::Capability("FsCap".into()),
+                    Type::SysCap => Value::Capability("SysCap".into()),
+                    Type::EnvCap => Value::Capability("EnvCap".into()),
+                    Type::List(inner)
+                        if matches!(**inner, Type::String)
+                            || param.name == "args"
+                            || param.name == "argv" =>
+                    {
+                        Value::List(
+                            self.argv
+                                .iter()
+                                .map(|s| Value::String(s.clone()))
+                                .collect(),
+                        )
+                    }
+                    _ => Value::Capability("GeneralCap".into()),
                 };
-                main_args.push(Value::Capability(cap_name.to_string()));
+                main_args.push(arg);
             }
             self.call_function("main", main_args, &mut HashMap::new())?;
         }
@@ -280,11 +337,170 @@ impl Interpreter {
             }
             println!();
             return Ok(Value::Void);
-        } else if name == ".len" {
-            if let Some(Value::String(s)) = args.get(0) {
-                return Ok(Value::Int(s.len() as i64));
+        } else if name == "read_file" || name == ".read_file" || name == "fs_read" {
+            let path = Self::fs_path_arg(name, &args)?;
+            return match std::fs::read_to_string(&path) {
+                Ok(s) => Ok(Value::Ok(Box::new(Value::String(s)))),
+                Err(e) => Ok(Value::Err(Box::new(Value::String(format!(
+                    "read_file('{}'): {}",
+                    path, e
+                ))))),
+            };
+        } else if name == "write_file" || name == ".write_file" || name == "fs_write" {
+            let (path, content) = Self::fs_write_args(name, &args)?;
+            return match std::fs::write(&path, &content) {
+                Ok(()) => Ok(Value::Ok(Box::new(Value::Void))),
+                Err(e) => Ok(Value::Err(Box::new(Value::String(format!(
+                    "write_file('{}'): {}",
+                    path, e
+                ))))),
+            };
+        } else if name == "env_get" || name == ".env_get" {
+            let key = Self::env_key_arg(name, &args)?;
+            return match std::env::var(&key) {
+                Ok(v) => Ok(Value::Ok(Box::new(Value::String(v)))),
+                Err(_) => Ok(Value::Err(Box::new(Value::String(format!(
+                    "env_get: '{}' not set",
+                    key
+                ))))),
+            };
+        } else if name == "list_new" {
+            return Ok(Value::List(Vec::new()));
+        } else if name == "list_push" || name == ".push" {
+            // list_push(list, x) or list.push(x) → new list with x appended
+            let (base, item) = if name == ".push" {
+                (
+                    args.get(0).cloned().unwrap_or(Value::List(vec![])),
+                    args.get(1).cloned().unwrap_or(Value::Void),
+                )
             } else {
-                return Err(anyhow!("Method .len() expects String argument"));
+                (
+                    args.get(0).cloned().unwrap_or(Value::List(vec![])),
+                    args.get(1).cloned().unwrap_or(Value::Void),
+                )
+            };
+            match base {
+                Value::List(mut items) => {
+                    items.push(item);
+                    return Ok(Value::List(items));
+                }
+                other => {
+                    return Err(anyhow!(
+                        "list_push expects List as first argument, found {}",
+                        other
+                    ))
+                }
+            }
+        } else if name == "list_get" {
+            let list = args.get(0).cloned().unwrap_or(Value::List(vec![]));
+            let idx = match args.get(1) {
+                Some(Value::Int(i)) => *i,
+                _ => return Err(anyhow!("list_get expects Int index")),
+            };
+            match list {
+                Value::List(items) => {
+                    if idx < 0 || idx as usize >= items.len() {
+                        return Err(anyhow!(
+                            "list_get: index {} out of bounds (len {})",
+                            idx,
+                            items.len()
+                        ));
+                    }
+                    return Ok(items[idx as usize].clone());
+                }
+                other => {
+                    return Err(anyhow!("list_get expects List, found {}", other))
+                }
+            }
+        } else if name == "list_len" {
+            match args.get(0) {
+                Some(Value::List(items)) => return Ok(Value::Int(items.len() as i64)),
+                Some(other) => {
+                    return Err(anyhow!("list_len expects List, found {}", other))
+                }
+                None => return Err(anyhow!("list_len expects one argument")),
+            }
+        } else if name == "chars_len" {
+            match args.get(0) {
+                Some(Value::String(s)) => {
+                    return Ok(Value::Int(s.chars().count() as i64))
+                }
+                _ => return Err(anyhow!("chars_len expects String")),
+            }
+        } else if name == "char_at" {
+            let s = match args.get(0) {
+                Some(Value::String(s)) => s.clone(),
+                _ => return Err(anyhow!("char_at expects String")),
+            };
+            let idx = match args.get(1) {
+                Some(Value::Int(i)) => *i,
+                _ => return Err(anyhow!("char_at expects Int index")),
+            };
+            if idx < 0 {
+                return Err(anyhow!("char_at: negative index {}", idx));
+            }
+            return match s.chars().nth(idx as usize) {
+                Some(c) => Ok(Value::String(c.to_string())),
+                None => Err(anyhow!(
+                    "char_at: index {} out of bounds (chars_len {})",
+                    idx,
+                    s.chars().count()
+                )),
+            };
+        } else if name == "str_slice" {
+            let s = match args.get(0) {
+                Some(Value::String(s)) => s.clone(),
+                _ => return Err(anyhow!("str_slice expects String")),
+            };
+            let start = match args.get(1) {
+                Some(Value::Int(i)) => *i,
+                _ => return Err(anyhow!("str_slice expects Int start")),
+            };
+            let end = match args.get(2) {
+                Some(Value::Int(i)) => *i,
+                _ => return Err(anyhow!("str_slice expects Int end")),
+            };
+            if start < 0 || end < start {
+                return Err(anyhow!(
+                    "str_slice: invalid range [{}, {})",
+                    start,
+                    end
+                ));
+            }
+            let chars: Vec<char> = s.chars().collect();
+            if end as usize > chars.len() {
+                return Err(anyhow!(
+                    "str_slice: end {} out of bounds (chars_len {})",
+                    end,
+                    chars.len()
+                ));
+            }
+            return Ok(Value::String(
+                chars[start as usize..end as usize].iter().collect(),
+            ));
+        } else if name == "char_is_digit" {
+            return Ok(Value::Bool(Self::first_char_pred(&args, |c| {
+                c.is_ascii_digit()
+            })?));
+        } else if name == "char_is_alpha" {
+            return Ok(Value::Bool(Self::first_char_pred(&args, |c| {
+                c.is_ascii_alphabetic()
+            })?));
+        } else if name == "char_is_space" {
+            return Ok(Value::Bool(Self::first_char_pred(&args, |c| {
+                c.is_whitespace()
+            })?));
+        } else if name == ".len" {
+            match args.get(0) {
+                Some(Value::String(s)) => return Ok(Value::Int(s.len() as i64)),
+                Some(Value::List(items)) => {
+                    return Ok(Value::Int(items.len() as i64))
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "Method .len() expects String or List argument"
+                    ))
+                }
             }
         } else if name == ".to_string" {
             if let Some(v) = args.get(0) {
@@ -421,6 +637,19 @@ impl Interpreter {
             return Ok(Value::Bool(matches!(args.get(0), Some(Value::Some(_)))));
         } else if name == ".is_none" {
             return Ok(Value::Bool(matches!(args.get(0), Some(Value::None))));
+        } else if name.starts_with('.') && args.len() == 1 {
+            // Field access on records: `tok.kind` parses as Call(".kind", [tok]).
+            if let Some(Value::Record { type_name, fields }) = args.get(0) {
+                let field = &name[1..];
+                if let Some(v) = fields.get(field) {
+                    return Ok(v.clone());
+                }
+                return Err(anyhow!(
+                    "Record '{}' has no field '{}'",
+                    type_name,
+                    field
+                ));
+            }
         }
 
         let func = self.functions.get(name).cloned()
@@ -581,6 +810,40 @@ impl Interpreter {
                     Ok(Value::Void)
                 }
             }
+            Expression::StructLit { name, fields, .. } => {
+                let def = self.struct_defs.get(name).cloned().ok_or_else(|| {
+                    anyhow!(
+                        "Unknown struct type '{}' (declare with `type {} = struct {{ ... }};`)",
+                        name,
+                        name
+                    )
+                })?;
+                let mut map = HashMap::new();
+                for (fname, fexpr) in fields {
+                    if !def.iter().any(|(n, _)| n == fname) {
+                        return Err(anyhow!(
+                            "Struct '{}' has no field '{}'",
+                            name,
+                            fname
+                        ));
+                    }
+                    map.insert(fname.clone(), self.eval_expr(fexpr, env)?);
+                }
+                // Fill missing fields? Require all fields for honesty.
+                for (fname, _) in &def {
+                    if !map.contains_key(fname) {
+                        return Err(anyhow!(
+                            "Struct literal '{}' missing field '{}'",
+                            name,
+                            fname
+                        ));
+                    }
+                }
+                Ok(Value::Record {
+                    type_name: name.clone(),
+                    fields: map,
+                })
+            }
             Expression::Match { expr, arms, .. } => {
                 let target = self.eval_expr(expr, env)?;
                 for arm in arms {
@@ -663,6 +926,89 @@ impl Interpreter {
             _ => false,
         }
     }
+
+    /// Path extraction for free/method FS reads.
+    /// - `read_file(path)` / `fs_read(path)`
+    /// - `read_file(fs, path)` / `.read_file` receiver+path
+    fn fs_path_arg(name: &str, args: &[Value]) -> Result<String> {
+        if name.starts_with('.') || matches!(args.first(), Some(Value::Capability(_))) {
+            match args.get(1) {
+                Some(Value::String(s)) => Ok(s.clone()),
+                Some(other) => Err(anyhow!(
+                    "{}: path must be String, found {}",
+                    name,
+                    other
+                )),
+                None => Err(anyhow!("{}: missing path argument", name)),
+            }
+        } else {
+            match args.get(0) {
+                Some(Value::String(s)) => Ok(s.clone()),
+                Some(other) => Err(anyhow!(
+                    "{}: path must be String, found {}",
+                    name,
+                    other
+                )),
+                None => Err(anyhow!("{}: missing path argument", name)),
+            }
+        }
+    }
+
+    fn fs_write_args(name: &str, args: &[Value]) -> Result<(String, String)> {
+        // .write_file(cap, path, content) or write_file(cap, path, content) or write_file(path, content)
+        let (path_i, content_i) = if name.starts_with('.')
+            || matches!(args.first(), Some(Value::Capability(_)))
+        {
+            (1, 2)
+        } else {
+            (0, 1)
+        };
+        let path = match args.get(path_i) {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => {
+                return Err(anyhow!(
+                    "{}: path must be String, found {}",
+                    name,
+                    other
+                ))
+            }
+            None => return Err(anyhow!("{}: missing path", name)),
+        };
+        let content = match args.get(content_i) {
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+            None => return Err(anyhow!("{}: missing content", name)),
+        };
+        Ok((path, content))
+    }
+
+    fn env_key_arg(name: &str, args: &[Value]) -> Result<String> {
+        if name.starts_with('.') || matches!(args.first(), Some(Value::Capability(_))) {
+            match args.get(1) {
+                Some(Value::String(s)) => Ok(s.clone()),
+                _ => Err(anyhow!("{}: key must be String", name)),
+            }
+        } else {
+            match args.get(0) {
+                Some(Value::String(s)) => Ok(s.clone()),
+                _ => Err(anyhow!("{}: key must be String", name)),
+            }
+        }
+    }
+
+    fn first_char_pred(args: &[Value], pred: impl Fn(char) -> bool) -> Result<bool> {
+        match args.get(0) {
+            Some(Value::String(s)) => {
+                let mut chars = s.chars();
+                match chars.next() {
+                    Some(c) if chars.next().is_none() => Ok(pred(c)),
+                    Some(_) => Ok(false),
+                    None => Ok(false),
+                }
+            }
+            _ => Err(anyhow!("char classifier expects a single-character String")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -737,5 +1083,183 @@ mod tests {
         );
         assert!(res.is_err());
         assert!(format!("{}", res.unwrap_err()).contains("&SysCap"));
+    }
+
+    #[test]
+    fn real_read_write_file_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "ooda_m0_fs_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("note.txt");
+        let path_s = path.to_string_lossy().to_string();
+
+        let prog = parse(
+            r#"
+            pub fn main(fs: &FsCap) {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("main".into());
+
+        let w = interp
+            .call_function(
+                "write_file",
+                vec![
+                    Value::String(path_s.clone()),
+                    Value::String("hello-m0".into()),
+                ],
+                &mut HashMap::new(),
+            )
+            .expect("write");
+        assert!(matches!(w, Value::Ok(_)), "write ok: {:?}", w);
+
+        let r = interp
+            .call_function(
+                "read_file",
+                vec![Value::String(path_s)],
+                &mut HashMap::new(),
+            )
+            .expect("read");
+        match r {
+            Value::Ok(inner) => assert_eq!(*inner, Value::String("hello-m0".into())),
+            other => panic!("expected Ok content, got {:?}", other),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_file_without_fscap_is_denied() {
+        let prog = parse(
+            r#"
+            pub fn rogue() {
+                let _ = read_file("/etc/passwd");
+            }
+            pub fn main() {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("rogue".into());
+        let res = interp.call_function(
+            "read_file",
+            vec![Value::String("/etc/passwd".into())],
+            &mut HashMap::new(),
+        );
+        assert!(res.is_err());
+        assert!(format!("{}", res.unwrap_err()).contains("&FsCap"));
+    }
+
+    #[test]
+    fn list_push_get_len() {
+        let prog = parse(r#"pub fn main() {}"#);
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("main".into());
+        let empty = interp
+            .call_function("list_new", vec![], &mut HashMap::new())
+            .unwrap();
+        let one = interp
+            .call_function(
+                "list_push",
+                vec![empty, Value::Int(7)],
+                &mut HashMap::new(),
+            )
+            .unwrap();
+        let two = interp
+            .call_function(
+                "list_push",
+                vec![one, Value::Int(9)],
+                &mut HashMap::new(),
+            )
+            .unwrap();
+        let len = interp
+            .call_function("list_len", vec![two.clone()], &mut HashMap::new())
+            .unwrap();
+        assert_eq!(len, Value::Int(2));
+        let g0 = interp
+            .call_function(
+                "list_get",
+                vec![two.clone(), Value::Int(0)],
+                &mut HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(g0, Value::Int(7));
+        let g1 = interp
+            .call_function(
+                "list_get",
+                vec![two, Value::Int(1)],
+                &mut HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(g1, Value::Int(9));
+    }
+
+    #[test]
+    fn string_char_walk() {
+        let prog = parse(r#"pub fn main() {}"#);
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("main".into());
+        let s = Value::String("ab".into());
+        let n = interp
+            .call_function("chars_len", vec![s.clone()], &mut HashMap::new())
+            .unwrap();
+        assert_eq!(n, Value::Int(2));
+        let c0 = interp
+            .call_function(
+                "char_at",
+                vec![s.clone(), Value::Int(0)],
+                &mut HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(c0, Value::String("a".into()));
+        let slice = interp
+            .call_function(
+                "str_slice",
+                vec![s, Value::Int(0), Value::Int(1)],
+                &mut HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(slice, Value::String("a".into()));
+        let dig = interp
+            .call_function(
+                "char_is_digit",
+                vec![Value::String("9".into())],
+                &mut HashMap::new(),
+            )
+            .unwrap();
+        assert_eq!(dig, Value::Bool(true));
+    }
+
+    #[test]
+    fn struct_literal_and_field_access() {
+        let prog = parse(
+            r#"
+            type Token = struct {
+                kind: Int,
+                text: String
+            };
+            pub fn main() {
+                let t = Token { kind: 1, text: "fn" };
+                println(t.kind);
+                println(t.text);
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        assert!(interp.execute_all().is_ok());
+    }
+
+    #[test]
+    fn argv_injected_into_main() {
+        let prog = parse(
+            r#"
+            pub fn main(args: List[String]) {
+                println(list_len(args));
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog).with_argv(vec!["a".into(), "b".into()]);
+        assert!(interp.execute_all().is_ok());
     }
 }

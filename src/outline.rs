@@ -90,6 +90,17 @@ fn format_type(t: &Type) -> String {
         Type::FsCap => "FsCap".into(),
         Type::EnvCap => "EnvCap".into(),
         Type::SysCap => "SysCap".into(),
+        Type::List(inner) => format!("List[{}]", format_type(inner)),
+        Type::Struct { name, fields } => {
+            let body: Vec<String> = fields
+                .iter()
+                .map(|(n, t)| format!("{}: {}", n, format_type(t)))
+                .collect();
+            match name {
+                Some(n) => format!("{} {{ {} }}", n, body.join(", ")),
+                None => format!("struct {{ {} }}", body.join(", ")),
+            }
+        }
         Type::Option(inner) => format!("Option[{}]", format_type(inner)),
         Type::Result(ok, err) => {
             format!("Result[{}, {}]", format_type(ok), format_type(err))
@@ -153,9 +164,10 @@ fn format_expr(expr: &Expression) -> String {
                 format!("{}{}", name, parenthesize_args(&args_str))
             }
         }
-        Expression::If { .. } | Expression::Match { .. } | Expression::While { .. } => {
-            "<expr>".into()
-        }
+        Expression::If { .. }
+        | Expression::Match { .. }
+        | Expression::While { .. }
+        | Expression::StructLit { .. } => "<expr>".into(),
         Expression::Unary { op, expr, .. } => {
             let o = match op {
                 UnaryOp::Not => "!",

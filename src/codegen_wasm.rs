@@ -69,6 +69,14 @@ impl WasmCodeGen {
                     "WASM backend does not yet support Option/Result in '{}'. Use `ooda run`.",
                     func.name
                 ),
+                Type::List(_) => bail!(
+                    "WASM backend does not yet support List in '{}'. Use `ooda run`.",
+                    func.name
+                ),
+                Type::Struct { .. } => bail!(
+                    "WASM backend does not yet support struct in '{}'. Use `ooda run`.",
+                    func.name
+                ),
                 _ => {}
             }
         }
@@ -284,6 +292,9 @@ impl WasmCodeGen {
             }
             Expression::Match { .. } => {
                 bail!("WASM backend does not yet lower `match` expressions; use `ooda run`.")
+            }
+            Expression::StructLit { .. } => {
+                bail!("WASM backend does not yet lower struct literals; use `ooda run`.")
             }
         }
         Ok(wat)

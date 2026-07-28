@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.20.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.21.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -24,7 +24,7 @@ cargo build --release
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.20.0-alpha
+ooda --version   # 0.21.0-alpha
 ```
 
 ```ooda
@@ -34,7 +34,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.20.0-alpha
+## What's real in v0.21.0-alpha (M0 CHS host surface)
 
 | Capability | Status |
 |---|---|
@@ -48,10 +48,17 @@ import "lib.oo";       // relative / OODA_PATH
 | Caps + call-graph handles | Real |
 | LLVM Int/Bool/Float + while | Real (clang to link) |
 | WAT Int subset + while/if | Real subset |
+| **CHS M0:** real `read_file`/`write_file` under `&FsCap` | Real (interpreter; sealed) |
+| **CHS M0:** `List[T]` + `list_*` | Real (interpreter; LLVM host-only until M4) |
+| **CHS M0:** `chars_len` / `char_at` / `str_slice` / char class | Real (interpreter) |
+| **CHS M0:** `type T = struct { … }` + field access | Real (interpreter) |
+| **CHS M0:** `main(args: List[String])` via `ooda run f.oo -- …` | Real |
 
 ## Not implemented (fail non-zero)
 
-LSP, pkg install, migrate, replay, full WASM product, PyTorch, arrays/`for`, self-host.
+LSP, pkg install, migrate, replay, full WASM product, PyTorch, `for` sugar, self-host / fixed-point, LLVM lower of List/String/struct (documented host-only kill date M4).
+
+See `bootstrap/CHS.md` for the Compiler Host Subset plan.
 
 ---
 

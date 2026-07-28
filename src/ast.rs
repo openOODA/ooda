@@ -38,6 +38,14 @@ pub enum Type {
     Custom(String),
     Option(Box<Type>),
     Result(Box<Type>, Box<Type>),
+    /// Homogeneous list / vector. Element type may be `Custom("_")` when inferred loosely.
+    List(Box<Type>),
+    /// Anonymous or named product type. `name` is set for `type Foo = struct { ... }` aliases
+    /// and for struct literals that reference a named alias.
+    Struct {
+        name: Option<String>,
+        fields: Vec<(String, Type)>,
+    },
     NetCap,
     FsCap,
     EnvCap,
@@ -99,6 +107,12 @@ pub enum Expression {
         body: Block,
         span: Span,
     },
+    /// Named struct literal: `Token { kind: 1, text: "fn" }`.
+    StructLit {
+        name: String,
+        fields: Vec<(String, Expression)>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -119,7 +133,8 @@ impl Expression {
             | Expression::If { span: s, .. }
             | Expression::Match { span: s, .. }
             | Expression::Unary { span: s, .. }
-            | Expression::While { span: s, .. } => *s,
+            | Expression::While { span: s, .. }
+            | Expression::StructLit { span: s, .. } => *s,
         }
     }
 }

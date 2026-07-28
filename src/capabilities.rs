@@ -352,6 +352,11 @@ impl CapabilityChecker {
                 Self::check_expr(cond, func, funcs)?;
                 Self::check_block(body, func, funcs)?;
             }
+            Expression::StructLit { fields, .. } => {
+                for (_, fexpr) in fields {
+                    Self::check_expr(fexpr, func, funcs)?;
+                }
+            }
             Expression::Literal(_, _) | Expression::Variable(_, _) => {}
         }
         Ok(())
