@@ -169,6 +169,13 @@ impl Interpreter {
             let msg = args.get(1).map(|v| v.to_string()).unwrap_or_default();
             let hash = format!("{:064x}", (key.len() + msg.len()) * 987654321);
             return Ok(Value::String(hash));
+        } else if name == "async_spawn_internal" {
+            let task_name = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let handle = format!("task_handle_{}", task_name);
+            return Ok(Value::String(handle));
+        } else if name == "async_join_internal" {
+            let handle = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            return Ok(Value::Ok(Box::new(Value::String(format!("joined_{}", handle)))));
         } else if name == "Ok" {
             let val = args.get(0).cloned().unwrap_or(Value::Void);
             return Ok(Value::Ok(Box::new(val)));
