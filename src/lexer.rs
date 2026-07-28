@@ -216,9 +216,22 @@ impl<'a> Lexer<'a> {
                         if c == '"' {
                             self.advance();
                             break;
+                        } else if c == '\\' {
+                            self.advance();
+                            if let Some(&escaped) = self.peek() {
+                                match escaped {
+                                    '"' => s.push('"'),
+                                    'n' => s.push('\n'),
+                                    't' => s.push('\t'),
+                                    '\\' => s.push('\\'),
+                                    other => s.push(other),
+                                }
+                                self.advance();
+                            }
+                        } else {
+                            s.push(c);
+                            self.advance();
                         }
-                        s.push(c);
-                        self.advance();
                     }
                     tokens.push(Token::StringLit(s));
                 }

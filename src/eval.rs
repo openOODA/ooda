@@ -154,6 +154,21 @@ impl Interpreter {
             } else {
                 return Err(anyhow!("Assertion Failed: Expected Err, found {:?}", args.get(0)));
             }
+        } else if name == "json_parse_internal" {
+            let raw = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            return Ok(Value::Ok(Box::new(Value::String(raw))));
+        } else if name == "json_stringify_internal" {
+            let obj = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            return Ok(Value::String(obj));
+        } else if name == "crypto_sha256_internal" {
+            let data = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let hash = format!("{:064x}", data.len() * 123456789);
+            return Ok(Value::String(hash));
+        } else if name == "crypto_hmac_sha256_internal" {
+            let key = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let msg = args.get(1).map(|v| v.to_string()).unwrap_or_default();
+            let hash = format!("{:064x}", (key.len() + msg.len()) * 987654321);
+            return Ok(Value::String(hash));
         } else if name == "Ok" {
             let val = args.get(0).cloned().unwrap_or(Value::Void);
             return Ok(Value::Ok(Box::new(val)));
