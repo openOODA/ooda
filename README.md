@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.25.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.26.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -25,7 +25,7 @@ cargo build --release
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.25.0-alpha
+ooda --version   # 0.26.0-alpha
 ```
 
 ```ooda
@@ -35,7 +35,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.25.0-alpha (CHS M0–M5)
+## What's real in v0.26.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
