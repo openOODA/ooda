@@ -420,6 +420,12 @@ impl Interpreter {
                     return Ok(Value::Err(Box::new(Value::String(e))))
                 }
             }
+        } else if name == "process_exit" {
+            let code = match args.get(0) {
+                Some(Value::Int(n)) => *n as i32,
+                _ => 1,
+            };
+            std::process::exit(code);
         } else if name == "list_new" {
             return Ok(Value::List(Vec::new()));
         } else if name == "list_push" || name == ".push" {

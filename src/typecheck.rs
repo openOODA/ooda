@@ -216,6 +216,8 @@ impl TypeChecker {
                 Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
             ),
         );
+        tc.functions
+            .insert("process_exit".into(), (vec![Ty::Int], Ty::Void));
         // Real FS / env (sealed effects; arg types loose)
         tc.functions.insert(
             "env_get".into(),

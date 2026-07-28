@@ -62,14 +62,14 @@ ooda dump check <file>    # OK / ERR\t…
 
 ## oodac
 
-- Source: `oodac/main.oo` (CHS only)
-- Native: `ooda build --target c oodac/main.oo` → links `libooda.a` + `runtime/chs_rt.c`
+- Source: `oodac/main.oo` (CHS only) — **frontend pipeline is real `.oo` code**
+- Native: `ooda build --target c oodac/main.oo` → links `libooda.a` + `runtime/chs_rt.c` (for **build** only)
 - Commands:
-  - `tokens <file>` — **lexer implemented in `.oo`** (parity vs `ooda dump tokens`)
-  - `ast <file>` — **exact** stage-0 AST via `host_ast_dump` (same code as `ooda dump ast`)
-  - `check <file>` — **exact** stage-0 type+cap via `host_check` (same as `ooda dump check`)
-  - `build <src> [out]` — **real** CHS native compile via `chs_build` → CCodeGen+gcc (not hardcoded C)
-- Parity: `scripts/chs_parity.sh` (pass + fail lex corpus; exact AST/check)
+  - `tokens <file>` — **lexer in `.oo`**; unknown chars → `ERR\tlex\t…` + `process_exit(1)` (no soft-skip)
+  - `ast <file>` — **recursive-descent parser in `.oo`** dumping stage-0-style AST (span-normalized parity)
+  - `check <file>` — **cap/structure check in `.oo`** (sealed effects require matching cap params); fail-closed
+  - `build <src> [out]` — `chs_build` host emit (CCodeGen+gcc) for native compile
+- Parity: `scripts/chs_parity.sh` (strict fail-closed; no soft-skip theater)
 - Fixed-point: `scripts/fixed_point.sh` (**stage-1 builds stage-2**)
 
 ## Metric (M5)
