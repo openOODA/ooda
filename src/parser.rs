@@ -394,6 +394,20 @@ impl Parser {
 
     fn parse_primary(&mut self) -> Result<Expression> {
         match self.peek().clone() {
+            Token::Minus => {
+                self.advance();
+                match self.peek().clone() {
+                    Token::IntLit(n) => {
+                        self.advance();
+                        Ok(Expression::Literal(Literal::Int(-n)))
+                    }
+                    Token::FloatLit(f) => {
+                        self.advance();
+                        Ok(Expression::Literal(Literal::Float(-f)))
+                    }
+                    other => Err(anyhow!("Expected number after '-', found {:?}", other)),
+                }
+            }
             Token::If => {
                 self.advance();
                 let cond = self.parse_expression()?;
