@@ -4,7 +4,7 @@
 # ===================================================================
 set -e
 
-VERSION="v0.9.0-alpha"
+VERSION="v0.10.0-alpha"
 ARCH="linux-x86_64"
 DIST_DIR="dist"
 TARBALL="ooda-${VERSION}-${ARCH}.tar.gz"
