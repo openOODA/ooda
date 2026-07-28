@@ -1,34 +1,44 @@
 #!/usr/bin/env bash
 # ===================================================================
-# openOODA GitHub Release Packaging & Binary Publisher Script
+# openOODA GitHub Release Packaging & Binary Publisher
+# Builds a tarball under dist/ (gitignored) and uploads to GitHub Releases.
+# Does NOT commit release artifacts into the git tree.
 # ===================================================================
-set -e
+set -euo pipefail
 
-VERSION="v0.12.0-alpha"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+
+VERSION="${1:-v0.12.1-alpha}"
+# Allow VERSION with or without leading v
+case "$VERSION" in
+  v*) TAG="$VERSION" ;;
+  *) TAG="v${VERSION}" ;;
+esac
 ARCH="linux-x86_64"
-DIST_DIR="dist"
-TARBALL="ooda-${VERSION}-${ARCH}.tar.gz"
+DIST_DIR="$ROOT/dist/ooda-${TAG}-${ARCH}"
+TARBALL="$ROOT/dist/ooda-${TAG}-${ARCH}.tar.gz"
 
-echo "🔨 [openOODA Release Publisher] Building native binary release ${VERSION}..."
+echo "[openOODA Release] Building ${TAG}..."
 cargo build --release
 
+rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 cp target/release/ooda "$DIST_DIR/"
-cp README.md "$DIST_DIR/"
-cp DESIGN.md "$DIST_DIR/"
+cp README.md DESIGN.md "$DIST_DIR/" 2>/dev/null || cp README.md "$DIST_DIR/"
 
-tar -czvf "$TARBALL" -C "$DIST_DIR" .
+tar -czf "$TARBALL" -C "$ROOT/dist" "ooda-${TAG}-${ARCH}"
+echo "[openOODA Release] Archive: $TARBALL"
 
-echo "📦 Created release binary archive: ${TARBALL}"
-
-if gh release view "$VERSION" > /dev/null 2>&1; then
-    echo "Updating existing release ${VERSION} on GitHub..."
-    gh release upload "$VERSION" "$TARBALL" --clobber
+if gh release view "$TAG" --repo openOODA/ooda >/dev/null 2>&1; then
+  echo "[openOODA Release] Uploading asset to existing release ${TAG}..."
+  gh release upload "$TAG" "$TARBALL" --repo openOODA/ooda --clobber
 else
-    echo "Creating new release ${VERSION} on GitHub..."
-    gh release create "$VERSION" "$TARBALL" \
-        --title "openOODA ${VERSION} Compiler Release" \
-        --notes "Official pre-built binary release for the OODA programming language compiler toolchain."
+  echo "[openOODA Release] Creating release ${TAG}..."
+  gh release create "$TAG" "$TARBALL" \
+    --repo openOODA/ooda \
+    --title "openOODA ${TAG}" \
+    --notes "Pre-built Linux x86_64 binary for the OODA toolchain (${TAG}). Source: https://github.com/openOODA/ooda"
 fi
 
-echo "🚀 Successfully published GitHub Release ${VERSION} with native binary assets!"
+echo "[openOODA Release] Done. Artifacts remain under dist/ (gitignored)."
