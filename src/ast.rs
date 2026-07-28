@@ -13,6 +13,7 @@ impl Span {
     pub const fn synthetic() -> Self {
         Span { line: 1, col: 1 }
     }
+    #[allow(dead_code)]
     pub fn format(&self) -> String {
         format!("at {}:{}", self.line, self.col)
     }

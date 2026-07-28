@@ -220,30 +220,38 @@ impl CapabilityChecker {
             Expression::Call { name, args, .. } => {
                 if let Some(effect) = lookup_effect(name) {
                     if !Self::function_has_cap(func, effect.requires) {
+                        let span = expr.span();
                         return Err(anyhow!(
-                            "Security Capability Violation: Function '{}' calls sealed effectful builtin '{}' which requires a {} parameter, but none was declared. Default-deny: grant the capability token explicitly.",
+                            "Security Capability Violation: Function '{}' calls sealed effectful builtin '{}' which requires a {} parameter, but none was declared at line {}, col {}. Default-deny: grant the capability token explicitly.",
                             func.name,
                             name,
-                            effect.requires.type_name()
+                            effect.requires.type_name(),
+                            span.line,
+                            span.col
                         ));
                     }
                     // Method style: receiver (args[0]) must be the declared cap parameter.
                     if effect.receiver_is_cap {
+                        let span = expr.span();
                         match args.first() {
                             Some(recv) if Self::expr_is_cap_handle(recv, effect.requires, func) => {}
                             Some(_) => {
                                 return Err(anyhow!(
-                                    "Security Capability Violation: Function '{}' calls '{}' but the receiver is not a {} capability handle parameter.",
+                                    "Security Capability Violation: Function '{}' calls '{}' at line {}, col {} but the receiver is not a {} capability handle parameter.",
                                     func.name,
                                     name,
+                                    span.line,
+                                    span.col,
                                     effect.requires.type_name()
                                 ));
                             }
                             None => {
                                 return Err(anyhow!(
-                                    "Security Capability Violation: Function '{}' calls method-style effect '{}' without a capability receiver.",
+                                    "Security Capability Violation: Function '{}' calls method-style effect '{}' at line {}, col {} without a capability receiver.",
                                     func.name,
-                                    name
+                                    name,
+                                    span.line,
+                                    span.col
                                 ));
                             }
                         }
