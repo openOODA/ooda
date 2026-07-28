@@ -590,21 +590,61 @@ impl TypeChecker {
                     Ok(t1)
                 }
             }
-            Expression::Match { expr, arms, .. } => {
-                self.infer_expr(expr, env)?;
+            Expression::Match { expr, arms, span, .. } => {
+                let scrutinee_ty = self.infer_expr(expr, env)?;
                 let mut result = Ty::Unknown;
+                let mut has_ok = false;
+                let mut has_err = false;
+                let mut has_some = false;
+                let mut has_none = false;
+                let mut has_wildcard = false;
                 for arm in arms {
                     let mut arm_env = env.clone();
-                    // Bind simple variant patterns loosely
-                    if let Pattern::Variant {
-                        name: _,
-                        arg: Some(var),
-                    } = &arm.pattern
-                    {
-                        arm_env.insert(var.clone(), Ty::Unknown);
+                    match &arm.pattern {
+                        Pattern::Wildcard => has_wildcard = true,
+                        Pattern::Variant { name, arg } => {
+                            match name.as_str() {
+                                "Ok" => has_ok = true,
+                                "Err" => has_err = true,
+                                "Some" => has_some = true,
+                                "None" => has_none = true,
+                                _ => {}
+                            }
+                            if let Some(var) = arg {
+                                let payload = match (&scrutinee_ty, name.as_str()) {
+                                    (Ty::Result(ok, _), "Ok") => (**ok).clone(),
+                                    (Ty::Result(_, err), "Err") => (**err).clone(),
+                                    (Ty::Option(inner), "Some") => (**inner).clone(),
+                                    _ => Ty::Unknown,
+                                };
+                                arm_env.insert(var.clone(), payload);
+                            }
+                        }
+                        Pattern::Literal(_) => {}
                     }
                     let t = self.infer_expr(&arm.body, &arm_env)?;
                     result = t;
+                }
+
+                // DESIGN: exhaustive matching for Result/Option (no silent fall-through).
+                if !has_wildcard {
+                    match &scrutinee_ty {
+                        Ty::Result(_, _) if !(has_ok && has_err) => {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: non-exhaustive match on Result — cover both Ok(_) and Err(_), or use `_`",
+                                span.line,
+                                span.col
+                            ));
+                        }
+                        Ty::Option(_) if !(has_some && has_none) => {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: non-exhaustive match on Option — cover both Some(_) and None, or use `_`",
+                                span.line,
+                                span.col
+                            ));
+                        }
+                        _ => {}
+                    }
                 }
                 Ok(result)
             }
@@ -693,6 +733,40 @@ mod tests {
             "got: {}",
             err
         );
+    }
+
+    #[test]
+    fn rejects_nonexhaustive_result_match() {
+        let src = r#"
+            pub fn main() {
+                let r = Ok(1);
+                let x = match r {
+                    Ok(v) => v,
+                };
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("non-exhaustive") || err.contains("Err"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn accepts_exhaustive_result_match() {
+        let src = r#"
+            pub fn main() {
+                let r = Ok(1);
+                let x = match r {
+                    Ok(v) => v,
+                    Err(e) => 0,
+                };
+                println(x);
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
     }
 
     #[test]

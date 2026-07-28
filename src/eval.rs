@@ -73,6 +73,8 @@ pub struct Interpreter {
     globals: HashMap<String, Value>,
     func_caps: HashMap<String, CapSet>,
     current_func: Option<String>,
+    /// Most recent call-site span (for contract / runtime diagnostics).
+    last_call_span: Span,
     /// Live OS threads spawned by `async_spawn_internal`. Keyed by numeric handle id.
     threads: HashMap<u64, std::thread::JoinHandle<String>>,
     next_thread_id: u64,
@@ -96,6 +98,7 @@ impl Interpreter {
             globals: HashMap::new(),
             func_caps,
             current_func: None,
+            last_call_span: Span::synthetic(),
             threads: HashMap::new(),
             next_thread_id: 1,
         }
@@ -420,7 +423,12 @@ impl Interpreter {
         for pre in &func.requires {
             let res = self.eval_expr(pre, &mut local_env)?;
             if res != Value::Bool(true) {
-                return Err(anyhow!("Precondition Violation: 'requires' contract failed for function '{}'", name));
+                return Err(anyhow!(
+                    "Precondition Violation: 'requires' contract failed for function '{}' (call site at {}:{})",
+                    name,
+                    self.last_call_span.line,
+                    self.last_call_span.col
+                ));
             }
         }
 
@@ -438,7 +446,12 @@ impl Interpreter {
             for post in &func.ensures {
                 let res = self.eval_expr(post, &mut post_env)?;
                 if res != Value::Bool(true) {
-                    return Err(anyhow!("Postcondition Violation: 'ensures' contract failed for function '{}'", name));
+                    return Err(anyhow!(
+                        "Postcondition Violation: 'ensures' contract failed for function '{}' (call site at {}:{})",
+                        name,
+                        self.last_call_span.line,
+                        self.last_call_span.col
+                    ));
                 }
             }
         }
@@ -496,7 +509,8 @@ impl Interpreter {
                 let r_val = self.eval_expr(right, env)?;
                 self.eval_binary_op(op, l_val, r_val)
             }
-            Expression::Call { name, args, propagate_err, .. } => {
+            Expression::Call { name, args, propagate_err, span, .. } => {
+                self.last_call_span = *span;
                 let mut arg_vals = Vec::new();
                 for arg in args {
                     arg_vals.push(self.eval_expr(arg, env)?);

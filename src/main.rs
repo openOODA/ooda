@@ -36,7 +36,7 @@ use codegen_wasm::WasmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.17.0-alpha")]
+#[command(version = "0.18.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -286,8 +286,11 @@ fn main() -> Result<()> {
                 let msg = format!("{}", e);
                 let (line, col) = parse_loc(&msg);
                 if json_errors {
-                    AiDiagnostic::new("CapabilitySecurityViolation", &file, line, col, msg, "Function attempts I/O without receiving explicit capability token handle.")
-                        .with_fix("Grant Capability Token", "Pass &NetCap or &FsCap in parameter list.")
+                    AiDiagnostic::new("CapabilitySecurityViolation", &file, line, col, msg.clone(), "Function attempts I/O without receiving explicit capability token handle.")
+                        .with_fix(
+                            "Grant Capability Token",
+                            "fn f(net: &NetCap, ...) { ... fetch(url); }  // pass net from main()",
+                        )
                         .print_json();
                 } else {
                     eprintln!("Security Error: {}", e);
@@ -300,8 +303,29 @@ fn main() -> Result<()> {
                 let msg = format!("{}", e);
                 let (line, col) = parse_loc(&msg);
                 if json_errors {
+                    let fix = if msg.contains("must-use") || msg.contains("unused Result") {
+                        (
+                            "Handle Result/Option",
+                            "let r = f(); match r { Ok(v) => ..., Err(e) => ... }",
+                        )
+                    } else if msg.contains("non-exhaustive match") {
+                        (
+                            "Cover all variants",
+                            "match r { Ok(v) => ..., Err(e) => ... }  // or `_ => ...`",
+                        )
+                    } else if msg.contains("immutable") {
+                        (
+                            "Use let mut",
+                            "let mut x = ...; x = new_value;",
+                        )
+                    } else {
+                        (
+                            "Fix types",
+                            "Ensure operands and annotations agree (Int/Float/String/Bool/caps).",
+                        )
+                    };
                     AiDiagnostic::new("TypeError", &file, line, col, msg, "Static type mismatch detected before execution.")
-                        .with_fix("Fix types", "Ensure operands and annotations agree (Int/Float/String/Bool/caps).")
+                        .with_fix(fix.0, fix.1)
                         .print_json();
                 } else {
                     eprintln!("Type Error: {}", e);
@@ -314,8 +338,11 @@ fn main() -> Result<()> {
                 let msg = format!("{}", e);
                 let (line, col) = parse_loc(&msg);
                 if json_errors {
-                    AiDiagnostic::new("RuntimeContractError", &file, line, col, msg, "Execution failed or precondition/postcondition contract violated.")
-                        .with_fix("Enforce contract preconditions", "Verify argument values passed into functions.")
+                    AiDiagnostic::new("RuntimeContractError", &file, line, col, msg.clone(), "Execution failed or precondition/postcondition contract violated.")
+                        .with_fix(
+                            "Satisfy requires / handle ensures",
+                            "Check call-site arguments against `requires`; error includes call site line:col when available.",
+                        )
                         .print_json();
                 } else {
                     eprintln!("Runtime Error: {}", e);
@@ -385,7 +412,7 @@ fn main() -> Result<()> {
                 }
                 NativeLinkResult::NoTool => {
                     println!(
-                        "💡 [openOODA Native Build] No clang/cc in PATH; IR only at {}. Install clang to link.",
+                        "💡 [openOODA Native Build] No clang in PATH; IR only at {}. Install clang (not gcc) to link LLVM IR.",
                         out_ll.display()
                     );
                 }
@@ -487,35 +514,44 @@ enum NativeLinkResult {
     ToolFailed { tool: String, detail: String },
 }
 
-/// Try clang / clang-XX / cc / $CC to assemble/link LLVM IR to a native binary.
+/// Link LLVM IR (.ll) to a native binary.
+///
+/// Only **clang** (and versioned clang-*) can consume LLVM IR text as input.
+/// Plain `gcc`/`cc` treat `.ll` as a linker script and fail noisily — never try them.
 fn try_native_link(ll: &std::path::Path, out_bin: &std::path::Path) -> NativeLinkResult {
     let mut tools: Vec<String> = Vec::new();
-    if let Ok(cc) = std::env::var("CC") {
-        if !cc.is_empty() {
-            tools.push(cc);
+    // Prefer explicit OODA_CLANG / CC only if the name looks like clang.
+    for key in ["OODA_CLANG", "CC"] {
+        if let Ok(cc) = std::env::var(key) {
+            let base = cc.rsplit('/').next().unwrap_or(&cc);
+            if base.contains("clang") && !tools.iter().any(|x| x == &cc) {
+                tools.push(cc);
+            }
         }
     }
-    for t in [
-        "clang",
-        "clang-18",
-        "clang-17",
-        "clang-16",
-        "clang-15",
-        "cc",
-        "gcc",
-    ] {
+    for t in ["clang", "clang-18", "clang-17", "clang-16", "clang-15", "clang-14"] {
         if !tools.iter().any(|x| x == t) {
             tools.push(t.to_string());
         }
     }
 
     let mut last_fail: Option<(String, String)> = None;
+    let mut saw_clang = false;
     for tool in tools {
         let probe = std::process::Command::new(&tool).arg("--version").output();
-        if probe.is_err() {
+        let Ok(probe_out) = probe else {
+            continue;
+        };
+        let ver = String::from_utf8_lossy(&probe_out.stdout);
+        if !ver.to_ascii_lowercase().contains("clang") {
+            // Refuse non-clang drivers even if named oddly.
             continue;
         }
+        saw_clang = true;
+        // `-x ir` forces IR input language so the suffix is unambiguous.
         let out = std::process::Command::new(&tool)
+            .arg("-x")
+            .arg("ir")
             .arg(ll)
             .arg("-Wno-override-module")
             .arg("-o")
@@ -530,7 +566,7 @@ fn try_native_link(ll: &std::path::Path, out_bin: &std::path::Path) -> NativeLin
                     if detail.is_empty() {
                         format!("exit {}", o.status)
                     } else {
-                        detail.chars().take(200).collect()
+                        detail.chars().take(240).collect()
                     },
                 ));
             }
@@ -539,6 +575,8 @@ fn try_native_link(ll: &std::path::Path, out_bin: &std::path::Path) -> NativeLin
     }
     if let Some((tool, detail)) = last_fail {
         NativeLinkResult::ToolFailed { tool, detail }
+    } else if !saw_clang {
+        NativeLinkResult::NoTool
     } else {
         NativeLinkResult::NoTool
     }

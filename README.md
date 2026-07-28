@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.17.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.18.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) is a systems-oriented, guard-rail-first
 language for capability security, self-verification, and AI co-authoring.
@@ -23,30 +23,28 @@ cargo build --release
 ./target/release/ooda build --target wasm examples/int_main.oo
 ```
 
-Install a published binary:
-
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.17.0-alpha
+ooda --version   # 0.18.0-alpha
 ```
 
 ---
 
-## What's real in v0.17.0-alpha
+## What's real in v0.18.0-alpha
 
 | Capability | Status |
 |---|---|
 | Lexer / parser / AST + spans | Real |
 | Interpreter (`ooda run`) | Real |
-| `requires` / `ensures` / `verify` | Real at runtime |
+| `requires` / `ensures` / `verify` | Real; **call-site line:col** on contract failures |
 | Sealed caps + runtime gate | Real |
 | Static type checker | Real |
-| **Must-use `Result` / `Option`** | Real (discarded values error) |
-| **`let` immutability + `let mut` assign** | Real |
-| Integer LLVM IR (+ basic `if`) | Real; links via clang/cc when available |
-| Integer WAT + `println(Int)` | Real subset; fails closed outside subset |
-| SHA-256 / HMAC / JSON | Real |
-| `--json-errors` with line:col | Real |
+| Must-use Result/Option | Real |
+| `let` / `let mut` assignment | Real |
+| **Exhaustive `match` on Result/Option** | Real (static) |
+| Integer LLVM IR (+ `if`) | Real; **native link only via clang** (never gcc on `.ll`) |
+| Integer WAT + `println(Int)` + `if` | Real subset |
+| `--json-errors` actionable fixes | Real (must-use / match / mut / caps) |
 | outline / reflect / context / patch | Real (limited) |
 
 ## Not implemented (fail non-zero)
@@ -54,14 +52,15 @@ ooda --version   # 0.17.0-alpha
 | Feature | Behavior |
 |---|---|
 | `ooda lsp` / `migrate` / `replay` | Error |
-| `ooda pkg --install` | Error (`--init` only) |
-| Full WASM/WASI product | Subset WAT only |
-| Python / PyTorch bridge | Honest `Err` |
+| `ooda pkg --install` | Error |
+| Full WASM/WASI | Subset WAT only |
+| Python / PyTorch | Honest `Err` |
+| Native binary without clang | IR-only (install clang to link) |
 
 ---
 
-## Repo hygiene
+## Hygiene
 
-Do not commit `*.ll`, `*.wat`, `*.wasm`, `dist/`, or release tarballs. Use `scripts/release.sh` + GitHub Releases.
+Do not commit `*.ll`, `*.wat`, `dist/`, release tarballs. Use `scripts/release.sh` + GitHub Releases.
 
 Related: `spec`, `qa`, `std`, `vscode`, `tree-sitter`, `openOODA.github.io`.
