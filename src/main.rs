@@ -712,18 +712,22 @@ mod version_consistency_tests {
     }
 
     #[test]
-    fn release_sh_version_matches_canonical() {
+    fn release_sh_version_derives_from_cargo() {
+        // release.sh's default VERSION reads Cargo.toml's version at
+        // build time (`v${CARGO_VER}`), so any bump to Cargo.toml
+        // propagates automatically. This test asserts that the
+        // release script still derives from Cargo rather than a
+        // hardcoded string.
         let sh = include_str!("../scripts/release.sh");
         for line in sh.lines() {
-            if let Some(rest) = line.strip_prefix("VERSION=\"${1:-") {
-                if let Some(v) = rest.strip_suffix("}\"") {
-                    assert_eq!(v, CANONICAL_VERSION,
-                        "scripts/release.sh default VERSION does not match the canonical version");
-                    return;
-                }
+            if line.contains("VERSION=") && line.contains("CARGO_VER") {
+                return;
             }
         }
-        panic!("could not locate `VERSION=\"${{1:-...}}\"` in scripts/release.sh");
+        panic!(
+            "scripts/release.sh must derive its default VERSION from \
+             Cargo.toml via CARGO_VER (no hardcoded version string)."
+        );
     }
 
     #[test]
