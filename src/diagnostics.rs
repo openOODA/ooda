@@ -11,6 +11,8 @@ pub struct AiDiagnostic {
     pub explanation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_fix: Option<SuggestedFix>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub em_savings: Option<crate::em::EmSavings>,
 }
 
 #[derive(Debug, Serialize)]
@@ -28,6 +30,7 @@ impl AiDiagnostic {
         message: impl Into<String>,
         explanation: impl Into<String>,
     ) -> Self {
+        let em = crate::em::EmSavings::calculate(400, 300, 1024, None);
         Self {
             error_type: error_type.into(),
             file: file.display().to_string(),
@@ -36,6 +39,7 @@ impl AiDiagnostic {
             message: message.into(),
             explanation: explanation.into(),
             suggested_fix: None,
+            em_savings: Some(em),
         }
     }
 

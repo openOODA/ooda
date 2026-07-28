@@ -924,6 +924,12 @@ impl Interpreter {
             }
         }
 
+        // Snapshot initial parameter values for old(param) postconditions
+        let mut old_snapshot = HashMap::new();
+        for (k, v) in &local_env {
+            old_snapshot.insert(format!("old({})", k), v.clone());
+        }
+
         // 2. Evaluate Function Body
         let prev_func = self.current_func.take();
         self.current_func = Some(name.to_string());
@@ -941,6 +947,7 @@ impl Interpreter {
         // 3. Evaluate Postconditions (ensures)
         if !func.ensures.is_empty() {
             let mut post_env = local_env.clone();
+            post_env.extend(old_snapshot);
             post_env.insert("result".to_string(), return_val.clone());
             for post in &func.ensures {
                 let res = self.eval_expr(post, &mut post_env)?;
@@ -1041,6 +1048,16 @@ impl Interpreter {
                 self.eval_binary_op(op, l_val, r_val)
             }
             Expression::Call { name, args, propagate_err, span, .. } => {
+                if name == "old" {
+                    if let Some(arg) = args.first() {
+                        if let Expression::Variable(ref var_name, _) = arg {
+                            let key = format!("old({})", var_name);
+                            if let Some(val) = env.get(&key) {
+                                return Ok(val.clone());
+                            }
+                        }
+                    }
+                }
                 self.last_call_span = *span;
                 let mut arg_vals = Vec::new();
                 for arg in args {
@@ -1672,6 +1689,25 @@ mod tests {
             "#,
         );
         let mut interp = Interpreter::new(prog).with_argv(vec!["a".into(), "b".into()]);
+        assert!(interp.execute_all().is_ok());
+    }
+
+    #[test]
+    fn postcondition_old_state_snapshot_verification() {
+        let prog = parse(
+            r#"
+            pub fn increment(x: Int) -> Int
+                ensures result == old(x) + 1
+            {
+                return x + 1;
+            }
+            pub fn main() {
+                let y = increment(5);
+                println(y);
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
         assert!(interp.execute_all().is_ok());
     }
 

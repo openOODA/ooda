@@ -21,6 +21,7 @@ pub mod codegen_wasm;
 pub mod codegen_c;
 pub mod dump;
 pub mod loader;
+pub mod em;
 pub mod host_api;
 
 // Re-export host API for tests and FFI.

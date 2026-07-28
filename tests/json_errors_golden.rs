@@ -47,4 +47,9 @@ fn json_errors_golden_capability_violation() {
             .is_empty(),
         "suggested_fix.diff must be non-empty"
     );
+    assert!(
+        v["em_savings"].is_object(),
+        "em_savings required for AI E-M telemetry: {}",
+        stderr
+    );
 }
