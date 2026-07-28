@@ -29,7 +29,7 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.2.0-alpha")]
+#[command(version = "0.2.1-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -109,12 +109,15 @@ enum Commands {
     },
     /// Start Language Server Protocol daemon for VSCode/Cursor IDEs
     Lsp,
-    /// Build < 200-token micro-context payload for 8GB VRAM GPU LLMs
+    /// Build auto-scaling context payload for 8GB VRAM up to Frontier Cloud LLMs
     Context {
         /// Path to the .oo file
         file: PathBuf,
         /// Target symbol
         symbol: String,
+        /// Hardware/LLM VRAM tier (8gb, 16gb, frontier)
+        #[arg(long, default_value = "8gb")]
+        tier: String,
     },
 }
 
@@ -281,9 +284,9 @@ fn main() -> Result<()> {
         Commands::Lsp => {
             lsp::LspDaemon::start()?;
         }
-        Commands::Context { file, symbol } => {
-            let ctx = context::ContextEngine::build_micro_context(&file.display().to_string(), &symbol)?;
-            println!("🤖 [8GB VRAM Micro-Context Payload]:\n{}", ctx);
+        Commands::Context { file, symbol, tier } => {
+            let ctx = context::ContextEngine::build_micro_context(&file.display().to_string(), &symbol, &tier)?;
+            println!("🤖 [LLVM/VRAM Dynamic Auto-Scaling Context Payload (Tier: {})]:\n{}", tier, ctx);
         }
     }
 
