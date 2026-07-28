@@ -88,27 +88,93 @@ impl Interpreter {
                 if func.name == "main" {
                     continue;
                 }
+                // Skip functions that require capability handles (no ambient caps in fuzz harness).
+                let needs_cap = func.params.iter().any(|p| {
+                    matches!(
+                        p.param_type,
+                        Type::NetCap | Type::FsCap | Type::SysCap | Type::EnvCap
+                    )
+                });
+                if needs_cap {
+                    println!(
+                        "  ⏭  Skipping '{}' (requires capability parameters)",
+                        name
+                    );
+                    continue;
+                }
+
                 println!("  🧪 Fuzzing '{}' across boundary test matrix...", name);
 
-                let mut test_inputs = Vec::new();
+                let mut domains: Vec<Vec<Value>> = Vec::new();
                 for param in &func.params {
                     match param.param_type {
-                        Type::Int => test_inputs.push(vec![Value::Int(0), Value::Int(1), Value::Int(-1), Value::Int(100)]),
-                        Type::Float => test_inputs.push(vec![Value::Float(0.0), Value::Float(1.0), Value::Float(-1.0), Value::Float(100.0)]),
-                        Type::String => test_inputs.push(vec![Value::String("".to_string()), Value::String("fuzz".to_string())]),
-                        Type::Bool => test_inputs.push(vec![Value::Bool(true), Value::Bool(false)]),
-                        _ => test_inputs.push(vec![Value::Void]),
+                        Type::Int => domains.push(vec![
+                            Value::Int(0),
+                            Value::Int(1),
+                            Value::Int(-1),
+                            Value::Int(i64::MAX),
+                            Value::Int(i64::MIN),
+                        ]),
+                        Type::Float => domains.push(vec![
+                            Value::Float(0.0),
+                            Value::Float(1.0),
+                            Value::Float(-1.0),
+                            Value::Float(f64::MAX),
+                        ]),
+                        Type::String => domains.push(vec![
+                            Value::String(String::new()),
+                            Value::String("fuzz".into()),
+                            Value::String("\0".into()),
+                        ]),
+                        Type::Bool => {
+                            domains.push(vec![Value::Bool(true), Value::Bool(false)])
+                        }
+                        _ => domains.push(vec![Value::Void]),
                     }
                 }
 
-                if let Some(first_args) = test_inputs.first() {
-                    for arg in first_args {
+                if domains.is_empty() {
+                    let mut env = HashMap::new();
+                    let _ = self.call_function(&func.name, vec![], &mut env);
+                } else {
+                    // Cartesian product capped for multi-param functions.
+                    let mut combos: Vec<Vec<Value>> = vec![vec![]];
+                    for domain in &domains {
+                        let mut next = Vec::new();
+                        for prefix in &combos {
+                            for v in domain {
+                                if next.len() >= 64 {
+                                    break;
+                                }
+                                let mut row = prefix.clone();
+                                row.push(v.clone());
+                                next.push(row);
+                            }
+                        }
+                        combos = next;
+                    }
+                    let mut pre_fail = 0u32;
+                    let mut ok = 0u32;
+                    let mut other_err = 0u32;
+                    for args in combos {
                         let mut env = HashMap::new();
-                        let _ = self.call_function(&func.name, vec![arg.clone()], &mut env);
+                        match self.call_function(&func.name, args, &mut env) {
+                            Ok(_) => ok += 1,
+                            Err(e) => {
+                                let msg = format!("{}", e);
+                                if msg.contains("Precondition Violation") {
+                                    pre_fail += 1;
+                                } else {
+                                    other_err += 1;
+                                }
+                            }
+                        }
                     }
+                    println!(
+                        "   ✓ Fuzz '{}': {} ok, {} precondition rejects, {} other errors",
+                        name, ok, pre_fail, other_err
+                    );
                 }
-
-                println!("   ✓ Function '{}' survived boundary fuzzing matrix clean!", name);
             }
         }
         Ok(())
@@ -334,11 +400,23 @@ impl Interpreter {
             (BinOp::Add, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a + b)),
             (BinOp::Sub, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a - b)),
             (BinOp::Mul, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a * b)),
-            (BinOp::Div, Value::Int(a), Value::Int(b)) => Ok(Value::Int(a / b)),
+            (BinOp::Div, Value::Int(a), Value::Int(b)) => {
+                if b == 0 {
+                    Err(anyhow!("Runtime error: integer division by zero"))
+                } else {
+                    Ok(Value::Int(a / b))
+                }
+            }
             (BinOp::Add, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a + b)),
             (BinOp::Sub, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
             (BinOp::Mul, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
-            (BinOp::Div, Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
+            (BinOp::Div, Value::Float(a), Value::Float(b)) => {
+                if b == 0.0 {
+                    Err(anyhow!("Runtime error: floating-point division by zero"))
+                } else {
+                    Ok(Value::Float(a / b))
+                }
+            }
             (BinOp::Add, Value::String(a), Value::String(b)) => Ok(Value::String(a + &b)),
             (BinOp::Eq, a, b) => Ok(Value::Bool(a == b)),
             (BinOp::Neq, a, b) => Ok(Value::Bool(a != b)),

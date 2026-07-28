@@ -6,6 +6,7 @@ mod diagnostics;
 mod fmt;
 mod outline;
 mod capabilities;
+mod typecheck;
 mod codegen;
 mod patch;
 mod reflect;
@@ -26,12 +27,13 @@ use parser::Parser;
 use eval::Interpreter;
 use diagnostics::AiDiagnostic;
 use capabilities::CapabilityChecker;
+use typecheck::TypeChecker;
 use codegen::LlvmCodeGen;
 
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.8.0-alpha")]
+#[command(version = "0.9.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -200,6 +202,18 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
 
+            // Static type checker
+            if let Err(e) = TypeChecker::check_program(&program) {
+                if json_errors {
+                    AiDiagnostic::new("TypeError", &file, 1, 1, format!("{}", e), "Static type mismatch detected before execution.")
+                        .with_fix("Fix types", "Ensure operands and annotations agree (Int/Float/String/Bool/caps).")
+                        .print_json();
+                } else {
+                    eprintln!("Type Error: {}", e);
+                }
+                std::process::exit(1);
+            }
+
             let mut interpreter = Interpreter::new(program);
             if let Err(e) = interpreter.execute_all() {
                 if json_errors {
@@ -223,6 +237,7 @@ fn main() -> Result<()> {
             let program = parser.parse_program()?;
 
             CapabilityChecker::check_program(&program)?;
+            TypeChecker::check_program(&program)?;
 
             let llvm_ir = LlvmCodeGen::emit_llvm_ir(&program);
 
@@ -250,6 +265,7 @@ fn main() -> Result<()> {
             let program = parser.parse_program()?;
 
             CapabilityChecker::check_program(&program)?;
+            TypeChecker::check_program(&program)?;
 
             let mut interpreter = Interpreter::new(program);
             println!("🧪 [openOODA Test Runner] Running contract verify blocks for {} (fuzz={})", file.display(), fuzz);
