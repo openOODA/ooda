@@ -28,6 +28,7 @@ impl LlvmCodeGen {
             }
         }
 
+        ir.push_str("attributes #0 = { nounwind }\n");
         ir
     }
 
@@ -103,7 +104,7 @@ impl LlvmCodeGen {
             f_ir.push_str("  ret i32 0\n");
         } else if ret_type == "void" {
             f_ir.push_str("  ret void\n");
-        } else if !f_ir.ends_with("ret\n") && !f_ir.contains("ret i64") {
+        } else if !f_ir.ends_with("ret void\n") && !f_ir.contains("ret i64") && !f_ir.contains("ret i32") {
             f_ir.push_str(&format!("  ret {} 0\n", ret_type));
         }
 

@@ -18,7 +18,6 @@ entry:
   %r2 = add i64 0, %r1
   %r3 = add i64 %r2, 0
   ret i32 %r3
-  ret i32 0
 }
 
 define i32 @main() #0 {
@@ -31,3 +30,4 @@ entry:
   ret i32 0
 }
 
+attributes #0 = { nounwind }

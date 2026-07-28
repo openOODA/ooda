@@ -1,6 +1,10 @@
 use crate::ast::*;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
+use sha2::{Sha256, Digest};
+use hmac::{Hmac, Mac};
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -162,19 +166,29 @@ impl Interpreter {
             }
         } else if name == "json_parse_internal" {
             let raw = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-            return Ok(Value::Ok(Box::new(Value::String(raw))));
+            if serde_json::from_str::<serde_json::Value>(&raw).is_ok() {
+                return Ok(Value::Ok(Box::new(Value::String(raw))));
+            } else {
+                return Ok(Value::Err(Box::new(Value::String("Invalid JSON syntax".to_string()))));
+            }
         } else if name == "json_stringify_internal" {
             let obj = args.get(0).map(|v| v.to_string()).unwrap_or_default();
             return Ok(Value::String(obj));
         } else if name == "crypto_sha256_internal" {
             let data = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-            let hash = format!("{:064x}", data.len() * 123456789);
-            return Ok(Value::String(hash));
+            let mut hasher = Sha256::new();
+            hasher.update(data.as_bytes());
+            let result = hasher.finalize();
+            let hex_hash = format!("{:x}", result);
+            return Ok(Value::String(hex_hash));
         } else if name == "crypto_hmac_sha256_internal" {
             let key = args.get(0).map(|v| v.to_string()).unwrap_or_default();
             let msg = args.get(1).map(|v| v.to_string()).unwrap_or_default();
-            let hash = format!("{:064x}", (key.len() + msg.len()) * 987654321);
-            return Ok(Value::String(hash));
+            let mut mac = HmacSha256::new_from_slice(key.as_bytes()).map_err(|e| anyhow!("{}", e))?;
+            mac.update(msg.as_bytes());
+            let result = mac.finalize();
+            let hex_hash = format!("{:x}", result.into_bytes());
+            return Ok(Value::String(hex_hash));
         } else if name == "async_spawn_internal" {
             let task_name = args.get(0).map(|v| v.to_string()).unwrap_or_default();
             let handle = format!("task_handle_{}", task_name);
