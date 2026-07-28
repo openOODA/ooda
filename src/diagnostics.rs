@@ -11,8 +11,16 @@ pub struct AiDiagnostic {
     pub explanation: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_fix: Option<SuggestedFix>,
+    /// Optional real timing telemetry (microseconds). Never inject hardcoded "savings".
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub em_savings: Option<crate::em::EmSavings>,
+    pub timings_us: Option<DiagnosticTimings>,
+}
+
+/// Measured compile-path timings for this diagnostic emission, when available.
+#[derive(Debug, Serialize, Clone, Copy)]
+pub struct DiagnosticTimings {
+    pub parse_us: u128,
+    pub check_us: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -30,7 +38,6 @@ impl AiDiagnostic {
         message: impl Into<String>,
         explanation: impl Into<String>,
     ) -> Self {
-        let em = crate::em::EmSavings::calculate(400, 300, 1024, None);
         Self {
             error_type: error_type.into(),
             file: file.display().to_string(),
@@ -39,7 +46,7 @@ impl AiDiagnostic {
             message: message.into(),
             explanation: explanation.into(),
             suggested_fix: None,
-            em_savings: Some(em),
+            timings_us: None,
         }
     }
 
@@ -51,9 +58,40 @@ impl AiDiagnostic {
         self
     }
 
+    pub fn with_timings(mut self, parse_us: u128, check_us: u128) -> Self {
+        self.timings_us = Some(DiagnosticTimings { parse_us, check_us });
+        self
+    }
+
     pub fn print_json(&self) {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             eprintln!("{}", json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn diagnostic_json_has_no_fake_em_savings() {
+        let d = AiDiagnostic::new(
+            "TypeError",
+            &PathBuf::from("t.oo"),
+            1,
+            1,
+            "msg",
+            "why",
+        )
+        .with_fix("fix", "diff body");
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(
+            !json.contains("em_savings") && !json.contains("82.4"),
+            "must not emit hardcoded E-M theater: {}",
+            json
+        );
+        assert!(json.contains("suggested_fix"));
     }
 }

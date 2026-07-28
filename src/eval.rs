@@ -282,6 +282,7 @@ impl Interpreter {
                     let mut pre_fail = 0u32;
                     let mut ok = 0u32;
                     let mut other_err = 0u32;
+                    let mut other_msgs: Vec<String> = Vec::new();
                     for args in combos {
                         let mut env = HashMap::new();
                         match self.call_function(&func.name, args, &mut env) {
@@ -292,13 +293,28 @@ impl Interpreter {
                                     pre_fail += 1;
                                 } else {
                                     other_err += 1;
+                                    if other_msgs.len() < 3 {
+                                        other_msgs.push(msg);
+                                    }
                                 }
                             }
                         }
                     }
+                    // Fail closed: unexpected errors (postconditions, panics, type traps)
+                    // must not soft-pass as a green fuzz report.
+                    if other_err > 0 {
+                        return Err(anyhow!(
+                            "Fuzz '{}': {} unexpected error(s) (ok={}, precondition_rejects={}). Sample: {}",
+                            name,
+                            other_err,
+                            ok,
+                            pre_fail,
+                            other_msgs.join(" | ")
+                        ));
+                    }
                     println!(
-                        "   ✓ Fuzz '{}': {} ok, {} precondition rejects, {} other errors",
-                        name, ok, pre_fail, other_err
+                        "   ✓ Fuzz '{}': {} ok, {} precondition rejects, 0 unexpected errors",
+                        name, ok, pre_fail
                     );
                 }
             }
@@ -1690,6 +1706,37 @@ mod tests {
         );
         let mut interp = Interpreter::new(prog).with_argv(vec!["a".into(), "b".into()]);
         assert!(interp.execute_all().is_ok());
+    }
+
+    #[test]
+    fn fuzz_fails_closed_on_unexpected_errors() {
+        // Division by zero / postcondition trap must not soft-pass as green fuzz.
+        let prog = parse(
+            r#"
+            pub fn bad(x: Int) -> Int
+                requires x >= 0
+                ensures result >= 0
+            {
+                return x - 100;
+            }
+            pub fn main() {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let res = interp.fuzz_all();
+        // Fuzz may ok if all combos either pass or pre-fail; with ensures result >= 0
+        // and body x-100, x=0 yields -100 and postcondition fails → other_err.
+        assert!(
+            res.is_err(),
+            "fuzz must fail closed when postconditions break: {:?}",
+            res
+        );
+        let msg = format!("{}", res.unwrap_err());
+        assert!(
+            msg.contains("unexpected error") || msg.contains("Fuzz"),
+            "got: {}",
+            msg
+        );
     }
 
     #[test]

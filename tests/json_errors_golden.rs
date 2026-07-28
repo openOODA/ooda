@@ -1,5 +1,6 @@
 //! Golden: `ooda check --json-errors` emits a parseable AI diagnostic
 //! with error_type, line, message, and suggested_fix for a known cap trap.
+//! Must not inject fake em_savings telemetry.
 
 #[test]
 fn json_errors_golden_capability_violation() {
@@ -47,9 +48,10 @@ fn json_errors_golden_capability_violation() {
             .is_empty(),
         "suggested_fix.diff must be non-empty"
     );
+    // Honesty: no hardcoded E-M "energy savings" theater on diagnostics.
     assert!(
-        v["em_savings"].is_object(),
-        "em_savings required for AI E-M telemetry: {}",
+        v.get("em_savings").is_none(),
+        "em_savings must not be injected as fake telemetry: {}",
         stderr
     );
 }
