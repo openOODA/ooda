@@ -33,7 +33,7 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.9.0-alpha")]
+#[command(version = "0.10.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -239,19 +239,31 @@ fn main() -> Result<()> {
             CapabilityChecker::check_program(&program)?;
             TypeChecker::check_program(&program)?;
 
-            let llvm_ir = LlvmCodeGen::emit_llvm_ir(&program);
-
             if target.to_lowercase() == "wasm" {
-                let out_wasm = file.with_extension("wasm");
-                fs::write(&out_wasm, format!(";; openOODA WebAssembly Bytecode Target v0.2.3-alpha\n;; Module: {}\n(module\n  (type $t0 (func (param i32) (result i32)))\n  (export \"main\" (func 0))\n)\n", file.display()))?;
-                println!("🌐 [openOODA WASM Target Engine] Compiled {} -> {} (target=wasm32-wasi)", file.display(), out_wasm.display());
-            } else {
-                let out_ll = file.with_extension("ll");
-                fs::write(&out_ll, &llvm_ir)?;
-                println!("🔨 [openOODA LLVM Compiler] Compiled {} -> {} (release={})", file.display(), out_ll.display(), release);
-                if emit_llvm {
-                    println!("\n--- Generated LLVM IR ---\n{}", llvm_ir);
-                }
+                anyhow::bail!(
+                    "WASM target is not implemented in this alpha (no bytecode emission). \
+                     Use `ooda build` for the integer-subset LLVM IR backend, or `ooda run` for the interpreter."
+                );
+            }
+
+            let llvm_ir = LlvmCodeGen::emit_llvm_ir(&program).with_context(|| {
+                format!(
+                    "LLVM integer-subset codegen failed for '{}'. \
+                     Supported: Int/Bool straight-line functions, println(Int), main. \
+                     Use `ooda run` for String programs and full language surface.",
+                    file.display()
+                )
+            })?;
+
+            let out_ll = file.with_extension("ll");
+            fs::write(&out_ll, &llvm_ir)?;
+            println!(
+                "🔨 [openOODA LLVM] Integer-subset IR validated → {} (release={})",
+                out_ll.display(),
+                release
+            );
+            if emit_llvm {
+                println!("\n--- Generated LLVM IR ---\n{}", llvm_ir);
             }
         }
         Commands::Test { file, fuzz } => {

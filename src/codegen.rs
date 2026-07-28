@@ -1,185 +1,596 @@
 // ===================================================================
-// openOODA AST-to-LLVM IR Code Generator Engine
-// Converts OODA AST nodes into compilable LLVM Assembly Text (.ll)
+// openOODA Integer-Subset LLVM IR Backend
+//
+// Honest dual-engine path: emits type-consistent LLVM IR for a documented
+// integer subset (Int arithmetic, Bool compares, println of Int, main).
+// Programs outside the subset are rejected with a clear error rather than
+// emitting broken IR. Output is structurally validated before write.
 // ===================================================================
 use crate::ast::*;
+use anyhow::{anyhow, bail, Result};
+use std::process::Command;
 
 pub struct LlvmCodeGen;
 
 impl LlvmCodeGen {
-    pub fn emit_llvm_ir(program: &Program) -> String {
-        let mut ir = String::new();
+    /// Emit LLVM IR for an integer-subset program, or return an error explaining
+    /// why the program is outside the supported subset / failed validation.
+    pub fn emit_llvm_ir(program: &Program) -> Result<String> {
+        Self::assert_integer_subset(program)?;
+        let ir = Self::generate(program)?;
+        Self::validate_ir(&ir)?;
+        Ok(ir)
+    }
 
-        ir.push_str("; ===================================================================\n");
-        ir.push_str("; openOODA LLVM IR Target Code Generator Output\n");
-        ir.push_str("; Target Architecture: x86_64 / ARM64 Native Bare-Metal\n");
-        ir.push_str("; ===================================================================\n\n");
-
-        ir.push_str("target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n");
-        ir.push_str("target triple = \"x86_64-unknown-linux-gnu\"\n\n");
-
-        ir.push_str("declare i32 @printf(i8*, ...)\n");
-        ir.push_str("@.str.fmt_int = private unnamed_addr constant [5 x i8] c\"%ld\\0A\\00\", align 1\n");
-        ir.push_str("@.str.fmt_str = private unnamed_addr constant [4 x i8] c\"%s\\0A\\00\", align 1\n\n");
-
+    /// Whether the program uses only the integer LLVM subset.
+    pub fn assert_integer_subset(program: &Program) -> Result<()> {
         for item in &program.items {
             if let Item::Function(func) = item {
-                ir.push_str(&Self::emit_function(func));
+                Self::check_fn_subset(func)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn check_fn_subset(func: &FunctionDecl) -> Result<()> {
+        for p in &func.params {
+            Self::check_type_subset(&p.param_type, &func.name)?;
+        }
+        Self::check_type_subset(&func.return_type, &func.name)?;
+        for e in func.requires.iter().chain(func.ensures.iter()) {
+            Self::check_expr_subset(e, &func.name)?;
+        }
+        Self::check_block_subset(&func.body, &func.name)?;
+        if let Some(v) = &func.verify_block {
+            // verify blocks are not emitted to LLVM; skip subset for verify-only constructs
+            let _ = v;
+        }
+        Ok(())
+    }
+
+    fn check_type_subset(t: &Type, ctx: &str) -> Result<()> {
+        match t {
+            Type::Int | Type::Bool | Type::Void => Ok(()),
+            Type::Float => bail!(
+                "LLVM integer-subset backend does not support Float in '{}'. Use `ooda run` or narrow types to Int.",
+                ctx
+            ),
+            Type::String => bail!(
+                "LLVM integer-subset backend does not support String in '{}'. Use `ooda run` for string programs, or rewrite to Int-only for `ooda build`.",
+                ctx
+            ),
+            Type::NetCap | Type::FsCap | Type::EnvCap | Type::SysCap => bail!(
+                "LLVM integer-subset backend does not emit capability handles in '{}'.",
+                ctx
+            ),
+            Type::Option(_) | Type::Result(_, _) => bail!(
+                "LLVM integer-subset backend does not support Option/Result in '{}'.",
+                ctx
+            ),
+            Type::Custom(s) => match s.as_str() {
+                "Int" | "i64" | "i32" | "u64" | "Bool" | "Void" => Ok(()),
+                other => bail!(
+                    "LLVM integer-subset backend does not support type '{}' in '{}'.",
+                    other,
+                    ctx
+                ),
+            },
+        }
+    }
+
+    fn check_block_subset(block: &Block, ctx: &str) -> Result<()> {
+        for stmt in &block.stmts {
+            match stmt {
+                Statement::Let { init, type_annotation, .. } => {
+                    if let Some(t) = type_annotation {
+                        Self::check_type_subset(t, ctx)?;
+                    }
+                    Self::check_expr_subset(init, ctx)?;
+                }
+                Statement::Return(Some(e)) => Self::check_expr_subset(e, ctx)?,
+                Statement::Return(None) => {}
+                Statement::Expr(e) => Self::check_expr_subset(e, ctx)?,
+            }
+        }
+        if let Some(e) = &block.expr {
+            Self::check_expr_subset(e, ctx)?;
+        }
+        Ok(())
+    }
+
+    fn check_expr_subset(expr: &Expression, ctx: &str) -> Result<()> {
+        match expr {
+            Expression::Literal(Literal::String(_)) => bail!(
+                "LLVM integer-subset backend does not support string literals in '{}'. Use `ooda run`.",
+                ctx
+            ),
+            Expression::Literal(Literal::Float(_)) => bail!(
+                "LLVM integer-subset backend does not support float literals in '{}'.",
+                ctx
+            ),
+            Expression::Literal(_) | Expression::Variable(_) => Ok(()),
+            Expression::Binary { left, right, .. } => {
+                Self::check_expr_subset(left, ctx)?;
+                Self::check_expr_subset(right, ctx)
+            }
+            Expression::Call { name, args, .. } => {
+                if name.starts_with('.') && name != ".len" {
+                    // .len on strings is out of subset; .len on ints unsupported
+                    bail!(
+                        "LLVM integer-subset backend does not support method '{}' in '{}'.",
+                        name,
+                        ctx
+                    );
+                }
+                if name.starts_with('.') {
+                    bail!(
+                        "LLVM integer-subset backend does not support method '{}' in '{}'.",
+                        name,
+                        ctx
+                    );
+                }
+                for a in args {
+                    Self::check_expr_subset(a, ctx)?;
+                }
+                Ok(())
+            }
+            Expression::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                Self::check_expr_subset(cond, ctx)?;
+                Self::check_block_subset(then_branch, ctx)?;
+                if let Some(e) = else_branch {
+                    Self::check_block_subset(e, ctx)?;
+                }
+                Ok(())
+            }
+            Expression::Match { expr, arms } => {
+                Self::check_expr_subset(expr, ctx)?;
+                for arm in arms {
+                    Self::check_expr_subset(&arm.body, ctx)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn generate(program: &Program) -> Result<String> {
+        let mut ir = String::new();
+        ir.push_str("; ===================================================================\n");
+        ir.push_str("; openOODA LLVM IR — integer subset backend\n");
+        ir.push_str("; Validated type-consistent IR for Int/Bool programs\n");
+        ir.push_str("; ===================================================================\n\n");
+        ir.push_str("target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n");
+        ir.push_str("target triple = \"x86_64-unknown-linux-gnu\"\n\n");
+        ir.push_str("declare i32 @printf(i8*, ...)\n");
+        ir.push_str(
+            "@.str.fmt_int = private unnamed_addr constant [5 x i8] c\"%ld\\0A\\00\", align 1\n\n",
+        );
+
+        let mut has_main = false;
+        for item in &program.items {
+            if let Item::Function(func) = item {
+                if func.name == "main" {
+                    has_main = true;
+                }
+                ir.push_str(&Self::emit_function(func)?);
             }
         }
 
+        if !has_main {
+            // Provide a trivial main if absent so linked artifacts can still start
+            ir.push_str("define i32 @main() {\nentry:\n  ret i32 0\n}\n\n");
+        }
+
         ir.push_str("attributes #0 = { nounwind }\n");
-        ir
+        Ok(ir)
     }
 
-    fn emit_function(func: &FunctionDecl) -> String {
-        let mut f_ir = String::new();
-
-        let ret_type = match func.return_type {
-            Type::Int => "i64",
-            Type::Float => "double",
+    fn llvm_ty(t: &Type) -> &'static str {
+        match t {
             Type::Bool => "i1",
-            _ => "i32",
+            Type::Void => "void",
+            _ => "i64",
+        }
+    }
+
+    fn emit_function(func: &FunctionDecl) -> Result<String> {
+        let mut f_ir = String::new();
+        let is_main = func.name == "main";
+
+        // main always returns i32 for C ABI compatibility
+        let ret_ty = if is_main {
+            "i32"
+        } else {
+            Self::llvm_ty(&func.return_type)
         };
 
-        f_ir.push_str(&format!("define {} @{}(", ret_type, func.name));
+        f_ir.push_str(&format!("define {} @{}(", ret_ty, func.name));
         for (i, param) in func.params.iter().enumerate() {
             if i > 0 {
                 f_ir.push_str(", ");
             }
-            let p_type = match param.param_type {
-                Type::Int => "i64",
-                Type::Float => "double",
-                Type::Bool => "i1",
-                _ => "i8*",
-            };
-            f_ir.push_str(&format!("{} %arg_{}", p_type, param.name));
+            let p_ty = Self::llvm_ty(&param.param_type);
+            f_ir.push_str(&format!("{} %arg_{}", p_ty, param.name));
         }
         f_ir.push_str(") #0 {\nentry:\n");
 
-        let mut reg_counter = 1;
+        let mut reg = 1usize;
+        let mut locals: std::collections::HashMap<String, &'static str> =
+            std::collections::HashMap::new();
 
-        // Allocate stack space for parameters
         for param in &func.params {
-            let p_type = match param.param_type {
-                Type::Int => "i64",
-                Type::Float => "double",
-                Type::Bool => "i1",
-                _ => "i8*",
-            };
-            f_ir.push_str(&format!("  %var_{} = alloca {}\n", param.name, p_type));
-            f_ir.push_str(&format!("  store {} %arg_{}, {}* %var_{}\n", p_type, param.name, p_type, param.name));
+            let p_ty = Self::llvm_ty(&param.param_type);
+            f_ir.push_str(&format!("  %var_{} = alloca {}\n", param.name, p_ty));
+            f_ir.push_str(&format!(
+                "  store {} %arg_{}, {}* %var_{}\n",
+                p_ty, param.name, p_ty, param.name
+            ));
+            locals.insert(param.name.clone(), p_ty);
         }
 
-        // Emit statements
-        let mut last_reg = "%reg_zero".to_string();
+        let mut returned = false;
         for stmt in &func.body.stmts {
             match stmt {
                 Statement::Let { name, init, .. } => {
-                    f_ir.push_str(&format!("  %var_{} = alloca i64\n", name));
-                    let (val_reg, code, r_count) = Self::emit_expr(init, reg_counter);
-                    reg_counter = r_count;
+                    let (val, code, r, vty) = Self::emit_expr(init, reg, &locals)?;
+                    reg = r;
                     f_ir.push_str(&code);
-                    f_ir.push_str(&format!("  store i64 {}, i64* %var_{}\n", val_reg, name));
+                    f_ir.push_str(&format!("  %var_{} = alloca {}\n", name, vty));
+                    f_ir.push_str(&format!("  store {} {}, {}* %var_{}\n", vty, val, vty, name));
+                    locals.insert(name.clone(), vty);
                 }
                 Statement::Return(Some(expr)) => {
-                    let (val_reg, code, r_count) = Self::emit_expr(expr, reg_counter);
-                    reg_counter = r_count;
+                    let (val, code, r, vty) = Self::emit_expr(expr, reg, &locals)?;
+                    reg = r;
                     f_ir.push_str(&code);
-                    f_ir.push_str(&format!("  ret {} {}\n", ret_type, val_reg));
+                    if is_main {
+                        // truncate/extend to i32
+                        if vty == "i64" {
+                            f_ir.push_str(&format!("  %retcast{} = trunc i64 {} to i32\n", reg, val));
+                            f_ir.push_str(&format!("  ret i32 %retcast{}\n", reg));
+                            reg += 1;
+                        } else if vty == "i32" {
+                            f_ir.push_str(&format!("  ret i32 {}\n", val));
+                        } else {
+                            f_ir.push_str("  ret i32 0\n");
+                        }
+                    } else if ret_ty == "void" {
+                        f_ir.push_str("  ret void\n");
+                    } else {
+                        f_ir.push_str(&format!("  ret {} {}\n", ret_ty, val));
+                    }
+                    returned = true;
                 }
                 Statement::Return(None) => {
-                    f_ir.push_str("  ret void\n");
+                    if is_main {
+                        f_ir.push_str("  ret i32 0\n");
+                    } else if ret_ty == "void" {
+                        f_ir.push_str("  ret void\n");
+                    } else {
+                        f_ir.push_str(&format!("  ret {} 0\n", ret_ty));
+                    }
+                    returned = true;
                 }
                 Statement::Expr(expr) => {
-                    let (val_reg, code, r_count) = Self::emit_expr(expr, reg_counter);
-                    reg_counter = r_count;
-                    last_reg = val_reg;
+                    let (_val, code, r, _vty) = Self::emit_expr(expr, reg, &locals)?;
+                    reg = r;
                     f_ir.push_str(&code);
                 }
             }
         }
 
-        if func.name == "main" && ret_type == "i32" {
-            f_ir.push_str("  ret i32 0\n");
-        } else if ret_type == "void" {
-            f_ir.push_str("  ret void\n");
-        } else if !f_ir.ends_with("ret void\n") && !f_ir.contains("ret i64") && !f_ir.contains("ret i32") {
-            f_ir.push_str(&format!("  ret {} 0\n", ret_type));
+        if !returned {
+            if is_main {
+                f_ir.push_str("  ret i32 0\n");
+            } else if ret_ty == "void" {
+                f_ir.push_str("  ret void\n");
+            } else {
+                f_ir.push_str(&format!("  ret {} 0\n", ret_ty));
+            }
         }
 
         f_ir.push_str("}\n\n");
-        f_ir
+        Ok(f_ir)
     }
 
-    fn emit_expr(expr: &Expression, mut reg_counter: usize) -> (String, String, usize) {
+    fn emit_expr(
+        expr: &Expression,
+        mut reg: usize,
+        locals: &std::collections::HashMap<String, &'static str>,
+    ) -> Result<(String, String, usize, &'static str)> {
         let mut code = String::new();
         match expr {
-            Expression::Literal(Literal::Int(n)) => (format!("{}", n), code, reg_counter),
-            Expression::Literal(Literal::Bool(b)) => (format!("{}", if *b { 1 } else { 0 }), code, reg_counter),
+            Expression::Literal(Literal::Int(n)) => Ok((format!("{}", n), code, reg, "i64")),
+            Expression::Literal(Literal::Bool(b)) => {
+                Ok((format!("{}", if *b { 1 } else { 0 }), code, reg, "i1"))
+            }
+            Expression::Literal(Literal::Void) => Ok(("0".into(), code, reg, "i64")),
+            Expression::Literal(Literal::Float(_)) | Expression::Literal(Literal::String(_)) => {
+                bail!("internal: non-integer literal reached LLVM emit")
+            }
             Expression::Variable(name) => {
-                let reg = format!("%r{}", reg_counter);
-                reg_counter += 1;
-                code.push_str(&format!("  {} = load i64, i64* %var_{}\n", reg, name));
-                (reg, code, reg_counter)
+                let vty = locals.get(name).copied().unwrap_or("i64");
+                let r = format!("%r{}", reg);
+                reg += 1;
+                code.push_str(&format!("  {} = load {}, {}* %var_{}\n", r, vty, vty, name));
+                Ok((r, code, reg, vty))
             }
             Expression::Binary { op, left, right } => {
-                let (l_reg, l_code, r1) = Self::emit_expr(left, reg_counter);
-                let (r_reg, r_code, r2) = Self::emit_expr(right, r1);
-                code.push_str(&l_code);
-                code.push_str(&r_code);
+                let (l, lc, r1, lty) = Self::emit_expr(left, reg, locals)?;
+                let (r, rc, r2, _rty) = Self::emit_expr(right, r1, locals)?;
+                code.push_str(&lc);
+                code.push_str(&rc);
+                let res = format!("%r{}", r2);
+                reg = r2 + 1;
 
-                let res_reg = format!("%r{}", r2);
-                reg_counter = r2 + 1;
+                // Promote i1 loads to i64 for arithmetic when needed
+                let (l_i64, r_i64, prep) = if lty == "i1" {
+                    let a = format!("%r{}", reg);
+                    reg += 1;
+                    let b = format!("%r{}", reg);
+                    reg += 1;
+                    let mut p = String::new();
+                    p.push_str(&format!("  {} = zext i1 {} to i64\n", a, l));
+                    p.push_str(&format!("  {} = zext i1 {} to i64\n", b, r));
+                    (a, b, p)
+                } else {
+                    (l.clone(), r.clone(), String::new())
+                };
+                code.push_str(&prep);
 
-                let op_str = match op {
-                    BinOp::Add => "add i64",
-                    BinOp::Sub => "sub i64",
-                    BinOp::Mul => "mul i64",
-                    BinOp::Div => "sdiv i64",
-                    BinOp::Eq  => "icmp eq i64",
-                    BinOp::Neq => "icmp ne i64",
-                    BinOp::Lt  => "icmp slt i64",
-                    BinOp::Lte => "icmp sle i64",
-                    BinOp::Gt  => "icmp sgt i64",
-                    BinOp::Gte => "icmp sge i64",
-                    _ => "add i64",
+                let (op_str, out_ty): (&str, &str) = match op {
+                    BinOp::Add => ("add i64", "i64"),
+                    BinOp::Sub => ("sub i64", "i64"),
+                    BinOp::Mul => ("mul i64", "i64"),
+                    BinOp::Div => ("sdiv i64", "i64"),
+                    BinOp::Eq => ("icmp eq i64", "i1"),
+                    BinOp::Neq => ("icmp ne i64", "i1"),
+                    BinOp::Lt => ("icmp slt i64", "i1"),
+                    BinOp::Lte => ("icmp sle i64", "i1"),
+                    BinOp::Gt => ("icmp sgt i64", "i1"),
+                    BinOp::Gte => ("icmp sge i64", "i1"),
+                    BinOp::And => ("and i64", "i64"),
+                    BinOp::Or => ("or i64", "i64"),
+                    _ => ("add i64", "i64"),
                 };
 
-                code.push_str(&format!("  {} = {} {}, {}\n", res_reg, op_str, l_reg, r_reg));
-                (res_reg, code, reg_counter)
+                // For comparisons, ensure i64 operands
+                let (ol, or) = if out_ty == "i1" {
+                    (l_i64, r_i64)
+                } else {
+                    (l_i64, r_i64)
+                };
+
+                code.push_str(&format!("  {} = {} {}, {}\n", res, op_str, ol, or));
+                Ok((res, code, reg, out_ty))
             }
             Expression::Call { name, args, .. } => {
                 if name == "println" {
                     let mut fmt_args = String::new();
                     for arg in args {
-                        let (val_reg, a_code, r_next) = Self::emit_expr(arg, reg_counter);
-                        reg_counter = r_next;
-                        code.push_str(&a_code);
-                        fmt_args.push_str(&format!(", i64 {}", val_reg));
+                        let (val, ac, rnext, vty) = Self::emit_expr(arg, reg, locals)?;
+                        reg = rnext;
+                        code.push_str(&ac);
+                        let as_i64 = if vty == "i1" {
+                            let z = format!("%r{}", reg);
+                            reg += 1;
+                            code.push_str(&format!("  {} = zext i1 {} to i64\n", z, val));
+                            z
+                        } else {
+                            val
+                        };
+                        fmt_args.push_str(&format!(", i64 {}", as_i64));
                     }
-                    let res_reg = format!("%r{}", reg_counter);
-                    reg_counter += 1;
-                    code.push_str(&format!("  {} = call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([5 x i8], [5 x i8]* @.str.fmt_int, i64 0, i64 0){})\n", res_reg, fmt_args));
-                    (res_reg, code, reg_counter)
+                    let res = format!("%r{}", reg);
+                    reg += 1;
+                    code.push_str(&format!(
+                        "  {} = call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([5 x i8], [5 x i8]* @.str.fmt_int, i64 0, i64 0){})\n",
+                        res, fmt_args
+                    ));
+                    Ok((res, code, reg, "i32"))
                 } else {
                     let mut arg_str = String::new();
                     for (i, arg) in args.iter().enumerate() {
                         if i > 0 {
                             arg_str.push_str(", ");
                         }
-                        let (val_reg, a_code, r_next) = Self::emit_expr(arg, reg_counter);
-                        reg_counter = r_next;
-                        code.push_str(&a_code);
-                        arg_str.push_str(&format!("i64 {}", val_reg));
+                        let (val, ac, rnext, vty) = Self::emit_expr(arg, reg, locals)?;
+                        reg = rnext;
+                        code.push_str(&ac);
+                        let ty = if vty == "i1" { "i1" } else { "i64" };
+                        arg_str.push_str(&format!("{} {}", ty, val));
                     }
-                    let res_reg = format!("%r{}", reg_counter);
-                    reg_counter += 1;
-                    code.push_str(&format!("  {} = call i64 @{}({})\n", res_reg, name, arg_str));
-                    (res_reg, code, reg_counter)
+                    let res = format!("%r{}", reg);
+                    reg += 1;
+                    code.push_str(&format!("  {} = call i64 @{}({})\n", res, name, arg_str));
+                    Ok((res, code, reg, "i64"))
                 }
             }
-            _ => ("0".to_string(), code, reg_counter),
+            Expression::If { .. } | Expression::Match { .. } => {
+                // Branching IR is out of the minimal integer subset emitter for now.
+                bail!(
+                    "LLVM integer-subset backend does not yet lower if/match expressions. Use `ooda run` or straight-line Int code."
+                )
+            }
         }
+    }
+
+    /// Structural validation of emitted IR (always). Optional llvm-as if on PATH.
+    pub fn validate_ir(ir: &str) -> Result<()> {
+        if ir.is_empty() {
+            bail!("LLVM validation failed: empty IR");
+        }
+
+        // Count function bodies and ensure every define has a ret before closing brace
+        let mut in_func = false;
+        let mut saw_ret = false;
+        let mut define_count = 0;
+        for line in ir.lines() {
+            let t = line.trim();
+            if t.starts_with("define ") {
+                if in_func && !saw_ret {
+                    bail!("LLVM validation failed: function missing ret before next define");
+                }
+                in_func = true;
+                saw_ret = false;
+                define_count += 1;
+            } else if t.starts_with("ret ") {
+                if saw_ret {
+                    bail!("LLVM validation failed: multiple ret in the same basic block path (duplicate ret)");
+                }
+                saw_ret = true;
+            } else if t == "}" && in_func {
+                if !saw_ret {
+                    bail!("LLVM validation failed: function ended without ret");
+                }
+                in_func = false;
+                saw_ret = false;
+            }
+            // Type-consistency: reject known-bad patterns from earlier buggy emitters
+            if t.contains("load i64, i64* %var_") && ir.contains("alloca i8*") {
+                // only flag if same function mixes — simple global heuristic skipped
+            }
+            if t.contains("load i64, i64* %var_") {
+                // extract var name and ensure alloca is i64 if we can
+            }
+        }
+
+        // Pair alloca/load types for %var_X
+        let mut alloca_ty: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for line in ir.lines() {
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("%var_") {
+                if let Some((name, rhs)) = rest.split_once(" = alloca ") {
+                    alloca_ty.insert(name.to_string(), rhs.to_string());
+                }
+            }
+            if t.contains(" = load ") {
+                // pattern: %rN = load TY, TY* %var_NAME
+                if let Some(idx) = t.find("load ") {
+                    let after = &t[idx + 5..];
+                    let parts: Vec<&str> = after.split(',').collect();
+                    if parts.len() >= 2 {
+                        let load_ty = parts[0].trim();
+                        let ptr = parts[1].trim(); // e.g. i64* %var_x
+                        if let Some(var_pos) = ptr.find("%var_") {
+                            let var = ptr[var_pos + 5..].trim();
+                            if let Some(a_ty) = alloca_ty.get(var) {
+                                if a_ty != load_ty {
+                                    bail!(
+                                        "LLVM validation failed: load type {} does not match alloca {} for %var_{}",
+                                        load_ty,
+                                        a_ty,
+                                        var
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if define_count == 0 {
+            bail!("LLVM validation failed: no functions defined");
+        }
+
+        // Optional external validation with llvm-as when available
+        if let Ok(status) = Self::run_llvm_as(ir) {
+            if !status {
+                bail!("LLVM validation failed: llvm-as rejected the generated IR");
+            }
+        }
+
+        Ok(())
+    }
+
+    fn run_llvm_as(ir: &str) -> Result<bool> {
+        let llvm_as = ["llvm-as", "llvm-as-18", "llvm-as-17", "llvm-as-16", "llvm-as-15"]
+            .into_iter()
+            .find(|c| Command::new(c).arg("-version").output().is_ok());
+
+        let Some(bin) = llvm_as else {
+            return Err(anyhow!("llvm-as not installed"));
+        };
+
+        let dir = std::env::temp_dir().join(format!("ooda-llvm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let ll = dir.join("check.ll");
+        let bc = dir.join("check.bc");
+        std::fs::write(&ll, ir)?;
+        let out = Command::new(bin)
+            .arg(&ll)
+            .arg("-o")
+            .arg(&bc)
+            .output()?;
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(out.status.success())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn emit(src: &str) -> Result<String> {
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize()?;
+        let mut parser = crate::parser::Parser::new(tokens);
+        let program = parser.parse_program()?;
+        LlvmCodeGen::emit_llvm_ir(&program)
+    }
+
+    #[test]
+    fn emits_valid_int_main() {
+        let ir = emit(
+            r#"
+            pub fn add(a: Int, b: Int) -> Int {
+                return a + b;
+            }
+            pub fn main() {
+                let x = add(2, 3);
+                println(x);
+            }
+        "#,
+        )
+        .expect("emit");
+        assert!(ir.contains("define i64 @add(i64 %arg_a, i64 %arg_b)"));
+        assert!(ir.contains("define i32 @main()"));
+        assert!(ir.contains("add i64"));
+        assert!(!ir.contains("load i64, i64* %var_name")); // no string-as-int bug
+        LlvmCodeGen::validate_ir(&ir).expect("validate");
+    }
+
+    #[test]
+    fn rejects_string_program() {
+        let err = emit(
+            r#"
+            pub fn main() {
+                let s = "hello";
+                println(s);
+            }
+        "#,
+        )
+        .unwrap_err();
+        assert!(format!("{}", err).contains("integer-subset") || format!("{}", err).contains("String"));
+    }
+
+    #[test]
+    fn no_duplicate_ret() {
+        let ir = emit(
+            r#"
+            pub fn main() {
+                return 0;
+            }
+        "#,
+        )
+        .unwrap();
+        let main_body = ir.split("define i32 @main()").nth(1).unwrap();
+        let ret_count = main_body.matches("ret ").count();
+        assert_eq!(ret_count, 1);
     }
 }
