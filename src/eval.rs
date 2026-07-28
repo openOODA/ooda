@@ -261,7 +261,16 @@ impl Interpreter {
 
                 if domains.is_empty() {
                     let mut env = HashMap::new();
-                    let _ = self.call_function(&func.name, vec![], &mut env);
+                    if let Err(e) = self.call_function(&func.name, vec![], &mut env) {
+                        let msg = format!("{}", e);
+                        if !msg.contains("Precondition Violation") {
+                            return Err(anyhow!(
+                                "Fuzz '{}': unexpected error on zero-arg call: {}",
+                                name,
+                                msg
+                            ));
+                        }
+                    }
                 } else {
                     // Cartesian product capped for multi-param functions.
                     let mut combos: Vec<Vec<Value>> = vec![vec![]];
