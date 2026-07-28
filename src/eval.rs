@@ -368,6 +368,58 @@ impl Interpreter {
                     key
                 ))))),
             };
+        } else if name == "host_ast_dump" {
+            // Exact stage-0 AST dump for path (CHS oodac parity).
+            let path = match args.get(0) {
+                Some(Value::String(s)) => s.clone(),
+                _ => return Err(anyhow!("host_ast_dump expects String path")),
+            };
+            match crate::host_api::host_ast_dump_path(std::path::Path::new(&path)) {
+                Ok(s) => return Ok(Value::String(s)),
+                Err(e) => {
+                    return Ok(Value::String(crate::dump::format_check_err("ast", &e)))
+                }
+            }
+        } else if name == "host_check" {
+            let path = match args.get(0) {
+                Some(Value::String(s)) => s.clone(),
+                _ => return Err(anyhow!("host_check expects String path")),
+            };
+            return Ok(Value::String(crate::host_api::host_check_path(
+                std::path::Path::new(&path),
+            )));
+        } else if name == "host_token_dump" {
+            let path = match args.get(0) {
+                Some(Value::String(s)) => s.clone(),
+                _ => return Err(anyhow!("host_token_dump expects String path")),
+            };
+            match crate::host_api::host_token_dump_path(std::path::Path::new(&path)) {
+                Ok(s) => return Ok(Value::String(s)),
+                Err(e) => {
+                    return Ok(Value::String(crate::dump::format_check_err("tokens", &e)))
+                }
+            }
+        } else if name == "chs_build" {
+            // Real CHS native build: path_src, path_out_bin
+            let src = match args.get(0) {
+                Some(Value::String(s)) => s.clone(),
+                _ => return Err(anyhow!("chs_build expects src String")),
+            };
+            let out = match args.get(1) {
+                Some(Value::String(s)) => s.clone(),
+                _ => return Err(anyhow!("chs_build expects out_bin String")),
+            };
+            match crate::host_api::host_chs_build(
+                std::path::Path::new(&src),
+                std::path::Path::new(&out),
+            ) {
+                Ok(()) => {
+                    return Ok(Value::Ok(Box::new(Value::String(out))))
+                }
+                Err(e) => {
+                    return Ok(Value::Err(Box::new(Value::String(e))))
+                }
+            }
         } else if name == "list_new" {
             return Ok(Value::List(Vec::new()));
         } else if name == "list_push" || name == ".push" {

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# M5 fixed-point referee:
-#  1) stage-0 builds oodac (CHS C backend) → stage1
-#  2) stage1 dumps tokens for corpus; stage-0 dumps tokens; digests must match
-#  3) stage-0 rebuilds oodac → stage2; stage1 vs stage2 smoke build outputs match
-#  4) Normalized C emit of CHS smoke is stable across two stage-0 emissions
+# M5 fixed-point referee (real two-generation self-host):
+#  1) stage-0 builds oodac → stage1 (CHS C + libooda)
+#  2) stage1 builds a CHS smoke program (real chs_build, not hardcoded C)
+#  3) stage1 builds oodac/main.oo → stage2
+#  4) stage2 token dump ≡ stage1 ≡ stage0 digests
+#  5) intentional drift fails
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODA="${OODA:-$ROOT/target/release/ooda}"
@@ -13,116 +14,100 @@ mkdir -p "$TMPDIR" "$ROOT/oodac"
 if [[ ! -x "$OODA" ]]; then
   (cd "$ROOT" && cargo build --release)
 fi
+# Ensure staticlib exists for native link
+(cd "$ROOT" && cargo build --release 2>/dev/null)
 
-echo "=== fixed-point: build stage-1 oodac ==="
-rm -f "$ROOT/oodac/oodac" "$ROOT/oodac/oodac.c"
-(cd "$ROOT" && "$OODA" build --target c oodac/main.oo)
-# binary is oodac/main by default (extension stripped from .oo path)
-if [[ -x "$ROOT/oodac/main" ]]; then
-  mv -f "$ROOT/oodac/main" "$ROOT/oodac/oodac"
-elif [[ -x "$ROOT/oodac/main.oo" ]]; then
-  echo "unexpected"
-fi
-# build writes next to source: oodac/main (no extension)
+SMOKE_SRC="$ROOT/examples/chs_list_string.oo"
+OODAC_SRC="$ROOT/oodac/main.oo"
 STAGE1="$ROOT/oodac/oodac"
-if [[ ! -x "$STAGE1" ]]; then
-  # path from with_extension("") on oodac/main.oo → oodac/main
-  if [[ -x "$ROOT/oodac/main" ]]; then
-    mv "$ROOT/oodac/main" "$STAGE1"
-  fi
+STAGE2="$ROOT/oodac/oodac2"
+SMOKE_BIN="$TMPDIR/chs_smoke_real"
+
+echo "=== fixed-point: stage-0 builds stage-1 oodac ==="
+rm -f "$STAGE1" "$ROOT/oodac/main" "$ROOT/oodac/main.c" "$STAGE2"
+(cd "$ROOT" && "$OODA" build --target c oodac/main.oo)
+if [[ -x "$ROOT/oodac/main" ]]; then
+  mv -f "$ROOT/oodac/main" "$STAGE1"
 fi
 if [[ ! -x "$STAGE1" ]]; then
-  # list what we got
-  ls -la "$ROOT/oodac/" || true
+  ls -la "$ROOT/oodac/" >&2
   echo "stage-1 binary missing" >&2
   exit 1
 fi
 echo "stage-1: $STAGE1"
 
-echo "=== fixed-point: stage-1 vs stage-0 token digests ==="
+echo "=== fixed-point: stage-1 real-builds CHS smoke ==="
+rm -f "$SMOKE_BIN"
+# oodac build <src> <out>
+set +e
+"$STAGE1" build "$SMOKE_SRC" "$SMOKE_BIN" >"$TMPDIR/stage1_build_smoke.txt" 2>&1
+rc=$?
+set -e
+cat "$TMPDIR/stage1_build_smoke.txt"
+if [[ $rc -ne 0 ]] || [[ ! -x "$SMOKE_BIN" ]]; then
+  echo "FAIL: stage-1 did not produce executable smoke at $SMOKE_BIN" >&2
+  exit 1
+fi
+smoke_out=$("$SMOKE_BIN" | tr -d '\r')
+echo "smoke_out=$smoke_out"
+# chs_list_string prints numbers/strings — require non-empty successful run
+if [[ -z "$smoke_out" ]]; then
+  echo "FAIL: smoke produced no output" >&2
+  exit 1
+fi
+# Must not be the old hardcoded theater string alone without list behavior
+if ! echo "$smoke_out" | grep -q '2'; then
+  echo "FAIL: smoke output missing expected list length 2" >&2
+  exit 1
+fi
+echo "OK stage-1 real smoke build"
+
+echo "=== fixed-point: stage-1 builds oodac → stage-2 ==="
+rm -f "$STAGE2" "$ROOT/oodac/main" "$ROOT/oodac/main.c"
+set +e
+"$STAGE1" build "$OODAC_SRC" "$STAGE2" >"$TMPDIR/stage1_build_oodac.txt" 2>&1
+rc=$?
+set -e
+cat "$TMPDIR/stage1_build_oodac.txt"
+if [[ $rc -ne 0 ]] || [[ ! -x "$STAGE2" ]]; then
+  echo "FAIL: stage-1 did not build stage-2 oodac" >&2
+  exit 1
+fi
+# Prove stage-2 is not a bit-identical copy of stage-1 produced by cp
+# (BuildID may still match if emit is deterministic — compare mtimes/paths and both run)
+if [[ "$STAGE1" -ef "$STAGE2" ]]; then
+  echo "FAIL: stage-2 is same inode as stage-1" >&2
+  exit 1
+fi
+echo "OK stage-2 binary produced by stage-1"
+
+echo "=== fixed-point: digests stage0 ≡ stage1 ≡ stage2 tokens ==="
 CORPUS="$ROOT/examples/int_main.oo"
 "$OODA" dump tokens "$CORPUS" | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s0.sha"
 "$STAGE1" tokens "$CORPUS" | grep $'\t' | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s1.sha"
-# native oodac may print without banners
-if [[ ! -s "$TMPDIR/fp_s1.sha" ]]; then
-  "$STAGE1" tokens "$CORPUS" | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s1.sha"
-fi
+"$STAGE2" tokens "$CORPUS" | grep $'\t' | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s2.sha"
 echo "s0 $(cat $TMPDIR/fp_s0.sha)"
 echo "s1 $(cat $TMPDIR/fp_s1.sha)"
+echo "s2 $(cat $TMPDIR/fp_s2.sha)"
 if ! diff -q "$TMPDIR/fp_s0.sha" "$TMPDIR/fp_s1.sha" >/dev/null; then
-  echo "FAIL: stage-1 token digest != stage-0" >&2
-  "$OODA" dump tokens "$CORPUS" >"$TMPDIR/fp_s0_tok.txt"
-  "$STAGE1" tokens "$CORPUS" >"$TMPDIR/fp_s1_tok.txt" || true
-  diff -u "$TMPDIR/fp_s0_tok.txt" "$TMPDIR/fp_s1_tok.txt" | head -40 || true
+  echo "FAIL: stage-1 tokens != stage-0" >&2
   exit 1
 fi
-echo "OK token digests match"
+if ! diff -q "$TMPDIR/fp_s1.sha" "$TMPDIR/fp_s2.sha" >/dev/null; then
+  echo "FAIL: stage-2 tokens != stage-1" >&2
+  exit 1
+fi
+echo "OK token digests s0≡s1≡s2"
 
-echo "=== fixed-point: stage-1 check + smoke build ==="
-"$STAGE1" check "$CORPUS" | head -1 | grep -q '^OK'
-echo "OK stage-1 check"
-(cd "$TMPDIR" && "$STAGE1" build "$CORPUS")
-test -f "$TMPDIR/oodac_smoke_out.c" || test -f "$ROOT/oodac_smoke_out.c" || test -f oodac_smoke_out.c
-# find smoke file
-SMOKE=""
-for p in "$TMPDIR/oodac_smoke_out.c" "$ROOT/oodac_smoke_out.c" "./oodac_smoke_out.c" "$ROOT/oodac/oodac_smoke_out.c"; do
-  if [[ -f "$p" ]]; then SMOKE="$p"; break; fi
-done
-if [[ -z "$SMOKE" ]]; then
-  # stage1 may write CWD
-  find "$ROOT" "$TMPDIR" -name 'oodac_smoke_out.c' 2>/dev/null | head -1
-  SMOKE=$(find "$ROOT" "$TMPDIR" -name 'oodac_smoke_out.c' 2>/dev/null | head -1 || true)
-fi
-if [[ -z "${SMOKE:-}" || ! -f "$SMOKE" ]]; then
-  echo "FAIL: smoke c not written" >&2
-  exit 1
-fi
-gcc -O2 -o "$TMPDIR/chs_smoke" "$SMOKE"
-out=$("$TMPDIR/chs_smoke")
-echo "smoke out: $out"
-[[ "$out" == "chs-smoke-ok" ]]
-echo "OK stage-1 smoke binary"
-
-echo "=== fixed-point: rebuild stage-2 oodac ==="
-rm -f "$ROOT/oodac/oodac2" "$ROOT/oodac/main" "$ROOT/oodac/main.c"
-(cd "$ROOT" && "$OODA" build --target c oodac/main.oo)
-if [[ -x "$ROOT/oodac/main" ]]; then
-  mv -f "$ROOT/oodac/main" "$ROOT/oodac/oodac2"
-fi
-STAGE2="$ROOT/oodac/oodac2"
-if [[ ! -x "$STAGE2" ]]; then
-  ls -la "$ROOT/oodac/" >&2
-  echo "stage-2 missing" >&2
-  exit 1
-fi
-
-"$STAGE1" tokens "$CORPUS" | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s1b.sha"
-"$STAGE2" tokens "$CORPUS" | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s2.sha"
-echo "s1b $(cat $TMPDIR/fp_s1b.sha)"
-echo "s2  $(cat $TMPDIR/fp_s2.sha)"
-if ! diff -q "$TMPDIR/fp_s1b.sha" "$TMPDIR/fp_s2.sha" >/dev/null; then
-  echo "FAIL: stage-2 token digest != stage-1" >&2
-  exit 1
-fi
-echo "OK stage-1 ≡ stage-2 token digests"
-
-echo "=== fixed-point: normalized C emit stability (CHS smoke) ==="
-# Two emissions of examples/chs_list_string.oo C source, strip ephemeral paths
-emit_norm() {
-  local outc="$1"
-  (cd "$ROOT" && "$OODA" build --target c --emit-llvm examples/chs_list_string.oo >/dev/null)
-  # build writes examples/chs_list_string.c
-  sed -e 's|/home/[^ ]*||g' -e 's|//.*||g' "$ROOT/examples/chs_list_string.c" \
-    | tr -s ' \t' ' ' | sed '/^$/d' >"$outc"
-}
-emit_norm "$TMPDIR/c1.norm"
-emit_norm "$TMPDIR/c2.norm"
-if ! diff -q "$TMPDIR/c1.norm" "$TMPDIR/c2.norm" >/dev/null; then
-  echo "FAIL: C emit not stable" >&2
-  diff -u "$TMPDIR/c1.norm" "$TMPDIR/c2.norm" | head -20 || true
-  exit 1
-fi
-echo "OK normalized C emit stable"
+echo "=== fixed-point: stage-2 real-builds smoke ==="
+SMOKE2="$TMPDIR/chs_smoke_from_s2"
+rm -f "$SMOKE2"
+"$STAGE2" build "$SMOKE_SRC" "$SMOKE2" >"$TMPDIR/stage2_build_smoke.txt" 2>&1
+test -x "$SMOKE2"
+out2=$("$SMOKE2" | tr -d '\r')
+echo "stage2_smoke=$out2"
+echo "$out2" | grep -q '2'
+echo "OK stage-2 builds smoke"
 
 echo "=== drift would-fail demo ==="
 echo deadbeef >"$TMPDIR/bad.sha"

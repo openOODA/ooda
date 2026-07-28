@@ -2,10 +2,14 @@
 
 ## Claim (truthful)
 
-**CHS frontend self-host is green:** native `oodac` matches stage-0 token dumps;
-two-generation rebuild digests match; smoke C from oodac runs `chs-smoke-ok`.
+**CHS frontend self-host is green:**
+- oodac **tokens** lexer in `.oo` matches stage-0 dumps
+- oodac **ast/check** use host APIs (exact stage-0 dumps / type+cap)
+- oodac **build** is real CHS native compile (`chs_build` → CCodeGen+gcc)
+- **stage-1 builds stage-2** oodac; both build real smoke executables
+- digests s0≡s1≡s2; drift fails non-zero
 
-**Not claimed:** full SPEC product self-host, LSP/pkg, full LLVM CHS product.
+**Not claimed:** full SPEC product self-host; pure-.oo reimplementation of typechecker/codegen (host lib linked into native oodac for emit/check/ast).
 
 `DESIGN.md` unchanged.
 

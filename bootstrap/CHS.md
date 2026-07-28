@@ -63,18 +63,22 @@ ooda dump check <file>    # OK / ERR\t…
 ## oodac
 
 - Source: `oodac/main.oo` (CHS only)
-- Native: `ooda build --target c oodac/main.oo` → `oodac/main` (rename `oodac/oodac`)
-- Commands: `tokens|ast|check|build <file>`
-- Parity: `scripts/chs_parity.sh`
-- Fixed-point: `scripts/fixed_point.sh`
+- Native: `ooda build --target c oodac/main.oo` → links `libooda.a` + `runtime/chs_rt.c`
+- Commands:
+  - `tokens <file>` — **lexer implemented in `.oo`** (parity vs `ooda dump tokens`)
+  - `ast <file>` — **exact** stage-0 AST via `host_ast_dump` (same code as `ooda dump ast`)
+  - `check <file>` — **exact** stage-0 type+cap via `host_check` (same as `ooda dump check`)
+  - `build <src> [out]` — **real** CHS native compile via `chs_build` → CCodeGen+gcc (not hardcoded C)
+- Parity: `scripts/chs_parity.sh` (pass + fail lex corpus; exact AST/check)
+- Fixed-point: `scripts/fixed_point.sh` (**stage-1 builds stage-2**)
 
 ## Metric (M5)
 
-1. stage-0 C-builds oodac → stage-1  
-2. stage-1 token dump SHA-256 == stage-0 dump for corpus  
-3. stage-1 `check` + smoke C (`chs-smoke-ok`)  
-4. rebuild stage-2; stage-1 ≡ stage-2 token digests  
-5. normalized C emit of CHS example is stable  
+1. stage-0 builds oodac → **stage-1**  
+2. stage-1 **`build`s** CHS smoke (`chs_list_string.oo`) to a real executable and runs it  
+3. stage-1 **`build`s oodac/main.oo → stage-2** (not stage-0 twice)  
+4. token digests s0 ≡ s1 ≡ s2  
+5. stage-2 builds smoke successfully  
 6. intentional digest drift fails  
 
-Not used: raw binary hash alone.
+Not used: raw binary hash alone; hardcoded `puts("chs-smoke-ok")` theater.

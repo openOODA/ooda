@@ -1,44 +1,31 @@
-mod ast;
-mod lexer;
-mod parser;
-mod eval;
-mod diagnostics;
-mod fmt;
-mod outline;
-mod capabilities;
-mod typecheck;
-mod codegen;
-mod patch;
-mod reflect;
-mod bench;
-mod pkg;
-mod lsp;
-mod context;
-mod replay;
-mod migrate;
-
-mod codegen_wasm;
-mod codegen_c;
-mod dump;
-mod loader;
+// openOODA CLI binary — logic modules live in the `ooda` library.
+use ooda::ast::Program;
+use ooda::bench;
+use ooda::capabilities::CapabilityChecker;
+use ooda::codegen::LlvmCodeGen;
+use ooda::codegen_c::{runtime_c_path, CCodeGen};
+use ooda::codegen_wasm::WasmCodeGen;
+use ooda::diagnostics::AiDiagnostic;
+use ooda::dump::{format_ast_dump, format_check_err, format_check_ok, format_token_dump};
+use ooda::eval::Interpreter;
+use ooda::fmt;
+use ooda::lexer::Lexer;
+use ooda::loader::load_program;
+use ooda::lsp;
+use ooda::migrate;
+use ooda::outline;
+use ooda::parser::Parser;
+use ooda::patch;
+use ooda::pkg;
+use ooda::reflect;
+use ooda::replay;
+use ooda::typecheck::TypeChecker;
+use ooda::context::ContextEngine;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
 use std::fs;
 use anyhow::{Context, Result};
-
-use lexer::Lexer;
-use parser::Parser;
-use eval::Interpreter;
-use diagnostics::AiDiagnostic;
-use capabilities::CapabilityChecker;
-use typecheck::TypeChecker;
-use codegen::LlvmCodeGen;
-use codegen_wasm::WasmCodeGen;
-use codegen_c::{runtime_c_path, CCodeGen};
-use loader::load_program;
-use ast::Program;
-use dump::{format_ast_dump, format_check_err, format_check_ok, format_token_dump};
 
 #[derive(ClapParser)]
 #[command(name = "ooda")]
@@ -507,7 +494,7 @@ fn main() -> Result<()> {
             lsp::LspDaemon::start()?;
         }
         Commands::Context { file, symbol, tier } => {
-            let ctx = context::ContextEngine::build_micro_context(&file.display().to_string(), &symbol, &tier)?;
+            let ctx = ContextEngine::build_micro_context(&file.display().to_string(), &symbol, &tier)?;
             println!("🤖 [LLVM/VRAM Dynamic Auto-Scaling Context Payload (Tier: {})]:\n{}", tier, ctx);
         }
         Commands::Replay { file, target } => {

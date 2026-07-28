@@ -59,24 +59,51 @@ impl CCodeGen {
             let _ = std::fs::create_dir_all(&p);
             p
         });
-        let out = Command::new(&gcc)
-            .env("TMPDIR", &tmp)
+        // Link against libooda.a (staticlib) so host_ast_dump/chs_build work natively.
+        let lib_dir = find_ooda_staticlib_dir();
+        let mut cmd = Command::new(&gcc);
+        cmd.env("TMPDIR", &tmp)
             .env("TMP", &tmp)
             .env("TEMP", &tmp)
             .arg("-O2")
             .arg("-std=c99")
             .arg(&out_c)
-            .arg(rt_c)
-            .arg("-o")
-            .arg(out_bin)
+            .arg(rt_c);
+        if let Some(dir) = &lib_dir {
+            cmd.arg(format!("-L{}", dir.display()));
+            cmd.arg("-looda");
+            cmd.arg("-lpthread");
+            cmd.arg("-ldl");
+            cmd.arg("-lm");
+            // Rust staticlib may need libgcc_s / libc
+            cmd.arg("-Wl,--allow-multiple-definition");
+        }
+        cmd.arg("-o").arg(out_bin);
+        let out = cmd
             .output()
             .map_err(|e| anyhow::anyhow!("failed to spawn {}: {}", gcc, e))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
-            bail!("gcc failed linking CHS C backend:\n{}", err.chars().take(800).collect::<String>());
+            bail!("gcc failed linking CHS C backend:\n{}", err.chars().take(1200).collect::<String>());
         }
         Ok(())
     }
+}
+
+/// Locate `libooda.a` from cargo target dir (release preferred).
+fn find_ooda_staticlib_dir() -> Option<std::path::PathBuf> {
+    let candidates = [
+        std::path::PathBuf::from("target/release"),
+        std::path::PathBuf::from("target/debug"),
+        std::path::PathBuf::from("/home/jeryd/openooda/target/release"),
+        std::path::PathBuf::from("/home/jeryd/openooda/target/debug"),
+    ];
+    for c in candidates {
+        if c.join("libooda.a").exists() {
+            return Some(c);
+        }
+    }
+    None
 }
 
 fn c_escape_string(s: &str) -> String {
@@ -166,7 +193,17 @@ impl Gen {
         s.push_str("OoStr oo_slist_get(OoSList,long long); long long oo_slist_len(OoSList);\n");
         s.push_str("OoResS oo_read_file(OoStr); OoResV oo_write_file(OoStr,OoStr);\n");
         s.push_str("void oo_print_str(OoStr); void oo_print_int(long long); void oo_print_bool(int); void oo_println(void);\n");
-        s.push_str("int oo_str_eq(OoStr,OoStr);\n\n");
+        s.push_str("int oo_str_eq(OoStr,OoStr);\n");
+        /* Host FFI (libooda.a) — exact stage-0 dumps + real CHS build */
+        s.push_str("char *ooda_host_ast_dump(const char *path);\n");
+        s.push_str("char *ooda_host_check(const char *path);\n");
+        s.push_str("char *ooda_host_token_dump(const char *path);\n");
+        s.push_str("int ooda_host_chs_build(const char *src, const char *out_bin);\n");
+        s.push_str("void ooda_host_free(char *p);\n");
+        s.push_str("OoStr oo_host_ast_dump(OoStr path);\n");
+        s.push_str("OoStr oo_host_check(OoStr path);\n");
+        s.push_str("OoStr oo_host_token_dump(OoStr path);\n");
+        s.push_str("OoResS oo_chs_build(OoStr src, OoStr out_bin);\n\n");
         s.push_str(&self.prelude);
         for f in &self.functions {
             s.push_str(f);
@@ -906,6 +943,34 @@ impl Gen {
                 ));
                 // map to OoResS-like for is_ok: use ok field
                 Ok((code, t, "OoResV".into()))
+            }
+            "host_ast_dump" => {
+                code.push_str(&format!(
+                    "  OoStr {} = oo_host_ast_dump({});\n",
+                    t, cargs[0]
+                ));
+                Ok((code, t, "OoStr".into()))
+            }
+            "host_check" => {
+                code.push_str(&format!(
+                    "  OoStr {} = oo_host_check({});\n",
+                    t, cargs[0]
+                ));
+                Ok((code, t, "OoStr".into()))
+            }
+            "host_token_dump" => {
+                code.push_str(&format!(
+                    "  OoStr {} = oo_host_token_dump({});\n",
+                    t, cargs[0]
+                ));
+                Ok((code, t, "OoStr".into()))
+            }
+            "chs_build" => {
+                code.push_str(&format!(
+                    "  OoResS {} = oo_chs_build({}, {});\n",
+                    t, cargs[0], cargs[1]
+                ));
+                Ok((code, t, "OoResS".into()))
             }
             "println" => {
                 // handled at stmt level usually

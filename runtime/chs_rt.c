@@ -222,3 +222,40 @@ int oo_str_eq(OoStr a, OoStr b) {
   if (a.len != b.len) return 0;
   return memcmp(a.data, b.data, (size_t)a.len) == 0;
 }
+
+/* ----- Host FFI wrappers (symbols from libooda.a) ----- */
+extern char *ooda_host_ast_dump(const char *path);
+extern char *ooda_host_check(const char *path);
+extern char *ooda_host_token_dump(const char *path);
+extern int ooda_host_chs_build(const char *src, const char *out_bin);
+extern void ooda_host_free(char *p);
+
+static OoStr oo_from_c_heap(char *p) {
+  if (!p) return oo_str_lit("ERR\thost\tnull\n");
+  OoStr r = oo_str_lit(p);
+  ooda_host_free(p);
+  return r;
+}
+
+OoStr oo_host_ast_dump(OoStr path) {
+  return oo_from_c_heap(ooda_host_ast_dump(path.data));
+}
+OoStr oo_host_check(OoStr path) {
+  return oo_from_c_heap(ooda_host_check(path.data));
+}
+OoStr oo_host_token_dump(OoStr path) {
+  return oo_from_c_heap(ooda_host_token_dump(path.data));
+}
+
+OoResS oo_chs_build(OoStr src, OoStr out_bin) {
+  OoResS r;
+  int rc = ooda_host_chs_build(src.data, out_bin.data);
+  if (rc == 0) {
+    r.ok = 1;
+    r.val = out_bin;
+  } else {
+    r.ok = 0;
+    r.val = oo_str_lit("chs_build failed");
+  }
+  return r;
+}

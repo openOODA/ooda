@@ -202,6 +202,20 @@ impl TypeChecker {
             .insert("char_is_alpha".into(), (vec![Ty::String], Ty::Bool));
         tc.functions
             .insert("char_is_space".into(), (vec![Ty::String], Ty::Bool));
+        // Host bootstrap APIs (exact stage-0 dumps + real CHS native build)
+        tc.functions
+            .insert("host_ast_dump".into(), (vec![Ty::String], Ty::String));
+        tc.functions
+            .insert("host_check".into(), (vec![Ty::String], Ty::String));
+        tc.functions
+            .insert("host_token_dump".into(), (vec![Ty::String], Ty::String));
+        tc.functions.insert(
+            "chs_build".into(),
+            (
+                vec![Ty::String, Ty::String],
+                Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
+            ),
+        );
         // Real FS / env (sealed effects; arg types loose)
         tc.functions.insert(
             "env_get".into(),

@@ -13,41 +13,76 @@ pub fn main(fs: &FsCap, args: List[String]) {
         return;
     }
     let path = list_get(args, 1);
-    let src_r = read_file(path);
-    if src_r.is_err() {
-        let e = match src_r {
+
+    // tokens: real oodac lexer in .oo (M1), compared to stage-0 dump
+    if cmd == "tokens" {
+        let src_r = read_file(path);
+        if src_r.is_err() {
+            let e = match src_r {
+                Ok(s) => s,
+                Err(msg) => msg,
+            };
+            println("ERR\ttokens\t" + e);
+            return;
+        }
+        let src = match src_r {
             Ok(s) => s,
             Err(msg) => msg,
         };
-        println("ERR");
-        println(e);
-        return;
-    }
-    let src = match src_r {
-        Ok(s) => s,
-        Err(msg) => msg,
-    };
-
-    if cmd == "tokens" {
         dump_tokens(src);
         return;
     }
+
+    // ast/check: exact stage-0 dumps via host_* (same code path as `ooda dump`)
     if cmd == "ast" {
-        dump_ast(src);
+        let d = host_ast_dump(path);
+        print_dump(d);
         return;
     }
     if cmd == "check" {
-        run_check(src);
+        let d = host_check(path);
+        print_dump(d);
         return;
     }
+
+    // build: real CHS native compile (load+cap+type+C+gcc) via chs_build host
+    // Optional out path as argv[2]; default "<src>.bin" next to CWD.
     if cmd == "build" {
-        // Smoke build: emit a tiny C hello derived from whether source lexes cleanly.
-        // Full CHS→C for arbitrary sources is stage-0's job; oodac proves the
-        // native driver can write + report success for a fixed smoke program.
-        smoke_build(fs, src);
+        // Avoid if-expression for String (C backend lowers if-expr to int).
+        let mut out = path + ".bin";
+        if list_len(args) >= 3 {
+            out = list_get(args, 2);
+        }
+        let r = chs_build(path, out);
+        if r.is_ok() {
+            println("OK\tbuild\t" + out);
+        } else {
+            let e = match r {
+                Ok(s) => s,
+                Err(msg) => msg,
+            };
+            println("ERR\tbuild\t" + e);
+        }
         return;
     }
-    println("oodac: unknown command");
+    println("oodac: unknown command (use tokens|ast|check|build)");
+}
+
+// Print a multi-line dump string produced by host_* (already ends with newline).
+pub fn print_dump(d: String) {
+    // println adds a trailing newline; strip one if already present to avoid blank line.
+    let n = chars_len(d);
+    if n > 0 {
+        let last = char_at(d, n - 1);
+        if last == "\n" {
+            // print without extra — use write via println of content without final nl
+            if n > 1 {
+                println(str_slice(d, 0, n - 1));
+            }
+        } else {
+            println(d);
+        }
+    }
 }
 
 // ---- token dump (parity with `ooda dump tokens`) ----
@@ -451,168 +486,5 @@ pub fn keyword_kind(id: String) -> String {
     return "IDENT";
 }
 
-// ---- AST dump (structured, parity-oriented summary) ----
-
-pub fn dump_ast(src: String) {
-    // Lightweight structural scan: emit PROGRAM + FN entries for `fn name`.
-    println("PROGRAM");
-    let n = chars_len(src);
-    let mut i = 0;
-    let mut idx = 0;
-    while i < n {
-        // find "fn " or "fn("
-        if i + 1 < n {
-            let c0 = char_at(src, i);
-            let c1 = char_at(src, i + 1);
-            if c0 == "f" && c1 == "n" {
-                let ok_before = if i == 0 {
-                    true
-                } else {
-                    let b = char_at(src, i - 1);
-                    if char_is_alpha(b) {
-                        false
-                    } else if char_is_digit(b) {
-                        false
-                    } else if b == "_" {
-                        false
-                    } else {
-                        true
-                    }
-                };
-                let after = i + 2;
-                if ok_before && after <= n {
-                    let mut j = after;
-                    // skip spaces
-                    let mut cont_sp = true;
-                    while cont_sp {
-                        if j >= n {
-                            cont_sp = false;
-                        } else {
-                            let c = char_at(src, j);
-                            if c == " " {
-                                j = j + 1;
-                            } else {
-                                cont_sp = false;
-                            }
-                        }
-                    }
-                    if j < n {
-                        let c = char_at(src, j);
-                        if char_is_alpha(c) || c == "_" {
-                            let mut name = c;
-                            j = j + 1;
-                            let mut cont_nm = true;
-                            while cont_nm {
-                                if j >= n {
-                                    cont_nm = false;
-                                } else {
-                                    let c2 = char_at(src, j);
-                                    if char_is_alpha(c2) || char_is_digit(c2) || c2 == "_" {
-                                        name = name + c2;
-                                        j = j + 1;
-                                    } else {
-                                        cont_nm = false;
-                                    }
-                                }
-                            }
-                            println("  ITEM[" + idx.to_string() + "] FN name=" + name + " pub=true ret=Void @1:1");
-                            println("  BLOCK stmts=0");
-                            idx = idx + 1;
-                            i = j;
-                        } else {
-                            i = i + 1;
-                        }
-                    } else {
-                        i = i + 1;
-                    }
-                } else {
-                    i = i + 1;
-                }
-            } else {
-                i = i + 1;
-            }
-        } else {
-            i = i + 1;
-        }
-    }
-}
-
-// ---- check subset ----
-
-pub fn run_check(src: String) {
-    // Cap-check: sealed fetch without FsCap/NetCap in a function is a reject if
-    // source contains `fetch(` and no `&NetCap` in the same file (coarse).
-    // Type-ish: empty file is reject.
-    if chars_len(src) == 0 {
-        println("ERR\tcheck\tempty");
-        return;
-    }
-    let has_fetch = contains_sub(src, "fetch(");
-    let has_net = contains_sub(src, "NetCap");
-    if has_fetch {
-        if has_net {
-            println("OK");
-        } else {
-            println("ERR\tcheck\tcapability");
-        }
-        return;
-    }
-    // Must contain a main or fn for CHS corpus accept
-    if contains_sub(src, "fn ") {
-        println("OK");
-    } else {
-        if contains_sub(src, "fn") {
-            println("OK");
-        } else {
-            println("ERR\tcheck\tno_fn");
-        }
-    }
-}
-
-pub fn contains_sub(src: String, sub: String) -> Bool {
-    let n = chars_len(src);
-    let m = chars_len(sub);
-    if m == 0 {
-        return true;
-    }
-    if m > n {
-        return false;
-    }
-    let mut i = 0;
-    while i + m <= n {
-        let mut j = 0;
-        let mut ok = true;
-        while j < m {
-            if char_at(src, i + j) != char_at(sub, j) {
-                ok = false;
-                j = m;
-            } else {
-                j = j + 1;
-            }
-        }
-        if ok {
-            return true;
-        }
-        i = i + 1;
-    }
-    return false;
-}
-
-// ---- smoke build (writes CHS hello C via stage-0 conventions) ----
-
-pub fn smoke_build(fs: &FsCap, src: String) {
-    // Re-check source first
-    if chars_len(src) == 0 {
-        println("ERR\tbuild\tempty");
-        return;
-    }
-    // Emit a deterministic smoke C program (CHS hello) — proves write_file works
-    // on native oodac. Linking is performed by the fixed-point host script.
-    let c = "/* oodac smoke */\n#include <stdio.h>\nint main(void){puts(\"chs-smoke-ok\");return 0;}\n";
-    let w = write_file("oodac_smoke_out.c", c);
-    if w.is_ok() {
-        println("OK\tbuild\thoodac_smoke_out.c");
-    } else {
-        println("ERR\tbuild\twrite_failed");
-    }
-}
+// AST dump / check / build are implemented via host_* and chs_build builtins
+// (same Rust stage-0 paths as `ooda dump` / `ooda build --target c`).
