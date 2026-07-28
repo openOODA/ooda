@@ -74,9 +74,21 @@ pub fn apply_patch(file_path: &Path, patch_json: &str) -> Result<()> {
     // Textual surgical replace of the function body between the first '{' after
     // the function signature and its matching '}'. Preserves contracts/verify.
     let new_code = replace_function_body(&code, &patch.target_function, &body_src)?;
-    fs::write(file_path, new_code)?;
+
+    // Atomic validation: parse, check capabilities, and check types before writing to disk
+    let mut check_lexer = Lexer::new(&new_code);
+    let check_tokens = check_lexer.tokenize().map_err(|e| anyhow!("Patch validation error: syntax error in patched body: {}", e))?;
+    let mut check_parser = Parser::new(check_tokens);
+    let check_program = check_parser.parse_program().map_err(|e| anyhow!("Patch validation error: AST parse error in patched body: {}", e))?;
+
+    crate::capabilities::CapabilityChecker::check_program(&check_program)
+        .map_err(|e| anyhow!("Patch validation error: capability violation in patched body: {}", e))?;
+    crate::typecheck::TypeChecker::check_program(&check_program)
+        .map_err(|e| anyhow!("Patch validation error: type error in patched body: {}", e))?;
+
+    fs::write(file_path, &new_code)?;
     println!(
-        "🔧 [openOODA Patch] Replaced body of function '{}' in {}",
+        "✂️  [openOODA Surgical Patcher] Successfully patched body of function '{}' in {}",
         patch.target_function,
         file_path.display()
     );

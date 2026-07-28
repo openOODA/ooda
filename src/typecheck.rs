@@ -285,6 +285,27 @@ impl TypeChecker {
                     let init_ty = self.infer_expr(init, env)?;
                     if let Some(ann) = type_annotation {
                         let want = Ty::from_ast(ann);
+                        if let Type::Custom(ref s) = ann {
+                            if let Some(rest) = s.strip_prefix("Int[").and_then(|str_s| str_s.strip_suffix("]")) {
+                                if let Some((min_s, max_s)) = rest.split_once("..") {
+                                    let min_v: i64 = min_s.parse().unwrap_or(i64::MIN);
+                                    let max_v: i64 = max_s.parse().unwrap_or(i64::MAX);
+                                    if let Expression::Literal(Literal::Int(val), l_span) = init {
+                                        if *val < min_v || *val > max_v {
+                                            return Err(anyhow!(
+                                                "Type error at {}:{}: RefinementTypeViolation: Value {} out of refinement bounds [{}..{}] for '{}'",
+                                                l_span.line,
+                                                l_span.col,
+                                                val,
+                                                min_v,
+                                                max_v,
+                                                name
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         if !Ty::unifyable(&init_ty, &want) {
                             return Err(anyhow!(
                                 "Type error at {}:{} in '{}': let '{}' annotated as {} but initializer has type {}",
@@ -700,5 +721,20 @@ mod tests {
             }
         "#;
         assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_refinement_initializer() {
+        let src = r#"
+            pub fn main() {
+                let port: Int[1..65535] = 99999;
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("99999"),
+            "expected static refinement error, got: {}",
+            err
+        );
     }
 }

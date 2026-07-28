@@ -197,7 +197,36 @@ impl Parser {
     fn parse_type(&mut self) -> Result<Type> {
         match self.advance() {
             Token::Ident(name) => match name.as_str() {
-                "Int" | "i32" | "u64" => Ok(Type::Int),
+                "Int" | "i32" | "u64" => {
+                    if self.peek() == &Token::LBracket {
+                        self.advance();
+                        let range_e = self.parse_expression()?;
+                        self.consume(Token::RBracket)?;
+                        let (min_s, max_s) = match range_e {
+                            Expression::Binary {
+                                op: BinOp::DotDot,
+                                left,
+                                right,
+                                ..
+                            } => {
+                                let min_str = match *left {
+                                    Expression::Literal(Literal::Int(n), _) => n.to_string(),
+                                    _ => "1".to_string(),
+                                };
+                                let max_str = match *right {
+                                    Expression::Literal(Literal::Int(n), _) => n.to_string(),
+                                    _ => "65535".to_string(),
+                                };
+                                (min_str, max_str)
+                            }
+                            Expression::Literal(Literal::Int(n), _) => (n.to_string(), "65535".to_string()),
+                            _ => ("1".to_string(), "65535".to_string()),
+                        };
+                        Ok(Type::Custom(format!("Int[{}..{}]", min_s, max_s)))
+                    } else {
+                        Ok(Type::Int)
+                    }
+                }
                 "Float" => Ok(Type::Float),
                 "String" => Ok(Type::String),
                 "Bool" => Ok(Type::Bool),
