@@ -136,6 +136,12 @@ impl Interpreter {
             } else {
                 return Err(anyhow!("Method .trim() expects String argument"));
             }
+        } else if name == ".is_ok" {
+            if let Some(Value::Ok(_)) = args.get(0) {
+                return Ok(Value::Bool(true));
+            } else {
+                return Ok(Value::Bool(false));
+            }
         } else if name == ".to_lowercase" {
             if let Some(Value::String(s)) = args.get(0) {
                 return Ok(Value::String(s.to_lowercase()));
