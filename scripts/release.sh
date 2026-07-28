@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-VERSION="${1:-v0.13.0-alpha}"
+VERSION="${1:-v0.15.0-alpha}"
 # Allow VERSION with or without leading v
 case "$VERSION" in
   v*) TAG="$VERSION" ;;

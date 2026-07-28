@@ -36,16 +36,21 @@ use codegen_wasm::WasmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.14.0-alpha")]
+#[command(version = "0.15.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
 
-/// Extract `line:col` from messages like `... at 12:3 ...` or `line 12`.
+/// Extract `line:col` from messages emitted by the parser, typechecker,
+/// and capability checker. Recognises these formats in priority order:
+///
+/// 1. `at LINE:COL`            — parser, typechecker (`Type error at 4:26: …`)
+/// 2. `at line LINE, col COL`  — capability checker (`… at line 2, col 52.`)
+/// 3. `line N`                 — fallback, column defaults to 1
 fn parse_loc(msg: &str) -> (usize, usize) {
-    // Prefer "at LINE:COL"
+    // Format 1: ` at LINE:COL `
     if let Some(idx) = msg.find(" at ") {
         let rest = &msg[idx + 4..];
         let coords: String = rest
@@ -59,7 +64,29 @@ fn parse_loc(msg: &str) -> (usize, usize) {
             }
         }
     }
-    // "line N"
+    // Format 2: ` at line LINE, col COL `
+    if let Some(idx) = msg.find(" at line ") {
+        let after_line = &msg[idx + " at line ".len()..];
+        let line_str: String = after_line
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(l) = line_str.parse::<usize>() {
+            if let Some(comma_idx) = after_line.find(" col ") {
+                let after_col = &after_line[comma_idx + " col ".len()..];
+                let col_str: String = after_col
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(c) = col_str.parse::<usize>() {
+                    return (l, c);
+                }
+            }
+            // `at line LINE` with no column → column 1.
+            return (l, 1);
+        }
+    }
+    // Format 3: `line N`
     if let Some(idx) = msg.find("line ") {
         let rest = &msg[idx + 5..];
         let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -68,6 +95,36 @@ fn parse_loc(msg: &str) -> (usize, usize) {
         }
     }
     (1, 1)
+}
+
+#[cfg(test)]
+mod parse_loc_tests {
+    use super::parse_loc;
+
+    #[test]
+    fn extracts_at_line_col_format() {
+        let (l, c) = parse_loc("Type error at 4:26: undefined variable 'foo'");
+        assert_eq!((l, c), (4, 26));
+    }
+
+    #[test]
+    fn extracts_capability_at_line_comma_col_format() {
+        let msg = "Security Capability Violation: Function 'rogue_fetch' calls sealed effectful builtin 'fetch' which requires a &NetCap parameter, but none was declared at line 2, col 52. Default-deny: grant the capability token explicitly.";
+        let (l, c) = parse_loc(msg);
+        assert_eq!((l, c), (2, 52));
+    }
+
+    #[test]
+    fn extracts_fallback_line_format() {
+        let (l, c) = parse_loc("Expected token at line 7");
+        assert_eq!((l, c), (7, 1));
+    }
+
+    #[test]
+    fn defaults_to_one_one_when_no_match() {
+        let (l, c) = parse_loc("totally unstructured error message");
+        assert_eq!((l, c), (1, 1));
+    }
 }
 
 #[derive(Subcommand)]

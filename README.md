@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.13.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.15.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) is a systems-oriented, guard-rail-first
 language for capability security, self-verification, and AI co-authoring.
@@ -27,12 +27,12 @@ Install a published binary:
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.13.0-alpha
+ooda --version   # 0.15.0-alpha
 ```
 
 ---
 
-## What's real in v0.13.0-alpha
+## What's real in v0.15.0-alpha
 
 | Capability | Status |
 |---|---|
