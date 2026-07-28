@@ -182,6 +182,10 @@ impl Interpreter {
         } else if name == "async_join_internal" {
             let handle = args.get(0).map(|v| v.to_string()).unwrap_or_default();
             return Ok(Value::Ok(Box::new(Value::String(format!("joined_{}", handle)))));
+        } else if name == "python_embed_internal" {
+            let model = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let handle = format!("pytorch_model_handle_{}", model);
+            return Ok(Value::Ok(Box::new(Value::String(handle))));
         } else if name == "Ok" {
             let val = args.get(0).cloned().unwrap_or(Value::Void);
             return Ok(Value::Ok(Box::new(val)));
