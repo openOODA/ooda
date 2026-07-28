@@ -386,6 +386,19 @@ impl TypeChecker {
                     }
                     last = t;
                 }
+                Statement::While { cond, body, span } => {
+                    let ct = self.infer_expr(cond, env)?;
+                    if !Ty::unifyable(&ct, &Ty::Bool) && !matches!(ct, Ty::Unknown) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: while condition must be Bool, found {}",
+                            span.line,
+                            span.col,
+                            ct.display()
+                        ));
+                    }
+                    self.check_block(body, env, mutable, "while-body")?;
+                    last = Ty::Void;
+                }
             }
         }
         if let Some(expr) = &block.expr {
@@ -534,7 +547,7 @@ impl TypeChecker {
                             }
                         }
                         ".trim" | ".to_lowercase" | ".to_string" => Ok(Ty::String),
-                        ".is_ok" => Ok(Ty::Bool),
+                        ".is_ok" | ".is_err" | ".is_some" | ".is_none" => Ok(Ty::Bool),
                         ".get" | ".read_file" | ".write_file" | ".env_get" => Ok(Ty::Unknown),
                         _ => Ok(Ty::Unknown),
                     };
@@ -600,6 +613,49 @@ impl TypeChecker {
                 } else {
                     Ok(t1)
                 }
+            }
+            Expression::Unary { op, expr, span } => {
+                let t = self.infer_expr(expr, env)?;
+                match op {
+                    UnaryOp::Not => {
+                        if Ty::unifyable(&t, &Ty::Bool) || matches!(t, Ty::Unknown) {
+                            Ok(Ty::Bool)
+                        } else {
+                            Err(anyhow!(
+                                "Type error at {}:{}: unary '!' requires Bool, found {}",
+                                span.line,
+                                span.col,
+                                t.display()
+                            ))
+                        }
+                    }
+                    UnaryOp::Neg => {
+                        if t.is_numeric() || matches!(t, Ty::Unknown) {
+                            Ok(t)
+                        } else {
+                            Err(anyhow!(
+                                "Type error at {}:{}: unary '-' requires numeric, found {}",
+                                span.line,
+                                span.col,
+                                t.display()
+                            ))
+                        }
+                    }
+                }
+            }
+            Expression::While { cond, body, span } => {
+                let ct = self.infer_expr(cond, env)?;
+                if !Ty::unifyable(&ct, &Ty::Bool) && !matches!(ct, Ty::Unknown) {
+                    return Err(anyhow!(
+                        "Type error at {}:{}: while condition must be Bool, found {}",
+                        span.line,
+                        span.col,
+                        ct.display()
+                    ));
+                }
+                let mut m = HashMap::new();
+                self.check_block(body, &mut env.clone(), &mut m, "while-expr")?;
+                Ok(Ty::Void)
             }
             Expression::Match { expr, arms, span, .. } => {
                 let scrutinee_ty = self.infer_expr(expr, env)?;
@@ -851,6 +907,23 @@ mod tests {
         "#;
         let err = check(src).unwrap_err().to_string();
         assert!(err.contains("non-exhaustive") || err.contains("None"), "{}", err);
+    }
+
+
+    #[test]
+    fn accepts_while_and_else_if_and_not() {
+        let src = r#"
+            pub fn main() {
+                let mut i = 0;
+                while i < 2 {
+                    i = i + 1;
+                }
+                let y = if i > 5 { 9 } else if i > 0 { i } else { 0 };
+                let z = if !false { y } else { 0 };
+                println(z);
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
     }
 
 }

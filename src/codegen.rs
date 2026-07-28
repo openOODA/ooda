@@ -87,6 +87,10 @@ impl LlvmCodeGen {
                 Statement::Return(Some(e), _) => Self::check_expr_subset(e, ctx)?,
                 Statement::Return(None, _) => {}
                 Statement::Expr(e, _) => Self::check_expr_subset(e, ctx)?,
+                Statement::While { cond, body, .. } => {
+                    Self::check_expr_subset(cond, ctx)?;
+                    Self::check_block_subset(body, ctx)?;
+                }
             }
         }
         if let Some(e) = &block.expr {
@@ -146,6 +150,11 @@ impl LlvmCodeGen {
                     Self::check_expr_subset(&arm.body, ctx)?;
                 }
                 Ok(())
+            }
+            Expression::Unary { expr, .. } => Self::check_expr_subset(expr, ctx),
+            Expression::While { cond, body, .. } => {
+                Self::check_expr_subset(cond, ctx)?;
+                Self::check_block_subset(body, ctx)
             }
         }
     }
@@ -283,6 +292,11 @@ impl LlvmCodeGen {
                     if matches!(expr, Expression::If { .. }) {
                         returned = true;
                     }
+                }
+                Statement::While { cond, body, .. } => {
+                    let (code, r) = Self::emit_while(cond, body, reg, &mut locals)?;
+                    reg = r;
+                    f_ir.push_str(&code);
                 }
             }
         }
@@ -491,12 +505,107 @@ impl LlvmCodeGen {
                 code.push_str(&format!("\n{}:\n", merge_label));
                 Ok(("%r0".to_string(), code, r_curr, "i64"))
             }
+            Expression::Unary { op, expr, .. } => {
+                let (v, vc, r1, vty) = Self::emit_expr(expr, reg, locals)?;
+                code.push_str(&vc);
+                reg = r1;
+                let res = format!("%r{}", reg);
+                reg += 1;
+                match op {
+                    UnaryOp::Not => {
+                        let as_i1 = if vty == "i1" {
+                            v
+                        } else {
+                            let t = format!("%r{}", reg);
+                            reg += 1;
+                            code.push_str(&format!("  {} = icmp ne i64 {}, 0\n", t, v));
+                            t
+                        };
+                        code.push_str(&format!("  {} = xor i1 {}, true\n", res, as_i1));
+                        Ok((res, code, reg, "i1"))
+                    }
+                    UnaryOp::Neg => {
+                        if vty == "double" {
+                            code.push_str(&format!("  {} = fneg double {}\n", res, v));
+                            Ok((res, code, reg, "double"))
+                        } else {
+                            code.push_str(&format!("  {} = sub i64 0, {}\n", res, v));
+                            Ok((res, code, reg, "i64"))
+                        }
+                    }
+                }
+            }
+            Expression::While { cond, body, .. } => {
+                let (wcode, r) = Self::emit_while(cond, body, reg, locals)?;
+                code.push_str(&wcode);
+                Ok(("0".into(), code, r, "i64"))
+            }
             Expression::Match { .. } => {
                 bail!(
                     "LLVM integer-subset backend does not lower match expressions. Use `ooda run`."
                 )
             }
         }
+    }
+
+    fn emit_while(
+        cond: &Expression,
+        body: &Block,
+        mut reg: usize,
+        locals: &std::collections::HashMap<String, &'static str>,
+    ) -> Result<(String, usize)> {
+        let mut code = String::new();
+        let id = reg;
+        reg += 1;
+        let head = format!("while_head_{}", id);
+        let body_l = format!("while_body_{}", id);
+        let end = format!("while_end_{}", id);
+
+        code.push_str(&format!("  br label %{}\n", head));
+        code.push_str(&format!("\n{}:\n", head));
+        let (cval, ccode, r1, cty) = Self::emit_expr(cond, reg, locals)?;
+        reg = r1;
+        code.push_str(&ccode);
+        let c_i1 = if cty == "i1" {
+            cval
+        } else {
+            let t = format!("%r{}", reg);
+            reg += 1;
+            code.push_str(&format!("  {} = icmp ne i64 {}, 0\n", t, cval));
+            t
+        };
+        code.push_str(&format!("  br i1 {}, label %{}, label %{}\n", c_i1, body_l, end));
+        code.push_str(&format!("\n{}:\n", body_l));
+        // Only lower simple assign/let/expr in while body for the integer subset.
+        for stmt in &body.stmts {
+            match stmt {
+                Statement::Assign { name, value, .. } => {
+                    let (val, vcode, r2, vty) = Self::emit_expr(value, reg, locals)?;
+                    reg = r2;
+                    code.push_str(&vcode);
+                    let pty = locals.get(name).copied().unwrap_or(vty);
+                    code.push_str(&format!("  store {} {}, {}* %var_{}\n", pty, val, pty, name));
+                }
+                Statement::Let { name, init, .. } => {
+                    let (val, vcode, r2, vty) = Self::emit_expr(init, reg, locals)?;
+                    reg = r2;
+                    code.push_str(&vcode);
+                    // Assume pre-allocated if already in locals; otherwise skip complex lets.
+                    if locals.contains_key(name) {
+                        code.push_str(&format!("  store {} {}, {}* %var_{}\n", vty, val, vty, name));
+                    }
+                }
+                Statement::Expr(expr, _) => {
+                    let (_v, ecode, r2, _) = Self::emit_expr(expr, reg, locals)?;
+                    reg = r2;
+                    code.push_str(&ecode);
+                }
+                _ => {}
+            }
+        }
+        code.push_str(&format!("  br label %{}\n", head));
+        code.push_str(&format!("\n{}:\n", end));
+        Ok((code, reg))
     }
 
     /// Structural validation of emitted IR (always). Optional llvm-as if on PATH.

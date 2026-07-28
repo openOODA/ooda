@@ -155,6 +155,9 @@ impl WasmCodeGen {
                         }
                     }
                 }
+                Statement::While { cond, body, .. } => {
+                    f_wat.push_str(&Self::emit_while(cond, body, &locals)?);
+                }
             }
         }
 
@@ -266,10 +269,45 @@ impl WasmCodeGen {
             } => {
                 wat.push_str(&Self::emit_if(cond, then_branch, else_branch.as_ref(), locals)?);
             }
+            Expression::Unary { op, expr, .. } => {
+                wat.push_str(&Self::emit_expr(expr, locals)?);
+                match op {
+                    UnaryOp::Not => wat.push_str("    i64.eqz\n"),
+                    UnaryOp::Neg => {
+                        wat.push_str("    i64.const -1\n");
+                        wat.push_str("    i64.mul\n");
+                    }
+                }
+            }
+            Expression::While { cond, body, .. } => {
+                wat.push_str(&Self::emit_while(cond, body, locals)?);
+            }
             Expression::Match { .. } => {
                 bail!("WASM backend does not yet lower `match` expressions; use `ooda run`.")
             }
         }
+        Ok(wat)
+    }
+
+    fn emit_while(
+        cond: &Expression,
+        body: &Block,
+        locals: &BTreeSet<String>,
+    ) -> Result<String> {
+        let mut wat = String::new();
+        wat.push_str("    block $break\n");
+        wat.push_str("      loop $continue\n");
+        wat.push_str(&Self::emit_expr(cond, locals)?);
+        wat.push_str("        i32.wrap_i64\n");
+        wat.push_str("        i32.eqz\n");
+        wat.push_str("        br_if $break\n");
+        for stmt in &body.stmts {
+            wat.push_str(&Self::emit_stmt_wat(stmt, locals)?);
+        }
+        wat.push_str("        br $continue\n");
+        wat.push_str("      end\n");
+        wat.push_str("    end\n");
+        wat.push_str("    i64.const 0\n");
         Ok(wat)
     }
 
@@ -366,6 +404,11 @@ impl WasmCodeGen {
                         wat.push_str("        drop\n");
                     }
                 }
+            }
+            Statement::While { cond, body, .. } => {
+                wat.push_str(&Self::emit_while(cond, body, locals)?);
+                // emit_while leaves i64.const 0 — drop in statement context
+                wat.push_str("        drop\n");
             }
         }
         Ok(wat)

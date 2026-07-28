@@ -153,7 +153,16 @@ fn format_expr(expr: &Expression) -> String {
                 format!("{}{}", name, parenthesize_args(&args_str))
             }
         }
-        Expression::If { .. } | Expression::Match { .. } => "<expr>".into(),
+        Expression::If { .. } | Expression::Match { .. } | Expression::While { .. } => {
+            "<expr>".into()
+        }
+        Expression::Unary { op, expr, .. } => {
+            let o = match op {
+                UnaryOp::Not => "!",
+                UnaryOp::Neg => "-",
+            };
+            format!("{}{}", o, format_expr(expr))
+        }
     }
 }
 

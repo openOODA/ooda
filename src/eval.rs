@@ -1,5 +1,6 @@
 use crate::ast::*;
 use crate::capabilities::{lookup_effect, CapKind};
+// UnaryOp used in eval_expr
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};
@@ -303,6 +304,8 @@ impl Interpreter {
             } else {
                 return Ok(Value::Bool(false));
             }
+        } else if name == ".is_err" {
+            return Ok(Value::Bool(matches!(args.get(0), Some(Value::Err(_)))));
         } else if name == ".to_lowercase" {
             if let Some(Value::String(s)) = args.get(0) {
                 return Ok(Value::String(s.to_lowercase()));
@@ -495,6 +498,15 @@ impl Interpreter {
                 Statement::Expr(expr, _) => {
                     self.eval_expr(expr, env)?;
                 }
+                Statement::While { cond, body, .. } => {
+                    loop {
+                        let c = self.eval_expr(cond, env)?;
+                        if c != Value::Bool(true) {
+                            break;
+                        }
+                        self.eval_block(body, env)?;
+                    }
+                }
             }
         }
 
@@ -539,6 +551,25 @@ impl Interpreter {
                 } else {
                     Ok(res)
                 }
+            }
+            Expression::Unary { op, expr, .. } => {
+                let v = self.eval_expr(expr, env)?;
+                match (op, v) {
+                    (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+                    (UnaryOp::Neg, Value::Int(n)) => Ok(Value::Int(-n)),
+                    (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
+                    (op, other) => Err(anyhow!("Invalid unary {:?} on {:?}", op, other)),
+                }
+            }
+            Expression::While { cond, body, .. } => {
+                loop {
+                    let c = self.eval_expr(cond, env)?;
+                    if c != Value::Bool(true) {
+                        break;
+                    }
+                    self.eval_block(body, env)?;
+                }
+                Ok(Value::Void)
             }
             Expression::If { cond, then_branch, else_branch, .. } => {
                 let cond_val = self.eval_expr(cond, env)?;

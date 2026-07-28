@@ -93,10 +93,41 @@ impl Parser {
             let span = self.last_span();
             let path = match self.advance() {
                 Token::StringLit(s) => s,
+                // `import std::crypto;` → resolve as crypto.oo under OODA_STD
+                Token::Ident(first) => {
+                    let mut parts = vec![first];
+                    while self.peek() == &Token::Colon {
+                        // could be :: 
+                        self.advance();
+                        if self.peek() != &Token::Colon {
+                            let (l, c) = self.loc();
+                            return Err(anyhow!("Expected `::` in import path at {}:{}", l, c));
+                        }
+                        self.advance();
+                        match self.advance() {
+                            Token::Ident(seg) => parts.push(seg),
+                            other => {
+                                let (l, c) = self.loc();
+                                return Err(anyhow!(
+                                    "Expected identifier in import path at {}:{}, found {:?}",
+                                    l,
+                                    c,
+                                    other
+                                ));
+                            }
+                        }
+                    }
+                    // std::crypto → crypto.oo (std is a search root)
+                    if parts.len() >= 2 && parts[0] == "std" {
+                        format!("{}.oo", parts[1..].join("/"))
+                    } else {
+                        format!("{}.oo", parts.join("/"))
+                    }
+                }
                 other => {
                     let (l, c) = self.loc();
                     return Err(anyhow!(
-                        "Expected string path after import at {}:{}, found {:?}",
+                        "Expected string path or module path after import at {}:{}, found {:?}",
                         l,
                         c,
                         other
@@ -286,6 +317,8 @@ impl Parser {
                 stmts.push(self.parse_let_stmt()?);
             } else if self.peek() == &Token::Return {
                 stmts.push(self.parse_return_stmt()?);
+            } else if self.peek() == &Token::While {
+                stmts.push(self.parse_while_stmt()?);
             } else {
                 let expr = self.parse_expression()?;
                 // Assignment: `name = expr;` (Token::Eq, not ==)
@@ -361,6 +394,43 @@ impl Parser {
         };
         self.consume(Token::Semi)?;
         Ok(Statement::Return(expr, self.last_span()))
+    }
+
+    fn parse_while_stmt(&mut self) -> Result<Statement> {
+        self.consume(Token::While)?;
+        let span = self.last_span();
+        let cond = self.parse_expression()?;
+        let body = self.parse_block()?;
+        Ok(Statement::While { cond, body, span })
+    }
+
+    /// `if cond { ... } else if ... else { ... }`
+    fn parse_if_expr(&mut self) -> Result<Expression> {
+        self.consume(Token::If)?;
+        let span = self.last_span();
+        let cond = self.parse_expression()?;
+        let then_branch = self.parse_block()?;
+        let else_branch = if self.peek() == &Token::Else {
+            self.advance();
+            if self.peek() == &Token::If {
+                // else if → nested if as a block tail expression
+                let nested = self.parse_if_expr()?;
+                Some(Block {
+                    stmts: vec![],
+                    expr: Some(Box::new(nested)),
+                })
+            } else {
+                Some(self.parse_block()?)
+            }
+        } else {
+            None
+        };
+        Ok(Expression::If {
+            cond: Box::new(cond),
+            then_branch,
+            else_branch,
+            span,
+        })
     }
 
     fn parse_expression(&mut self) -> Result<Expression> {
@@ -510,21 +580,27 @@ impl Parser {
                     other => { let (l,c)=self.loc(); Err(anyhow!("Expected number after '-' at {}:{}, found {:?}", l, c, other)) },
                 }
             }
-            Token::If => {
+            Token::If => self.parse_if_expr(),
+            Token::Exclamation => {
                 self.advance();
+                let span = self.last_span();
+                // Unary ! binds tight: !expr
+                let inner = self.parse_primary_or_call()?;
+                Ok(Expression::Unary {
+                    op: UnaryOp::Not,
+                    expr: Box::new(inner),
+                    span,
+                })
+            }
+            Token::While => {
+                self.advance();
+                let span = self.last_span();
                 let cond = self.parse_expression()?;
-                let then_branch = self.parse_block()?;
-                let else_branch = if self.peek() == &Token::Else {
-                    self.advance();
-                    Some(self.parse_block()?)
-                } else {
-                    None
-                };
-                Ok(Expression::If {
+                let body = self.parse_block()?;
+                Ok(Expression::While {
                     cond: Box::new(cond),
-                    then_branch,
-                    else_branch,
-                    span: self.last_span(),
+                    body,
+                    span,
                 })
             }
             Token::Match => {

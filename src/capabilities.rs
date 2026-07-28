@@ -220,6 +220,10 @@ impl CapabilityChecker {
                 Statement::Assign { value, .. } => Self::check_expr(value, func, funcs)?,
                 Statement::Return(Some(expr), _) => Self::check_expr(expr, func, funcs)?,
                 Statement::Expr(expr, _) => Self::check_expr(expr, func, funcs)?,
+                Statement::While { cond, body, .. } => {
+                    Self::check_expr(cond, func, funcs)?;
+                    Self::check_block(body, func, funcs)?;
+                }
                 Statement::Return(None, _) => {}
             }
         }
@@ -342,6 +346,11 @@ impl CapabilityChecker {
                 for arm in arms {
                     Self::check_expr(&arm.body, func, funcs)?;
                 }
+            }
+            Expression::Unary { expr, .. } => Self::check_expr(expr, func, funcs)?,
+            Expression::While { cond, body, .. } => {
+                Self::check_expr(cond, func, funcs)?;
+                Self::check_block(body, func, funcs)?;
             }
             Expression::Literal(_, _) | Expression::Variable(_, _) => {}
         }

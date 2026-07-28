@@ -89,6 +89,22 @@ pub enum Expression {
         arms: Vec<MatchArm>,
         span: Span,
     },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expression>,
+        span: Span,
+    },
+    While {
+        cond: Box<Expression>,
+        body: Block,
+        span: Span,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum UnaryOp {
+    Not,
+    Neg,
 }
 
 impl Expression {
@@ -101,7 +117,9 @@ impl Expression {
             | Expression::Binary { span: s, .. }
             | Expression::Call { span: s, .. }
             | Expression::If { span: s, .. }
-            | Expression::Match { span: s, .. } => *s,
+            | Expression::Match { span: s, .. }
+            | Expression::Unary { span: s, .. }
+            | Expression::While { span: s, .. } => *s,
         }
     }
 }
@@ -136,6 +154,11 @@ pub enum Statement {
     },
     Return(Option<Expression>, Span),
     Expr(Expression, Span),
+    While {
+        cond: Expression,
+        body: Block,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
