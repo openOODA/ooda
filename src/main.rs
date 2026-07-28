@@ -5,6 +5,8 @@ mod eval;
 mod diagnostics;
 mod fmt;
 mod outline;
+mod capabilities;
+mod codegen;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -15,6 +17,8 @@ use lexer::Lexer;
 use parser::Parser;
 use eval::Interpreter;
 use diagnostics::AiDiagnostic;
+use capabilities::CapabilityChecker;
+use codegen::LlvmCodeGen;
 
 #[derive(ClapParser)]
 #[command(name = "ooda")]
@@ -43,6 +47,9 @@ enum Commands {
         /// Produce optimized release build
         #[arg(long)]
         release: bool,
+        /// Output LLVM IR text file (.ll)
+        #[arg(long)]
+        emit_llvm: bool,
     },
     /// Run inline verify test blocks and contracts
     Test {
@@ -114,6 +121,18 @@ fn main() -> Result<()> {
                 }
             };
 
+            // Capability Security Verifier
+            if let Err(e) = CapabilityChecker::check_program(&program) {
+                if json_errors {
+                    AiDiagnostic::new("CapabilitySecurityViolation", &file, 1, 1, format!("{}", e), "Function attempts I/O without receiving explicit capability token handle.")
+                        .with_fix("Grant Capability Token", "Pass &NetCap or &FsCap in parameter list.")
+                        .print_json();
+                } else {
+                    eprintln!("Security Error: {}", e);
+                }
+                std::process::exit(1);
+            }
+
             let mut interpreter = Interpreter::new(program);
             if let Err(e) = interpreter.execute_all() {
                 if json_errors {
@@ -126,9 +145,24 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Build { file, release } => {
-            println!("🔨 [openOODA LLVM Compiler] Building {} (release={})", file.display(), release);
-            println!("   Backend: Native LLVM IR CodeGen pipeline engaged.");
+        Commands::Build { file, release, emit_llvm } => {
+            let code = fs::read_to_string(&file)?;
+            let mut lexer = Lexer::new(&code);
+            let tokens = lexer.tokenize()?;
+            let mut parser = Parser::new(tokens);
+            let program = parser.parse_program()?;
+
+            CapabilityChecker::check_program(&program)?;
+
+            let llvm_ir = LlvmCodeGen::emit_llvm_ir(&program);
+
+            let out_ll = file.with_extension("ll");
+            fs::write(&out_ll, &llvm_ir)?;
+
+            println!("🔨 [openOODA LLVM Compiler] Compiled {} -> {} (release={})", file.display(), out_ll.display(), release);
+            if emit_llvm {
+                println!("\n--- Generated LLVM IR ---\n{}", llvm_ir);
+            }
         }
         Commands::Test { file, fuzz } => {
             let code = fs::read_to_string(&file)
@@ -139,6 +173,8 @@ fn main() -> Result<()> {
 
             let mut parser = Parser::new(tokens);
             let program = parser.parse_program()?;
+
+            CapabilityChecker::check_program(&program)?;
 
             let mut interpreter = Interpreter::new(program);
             println!("🧪 [openOODA Test Runner] Running contract verify blocks for {} (fuzz={})", file.display(), fuzz);
