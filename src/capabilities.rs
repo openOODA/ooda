@@ -150,6 +150,23 @@ pub const EFFECT_BUILTINS: &[EffectBuiltin] = &[
         requires: CapKind::Env,
         receiver_is_cap: true,
     },
+    // Sealed stdlib internals (callable from .oo but require a SysCap because
+    // they spawn threads or invoke out-of-process runtimes).
+    EffectBuiltin {
+        name: "async_spawn_internal",
+        requires: CapKind::Sys,
+        receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: "async_join_internal",
+        requires: CapKind::Sys,
+        receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: "python_embed_internal",
+        requires: CapKind::Sys,
+        receiver_is_cap: false,
+    },
 ];
 
 pub fn lookup_effect(name: &str) -> Option<&'static EffectBuiltin> {

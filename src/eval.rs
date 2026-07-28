@@ -1,10 +1,45 @@
 use crate::ast::*;
+use crate::capabilities::{lookup_effect, CapKind};
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};
 use hmac::{Hmac, Mac};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Which capability tokens a function declares in its parameter list.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CapSet {
+    pub net: bool,
+    pub fs: bool,
+    pub sys: bool,
+    pub env: bool,
+}
+
+impl CapSet {
+    fn from_params(func: &FunctionDecl) -> Self {
+        let mut s = CapSet::default();
+        for p in &func.params {
+            match p.param_type {
+                Type::NetCap => s.net = true,
+                Type::FsCap => s.fs = true,
+                Type::SysCap => s.sys = true,
+                Type::EnvCap => s.env = true,
+                _ => {}
+            }
+        }
+        s
+    }
+
+    fn has(&self, k: CapKind) -> bool {
+        match k {
+            CapKind::Net => self.net,
+            CapKind::Fs => self.fs,
+            CapKind::Sys => self.sys,
+            CapKind::Env => self.env,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -36,14 +71,21 @@ impl std::fmt::Display for Value {
 pub struct Interpreter {
     functions: HashMap<String, FunctionDecl>,
     globals: HashMap<String, Value>,
+    func_caps: HashMap<String, CapSet>,
+    current_func: Option<String>,
+    /// Live OS threads spawned by `async_spawn_internal`. Keyed by numeric handle id.
+    threads: HashMap<u64, std::thread::JoinHandle<String>>,
+    next_thread_id: u64,
 }
 
 impl Interpreter {
     pub fn new(program: Program) -> Self {
         let mut functions = HashMap::new();
+        let mut func_caps = HashMap::new();
         for item in program.items {
             match item {
                 Item::Function(func) => {
+                    func_caps.insert(func.name.clone(), CapSet::from_params(&func));
                     functions.insert(func.name.clone(), func);
                 }
                 Item::TypeAlias(..) => {}
@@ -52,6 +94,10 @@ impl Interpreter {
         Self {
             functions,
             globals: HashMap::new(),
+            func_caps,
+            current_func: None,
+            threads: HashMap::new(),
+            next_thread_id: 1,
         }
     }
 
@@ -192,6 +238,33 @@ impl Interpreter {
     }
 
     pub fn call_function(&mut self, name: &str, args: Vec<Value>, caller_env: &mut HashMap<String, Value>) -> Result<Value> {
+        // ------------------------------------------------------------------
+        // Runtime capability gate (default-deny at the point of action).
+        // Even if a caller bypasses the static CapabilityChecker, the
+        // interpreter refuses to invoke a sealed effectful builtin unless
+        // the enclosing function declared the required capability token in
+        // its parameter list.
+        // ------------------------------------------------------------------
+        if let Some(effect) = lookup_effect(name) {
+            let caller = self
+                .current_func
+                .clone()
+                .unwrap_or_else(|| "<top-level>".to_string());
+            let caps = self
+                .func_caps
+                .get(&caller)
+                .copied()
+                .unwrap_or_default();
+            if !caps.has(effect.requires) {
+                return Err(anyhow!(
+                    "Runtime Security Capability Violation: function '{}' invoked sealed effect '{}' without holding the required {} token. Default-deny enforced at runtime.",
+                    caller,
+                    name,
+                    effect.requires.type_name()
+                ));
+            }
+        }
+
         // Built-in functions
         if name == "println" {
             for arg in &args {
@@ -268,15 +341,61 @@ impl Interpreter {
             return Ok(Value::String(hex_hash));
         } else if name == "async_spawn_internal" {
             let task_name = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-            let handle = format!("task_handle_{}", task_name);
-            return Ok(Value::String(handle));
+            let id = self.next_thread_id;
+            self.next_thread_id += 1;
+            // Real OS thread — does work and returns a result that
+            // async_join_internal can collect. This is no longer a fake
+            // handle string.
+            let handle = std::thread::Builder::new()
+                .name(format!("ooda-{}", task_name))
+                .spawn(move || {
+                    // Minimal real work: yield so the OS scheduler runs it,
+                    // then return the task name as the joined result.
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    format!("task_done:{}", task_name)
+                })
+                .map_err(|e| anyhow!("async_spawn_internal: thread spawn failed: {}", e))?;
+            self.threads.insert(id, handle);
+            return Ok(Value::String(format!("thread#{}", id)));
         } else if name == "async_join_internal" {
             let handle = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-            return Ok(Value::Ok(Box::new(Value::String(format!("joined_{}", handle)))));
+            let id: u64 = match handle.strip_prefix("thread#").and_then(|s| s.parse().ok()) {
+                Some(n) => n,
+                None => {
+                    return Ok(Value::Err(Box::new(Value::String(format!(
+                        "async_join_internal: malformed handle '{}'",
+                        handle
+                    )))))
+                }
+            };
+            let join = match self.threads.remove(&id) {
+                Some(j) => j,
+                None => {
+                    return Ok(Value::Err(Box::new(Value::String(format!(
+                        "async_join_internal: no live thread with id {}",
+                        id
+                    )))))
+                }
+            };
+            return match join.join() {
+                Ok(s) => Ok(Value::Ok(Box::new(Value::String(s)))),
+                Err(_) => Ok(Value::Err(Box::new(Value::String(format!(
+                    "async_join_internal: worker thread {} panicked",
+                    id
+                ))))),
+            };
         } else if name == "python_embed_internal" {
             let model = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-            let handle = format!("pytorch_model_handle_{}", model);
-            return Ok(Value::Ok(Box::new(Value::String(handle))));
+            // Honest: this alpha does not embed a Python interpreter. The
+            // previous build returned a fake handle string; we now surface
+            // the gap as a runtime Err so callers don't believe a model
+            // was loaded.
+            return Ok(Value::Err(Box::new(Value::String(format!(
+                "python_embed_internal: not implemented in this alpha (model requested: '{}'). \
+                 The std::python bridge requires a Python interpreter binding that is not yet wired \
+                 into the runtime. See openooda-std/python.oo.",
+                model
+            )))));
         } else if name == "Ok" {
             let val = args.get(0).cloned().unwrap_or(Value::Void);
             return Ok(Value::Ok(Box::new(val)));
@@ -306,7 +425,11 @@ impl Interpreter {
         }
 
         // 2. Evaluate Function Body
-        let return_val = self.eval_block(&func.body, &mut local_env)?;
+        let prev_func = self.current_func.take();
+        self.current_func = Some(name.to_string());
+        let body_result = self.eval_block(&func.body, &mut local_env);
+        self.current_func = prev_func;
+        let return_val = body_result?;
 
         // 3. Evaluate Postconditions (ensures)
         if !func.ensures.is_empty() {
@@ -467,5 +590,80 @@ impl Interpreter {
             }
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(src: &str) -> Program {
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize().expect("lex");
+        let mut parser = crate::parser::Parser::new(tokens);
+        parser.parse_program().expect("parse")
+    }
+
+    #[test]
+    fn runtime_capability_blocks_syscall_without_cap() {
+        // The static checker would also catch this, but the runtime check
+        // is the last line of defense: it must fire even if static checks
+        // are bypassed.
+        let prog = parse(
+            r#"
+            pub fn rogue() {
+                let h = async_spawn_internal("x");
+            }
+            pub fn main() {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("rogue".into());
+        let res = interp.call_function("async_spawn_internal", vec![Value::String("x".into())], &mut HashMap::new());
+        assert!(res.is_err());
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("Runtime Security Capability Violation"), "got: {}", msg);
+        assert!(msg.contains("&SysCap"), "got: {}", msg);
+    }
+
+    #[test]
+    fn runtime_capability_allows_with_correct_cap() {
+        let prog = parse(
+            r#"
+            pub fn ok(sys: &SysCap) -> String {
+                return async_spawn_internal("y");
+            }
+            pub fn main() {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("ok".into());
+        let res = interp.call_function(
+            "async_spawn_internal",
+            vec![Value::String("y".into())],
+            &mut HashMap::new(),
+        );
+        assert!(res.is_ok(), "expected ok, got: {:?}", res);
+    }
+
+    #[test]
+    fn runtime_capability_wrong_kind_still_blocks() {
+        let prog = parse(
+            r#"
+            pub fn wrong(net: &NetCap) {
+                let h = async_spawn_internal("z");
+            }
+            pub fn main() {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("wrong".into());
+        let res = interp.call_function(
+            "async_spawn_internal",
+            vec![Value::String("z".into())],
+            &mut HashMap::new(),
+        );
+        assert!(res.is_err());
+        assert!(format!("{}", res.unwrap_err()).contains("&SysCap"));
     }
 }
