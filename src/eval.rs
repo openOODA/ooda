@@ -50,6 +50,8 @@ pub enum Value {
     Void,
     Ok(Box<Value>),
     Err(Box<Value>),
+    Some(Box<Value>),
+    None,
     Capability(String),
 }
 
@@ -63,6 +65,8 @@ impl std::fmt::Display for Value {
             Value::Void => write!(f, "()"),
             Value::Ok(v) => write!(f, "Ok({})", v),
             Value::Err(e) => write!(f, "Err({})", e),
+            Value::Some(v) => write!(f, "Some({})", v),
+            Value::None => write!(f, "None"),
             Value::Capability(c) => write!(f, "<Capability: {}>", c),
         }
     }
@@ -90,7 +94,7 @@ impl Interpreter {
                     func_caps.insert(func.name.clone(), CapSet::from_params(&func));
                     functions.insert(func.name.clone(), func);
                 }
-                Item::TypeAlias(..) => {}
+                Item::TypeAlias(..) | Item::Import { .. } => {}
             }
         }
         Self {
@@ -405,6 +409,15 @@ impl Interpreter {
         } else if name == "Err" {
             let val = args.get(0).cloned().unwrap_or(Value::Void);
             return Ok(Value::Err(Box::new(val)));
+        } else if name == "Some" {
+            let val = args.get(0).cloned().unwrap_or(Value::Void);
+            return Ok(Value::Some(Box::new(val)));
+        } else if name == "None" {
+            return Ok(Value::None);
+        } else if name == ".is_some" {
+            return Ok(Value::Bool(matches!(args.get(0), Some(Value::Some(_)))));
+        } else if name == ".is_none" {
+            return Ok(Value::Bool(matches!(args.get(0), Some(Value::None))));
         }
 
         let func = self.functions.get(name).cloned()
@@ -609,6 +622,13 @@ impl Interpreter {
                 }
                 true
             }
+            (Pattern::Variant { name, arg }, Value::Some(inner)) if name == "Some" => {
+                if let Some(var_name) = arg {
+                    env.insert(var_name.clone(), *inner.clone());
+                }
+                true
+            }
+            (Pattern::Variant { name, arg: _ }, Value::None) if name == "None" => true,
             _ => false,
         }
     }

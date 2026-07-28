@@ -84,7 +84,28 @@ impl Parser {
             false
         };
 
-        if self.peek() == &Token::Type {
+        if self.peek() == &Token::Import {
+            if is_pub {
+                let (l, c) = self.loc();
+                return Err(anyhow!("`pub import` is not supported at {}:{}", l, c));
+            }
+            self.advance(); // import
+            let span = self.last_span();
+            let path = match self.advance() {
+                Token::StringLit(s) => s,
+                other => {
+                    let (l, c) = self.loc();
+                    return Err(anyhow!(
+                        "Expected string path after import at {}:{}, found {:?}",
+                        l,
+                        c,
+                        other
+                    ));
+                }
+            };
+            self.consume(Token::Semi)?;
+            Ok(Item::Import { path, span })
+        } else if self.peek() == &Token::Type {
             self.advance();
             let name = match self.advance() {
                 Token::Ident(s) => s.clone(),
@@ -532,7 +553,20 @@ impl Parser {
             Token::StringLit(s) => { let sp = self.last_span(); self.advance(); Ok(Expression::Literal(Literal::String(s), sp)) }
             Token::True => { let s = self.last_span(); self.advance(); Ok(Expression::Literal(Literal::Bool(true), s)) }
             Token::False => { let s = self.last_span(); self.advance(); Ok(Expression::Literal(Literal::Bool(false), s)) }
-            Token::Ident(id) => { let s = self.last_span(); self.advance(); Ok(Expression::Variable(id, s)) }
+            Token::Ident(id) => {
+                let s = self.last_span();
+                self.advance();
+                // Bare `None` constructor (no argument list).
+                if id == "None" && self.peek() != &Token::LParen {
+                    return Ok(Expression::Call {
+                        name: "None".into(),
+                        args: vec![],
+                        propagate_err: false,
+                        span: s,
+                    });
+                }
+                Ok(Expression::Variable(id, s))
+            }
             Token::LParen => {
                 self.advance();
                 if self.peek() == &Token::RParen {

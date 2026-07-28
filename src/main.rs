@@ -18,6 +18,7 @@ mod replay;
 mod migrate;
 
 mod codegen_wasm;
+mod loader;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -32,11 +33,13 @@ use capabilities::CapabilityChecker;
 use typecheck::TypeChecker;
 use codegen::LlvmCodeGen;
 use codegen_wasm::WasmCodeGen;
+use loader::load_program;
+use ast::Program;
 
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.18.0-alpha")]
+#[command(version = "0.19.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -164,6 +167,14 @@ enum Commands {
         #[arg(long)]
         fuzz: bool,
     },
+    /// Typecheck + capability check without executing (AI / CI gate)
+    Check {
+        /// Path to the .oo file
+        file: PathBuf,
+        /// Output machine-readable JSON errors
+        #[arg(long)]
+        json_errors: bool,
+    },
     /// Apply surgical AST JSON diff patch to source code
     Patch {
         /// Path to the .oo file
@@ -235,103 +246,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Run { file, json_errors } => {
-            let code = match fs::read_to_string(&file) {
-                Ok(c) => c,
-                Err(e) => {
-                    if json_errors {
-                        AiDiagnostic::new("FileNotFound", &file, 1, 1, format!("{}", e), "Ensure the file path exists and is readable.").print_json();
-                    } else {
-                        eprintln!("Error: Failed to read file '{}': {}", file.display(), e);
-                    }
-                    std::process::exit(1);
-                }
-            };
-
-            let mut lexer = Lexer::new(&code);
-            let tokens = match lexer.tokenize() {
-                Ok(t) => t,
-                Err(e) => {
-                    let msg = format!("{}", e);
-                    let (line, col) = parse_loc(&msg);
-                    if json_errors {
-                        AiDiagnostic::new("LexerError", &file, line, col, msg, "Syntax error encountered during tokenization.")
-                            .with_fix("Fix syntax token", "Ensure brackets, quotes, and operators are balanced.")
-                            .print_json();
-                    } else {
-                        eprintln!("Lexer Error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
-            };
-
-            let mut parser = Parser::new(tokens);
-            let program = match parser.parse_program() {
+            let program = match load_and_analyze(&file, json_errors) {
                 Ok(p) => p,
-                Err(e) => {
-                    let msg = format!("{}", e);
-                    let (line, col) = parse_loc(&msg);
-                    if json_errors {
-                        AiDiagnostic::new("ParserError", &file, line, col, msg, "Structure error encountered during AST parsing.")
-                            .with_fix("Fix AST structure", "Check function headers, contracts, and statement semicolons.")
-                            .print_json();
-                    } else {
-                        eprintln!("Parser Error: {}", e);
-                    }
-                    std::process::exit(1);
-                }
+                Err(code) => std::process::exit(code),
             };
-
-            // Capability Security Verifier
-            if let Err(e) = CapabilityChecker::check_program(&program) {
-                let msg = format!("{}", e);
-                let (line, col) = parse_loc(&msg);
-                if json_errors {
-                    AiDiagnostic::new("CapabilitySecurityViolation", &file, line, col, msg.clone(), "Function attempts I/O without receiving explicit capability token handle.")
-                        .with_fix(
-                            "Grant Capability Token",
-                            "fn f(net: &NetCap, ...) { ... fetch(url); }  // pass net from main()",
-                        )
-                        .print_json();
-                } else {
-                    eprintln!("Security Error: {}", e);
-                }
-                std::process::exit(1);
-            }
-
-            // Static type checker
-            if let Err(e) = TypeChecker::check_program(&program) {
-                let msg = format!("{}", e);
-                let (line, col) = parse_loc(&msg);
-                if json_errors {
-                    let fix = if msg.contains("must-use") || msg.contains("unused Result") {
-                        (
-                            "Handle Result/Option",
-                            "let r = f(); match r { Ok(v) => ..., Err(e) => ... }",
-                        )
-                    } else if msg.contains("non-exhaustive match") {
-                        (
-                            "Cover all variants",
-                            "match r { Ok(v) => ..., Err(e) => ... }  // or `_ => ...`",
-                        )
-                    } else if msg.contains("immutable") {
-                        (
-                            "Use let mut",
-                            "let mut x = ...; x = new_value;",
-                        )
-                    } else {
-                        (
-                            "Fix types",
-                            "Ensure operands and annotations agree (Int/Float/String/Bool/caps).",
-                        )
-                    };
-                    AiDiagnostic::new("TypeError", &file, line, col, msg, "Static type mismatch detected before execution.")
-                        .with_fix(fix.0, fix.1)
-                        .print_json();
-                } else {
-                    eprintln!("Type Error: {}", e);
-                }
-                std::process::exit(1);
-            }
 
             let mut interpreter = Interpreter::new(program);
             if let Err(e) = interpreter.execute_all() {
@@ -350,16 +268,20 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Commands::Check { file, json_errors } => {
+            match load_and_analyze(&file, json_errors) {
+                Ok(_) => {
+                    println!("✓ [openOODA check] {} — parse, capabilities, and types OK", file.display());
+                }
+                Err(code) => std::process::exit(code),
+            }
+        }
         Commands::Bench { file } => {
             bench::run_empirical_verification_suite(&file)?;
         }
         Commands::Build { file, release: _, emit_llvm, target } => {
-            let code = fs::read_to_string(&file)?;
-            let mut lexer = Lexer::new(&code);
-            let tokens = lexer.tokenize()?;
-            let mut parser = Parser::new(tokens);
-            let program = parser.parse_program()?;
-
+            let program = load_program(&file)
+                .with_context(|| format!("Failed to load '{}'", file.display()))?;
             CapabilityChecker::check_program(&program)?;
             TypeChecker::check_program(&program)?;
 
@@ -423,15 +345,8 @@ fn main() -> Result<()> {
             }
         }
         Commands::Test { file, fuzz } => {
-            let code = fs::read_to_string(&file)
-                .with_context(|| format!("Failed to read file '{}'", file.display()))?;
-
-            let mut lexer = Lexer::new(&code);
-            let tokens = lexer.tokenize()?;
-
-            let mut parser = Parser::new(tokens);
-            let program = parser.parse_program()?;
-
+            let program = load_program(&file)
+                .with_context(|| format!("Failed to load '{}'", file.display()))?;
             CapabilityChecker::check_program(&program)?;
             TypeChecker::check_program(&program)?;
 
@@ -506,6 +421,99 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Load .oo (with imports), then capability + type check.
+/// On failure prints diagnostics and returns process exit code.
+fn load_and_analyze(file: &std::path::Path, json_errors: bool) -> Result<Program, i32> {
+    let program = match load_program(file) {
+        Ok(p) => p,
+        Err(e) => {
+            let msg = format!("{}", e);
+            let (line, col) = parse_loc(&msg);
+            if json_errors {
+                AiDiagnostic::new(
+                    "LoadError",
+                    file,
+                    line,
+                    col,
+                    msg,
+                    "Failed to load .oo source or resolve import.",
+                )
+                .with_fix(
+                    "Fix import path",
+                    "import \"module.oo\";  // relative, OODA_PATH, or OODA_STD",
+                )
+                .print_json();
+            } else {
+                eprintln!("Load Error: {}", e);
+            }
+            return Err(1);
+        }
+    };
+
+    if let Err(e) = CapabilityChecker::check_program(&program) {
+        let msg = format!("{}", e);
+        let (line, col) = parse_loc(&msg);
+        if json_errors {
+            AiDiagnostic::new(
+                "CapabilitySecurityViolation",
+                file,
+                line,
+                col,
+                msg.clone(),
+                "Function attempts I/O without receiving explicit capability token handle.",
+            )
+            .with_fix(
+                "Grant Capability Token",
+                "fn f(net: &NetCap, ...) { ... fetch(url); }  // pass net from main()",
+            )
+            .print_json();
+        } else {
+            eprintln!("Security Error: {}", e);
+        }
+        return Err(1);
+    }
+
+    if let Err(e) = TypeChecker::check_program(&program) {
+        let msg = format!("{}", e);
+        let (line, col) = parse_loc(&msg);
+        if json_errors {
+            let fix = if msg.contains("must-use") || msg.contains("unused Result") {
+                (
+                    "Handle Result/Option",
+                    "let r = f(); match r { Ok(v) => ..., Err(e) => ... }",
+                )
+            } else if msg.contains("non-exhaustive match") {
+                (
+                    "Cover all variants",
+                    "match r { Ok(v) => ..., Err(e) => ... }  // or `_ => ...`",
+                )
+            } else if msg.contains("immutable") {
+                ("Use let mut", "let mut x = ...; x = new_value;")
+            } else {
+                (
+                    "Fix types",
+                    "Ensure operands and annotations agree (Int/Float/String/Bool/caps).",
+                )
+            };
+            AiDiagnostic::new(
+                "TypeError",
+                file,
+                line,
+                col,
+                msg,
+                "Static type mismatch detected before execution.",
+            )
+            .with_fix(fix.0, fix.1)
+            .print_json();
+        } else {
+            eprintln!("Type Error: {}", e);
+        }
+        return Err(1);
+    }
+
+    Ok(program)
 }
 
 enum NativeLinkResult {

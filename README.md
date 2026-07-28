@@ -1,12 +1,14 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.18.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.19.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) is a systems-oriented, guard-rail-first
 language for capability security, self-verification, and AI co-authoring.
-This repository is the compiler / interpreter / CLI toolchain.
 
-> **DESIGN.md is the architectural north star and is not rewritten to match alpha gaps.**
-> This README states what the binary actually does today.
+> **DESIGN.md is the architectural north star (do not rewrite it to match alpha gaps).**  
+> This README states what the binary does **today**.
+
+**Language rule of thumb:** *userland, std, tests, and examples are `.oo`.*  
+The **compiler bootstrap** remains Rust until self-hosting is real (normal for new languages).
 
 ---
 
@@ -18,34 +20,41 @@ cd ooda
 cargo build --release
 
 ./target/release/ooda run examples/hello.oo
-./target/release/ooda test examples/math_contract.oo
-./target/release/ooda build examples/int_main.oo --emit-llvm
+./target/release/ooda check examples/hello.oo
+./target/release/ooda run examples/import_lib.oo
+./target/release/ooda run examples/option_match.oo
+./target/release/ooda build examples/float_main.oo --emit-llvm
 ./target/release/ooda build --target wasm examples/int_main.oo
 ```
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.18.0-alpha
+ooda --version   # 0.19.0-alpha
+```
+
+Import the std library (`.oo` modules):
+
+```bash
+export OODA_STD=/path/to/openooda-std
+# import "crypto.oo";
 ```
 
 ---
 
-## What's real in v0.18.0-alpha
+## What's real in v0.19.0-alpha
 
 | Capability | Status |
 |---|---|
-| Lexer / parser / AST + spans | Real |
-| Interpreter (`ooda run`) | Real |
-| `requires` / `ensures` / `verify` | Real; **call-site line:col** on contract failures |
-| Sealed caps + runtime gate | Real |
-| Static type checker | Real |
-| Must-use Result/Option | Real |
-| `let` / `let mut` assignment | Real |
-| **Exhaustive `match` on Result/Option** | Real (static) |
-| Integer LLVM IR (+ `if`) | Real; **native link only via clang** (never gcc on `.ll`) |
-| Integer WAT + `println(Int)` + `if` | Real subset |
-| `--json-errors` actionable fixes | Real (must-use / match / mut / caps) |
-| outline / reflect / context / patch | Real (limited) |
+| Interpreter + contracts + verify | Real |
+| Sealed caps + runtime gate + **cap-handle call-graph** | Real (forged cap args denied) |
+| Typecheck, must-use, let mut, refinements | Real |
+| Exhaustive match Result/**Option** | Real |
+| **Some / None** | Real |
+| **`import "file.oo"`** multi-file modules | Real (`OODA_PATH` / `OODA_STD`) |
+| **`ooda check`** (parse+caps+types, no run) | Real |
+| LLVM Int/Bool/**Float** IR (+ if); clang link | Real (IR-only without clang) |
+| WAT Int subset (+ if, println) | Real subset |
+| AI `--json-errors` with spans + fixes | Real |
 
 ## Not implemented (fail non-zero)
 
@@ -53,14 +62,14 @@ ooda --version   # 0.18.0-alpha
 |---|---|
 | `ooda lsp` / `migrate` / `replay` | Error |
 | `ooda pkg --install` | Error |
-| Full WASM/WASI | Subset WAT only |
-| Python / PyTorch | Honest `Err` |
-| Native binary without clang | IR-only (install clang to link) |
+| Full WASM/WASI product | Subset WAT only |
+| Python / PyTorch bridge | Honest `Err` |
+| Self-hosted compiler in `.oo` | Prototypes only |
 
 ---
 
 ## Hygiene
 
-Do not commit `*.ll`, `*.wat`, `dist/`, release tarballs. Use `scripts/release.sh` + GitHub Releases.
+Do not commit `*.ll`, `*.wat`, `dist/`, or release tarballs.
 
-Related: `spec`, `qa`, `std`, `vscode`, `tree-sitter`, `openOODA.github.io`.
+Related: `spec`, `qa`, `std` (`.oo`), `vscode`, `tree-sitter`, `openOODA.github.io`.

@@ -168,6 +168,8 @@ pub struct Parameter {
 pub enum Item {
     Function(FunctionDecl),
     TypeAlias(String, Type),
+    /// `import "path/to/module.oo";` — load another .oo source (userland modules).
+    Import { path: String, span: Span },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

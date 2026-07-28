@@ -171,6 +171,17 @@ impl TypeChecker {
                 Ty::Result(Box::new(Ty::Unknown), Box::new(Ty::Unknown)),
             ),
         );
+        tc.functions.insert(
+            "Some".into(),
+            (
+                vec![Ty::Unknown],
+                Ty::Option(Box::new(Ty::Unknown)),
+            ),
+        );
+        tc.functions.insert(
+            "None".into(),
+            (vec![], Ty::Option(Box::new(Ty::Unknown))),
+        );
         // Sealed effects (arg types loosely checked)
         for name in [
             "fetch",
@@ -811,4 +822,35 @@ mod tests {
             err
         );
     }
+
+    #[test]
+    fn accepts_option_some_none_match() {
+        let src = r#"
+            pub fn main() {
+                let o = Some(1);
+                let x = match o {
+                    Some(v) => v,
+                    None => 0,
+                };
+                println(x);
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn rejects_nonexhaustive_option_match() {
+        let src = r#"
+            pub fn main() {
+                let o = Some(1);
+                let x = match o {
+                    Some(v) => v,
+                };
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(err.contains("non-exhaustive") || err.contains("None"), "{}", err);
+    }
+
 }

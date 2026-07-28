@@ -28,6 +28,9 @@ pub fn generate_outline(program: &Program) -> String {
             Item::TypeAlias(name, target_type) => {
                 out.push_str(&format!("type {} = {}\n", name, format_type(target_type)));
             }
+            Item::Import { path, .. } => {
+                out.push_str(&format!("import \"{}\"\n", path));
+            }
             Item::Function(func) => {
                 out.push_str(&format_function(func));
             }

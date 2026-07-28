@@ -177,9 +177,16 @@ pub struct CapabilityChecker;
 
 impl CapabilityChecker {
     pub fn check_program(program: &Program) -> Result<()> {
+        use std::collections::HashMap;
+        let mut funcs: HashMap<String, &FunctionDecl> = HashMap::new();
         for item in &program.items {
             if let Item::Function(func) = item {
-                Self::check_function(func)?;
+                funcs.insert(func.name.clone(), func);
+            }
+        }
+        for item in &program.items {
+            if let Item::Function(func) = item {
+                Self::check_function(func, &funcs)?;
             }
         }
         Ok(())
@@ -189,33 +196,44 @@ impl CapabilityChecker {
         func.params.iter().any(|p| kind.matches_type(&p.param_type))
     }
 
-    fn check_function(func: &FunctionDecl) -> Result<()> {
-        Self::check_block(&func.body, func)?;
+    fn check_function(
+        func: &FunctionDecl,
+        funcs: &std::collections::HashMap<String, &FunctionDecl>,
+    ) -> Result<()> {
+        Self::check_block(&func.body, func, funcs)?;
         if let Some(verify) = &func.verify_block {
             // verify blocks run in a trusted test context but still cannot invent
             // ambient I/O without caps on the function under test.
-            Self::check_block(verify, func)?;
+            Self::check_block(verify, func, funcs)?;
         }
         Ok(())
     }
 
-    fn check_block(block: &Block, func: &FunctionDecl) -> Result<()> {
+    fn check_block(
+        block: &Block,
+        func: &FunctionDecl,
+        funcs: &std::collections::HashMap<String, &FunctionDecl>,
+    ) -> Result<()> {
         for stmt in &block.stmts {
             match stmt {
-                Statement::Let { init, .. } => Self::check_expr(init, func)?,
-                Statement::Assign { value, .. } => Self::check_expr(value, func)?,
-                Statement::Return(Some(expr), _) => Self::check_expr(expr, func)?,
-                Statement::Expr(expr, _) => Self::check_expr(expr, func)?,
+                Statement::Let { init, .. } => Self::check_expr(init, func, funcs)?,
+                Statement::Assign { value, .. } => Self::check_expr(value, func, funcs)?,
+                Statement::Return(Some(expr), _) => Self::check_expr(expr, func, funcs)?,
+                Statement::Expr(expr, _) => Self::check_expr(expr, func, funcs)?,
                 Statement::Return(None, _) => {}
             }
         }
         if let Some(expr) = &block.expr {
-            Self::check_expr(expr, func)?;
+            Self::check_expr(expr, func, funcs)?;
         }
         Ok(())
     }
 
-    fn check_expr(expr: &Expression, func: &FunctionDecl) -> Result<()> {
+    fn check_expr(
+        expr: &Expression,
+        func: &FunctionDecl,
+        funcs: &std::collections::HashMap<String, &FunctionDecl>,
+    ) -> Result<()> {
         match expr {
             Expression::Call { name, args, .. } => {
                 if let Some(effect) = lookup_effect(name) {
@@ -258,13 +276,54 @@ impl CapabilityChecker {
                     }
                 }
 
+                // Interprocedural: capability parameters must be real handles from the caller
+                // (not forged literals). Call graph integrity for DESIGN default-deny.
+                if let Some(callee) = funcs.get(name) {
+                    for (i, param) in callee.params.iter().enumerate() {
+                        let kind = match param.param_type {
+                            Type::NetCap => Some(CapKind::Net),
+                            Type::FsCap => Some(CapKind::Fs),
+                            Type::SysCap => Some(CapKind::Sys),
+                            Type::EnvCap => Some(CapKind::Env),
+                            _ => None,
+                        };
+                        if let Some(k) = kind {
+                            let span = expr.span();
+                            match args.get(i) {
+                                Some(arg) if Self::expr_is_cap_handle(arg, k, func) => {}
+                                Some(_) => {
+                                    return Err(anyhow!(
+                                        "Security Capability Violation: Function '{}' calls '{}' at line {}, col {} but argument {} is not a live {} handle from the caller's parameter list (capability forgery denied).",
+                                        func.name,
+                                        name,
+                                        span.line,
+                                        span.col,
+                                        i,
+                                        k.type_name()
+                                    ));
+                                }
+                                None => {
+                                    return Err(anyhow!(
+                                        "Security Capability Violation: Function '{}' calls '{}' at line {}, col {} missing required {} argument.",
+                                        func.name,
+                                        name,
+                                        span.line,
+                                        span.col,
+                                        k.type_name()
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 for arg in args {
-                    Self::check_expr(arg, func)?;
+                    Self::check_expr(arg, func, funcs)?;
                 }
             }
             Expression::Binary { left, right, .. } => {
-                Self::check_expr(left, func)?;
-                Self::check_expr(right, func)?;
+                Self::check_expr(left, func, funcs)?;
+                Self::check_expr(right, func, funcs)?;
             }
             Expression::If {
                 cond,
@@ -272,16 +331,16 @@ impl CapabilityChecker {
                 else_branch,
                 ..
             } => {
-                Self::check_expr(cond, func)?;
-                Self::check_block(then_branch, func)?;
+                Self::check_expr(cond, func, funcs)?;
+                Self::check_block(then_branch, func, funcs)?;
                 if let Some(else_b) = else_branch {
-                    Self::check_block(else_b, func)?;
+                    Self::check_block(else_b, func, funcs)?;
                 }
             }
             Expression::Match { expr, arms, .. } => {
-                Self::check_expr(expr, func)?;
+                Self::check_expr(expr, func, funcs)?;
                 for arm in arms {
-                    Self::check_expr(&arm.body, func)?;
+                    Self::check_expr(&arm.body, func, funcs)?;
                 }
             }
             Expression::Literal(_, _) | Expression::Variable(_, _) => {}

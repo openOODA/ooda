@@ -50,11 +50,7 @@ impl LlvmCodeGen {
 
     fn check_type_subset(t: &Type, ctx: &str) -> Result<()> {
         match t {
-            Type::Int | Type::Bool | Type::Void => Ok(()),
-            Type::Float => bail!(
-                "LLVM integer-subset backend does not support Float in '{}'. Use `ooda run` or narrow types to Int.",
-                ctx
-            ),
+            Type::Int | Type::Bool | Type::Void | Type::Float => Ok(()),
             Type::String => bail!(
                 "LLVM integer-subset backend does not support String in '{}'. Use `ooda run` for string programs, or rewrite to Int-only for `ooda build`.",
                 ctx
@@ -103,10 +99,6 @@ impl LlvmCodeGen {
         match expr {
             Expression::Literal(Literal::String(_), _) => bail!(
                 "LLVM integer-subset backend does not support string literals in '{}'. Use `ooda run`.",
-                ctx
-            ),
-            Expression::Literal(Literal::Float(_), _) => bail!(
-                "LLVM integer-subset backend does not support float literals in '{}'.",
                 ctx
             ),
             Expression::Literal(_, _) | Expression::Variable(_, _) => Ok(()),
@@ -193,6 +185,7 @@ impl LlvmCodeGen {
     fn llvm_ty(t: &Type) -> &'static str {
         match t {
             Type::Bool => "i1",
+            Type::Float => "double",
             Type::Void => "void",
             _ => "i64",
         }
@@ -328,9 +321,12 @@ impl LlvmCodeGen {
             Expression::Literal(Literal::Bool(b), _) => {
                 Ok((format!("{}", if *b { 1 } else { 0 }), code, reg, "i1"))
             }
+            Expression::Literal(Literal::Float(f), _) => {
+                Ok((format!("{}", f), code, reg, "double"))
+            }
             Expression::Literal(Literal::Void, _) => Ok(("0".into(), code, reg, "i64")),
-            Expression::Literal(Literal::Float(_), _) | Expression::Literal(Literal::String(_), _) => {
-                bail!("internal: non-integer literal reached LLVM emit")
+            Expression::Literal(Literal::String(_), _) => {
+                bail!("internal: string literal reached LLVM emit")
             }
             Expression::Variable(name, _) => {
                 let vty = locals.get(name).copied().unwrap_or("i64");
@@ -341,11 +337,30 @@ impl LlvmCodeGen {
             }
             Expression::Binary { op, left, right, .. } => {
                 let (l, lc, r1, lty) = Self::emit_expr(left, reg, locals)?;
-                let (r, rc, r2, _rty) = Self::emit_expr(right, r1, locals)?;
+                let (r, rc, r2, rty) = Self::emit_expr(right, r1, locals)?;
                 code.push_str(&lc);
                 code.push_str(&rc);
                 let res = format!("%r{}", r2);
                 reg = r2 + 1;
+
+                let use_float = lty == "double" || rty == "double";
+                if use_float {
+                    let (op_str, out_ty): (&str, &str) = match op {
+                        BinOp::Add => ("fadd double", "double"),
+                        BinOp::Sub => ("fsub double", "double"),
+                        BinOp::Mul => ("fmul double", "double"),
+                        BinOp::Div => ("fdiv double", "double"),
+                        BinOp::Eq => ("fcmp oeq double", "i1"),
+                        BinOp::Neq => ("fcmp one double", "i1"),
+                        BinOp::Lt => ("fcmp olt double", "i1"),
+                        BinOp::Lte => ("fcmp ole double", "i1"),
+                        BinOp::Gt => ("fcmp ogt double", "i1"),
+                        BinOp::Gte => ("fcmp oge double", "i1"),
+                        _ => bail!("LLVM backend: unsupported float operator {:?}", op),
+                    };
+                    code.push_str(&format!("  {} = {} {}, {}\n", res, op_str, l, r));
+                    return Ok((res, code, reg, out_ty));
+                }
 
                 // Promote i1 loads to i64 for arithmetic when needed
                 let (l_i64, r_i64, prep) = if lty == "i1" {
@@ -378,14 +393,7 @@ impl LlvmCodeGen {
                     _ => ("add i64", "i64"),
                 };
 
-                // For comparisons, ensure i64 operands
-                let (ol, or) = if out_ty == "i1" {
-                    (l_i64, r_i64)
-                } else {
-                    (l_i64, r_i64)
-                };
-
-                code.push_str(&format!("  {} = {} {}, {}\n", res, op_str, ol, or));
+                code.push_str(&format!("  {} = {} {}, {}\n", res, op_str, l_i64, r_i64));
                 Ok((res, code, reg, out_ty))
             }
             Expression::Call { name, args, .. } => {
@@ -399,6 +407,11 @@ impl LlvmCodeGen {
                             let z = format!("%r{}", reg);
                             reg += 1;
                             code.push_str(&format!("  {} = zext i1 {} to i64\n", z, val));
+                            z
+                        } else if vty == "double" {
+                            let z = format!("%r{}", reg);
+                            reg += 1;
+                            code.push_str(&format!("  {} = fptosi double {} to i64\n", z, val));
                             z
                         } else {
                             val
