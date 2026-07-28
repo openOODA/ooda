@@ -11,6 +11,7 @@ mod patch;
 mod reflect;
 mod bench;
 mod pkg;
+mod lsp;
 
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
@@ -27,7 +28,7 @@ use codegen::LlvmCodeGen;
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.1.4-alpha")]
+#[command(version = "0.1.5-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -105,6 +106,8 @@ enum Commands {
         #[arg(long)]
         init: Option<String>,
     },
+    /// Start Language Server Protocol daemon for VSCode/Cursor IDEs
+    Lsp,
 }
 
 fn main() -> Result<()> {
@@ -264,8 +267,11 @@ fn main() -> Result<()> {
             } else if let Some(repo) = install {
                 pkg::PackageManager::install(&repo)?;
             } else {
-                println!("📦 openOODA Package Manager v0.1.4-alpha. Use --init or --install.");
+                println!("📦 openOODA Package Manager v0.1.5-alpha. Use --init or --install.");
             }
+        }
+        Commands::Lsp => {
+            lsp::LspDaemon::start()?;
         }
     }
 
