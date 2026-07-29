@@ -74,39 +74,72 @@ impl Ty {
         matches!(self, Ty::Int | Ty::Float)
     }
 
-    /// Fail-closed unify: `Unknown` only unifies with `Unknown` (inference hole,
-    /// not a wildcard). `Custom` only matches same name or a named struct alias.
-    fn unifyable(a: &Ty, b: &Ty) -> bool {
-        if a == b {
+    pub fn normalize(&self, aliases: &HashMap<String, Ty>) -> Ty {
+        self.normalize_with_depth(aliases, 0)
+    }
+
+    fn normalize_with_depth(&self, aliases: &HashMap<String, Ty>, depth: usize) -> Ty {
+        if depth > 10 {
+            return self.clone();
+        }
+        match self {
+            Ty::Custom(name) => {
+                if let Some(target) = aliases.get(name) {
+                    target.normalize_with_depth(aliases, depth + 1)
+                } else {
+                    Ty::Custom(name.clone())
+                }
+            }
+            Ty::Option(inner) => Ty::Option(Box::new(inner.normalize_with_depth(aliases, depth + 1))),
+            Ty::Result(ok, err) => Ty::Result(
+                Box::new(ok.normalize_with_depth(aliases, depth + 1)),
+                Box::new(err.normalize_with_depth(aliases, depth + 1)),
+            ),
+            Ty::List(inner) => Ty::List(Box::new(inner.normalize_with_depth(aliases, depth + 1))),
+            Ty::Struct { name, fields } => Ty::Struct {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), t.normalize_with_depth(aliases, depth + 1)))
+                    .collect(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    pub fn unifyable_with_aliases(a: &Ty, b: &Ty, aliases: &HashMap<String, Ty>) -> bool {
+        let norm_a = a.normalize(aliases);
+        let norm_b = b.normalize(aliases);
+        if norm_a == norm_b {
             return true;
         }
-        // Unknown is not a soft-accept wildcard (was fail-open theater).
-        if matches!(a, Ty::Unknown) && matches!(b, Ty::Unknown) {
+        if matches!(norm_a, Ty::Unknown) && matches!(norm_b, Ty::Unknown) {
             return true;
         }
-        // Allow () (Void) capability tokens in verify blocks
-        if (matches!(a, Ty::Void) && matches!(b, Ty::NetCap | Ty::FsCap | Ty::SysCap | Ty::EnvCap))
-            || (matches!(b, Ty::Void) && matches!(a, Ty::NetCap | Ty::FsCap | Ty::SysCap | Ty::EnvCap))
+        if (matches!(norm_a, Ty::Void) && matches!(norm_b, Ty::NetCap | Ty::FsCap | Ty::SysCap | Ty::EnvCap))
+            || (matches!(norm_b, Ty::Void) && matches!(norm_a, Ty::NetCap | Ty::FsCap | Ty::SysCap | Ty::EnvCap))
         {
             return true;
         }
-        match (a, b) {
-            // ADT constructors (Ok/Err/Some) still use Unknown payloads until full
-            // polymorphism exists — allow Unknown only *inside* Result/Option/List.
+        match (&norm_a, &norm_b) {
             (Ty::Result(a1, a2), Ty::Result(b1, b2)) => {
-                Ty::unifyable_or_unknown_hole(a1, b1) && Ty::unifyable_or_unknown_hole(a2, b2)
+                Ty::unifyable_or_unknown_hole_with_aliases(a1, b1, aliases)
+                    && Ty::unifyable_or_unknown_hole_with_aliases(a2, b2, aliases)
             }
-            (Ty::Option(a1), Ty::Option(b1)) => Ty::unifyable_or_unknown_hole(a1, b1),
-            (Ty::List(a1), Ty::List(b1)) => Ty::unifyable_or_unknown_hole(a1, b1),
+            (Ty::Option(a1), Ty::Option(b1)) => {
+                Ty::unifyable_or_unknown_hole_with_aliases(a1, b1, aliases)
+            }
+            (Ty::List(a1), Ty::List(b1)) => {
+                Ty::unifyable_or_unknown_hole_with_aliases(a1, b1, aliases)
+            }
             (Ty::Struct { fields: fa, .. }, Ty::Struct { fields: fb, .. }) => {
                 if fa.len() != fb.len() {
                     return false;
                 }
                 fa.iter().zip(fb.iter()).all(|((na, ta), (nb, tb))| {
-                    na == nb && Ty::unifyable(ta, tb)
+                    na == nb && Ty::unifyable_with_aliases(ta, tb, aliases)
                 })
             }
-            // Named struct alias vs Custom("Token") from annotations
             (Ty::Struct { name: Some(n), .. }, Ty::Custom(c))
             | (Ty::Custom(c), Ty::Struct { name: Some(n), .. }) => n == c,
             (Ty::Custom(a), Ty::Custom(b)) => a == b,
@@ -114,9 +147,23 @@ impl Ty {
         }
     }
 
+    pub fn unifyable_or_unknown_hole_with_aliases(a: &Ty, b: &Ty, aliases: &HashMap<String, Ty>) -> bool {
+        let norm_a = a.normalize(aliases);
+        let norm_b = b.normalize(aliases);
+        matches!(norm_a, Ty::Unknown)
+            || matches!(norm_b, Ty::Unknown)
+            || Ty::unifyable_with_aliases(&norm_a, &norm_b, aliases)
+    }
+
+    /// Fail-closed unify: `Unknown` only unifies with `Unknown` (inference hole,
+    /// not a wildcard). `Custom` only matches same name or a named struct alias.
+    fn unifyable(a: &Ty, b: &Ty) -> bool {
+        Ty::unifyable_with_aliases(a, b, &HashMap::new())
+    }
+
     /// Like unifyable, but Unknown on either side is a polymorphic hole (Ok/Err/Some).
     fn unifyable_or_unknown_hole(a: &Ty, b: &Ty) -> bool {
-        matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown) || Ty::unifyable(a, b)
+        Ty::unifyable_or_unknown_hole_with_aliases(a, b, &HashMap::new())
     }
 
     /// Evaluate simple integer constant expressions for refinement checks.
@@ -207,6 +254,14 @@ pub fn int_refinement_bounds(ty: &Type) -> Option<(i64, i64)> {
 }
 
 impl TypeChecker {
+    fn unify(&self, a: &Ty, b: &Ty) -> bool {
+        Ty::unifyable_with_aliases(a, b, &self.type_aliases)
+    }
+
+    fn unify_or_hole(&self, a: &Ty, b: &Ty) -> bool {
+        Ty::unifyable_or_unknown_hole_with_aliases(a, b, &self.type_aliases)
+    }
+
     pub fn check_program(program: &Program) -> Result<()> {
         let mut tc = TypeChecker {
             functions: HashMap::new(),
@@ -340,19 +395,19 @@ impl TypeChecker {
         );
         tc.functions.insert(
             "async_spawn_internal".into(),
-            (vec![Ty::String], Ty::String),
+            (vec![Ty::Unknown, Ty::Unknown], Ty::String),
         );
         tc.functions.insert(
             "async_join_internal".into(),
             (
-                vec![Ty::String],
+                vec![Ty::Unknown, Ty::Unknown],
                 Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
             ),
         );
         tc.functions.insert(
             "python_embed_internal".into(),
             (
-                vec![Ty::String],
+                vec![Ty::Unknown, Ty::Unknown],
                 Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
             ),
         );
@@ -1470,7 +1525,7 @@ impl TypeChecker {
                         ));
                     }
                     let (a, b) = (&arg_tys[0], &arg_tys[1]);
-                    if !Ty::unifyable(a, b)
+                    if !self.unify(a, b)
                         && !(matches!(a, Ty::Unknown) && matches!(b, Ty::Unknown))
                     {
                         return Err(anyhow!(
@@ -1517,7 +1572,7 @@ impl TypeChecker {
                     for (i, (pt, at)) in params.iter().zip(arg_tys.iter()).take(n).enumerate() {
                         // Unknown in builtin signatures is a polymorphic hole, not a wildcard
                         // for user annotations (those still fail-closed via unifyable).
-                        if !Ty::unifyable_or_unknown_hole(pt, at) {
+                        if !self.unify_or_hole(pt, at) {
                             return Err(anyhow!(
                                 "Type error at {}:{}: function '{}' argument {} expects {}, found {}",
                                 expr.span().line,
