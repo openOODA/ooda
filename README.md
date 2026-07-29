@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.56.0-alpha
+ooda --version   # 0.57.0-alpha
 ```
 
 ```ooda
