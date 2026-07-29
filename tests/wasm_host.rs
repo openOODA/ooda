@@ -285,6 +285,32 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fixture `string_walk.oo`: while + .len + .char_at under host.
+#[test]
+fn ooda_wasm_string_walk_fixture_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/string_walk.oo");
+    assert!(path.is_file(), "missing fixture {}", path.display());
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm string_walk: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    let lines = run_wat(&wat).expect("host");
+    // WASM println is numeric; 'a'=97 'b'=98
+    assert_eq!(
+        lines,
+        vec!["97".to_string(), "98".to_string()],
+        "walk got {:?}",
+        lines
+    );
+}
+
 /// String `.char_at(i)` loads byte at offset as i64 (ASCII).
 #[test]
 fn ooda_wasm_string_char_at_runs_on_host() {
