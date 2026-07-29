@@ -470,17 +470,19 @@ impl TypeChecker {
         }
 
         let expected = Ty::from_ast(&func.return_type);
-        // Fail-closed: non-Void functions must produce a value (no silent Void body).
-        // (Statement `return` types are also checked in check_block Return arm.)
+        // Fail-closed: non-Void functions must produce a value on every path.
+        // Body type Void is OK only when every path hits `return <expr>` (if/else, etc.).
         if !matches!(expected, Ty::Void) {
             if matches!(body_ty, Ty::Void) {
-                return Err(anyhow!(
-                    "Type error in '{}': function declares return type {} but body has type Void (missing return value)",
-                    func.name,
-                    expected.display()
-                ));
-            }
-            if !matches!(body_ty, Ty::Unknown) && !Ty::unifyable(&body_ty, &expected) {
+                if !block_always_returns(&func.body) {
+                    return Err(anyhow!(
+                        "Type error in '{}': function declares return type {} but body has type Void (missing return value)",
+                        func.name,
+                        expected.display()
+                    ));
+                }
+                // All paths return; per-return types already checked in check_block.
+            } else if !matches!(body_ty, Ty::Unknown) && !Ty::unifyable(&body_ty, &expected) {
                 return Err(anyhow!(
                     "Type error in '{}': function declares return type {} but body has type {}",
                     func.name,
@@ -544,6 +546,15 @@ impl TypeChecker {
                     ..
                 } => {
                     let init_ty = self.infer_expr(init, env)?;
+                    // Fail-closed: do not bind Void (e.g. `let x = while …` / discarded unit).
+                    if matches!(init_ty, Ty::Void) && name != "_" {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: cannot bind Void value to '{}'; while/if-as-stmt produce Void — use a value expression",
+                            span.line,
+                            span.col,
+                            name
+                        ));
+                    }
                     // DESIGN must-use: binding to `_` does not discharge Result/Option.
                     if name == "_" && matches!(init_ty, Ty::Result(_, _) | Ty::Option(_)) {
                         return Err(anyhow!(
@@ -871,6 +882,28 @@ impl TypeChecker {
                     }
                     BinOp::Sub | BinOp::Mul | BinOp::Div => {
                         // Same-type numeric only (Int+Float used to typecheck then trap at runtime).
+                        if matches!(op, BinOp::Div) {
+                            if let (Some(_), Some(0)) = (Ty::const_int(left), Ty::const_int(right)) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: integer division by zero",
+                                    expr.span().line,
+                                    expr.span().col
+                                ));
+                            }
+                            if let (
+                                Expression::Literal(Literal::Float(_), _),
+                                Expression::Literal(Literal::Float(r), _),
+                            ) = (left.as_ref(), right.as_ref())
+                            {
+                                if *r == 0.0 {
+                                    return Err(anyhow!(
+                                        "Type error at {}:{}: float division by zero",
+                                        expr.span().line,
+                                        expr.span().col
+                                    ));
+                                }
+                            }
+                        }
                         if matches!((&lt, &rt), (Ty::Int, Ty::Int)) {
                             Ok(Ty::Int)
                         } else if matches!((&lt, &rt), (Ty::Float, Ty::Float)) {
@@ -1467,6 +1500,42 @@ impl TypeChecker {
                 Ok(result.unwrap_or(Ty::Void))
             }
         }
+    }
+}
+
+/// True when every control-flow path through `block` executes `return`.
+/// Expression-bodied blocks (tail value) are NOT "returns" — they yield a value.
+/// Conservative: unknown constructs → false.
+fn block_always_returns(block: &Block) -> bool {
+    if let Some(expr) = &block.expr {
+        return expr_paths_return(expr);
+    }
+    match block.stmts.last() {
+        Some(Statement::Return(Some(_), _)) | Some(Statement::Return(None, _)) => true,
+        Some(Statement::Expr(e, _)) => expr_paths_return(e),
+        Some(Statement::While { .. }) => false, // may never enter
+        _ => false,
+    }
+}
+
+fn expr_paths_return(expr: &Expression) -> bool {
+    match expr {
+        Expression::If {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            block_always_returns(then_branch)
+                && else_branch
+                    .as_ref()
+                    .map(|b| block_always_returns(b))
+                    .unwrap_or(false)
+        }
+        Expression::Match { arms, .. } => {
+            !arms.is_empty() && arms.iter().all(|arm| expr_paths_return(&arm.body))
+        }
+        // Bare values / calls are not return statements.
+        _ => false,
     }
 }
 
@@ -2268,6 +2337,97 @@ mod tests {
             check(src).is_ok(),
             "if/else value: {:?}",
             check(src).err()
+        );
+    }
+
+    #[test]
+    fn accepts_if_else_both_return() {
+        let src = r#"
+            pub fn f(x: Int) -> Int {
+                if x > 0 {
+                    return x;
+                } else {
+                    return 0;
+                }
+            }
+            pub fn main() {
+                println(f(1));
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "if/else both return must typecheck: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn rejects_partial_if_return_fallthrough() {
+        let src = r#"
+            pub fn f(x: Int) -> Int {
+                if x > 0 {
+                    return x;
+                }
+            }
+            pub fn main() {
+                println(f(0));
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("missing return") || err.contains("Void"),
+            "partial if return must fail: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_bind_void_from_while() {
+        let src = r#"
+            pub fn main() {
+                let x = while false {
+                    println(1);
+                };
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("Void") || err.contains("bind"),
+            "let x = while must fail: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_const_int_division_by_zero() {
+        let src = r#"
+            pub fn main() {
+                let x = 1 / 0;
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("division by zero"),
+            "const /0 must fail closed: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_const_float_division_by_zero() {
+        let src = r#"
+            pub fn main() {
+                let x = 1.0 / 0.0;
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("division by zero"),
+            "const float /0 must fail closed: {}",
+            err
         );
     }
 }
