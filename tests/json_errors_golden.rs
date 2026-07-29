@@ -997,3 +997,116 @@ fn ooda_context_nests_reflection_json() {
     );
     assert_eq!(v["context"]["symbol"].as_str(), Some("greet"));
 }
+
+#[test]
+fn json_errors_const_char_at_oob_is_patch_applicable() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_char_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("c.oo");
+    std::fs::write(
+        &path,
+        "pub fn main() {\n    let c = char_at(\"hi\", 99);\n    println(c);\n}\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stderr)
+    });
+    assert!(
+        v["message"].as_str().unwrap_or("").contains("out of bounds"),
+        "{}",
+        stderr
+    );
+    assert_eq!(
+        v["suggested_fix"]["applicability"].as_str(),
+        Some("patch")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn json_errors_str_concat_is_patch_applicable() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_sc_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("s.oo");
+    std::fs::write(&path, "pub fn main() {\n    let s = \"a\" + 1;\n    println(s);\n}\n")
+        .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stderr)
+    });
+    assert_eq!(
+        v["suggested_fix"]["applicability"].as_str(),
+        Some("patch"),
+        "{}",
+        stderr
+    );
+    let diff = v["suggested_fix"]["diff"].as_str().unwrap_or("");
+    assert!(diff.contains("str_concat") || diff.contains("to_string"), "{}", diff);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ooda_outline_json_is_structured() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.oo");
+    let out = std::process::Command::new(bin)
+        .args(["outline", example, "--json"])
+        .output()
+        .expect("spawn outline --json");
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stdout)
+    });
+    assert!(v["functions"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+    let names: Vec<_> = v["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|f| f["name"].as_str())
+        .collect();
+    assert!(names.contains(&"greet"), "funcs: {:?}", names);
+    assert!(!stdout.contains("Binary {"));
+}
+
+#[test]
+fn wrong_kind_cap_handle_message_names_kinds() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wk_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("wk.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn mix(net: &NetCap, fs: &FsCap) {
+    let r = write_file(net, "/tmp/x", "y");
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("wrong-kind") && stderr.contains("NetCap") && stderr.contains("FsCap"),
+        "wrong-kind message: {}",
+        stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

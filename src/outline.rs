@@ -16,6 +16,8 @@
 //   type Port = Int where 1..=65535
 // ===================================================================
 use crate::ast::*;
+use anyhow::Result;
+use serde_json::json;
 
 pub fn generate_outline(program: &Program) -> String {
     let mut out = String::new();
@@ -38,6 +40,72 @@ pub fn generate_outline(program: &Program) -> String {
     }
 
     out
+}
+
+/// Machine-readable outline for AI agents (`ooda outline --json`).
+/// Source-like strings only — no Debug AST dumps (keeps W low).
+pub fn generate_outline_json(program: &Program, file: &str) -> Result<String> {
+    let mut functions = Vec::new();
+    let mut types = Vec::new();
+    let mut imports = Vec::new();
+    for item in &program.items {
+        match item {
+            Item::Function(func) => {
+                let params: Vec<_> = func
+                    .params
+                    .iter()
+                    .map(|p| {
+                        json!({
+                            "name": p.name,
+                            "type": format_param_type(p),
+                            "is_ref": p.is_ref,
+                        })
+                    })
+                    .collect();
+                let caps: Vec<String> = func
+                    .params
+                    .iter()
+                    .filter_map(|p| match p.param_type {
+                        Type::NetCap => Some("NetCap".into()),
+                        Type::FsCap => Some("FsCap".into()),
+                        Type::SysCap => Some("SysCap".into()),
+                        Type::EnvCap => Some("EnvCap".into()),
+                        _ => None,
+                    })
+                    .collect();
+                functions.push(json!({
+                    "name": func.name,
+                    "is_pub": func.is_pub,
+                    "parameters": params,
+                    "return_type": format_type(&func.return_type),
+                    "requires": func.requires.iter().map(format_expr).collect::<Vec<_>>(),
+                    "ensures": func.ensures.iter().map(format_expr).collect::<Vec<_>>(),
+                    "capabilities_required": caps,
+                }));
+            }
+            Item::TypeAlias(name, t) => {
+                types.push(json!({
+                    "name": name,
+                    "type": format_type(t),
+                }));
+            }
+            Item::Import { path, .. } => {
+                imports.push(json!({ "path": path }));
+            }
+        }
+    }
+    let payload = json!({
+        "file": file,
+        "functions": functions,
+        "types": types,
+        "imports": imports,
+    });
+    Ok(serde_json::to_string_pretty(&payload)?)
+}
+
+fn format_param_type(p: &Parameter) -> String {
+    let ref_str = if p.is_ref { "&" } else { "" };
+    format!("{}{}", ref_str, format_type(&p.param_type))
 }
 
 fn format_function(func: &FunctionDecl) -> String {
@@ -292,5 +360,33 @@ mod tests {
         let src = "type Port = Int;";
         let outline = generate_outline(&parse(src));
         assert_eq!(outline.trim(), "type Port = Int");
+    }
+
+    #[test]
+    fn outline_json_is_structured_not_debug_ast() {
+        let src = r#"
+            pub fn greet(name: String) -> String
+                requires name.len() > 0
+            {
+                return "hi";
+            }
+            type Port = Int;
+        "#;
+        let js = generate_outline_json(&parse(src), "t.oo").expect("json");
+        let v: serde_json::Value = serde_json::from_str(&js).expect(&js);
+        assert_eq!(v["file"], "t.oo");
+        assert_eq!(v["functions"][0]["name"], "greet");
+        assert_eq!(v["functions"][0]["return_type"], "String");
+        assert!(
+            v["functions"][0]["requires"]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false),
+            "requires: {}",
+            js
+        );
+        assert_eq!(v["types"][0]["name"], "Port");
+        assert!(!js.contains("Binary {"), "no Debug AST: {}", js);
+        assert!(!js.contains("Span {"), "no spans: {}", js);
     }
 }

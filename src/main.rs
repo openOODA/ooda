@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.51.0-alpha")]
+#[command(version = "0.52.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -211,6 +211,9 @@ enum Commands {
     Outline {
         /// Path to the .oo file
         file: PathBuf,
+        /// Machine-readable JSON outline (functions, types, contracts) for AI agents
+        #[arg(long)]
+        json: bool,
     },
     /// Manage OODA package dependencies and lockfiles
     Pkg {
@@ -699,15 +702,24 @@ fn main() -> Result<()> {
                 print!("{}", formatted);
             }
         }
-        Commands::Outline { file } => {
+        Commands::Outline { file, json } => {
             let code = fs::read_to_string(&file)?;
             let mut lexer = Lexer::new(&code);
             let tokens = lexer.tokenize()?;
             let mut parser = Parser::new(tokens);
             let program = parser.parse_program()?;
 
-            let summary = outline::generate_outline(&program);
-            println!("📋 [openOODA Outline] API Summary for {}:\n{}", file.display(), summary);
+            if json {
+                let js = outline::generate_outline_json(&program, &file.display().to_string())?;
+                println!("{}", js);
+            } else {
+                let summary = outline::generate_outline(&program);
+                println!(
+                    "📋 [openOODA Outline] API Summary for {}:\n{}",
+                    file.display(),
+                    summary
+                );
+            }
         }
         Commands::Pkg { install, init } => {
             if let Some(name) = init {
@@ -944,6 +956,21 @@ fn load_and_analyze(
                         "{{\"codemod\":\"arg_count\",\"function\":\"{}\",\"expected_arity\":{},\"found_arity\":{},\"hint\":\"supply exactly the declared parameters (or change the callee signature)\"}}",
                         fname, expected, found
                     ),
+                    true,
+                )
+            } else if msg.contains("cannot concatenate") || msg.contains("convert with .to_string()")
+            {
+                (
+                    "Convert non-String operand before concat".into(),
+                    r#"{"codemod":"str_concat","hint":"use left + right.to_string() (or both String) for concatenation"}"#.into(),
+                    true,
+                )
+            } else if msg.contains("out of bounds")
+                && (msg.contains("char_at") || msg.contains("str_slice"))
+            {
+                (
+                    "Fix const string index / slice bounds".into(),
+                    r#"{"codemod":"str_bounds","hint":"use an index in 0..chars_len(s) or a valid [start..end] slice"}"#.into(),
                     true,
                 )
             } else if msg.contains("cannot assign") && msg.contains("to '") {
@@ -1186,12 +1213,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.51.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.52.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.51.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.52.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

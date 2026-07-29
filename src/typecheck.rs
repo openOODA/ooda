@@ -145,6 +145,14 @@ impl Ty {
         }
     }
 
+    /// String literal only (for const char_at / str_slice bounds).
+    fn const_str(expr: &Expression) -> Option<&str> {
+        match expr {
+            Expression::Literal(Literal::String(s), _) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
     fn display(&self) -> String {
         match self {
             Ty::Int => "Int".into(),
@@ -1277,6 +1285,97 @@ impl TypeChecker {
                             other.display()
                         )),
                     };
+                }
+
+                // Const string indexing — fail-closed OOB (was typecheck-green, runtime trap).
+                if name == "char_at" {
+                    if arg_tys.len() != 2 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'char_at' expects 2 argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    if !Ty::unifyable_or_unknown_hole(&arg_tys[0], &Ty::String) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'char_at' argument 0 expects String, found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys[0].display()
+                        ));
+                    }
+                    if !Ty::unifyable_or_unknown_hole(&arg_tys[1], &Ty::Int) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'char_at' argument 1 expects Int, found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys[1].display()
+                        ));
+                    }
+                    if let (Some(s), Some(idx)) =
+                        (Ty::const_str(&args[0]), Ty::const_int(&args[1]))
+                    {
+                        let len = s.chars().count() as i64;
+                        if idx < 0 || idx >= len {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: char_at index {} out of bounds for string literal of length {} (const bounds check)",
+                                expr.span().line,
+                                expr.span().col,
+                                idx,
+                                len
+                            ));
+                        }
+                    }
+                    return Ok(Ty::String);
+                }
+                if name == "str_slice" {
+                    if arg_tys.len() != 3 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'str_slice' expects 3 argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    if !Ty::unifyable_or_unknown_hole(&arg_tys[0], &Ty::String) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'str_slice' argument 0 expects String, found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys[0].display()
+                        ));
+                    }
+                    for (i, expect) in [(1, "start"), (2, "end")] {
+                        if !Ty::unifyable_or_unknown_hole(&arg_tys[i], &Ty::Int) {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: function 'str_slice' argument {} ({}) expects Int, found {}",
+                                expr.span().line,
+                                expr.span().col,
+                                i,
+                                expect,
+                                arg_tys[i].display()
+                            ));
+                        }
+                    }
+                    if let (Some(s), Some(start), Some(end)) = (
+                        Ty::const_str(&args[0]),
+                        Ty::const_int(&args[1]),
+                        Ty::const_int(&args[2]),
+                    ) {
+                        let len = s.chars().count() as i64;
+                        if start < 0 || end < 0 || start > end || end > len {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: str_slice[{}..{}] out of bounds for string literal of length {} (const bounds check)",
+                                expr.span().line,
+                                expr.span().col,
+                                start,
+                                end,
+                                len
+                            ));
+                        }
+                    }
+                    return Ok(Ty::String);
                 }
 
                 // ADT constructors: payload-driven Result/Option (cuts match-arm Unknown vs Int).
@@ -2709,6 +2808,53 @@ mod tests {
         assert!(
             err.contains("return type") || err.contains("String") || err.contains("Int"),
             "list_get Int must not soft-accept as String: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_const_char_at_out_of_bounds() {
+        let src = r#"
+            pub fn main() {
+                let c = char_at("hi", 99);
+                println(c);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("out of bounds") && err.contains("char_at"),
+            "const char_at OOB must fail at typecheck: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn accepts_const_char_at_in_bounds() {
+        let src = r#"
+            pub fn main() {
+                let c = char_at("hi", 0);
+                println(c);
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "in-bounds char_at: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn rejects_const_str_slice_out_of_bounds() {
+        let src = r#"
+            pub fn main() {
+                let s = str_slice("hi", 0, 9);
+                println(s);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("out of bounds") && err.contains("str_slice"),
+            "const str_slice OOB: {}",
             err
         );
     }

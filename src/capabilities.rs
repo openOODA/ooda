@@ -397,6 +397,31 @@ impl CapabilityChecker {
                             .iter()
                             .any(|a| Self::expr_is_cap_handle(a, effect.requires, func));
                         if !has_handle_arg {
+                            // Prefer explicit wrong-kind when another cap handle is present.
+                            let wrong_kind = [
+                                CapKind::Net,
+                                CapKind::Fs,
+                                CapKind::Sys,
+                                CapKind::Env,
+                            ]
+                            .into_iter()
+                            .find(|&k| {
+                                k != effect.requires
+                                    && args
+                                        .iter()
+                                        .any(|a| Self::expr_is_cap_handle(a, k, func))
+                            });
+                            if let Some(got) = wrong_kind {
+                                return Err(anyhow!(
+                                    "Security Capability Violation: Function '{}' calls sealed '{}' at line {}, col {} with wrong-kind handle {} (requires live {} — object-capability: kinds are not interchangeable).",
+                                    func.name,
+                                    name,
+                                    span.line,
+                                    span.col,
+                                    got.type_name(),
+                                    effect.requires.type_name()
+                                ));
+                            }
                             return Err(anyhow!(
                                 "Security Capability Violation: Function '{}' calls sealed '{}' at line {}, col {} without passing a live {} handle argument (object-capability: ambient grant alone is not enough — use `{}(cap, …)` or a method-style receiver).",
                                 func.name,
@@ -699,11 +724,17 @@ mod tests {
         );
         let err = CapabilityChecker::check_program(&prog).unwrap_err().to_string();
         assert!(
-            err.contains("object-capability")
+            err.contains("wrong-kind")
+                || err.contains("object-capability")
                 || err.contains("live")
                 || err.contains("FsCap")
                 || err.contains("write_file"),
             "wrong-kind handle must fail: {}",
+            err
+        );
+        assert!(
+            err.contains("wrong-kind") && err.contains("NetCap") && err.contains("FsCap"),
+            "must name both kinds: {}",
             err
         );
     }
