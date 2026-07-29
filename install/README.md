@@ -19,7 +19,7 @@ Shell cannot be eliminated for a **first** install (no `ooda` yet). Everything a
 | `OODA_CONFIG` | `$XDG_CONFIG_HOME/ooda` → `~/.config/ooda` | `env` shell snippet |
 | `OODA_CACHE` | `$XDG_CACHE_HOME/ooda` → `~/.cache/ooda` | downloads + extract |
 | `OODA_STD` | `$OODA_HOME/std` | standard library root (clone here) |
-| `OODA_VERSION` | pin e.g. `v0.33.0-alpha` | release tag to fetch |
+| `OODA_VERSION` | pin e.g. `v0.34.0-alpha` | release tag to fetch |
 
 ## User commands
 
@@ -38,5 +38,5 @@ ooda run install/install.oo
 
 ```bash
 ./scripts/release.sh          # version from Cargo.toml
-./scripts/release.sh v0.33.0-alpha
+./scripts/release.sh v0.34.0-alpha
 ```

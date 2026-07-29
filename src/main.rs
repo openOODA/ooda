@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.33.0-alpha")]
+#[command(version = "0.34.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -369,9 +369,9 @@ fn main() -> Result<()> {
             TypeChecker::check_program(&program)?;
 
             let target_l = target.to_lowercase();
-            // Fail-closed: C/native backends do not lower requires/ensures yet.
+            // Fail-closed: non-interpreter backends do not lower requires/ensures yet.
             // Interpreter (`ooda run` / `ooda test`) still evaluates contracts.
-            if target_l == "c" || target_l == "native" || target_l == "chs" || target_l == "wasm" {
+            {
                 let mut contract_fns = Vec::new();
                 for item in &program.items {
                     if let ooda::ast::Item::Function(f) = item {
@@ -380,11 +380,16 @@ fn main() -> Result<()> {
                         }
                     }
                 }
-                if !contract_fns.is_empty() && (target_l == "c" || target_l == "chs" || target_l == "native") {
+                if !contract_fns.is_empty()
+                    && matches!(
+                        target_l.as_str(),
+                        "c" | "chs" | "native" | "wasm" | "llvm"
+                    )
+                {
                     anyhow::bail!(
-                        "build --target {}: contracts (requires/ensures) are not lowered in the C/native backend yet \
+                        "build --target {}: contracts (requires/ensures) are not lowered outside the interpreter yet \
                          (found on: {}). Use `ooda run` / `ooda test` for contract enforcement, or remove contracts \
-                         from functions that must be compiled natively.",
+                         from functions that must be compiled.",
                         target_l,
                         contract_fns.join(", ")
                     );
@@ -889,12 +894,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.33.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.34.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.33.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.34.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

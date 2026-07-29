@@ -101,6 +101,47 @@ fn json_errors_undefined_function_names_symbol() {
 }
 
 #[test]
+fn build_wasm_refuses_requires_contracts() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wasm_req_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("req.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn add(a: Int, b: Int) -> Int
+    requires a >= 0
+{
+    return a + b;
+}
+pub fn main() {
+    println(add(1, 2));
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn build wasm");
+    assert!(
+        !out.status.success(),
+        "WASM build must refuse requires/ensures"
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        err.contains("contracts") || err.contains("requires"),
+        "honest message required: {}",
+        err
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn build_c_refuses_requires_contracts() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_c_req_{}", std::process::id()));

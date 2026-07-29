@@ -463,6 +463,15 @@ impl TypeChecker {
                     ..
                 } => {
                     let init_ty = self.infer_expr(init, env)?;
+                    // DESIGN must-use: binding to `_` does not discharge Result/Option.
+                    if name == "_" && matches!(init_ty, Ty::Result(_, _) | Ty::Option(_)) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: unused {} value (must-use); `let _ = ...` does not handle Result/Option — use `match` or `?`",
+                            span.line,
+                            span.col,
+                            init_ty.display()
+                        ));
+                    }
                     if let Some(ann) = type_annotation {
                         let want = Ty::from_ast(ann);
                         if let Type::Custom(ref s) = ann {
@@ -604,7 +613,7 @@ impl TypeChecker {
                             // DESIGN must-use: discarded Result/Option is a hard error.
                             if matches!(t, Ty::Result(_, _) | Ty::Option(_)) {
                                 return Err(anyhow!(
-                                    "Type error at {}:{}: unused {} value (must-use); handle it or bind with `let _ = ...` is not enough — use `let` and match, or `?`",
+                                    "Type error at {}:{}: unused {} value (must-use); handle with `match` / `?` — bare discard and `let _ = ...` are not enough",
                                     span.line,
                                     span.col,
                                     t.display()
@@ -1263,6 +1272,24 @@ mod tests {
             }
             pub fn main() {
                 get();
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("must-use") || err.contains("unused"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_let_underscore_result_must_use() {
+        let src = r#"
+            pub fn get() -> Result[Int, String] {
+                return Ok(1);
+            }
+            pub fn main() {
+                let _ = get();
             }
         "#;
         let err = check(src).unwrap_err().to_string();

@@ -14,8 +14,11 @@ if [[ ! -x "$OODA" ]]; then
 fi
 
 normalize() {
-  # Pure numeric lines only (drop 🧪 / 🚀 banners)
-  grep -E '^[0-9]+$' "$1" 2>/dev/null | tr '\n' ',' | sed 's/,$//' || true
+  # Stable CHS digests: numbers, bools, short alphanumeric tokens (drop banners/emoji)
+  # Exclude lines with spaces (banner prose) and common log prefixes.
+  grep -E '^[0-9]+$|^true$|^false$|^[A-Za-z0-9_./+-]+$' "$1" 2>/dev/null \
+    | grep -Ev '^(Execution|Contract|Verify|openOODA|PASS|FAIL)' \
+    | tr '\n' ',' | sed 's/,$//' || true
 }
 
 # Contract-free CHS programs only (C backend does not lower requires/ensures).
