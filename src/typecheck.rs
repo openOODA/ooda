@@ -255,40 +255,42 @@ impl TypeChecker {
         );
         tc.functions
             .insert("process_exit".into(), (vec![Ty::Int], Ty::Void));
-        for (n, ret) in [
-            ("mkdir_p", Ty::Result(Box::new(Ty::Void), Box::new(Ty::String))),
-            ("chmod_exec", Ty::Result(Box::new(Ty::Void), Box::new(Ty::String))),
-            (
-                "copy_file",
-                Ty::Result(Box::new(Ty::Void), Box::new(Ty::String)),
-            ),
-            (
-                "http_download",
-                Ty::Result(Box::new(Ty::Void), Box::new(Ty::String)),
-            ),
-            (
-                "extract_tar_gz",
-                Ty::Result(Box::new(Ty::Void), Box::new(Ty::String)),
-            ),
-        ] {
+        // Host helpers: object-cap shape (live handle first, then op args).
+        let res_v_host = Ty::Result(Box::new(Ty::Void), Box::new(Ty::String));
+        let res_s_host = Ty::Result(Box::new(Ty::String), Box::new(Ty::String));
+        for n in ["mkdir_p", "chmod_exec"] {
+            // (cap, path)
             tc.functions
-                .insert(n.into(), (vec![Ty::Unknown], ret));
+                .insert(n.into(), (vec![Ty::Unknown, Ty::Unknown], res_v_host.clone()));
         }
-        tc.functions
-            .insert("path_exists".into(), (vec![Ty::String], Ty::Bool));
+        for n in ["copy_file", "http_download", "extract_tar_gz"] {
+            // (cap, a, b)
+            tc.functions.insert(
+                n.into(),
+                (
+                    vec![Ty::Unknown, Ty::Unknown, Ty::Unknown],
+                    res_v_host.clone(),
+                ),
+            );
+        }
+        // path_exists(cap, path) — Bool, not Result
+        tc.functions.insert(
+            "path_exists".into(),
+            (vec![Ty::Unknown, Ty::Unknown], Ty::Bool),
+        );
+        // sys_exec is varargs at runtime; registered for lookup, arity special-cased below.
         tc.functions.insert(
             "sys_exec".into(),
             (
-                vec![Ty::Unknown],
-                Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
+                vec![Ty::Unknown, Ty::Unknown],
+                res_s_host.clone(),
             ),
         );
-        // Real FS / env (sealed effects; arg types loose)
         tc.functions.insert(
-            "env_get".into(),
+            "exec".into(),
             (
-                vec![Ty::Unknown],
-                Ty::Result(Box::new(Ty::String), Box::new(Ty::String)),
+                vec![Ty::Unknown, Ty::Unknown],
+                res_s_host.clone(),
             ),
         );
         tc.functions.insert(
@@ -1121,6 +1123,22 @@ impl TypeChecker {
                         ));
                     }
                     return Ok(Ty::Void);
+                }
+
+                // sys_exec/exec: varargs (optional cap handle + cmd + argv strings).
+                if name == "sys_exec" || name == "exec" || name == "spawn_process" {
+                    if arg_tys.is_empty() {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function '{}' expects at least 1 argument(s), found 0",
+                            expr.span().line,
+                            expr.span().col,
+                            name
+                        ));
+                    }
+                    return Ok(Ty::Result(
+                        Box::new(Ty::String),
+                        Box::new(Ty::String),
+                    ));
                 }
 
                 if let Some((params, ret)) = self.functions.get(name) {
@@ -2009,6 +2027,71 @@ mod tests {
         assert!(
             check(src).is_ok(),
             "fetch(net, url) must typecheck: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn ok_constructor_carries_payload_type_into_match() {
+        let src = r#"
+            pub fn main() {
+                let r = Ok(1);
+                let x = match r {
+                    Ok(v) => v,
+                    Err(e) => 0,
+                };
+                println(x);
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "Ok(1) payload Int must type match arm: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn write_file_wrong_arity_fails_closed() {
+        let src = r#"
+            pub fn bad(fs: &FsCap) {
+                let r = write_file(fs, "/tmp/x");
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("expects 3 argument") || err.contains("found 2"),
+            "write_file object-cap arity: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn path_exists_object_cap_arity_ok() {
+        let src = r#"
+            pub fn main(fs: &FsCap) {
+                let b = path_exists(fs, "/tmp");
+                println(b);
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "path_exists(cap, path): {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn sys_exec_varargs_typechecks() {
+        let src = r#"
+            pub fn main(sys: &SysCap) {
+                let v = sys_exec(sys, "true");
+                let w = sys_exec(sys, "echo", "hi");
+                println(1);
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "sys_exec varargs: {:?}",
             check(src).err()
         );
     }

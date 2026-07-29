@@ -626,6 +626,46 @@ pub fn main() {
 }
 
 #[test]
+fn json_errors_write_file_arity_is_patch_applicable() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wf_ar_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("wf.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn bad(fs: &FsCap) {
+    let r = write_file(fs, "/tmp/x");
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn check");
+    assert!(!out.status.success(), "write_file arity must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stderr)
+    });
+    assert_eq!(v["error_type"].as_str(), Some("TypeError"));
+    let msg = v["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("write_file") && (msg.contains("expects 3") || msg.contains("found 2")),
+        "msg: {}",
+        msg
+    );
+    assert_eq!(
+        v["suggested_fix"]["applicability"].as_str(),
+        Some("patch"),
+        "arity should be patch-applicable: {}",
+        stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ooda_em_json_reports_cap_failed_kind() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_em_cap_{}", std::process::id()));
