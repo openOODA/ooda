@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.30.0-alpha")]
+#[command(version = "0.31.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -143,7 +143,7 @@ enum Commands {
         #[arg(long)]
         em: bool,
     },
-    /// Calculate and display Energy-Maneuverability (E-M) Specific Excess Power (Ps) breakdown
+    /// Measure real E-M analysis telemetry for a .oo file (parse/check µs, W, V — no fake scores)
     Em {
         /// Path to the .oo file
         file: PathBuf,
@@ -315,9 +315,48 @@ fn main() -> Result<()> {
             bench::run_empirical_verification_suite(&file)?;
         }
         Commands::Em { file } => {
-            let code_len = fs::metadata(&file).map(|m| m.len() as usize).unwrap_or(2048);
-            let em_savings = ooda::em::EmSavings::calculate(500, 300, code_len, None);
-            println!("{}", em_savings.display_summary());
+            // Honest E-M: wall-clock parse + cap + typecheck only — never invent 82.4% scores.
+            let source_bytes = fs::read_to_string(&file)
+                .map(|s| s.len())
+                .unwrap_or(0);
+            let parse_start = Instant::now();
+            let program = match load_program(&file) {
+                Ok(p) => p,
+                Err(e) => {
+                    let parse_us = parse_start.elapsed().as_micros();
+                    let report = ooda::em::EmReport::from_measured(
+                        file.display().to_string(),
+                        source_bytes,
+                        parse_us,
+                        0,
+                        0,
+                        true,
+                    );
+                    println!("{}", report.display_summary());
+                    eprintln!("Load Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            let parse_us = parse_start.elapsed().as_micros();
+            let cap_start = Instant::now();
+            let cap_ok = CapabilityChecker::check_program(&program).is_ok();
+            let capability_us = cap_start.elapsed().as_micros();
+            let ty_start = Instant::now();
+            let ty_ok = TypeChecker::check_program(&program).is_ok();
+            let typecheck_us = ty_start.elapsed().as_micros();
+            let failed = !cap_ok || !ty_ok;
+            let report = ooda::em::EmReport::from_measured(
+                file.display().to_string(),
+                source_bytes,
+                parse_us,
+                capability_us,
+                typecheck_us,
+                failed,
+            );
+            println!("{}", report.display_summary());
+            if failed {
+                std::process::exit(1);
+            }
         }
         Commands::Build { file, release: _, emit_llvm, target } => {
             let program = load_program(&file)
@@ -771,12 +810,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.29.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.31.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.29.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.31.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
@@ -793,6 +832,15 @@ mod version_consistency_tests {
     #[test]
     fn clap_version_matches_canonical() {
         assert_eq!(clap_version(), CANONICAL_VERSION_NO_V);
+    }
+
+    #[test]
+    fn cargo_pkg_version_matches_canonical() {
+        assert_eq!(
+            env!("CARGO_PKG_VERSION"),
+            CANONICAL_VERSION_NO_V,
+            "Cargo.toml package version must match CANONICAL_VERSION_NO_V"
+        );
     }
 
     #[test]

@@ -1,58 +1,95 @@
 // ===================================================================
-// openOODA Energy-Maneuverability (E-M) Automatic Telemetry Engine
-// Calculates Specific Excess Power (Ps = V * (T - D) / W)
-// and reports transparent drag elimination & energy savings automatically.
+// openOODA Energy-Maneuverability telemetry (honest, measured only)
+//
+// Boyd / E-M framing for the toolchain loop:
+//   Ps ~ V * (T - D) / W
+// We do **not** invent drag-eliminated milliseconds or 82.4% scores.
+// We report measured µs (latency), source weight W, and throughput V.
 // ===================================================================
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EmSavings {
-    /// Latency drag eliminated in milliseconds (D -> 0)
-    pub drag_reduced_ms: f64,
-    /// Memory weight saved in bytes (W optimization)
-    pub memory_saved_bytes: usize,
-    /// Specific Energy score (Ps = 0..100)
-    pub ps_energy_score: f64,
-    /// Percentage of AST mutation drag saved by surgical patch vs full re-synthesis
-    pub mutation_drag_saved_pct: f64,
+/// Measured analysis path for one file — no hardcoded savings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmReport {
+    pub file: String,
+    /// Source weight W (bytes).
+    pub source_bytes: usize,
+    pub parse_us: u128,
+    pub capability_us: u128,
+    pub typecheck_us: u128,
+    /// parse + capability + typecheck
+    pub total_us: u128,
+    /// V proxy: source bytes processed per second on the analyze path.
+    pub analyze_throughput_bps: f64,
+    /// Ps proxy: throughput per byte of source weight (1/s). Higher = faster relative to W.
+    pub ps_proxy_per_sec: f64,
+    /// True if capability or typecheck failed (drag that forces a rework loop).
+    pub check_failed: bool,
 }
 
-impl EmSavings {
-    pub fn calculate(parse_us: u128, check_us: u128, code_bytes: usize, patched_lines: Option<(usize, usize)>) -> Self {
-        let total_ms = (parse_us + check_us) as f64 / 1000.0;
-        let drag_reduced_ms = (total_ms * 0.65).max(0.12);
-        let memory_saved_bytes = (code_bytes * 4).max(1024);
-        let mutation_drag_saved_pct = if let Some((patched, total)) = patched_lines {
-            if total > 0 {
-                ((1.0 - (patched as f64 / total as f64)) * 100.0).clamp(0.0, 99.9)
-            } else {
-                0.0
-            }
+impl EmReport {
+    pub fn from_measured(
+        file: impl Into<String>,
+        source_bytes: usize,
+        parse_us: u128,
+        capability_us: u128,
+        typecheck_us: u128,
+        check_failed: bool,
+    ) -> Self {
+        let total_us = parse_us
+            .saturating_add(capability_us)
+            .saturating_add(typecheck_us)
+            .max(1);
+        let analyze_throughput_bps =
+            (source_bytes as f64) * 1_000_000.0 / (total_us as f64);
+        let ps_proxy_per_sec = if source_bytes == 0 {
+            0.0
         } else {
-            82.4
+            analyze_throughput_bps / (source_bytes as f64)
         };
-        let ps_energy_score = (100.0 - (total_ms * 1.5)).clamp(88.0, 99.8);
-        EmSavings {
-            drag_reduced_ms,
-            memory_saved_bytes,
-            ps_energy_score,
-            mutation_drag_saved_pct,
+        Self {
+            file: file.into(),
+            source_bytes,
+            parse_us,
+            capability_us,
+            typecheck_us,
+            total_us,
+            analyze_throughput_bps,
+            ps_proxy_per_sec,
+            check_failed,
         }
     }
 
     pub fn display_summary(&self) -> String {
         format!(
-            "⚡ [openOODA E-M Engine] Automatic Energy Savings Summary:\n  • Drag Eliminated (D → 0): {:.2} ms (Static verification lowering)\n  • Weight Saved (W):         {:.1} KB (Zero-cost token reference reuse)\n  • Mutation Drag Saved:      {:.1}% (Surgical patch vs full synthesis)\n  • Specific Energy (Ps):     {:.1} / 100 [OPTIMAL MANEUVERABILITY VELOCITY]",
-            self.drag_reduced_ms,
-            self.memory_saved_bytes as f64 / 1024.0,
-            self.mutation_drag_saved_pct,
-            self.ps_energy_score
+            "[openOODA E-M] measured analysis of {}\n\
+               W (source weight):     {} bytes\n\
+               parse:                 {} µs\n\
+               capability check:      {} µs\n\
+               typecheck:             {} µs\n\
+               total (latency):       {} µs\n\
+               V (analyze throughput): {:.0} B/s\n\
+               Ps proxy (V/W):        {:.2} /s{}\n\
+               (No invented drag-% or floor scores — values are wall-clock measurements.)",
+            self.file,
+            self.source_bytes,
+            self.parse_us,
+            self.capability_us,
+            self.typecheck_us,
+            self.total_us,
+            self.analyze_throughput_bps,
+            self.ps_proxy_per_sec,
+            if self.check_failed {
+                "\n   check_failed:          true (rework loop — D > 0 until fixed)"
+            } else {
+                ""
+            }
         )
     }
 }
 
-/// Raw measured durations — no hardcoded "82.4% savings" constants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Raw measured durations (for diagnostics / callers that only need clocks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeasuredTimings {
     pub parse_us: u128,
     pub check_us: u128,
@@ -81,11 +118,20 @@ mod tests {
     }
 
     #[test]
-    fn em_savings_calculation_is_stable() {
-        let em = EmSavings::calculate(500, 300, 2048, Some((10, 100)));
-        assert!(em.drag_reduced_ms > 0.0);
-        assert!(em.memory_saved_bytes > 0);
-        assert_eq!(em.mutation_drag_saved_pct, 90.0);
-        assert!(em.ps_energy_score >= 88.0);
+    fn em_report_has_no_magic_constants() {
+        let r = EmReport::from_measured("t.oo", 1000, 200, 50, 50, false);
+        assert_eq!(r.total_us, 300);
+        assert!((r.analyze_throughput_bps - (1000.0 * 1e6 / 300.0)).abs() < 1.0);
+        let s = r.display_summary();
+        assert!(!s.contains("82.4"), "no fake savings: {}", s);
+        assert!(!s.contains("OPTIMAL MANEUVERABILITY"), "no marketing floor: {}", s);
+        assert!(s.contains("measured"), "must claim measured: {}", s);
+    }
+
+    #[test]
+    fn em_report_marks_check_failed() {
+        let r = EmReport::from_measured("bad.oo", 10, 1, 1, 1, true);
+        assert!(r.check_failed);
+        assert!(r.display_summary().contains("check_failed"));
     }
 }

@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.29.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.31.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -26,7 +26,7 @@ cargo build --release
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.28.0-alpha
+ooda --version   # 0.31.0-alpha
 ```
 
 ```ooda
@@ -36,7 +36,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.29.0-alpha (CHS M0–M5)
+## What's real in v0.31.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -55,7 +55,8 @@ import "lib.oo";       // relative / OODA_PATH
 
 ## Not implemented (fail non-zero)
 
-LSP, pkg install, migrate, replay, full WASM product, PyTorch, `for` sugar, full SPEC self-host (only **CHS frontend** fixed-point is claimed).
+LSP, pkg install, replay, full WASM product, PyTorch, `for` sugar, full SPEC self-host (only **CHS frontend** fixed-point is claimed).  
+`ooda migrate --edition 2026` is a **partial** real codemod (exhaustive match arms), not a full edition engine.
 
 Stage-0 is still **Rust** (`src/**/*.rs`). That is intentional on alpha. **Beta exit criterion:** no `.rs` left — [`bootstrap/BETA.md`](bootstrap/BETA.md).
 
