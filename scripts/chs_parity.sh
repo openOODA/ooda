@@ -231,9 +231,9 @@ compare_check() {
 echo "=== CHS token parity (pass) ==="
 shopt -s nullglob
 for f in "$ROOT"/bootstrap/corpus/lex/pass/*.oo \
-         "$ROOT"/examples/hello.oo \
-         "$ROOT"/examples/int_main.oo \
-         "$ROOT"/examples/while_count.oo; do
+         "$ROOT"/fixtures/hello.oo \
+         "$ROOT"/fixtures/int_main.oo \
+         "$ROOT"/fixtures/while_count.oo; do
   [[ -f "$f" ]] || continue
   compare_tokens "$f"
 done
@@ -263,7 +263,7 @@ done
 
 echo "=== drift detector ==="
 echo "KW_FAKE	1	1	x" >"$TMPDIR/drift_a.txt"
-"$OODA" dump tokens "$ROOT/examples/int_main.oo" >"$TMPDIR/drift_b.txt"
+"$OODA" dump tokens "$ROOT/fixtures/int_main.oo" >"$TMPDIR/drift_b.txt"
 if diff -q "$TMPDIR/drift_a.txt" "$TMPDIR/drift_b.txt" >/dev/null; then
   echo "FAIL drift detector"
   fail=1

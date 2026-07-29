@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn host_check_accepts_int_main() {
-        let p = PathBuf::from("examples/int_main.oo");
+        let p = PathBuf::from("fixtures/int_main.oo");
         if !p.exists() {
             return;
         }
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn host_ast_has_program() {
-        let p = PathBuf::from("examples/int_main.oo");
+        let p = PathBuf::from("fixtures/int_main.oo");
         if !p.exists() {
             return;
         }
@@ -185,7 +185,7 @@ mod tests {
 
     #[test]
     fn host_chs_build_smoke() {
-        let src = PathBuf::from("examples/chs_list_string.oo");
+        let src = PathBuf::from("fixtures/chs_list_string.oo");
         if !src.exists() {
             return;
         }

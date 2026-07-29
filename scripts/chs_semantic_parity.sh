@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ===================================================================
 # CHS dual-engine semantic parity: `ooda run` vs `ooda build --target c`
-# Compares normalized stdout digests. Fail closed on missing examples.
+# Compares normalized stdout digests. Fail closed on missing fixtures.
 # ===================================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,16 +23,16 @@ normalize() {
 
 # Contract-free CHS programs only (C backend does not lower requires/ensures).
 EXAMPLES=(
-  "examples/while_count.oo"
-  "examples/chs_list_string.oo"
-  "examples/chs_hello.oo"
+  "fixtures/while_count.oo"
+  "fixtures/chs_list_string.oo"
+  "fixtures/chs_hello.oo"
 )
 
 fail=0
 for rel in "${EXAMPLES[@]}"; do
   src="$ROOT/$rel"
   if [[ ! -f "$src" ]]; then
-    echo "FAIL missing listed example: $rel (fail-closed)"
+    echo "FAIL missing listed fixture: $rel (fail-closed)"
     fail=$((fail + 1))
     continue
   fi

@@ -16,17 +16,19 @@ OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-nati
 git clone https://github.com/openOODA/ooda.git && cd ooda
 cargo build --release
 
-./target/release/ooda run examples/hello.oo
-./target/release/ooda run examples/while_count.oo
-./target/release/ooda run examples/import_lib.oo
-./target/release/ooda check examples/hello.oo
-./target/release/ooda build examples/while_count.oo --emit-llvm
-./target/release/ooda build --target wasm examples/while_count.oo
+./target/release/ooda run fixtures/hello.oo
+./target/release/ooda run fixtures/while_count.oo
+./target/release/ooda check fixtures/hello.oo
+./target/release/ooda build fixtures/while_count.oo --emit-llvm
+./target/release/ooda build --target wasm fixtures/while_count.oo
 ```
+
+`fixtures/` is harness input only (tests, parity, fixed-point) — not a tutorial pack.  
+Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.53.0-alpha
+ooda --version   # 0.54.0-alpha
 ```
 
 ```ooda

@@ -5,7 +5,7 @@
 #[test]
 fn json_errors_golden_capability_violation() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/unauthorized_io.oo");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/unauthorized_io.oo");
     let out = std::process::Command::new(bin)
         .args(["check", example, "--json-errors"])
         .output()
@@ -199,7 +199,7 @@ pub fn main() {
 #[test]
 fn ooda_em_is_measured_not_theater() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.oo");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/hello.oo");
     let out = std::process::Command::new(bin)
         .args(["em", example])
         .output()
@@ -441,7 +441,7 @@ pub fn main() {
 #[test]
 fn ooda_em_json_is_measured_report_not_theater() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/em_demo.oo");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/em_demo.oo");
     let out = std::process::Command::new(bin)
         .args(["em", example, "--json"])
         .output()
@@ -511,7 +511,7 @@ pub fn main() {
 #[test]
 fn build_wasm_refuses_sealed_io_effects() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/chs_fs_roundtrip.oo");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/chs_fs_roundtrip.oo");
     let out = std::process::Command::new(bin)
         .args(["build", example, "--target", "wasm"])
         .output()
@@ -532,7 +532,7 @@ fn build_wasm_refuses_sealed_io_effects() {
 #[test]
 fn build_c_refuses_sealed_io_effects() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/chs_fs_roundtrip.oo");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/chs_fs_roundtrip.oo");
     let out = std::process::Command::new(bin)
         .args(["build", example, "--target", "c"])
         .output()
@@ -553,7 +553,7 @@ fn build_c_refuses_sealed_io_effects() {
 #[test]
 fn build_llvm_and_native_refuse_sealed_io_effects() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/chs_fs_roundtrip.oo");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/chs_fs_roundtrip.oo");
     for target in ["llvm", "native"] {
         let out = std::process::Command::new(bin)
             .args(["build", example, "--target", target])
@@ -977,7 +977,7 @@ pub fn main() {
 #[test]
 fn ooda_context_nests_reflection_json() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.oo");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/hello.oo");
     let out = std::process::Command::new(bin)
         .args(["context", example, "greet", "--tier", "8gb"])
         .output()
@@ -1061,7 +1061,7 @@ fn json_errors_str_concat_is_patch_applicable() {
 #[test]
 fn ooda_outline_json_is_structured() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.oo");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/hello.oo");
     let out = std::process::Command::new(bin)
         .args(["outline", example, "--json"])
         .output()

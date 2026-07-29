@@ -17,7 +17,7 @@ fi
 # Ensure staticlib exists for native link
 (cd "$ROOT" && cargo build --release 2>/dev/null)
 
-SMOKE_SRC="$ROOT/examples/chs_list_string.oo"
+SMOKE_SRC="$ROOT/fixtures/chs_list_string.oo"
 OODAC_SRC="$ROOT/oodac/main.oo"
 STAGE1="$ROOT/oodac/oodac"
 STAGE2="$ROOT/oodac/oodac2"
@@ -82,7 +82,7 @@ fi
 echo "OK stage-2 binary produced by stage-1"
 
 echo "=== fixed-point: digests stage0 ≡ stage1 ≡ stage2 tokens ==="
-CORPUS="$ROOT/examples/int_main.oo"
+CORPUS="$ROOT/fixtures/int_main.oo"
 "$OODA" dump tokens "$CORPUS" | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s0.sha"
 "$STAGE1" tokens "$CORPUS" | grep $'\t' | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s1.sha"
 "$STAGE2" tokens "$CORPUS" | grep $'\t' | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s2.sha"
