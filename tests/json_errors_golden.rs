@@ -1652,3 +1652,43 @@ pub fn main(fs: &FsCap) {{
     assert!(stdout.contains("hello ooda"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn build_c_lowers_file_size_method() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_c_sz_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let target_file = dir.join("data.txt");
+    std::fs::write(&target_file, "1234567890").unwrap();
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+pub fn main(fs: &FsCap) {{
+    let sz = fs.file_size("{}");
+    if sz > 0 {{
+        println(sz);
+    }}
+}}
+"#,
+            target_file.display()
+        ),
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "C must lower .file_size: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("10"), "stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}

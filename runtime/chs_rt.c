@@ -222,6 +222,15 @@ int oo_path_exists(OoStr path) {
   return 0;
 }
 
+long long oo_file_size(OoStr path) {
+  FILE *f = fopen(path.data, "rb");
+  if (!f) return -1;
+  fseek(f, 0, SEEK_END);
+  long long sz = ftell(f);
+  fclose(f);
+  return sz;
+}
+
 void oo_print_str(OoStr s) { fwrite(s.data, 1, (size_t)s.len, stdout); }
 void oo_print_int(long long n) { printf("%lld", n); }
 void oo_print_bool(int b) { fputs(b ? "true" : "false", stdout); }

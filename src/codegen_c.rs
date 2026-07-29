@@ -197,7 +197,7 @@ impl Gen {
         s.push_str("long long oo_ilist_get(OoIList,long long); long long oo_ilist_len(OoIList);\n");
         s.push_str("OoSList oo_slist_new(void); OoSList oo_slist_push(OoSList,OoStr);\n");
         s.push_str("OoStr oo_slist_get(OoSList,long long); long long oo_slist_len(OoSList);\n");
-        s.push_str("OoResS oo_read_file(OoStr); OoResV oo_write_file(OoStr,OoStr); int oo_path_exists(OoStr);\n");
+        s.push_str("OoResS oo_read_file(OoStr); OoResV oo_write_file(OoStr,OoStr); int oo_path_exists(OoStr); long long oo_file_size(OoStr);\n");
         s.push_str("void oo_print_str(OoStr); void oo_print_int(long long); void oo_print_bool(int); void oo_println(void);\n");
         s.push_str("int oo_str_eq(OoStr,OoStr);\n");
         /* Host FFI (libooda.a) — exact stage-0 dumps + real CHS build */
@@ -986,6 +986,19 @@ impl Gen {
             "path_exists" | "fs_exists" => {
                 let path = cargs.last().unwrap();
                 code.push_str(&format!("  int {} = oo_path_exists({});\n", t, path));
+                Ok((code, t, "int".into()))
+            }
+            "file_size" => {
+                let path = cargs.last().unwrap();
+                code.push_str(&format!("  long long {} = oo_file_size({});\n", t, path));
+                Ok((code, t, "long long".into()))
+            }
+            "is_some" => {
+                code.push_str(&format!("  int {} = ({}.is_some);\n", t, cargs[0]));
+                Ok((code, t, "int".into()))
+            }
+            "is_none" => {
+                code.push_str(&format!("  int {} = !({}.is_some);\n", t, cargs[0]));
                 Ok((code, t, "int".into()))
             }
             "host_ast_dump" => {
