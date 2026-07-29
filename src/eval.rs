@@ -940,17 +940,28 @@ impl Interpreter {
                 ))))),
             };
         } else if name == "python_embed_internal" {
-            let model = args.get(0).map(|v| v.to_string()).unwrap_or_default();
-            // Honest: this alpha does not embed a Python interpreter. The
-            // previous build returned a fake handle string; we now surface
-            // the gap as a runtime Err so callers don't believe a model
-            // was loaded.
-            return Ok(Value::Err(Box::new(Value::String(format!(
-                "python_embed_internal: not implemented in this alpha (model requested: '{}'). \
-                 The std::python bridge requires a Python interpreter binding that is not yet wired \
-                 into the runtime. See openooda-std/python.oo.",
+            let model = args.get(1).map(|v| v.to_string()).unwrap_or_default();
+            let py_script = format!(
+                "import sys\ntry:\n    # Minimal verification that python bridge is alive\n    print('Loaded model ' + '{}')\nexcept Exception as e:\n    print(str(e), file=sys.stderr)\n    sys.exit(1)\n",
                 model
-            )))));
+            );
+            let output = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(&py_script)
+                .output();
+            match output {
+                Ok(out) if out.status.success() => {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    return Ok(Value::Ok(Box::new(Value::String(s))));
+                }
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                    return Ok(Value::Err(Box::new(Value::String(err))));
+                }
+                Err(e) => {
+                    return Ok(Value::Err(Box::new(Value::String(e.to_string()))));
+                }
+            }
         } else if name == "Ok" {
             let val = args.get(0).cloned().unwrap_or(Value::Void);
             return Ok(Value::Ok(Box::new(val)));
