@@ -862,7 +862,20 @@ impl TypeChecker {
                             ))
                         }
                     }
-                    BinOp::Eq | BinOp::Neq => Ok(Ty::Bool),
+                    BinOp::Eq | BinOp::Neq => {
+                        // Fail-closed: no String == Int soft-Bool.
+                        if Ty::unifyable(&lt, &rt) || (lt.is_numeric() && rt.is_numeric()) {
+                            Ok(Ty::Bool)
+                        } else {
+                            Err(anyhow!(
+                                "Type error at {}:{}: cannot compare {} and {} with equality",
+                                expr.span().line,
+                                expr.span().col,
+                                lt.display(),
+                                rt.display()
+                            ))
+                        }
+                    }
                     BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte => {
                         if lt.is_numeric() && rt.is_numeric() {
                             Ok(Ty::Bool)
@@ -1725,6 +1738,22 @@ mod tests {
         assert!(
             err.contains("return type") || err.contains("does not match"),
             "Int must not soft-accept as String, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_string_eq_int() {
+        let src = r#"
+            pub fn main() {
+                let b = "a" == 1;
+                println(b);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("cannot compare") || err.contains("equality"),
+            "String == Int must fail, got: {}",
             err
         );
     }
