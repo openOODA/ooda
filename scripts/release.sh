@@ -53,6 +53,9 @@ cp install/install.oo "$DIST_DIR/install/install.oo"
 # Metadata
 echo "$TAG" > "$DIST_DIR/share/VERSION"
 cp README.md "$DIST_DIR/share/README.md"
+if [[ -f LICENSE ]]; then
+  cp LICENSE "$DIST_DIR/share/LICENSE"
+fi
 if [[ -f DESIGN.md ]]; then
   cp DESIGN.md "$DIST_DIR/share/DESIGN.md"
 fi
