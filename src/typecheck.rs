@@ -185,14 +185,32 @@ impl Ty {
 
 pub struct TypeChecker {
     functions: HashMap<String, (Vec<Ty>, Ty)>,
+    /// Per-function `Int[lo..hi]` parameter bounds (`None` = unrefined).
+    /// Call-sites with const args are fail-closed against these.
+    param_refinements: HashMap<String, Vec<Option<(i64, i64)>>>,
     /// Named type aliases (including named structs) for StructLit typing.
     type_aliases: HashMap<String, Ty>,
+}
+
+/// Parse `Int[lo..hi]` refinement bounds from a type annotation.
+pub fn int_refinement_bounds(ty: &Type) -> Option<(i64, i64)> {
+    if let Type::Custom(s) = ty {
+        if let Some(rest) = s.strip_prefix("Int[").and_then(|r| r.strip_suffix(']')) {
+            if let Some((min_s, max_s)) = rest.split_once("..") {
+                let min_v: i64 = min_s.parse().ok()?;
+                let max_v: i64 = max_s.parse().ok()?;
+                return Some((min_v, max_v));
+            }
+        }
+    }
+    None
 }
 
 impl TypeChecker {
     pub fn check_program(program: &Program) -> Result<()> {
         let mut tc = TypeChecker {
             functions: HashMap::new(),
+            param_refinements: HashMap::new(),
             type_aliases: HashMap::new(),
         };
 
@@ -405,7 +423,13 @@ impl TypeChecker {
             if let Item::Function(f) = item {
                 let params: Vec<Ty> = f.params.iter().map(|p| Ty::from_ast(&p.param_type)).collect();
                 let ret = Ty::from_ast(&f.return_type);
+                let bounds: Vec<Option<(i64, i64)>> = f
+                    .params
+                    .iter()
+                    .map(|p| int_refinement_bounds(&p.param_type))
+                    .collect();
                 tc.functions.insert(f.name.clone(), (params, ret));
+                tc.param_refinements.insert(f.name.clone(), bounds);
             }
         }
 
@@ -698,6 +722,8 @@ impl TypeChecker {
                 Statement::Expr(expr, span) => {
                     // Statement-level if/while must inherit mutability so
                     // `let mut x` can be assigned inside branches (CHS oodac).
+                    // Nested blocks clone env/mutable so `let` bindings do not
+                    // leak into the outer scope (assign to outer mut still works).
                     match expr {
                         Expression::If {
                             cond,
@@ -714,19 +740,23 @@ impl TypeChecker {
                                     ct.display()
                                 ));
                             }
+                            let mut env_then = env.clone();
+                            let mut mut_then = mutable.clone();
                             self.check_block(
                                 then_branch,
-                                env,
-                                mutable,
+                                &mut env_then,
+                                &mut mut_then,
                                 "if-then",
                                 expected_ret,
                                 &refinements,
                             )?;
                             if let Some(eb) = else_branch {
+                                let mut env_else = env.clone();
+                                let mut mut_else = mutable.clone();
                                 self.check_block(
                                     eb,
-                                    env,
-                                    mutable,
+                                    &mut env_else,
+                                    &mut mut_else,
                                     "if-else",
                                     expected_ret,
                                     &refinements,
@@ -751,10 +781,12 @@ impl TypeChecker {
                                     ct.display()
                                 ));
                             }
+                            let mut env_w = env.clone();
+                            let mut mut_w = mutable.clone();
                             self.check_block(
                                 body,
-                                env,
-                                mutable,
+                                &mut env_w,
+                                &mut mut_w,
                                 "while-expr-stmt",
                                 expected_ret,
                                 &refinements,
@@ -786,10 +818,12 @@ impl TypeChecker {
                             ct.display()
                         ));
                     }
+                    let mut env_w = env.clone();
+                    let mut mut_w = mutable.clone();
                     self.check_block(
                         body,
-                        env,
-                        mutable,
+                        &mut env_w,
+                        &mut mut_w,
                         "while-body",
                         expected_ret,
                         &refinements,
@@ -807,7 +841,9 @@ impl TypeChecker {
                     sp.col
                 ));
             }
-            // Tail expression may be a nested `else if` chain — keep mut map.
+            // Tail expression may be a nested `else if` chain.
+            // Clone env/mutable per branch so `else if` desugar cannot leak
+            // sibling `let`s (else if is a nested if as the else block's tail).
             match expr.as_ref() {
                 Expression::If {
                     cond,
@@ -824,19 +860,23 @@ impl TypeChecker {
                             ct.display()
                         ));
                     }
+                    let mut env_then = env.clone();
+                    let mut mut_then = mutable.clone();
                     self.check_block(
                         then_branch,
-                        env,
-                        mutable,
+                        &mut env_then,
+                        &mut mut_then,
                         "if-then-tail",
                         expected_ret,
                         &refinements,
                     )?;
                     if let Some(eb) = else_branch {
+                        let mut env_else = env.clone();
+                        let mut mut_else = mutable.clone();
                         self.check_block(
                             eb,
-                            env,
-                            mutable,
+                            &mut env_else,
+                            &mut mut_else,
                             "if-else-tail",
                             expected_ret,
                             &refinements,
@@ -1487,6 +1527,30 @@ impl TypeChecker {
                                 pt.display(),
                                 at.display()
                             ));
+                        }
+                    }
+                    // Const call-site refinement: Int[lo..hi] params reject out-of-bounds literals.
+                    if let Some(bounds) = self.param_refinements.get(name) {
+                        for (i, bound) in bounds.iter().enumerate() {
+                            if let Some((lo, hi)) = bound {
+                                if let Some(arg_expr) = args.get(i) {
+                                    if let Some(val) = Ty::const_int(arg_expr) {
+                                        if val < *lo || val > *hi {
+                                            let sp = arg_expr.span();
+                                            return Err(anyhow!(
+                                                "Type error at {}:{}: RefinementTypeViolation: argument {} value {} out of refinement bounds [{}..{}] for parameter of function '{}'",
+                                                sp.line,
+                                                sp.col,
+                                                i,
+                                                val,
+                                                lo,
+                                                hi,
+                                                name
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     return Ok(ret.clone());
@@ -2855,6 +2919,115 @@ mod tests {
         assert!(
             err.contains("out of bounds") && err.contains("str_slice"),
             "const str_slice OOB: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn nested_let_does_not_pollute_outer_type_env() {
+        // Was: `let x = "hi"` inside if retyped outer Int x → String (scope leak).
+        let src = r#"
+            pub fn main() {
+                let x = 1;
+                if true {
+                    let x = "hi";
+                    println(x);
+                }
+                let y = x + 1;
+                println(y);
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "outer x must stay Int after nested shadow: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn nested_while_let_does_not_pollute_outer_type_env() {
+        let src = r#"
+            pub fn main() {
+                let x = 1;
+                let mut i = 0;
+                while i < 1 {
+                    let x = "hi";
+                    println(x);
+                    i = i + 1;
+                }
+                let y = x + 1;
+                println(y);
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "while-body let must not leak: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn rejects_const_arg_out_of_param_refinement_bounds() {
+        let src = r#"
+            pub fn port(p: Int[1..65535]) -> Int {
+                return p;
+            }
+            pub fn main() {
+                println(port(0));
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("0"),
+            "const arg must enforce param Int[lo..hi]: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn accepts_const_arg_in_param_refinement_bounds() {
+        let src = r#"
+            pub fn port(p: Int[1..65535]) -> Int {
+                return p;
+            }
+            pub fn main() {
+                println(port(8080));
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn outer_let_mut_assign_inside_if_still_typechecks() {
+        let src = r#"
+            pub fn main() {
+                let mut x = 1;
+                if true {
+                    x = 2;
+                }
+                println(x);
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn else_if_sibling_let_does_not_leak_across_branches() {
+        // else if desugars to nested tail-if; sibling lets must not pollute.
+        let src = r#"
+            pub fn main() {
+                if false {
+                } else if false {
+                    let x = 1;
+                } else {
+                    println(x);
+                }
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("undefined variable") && err.contains("'x'"),
+            "else-branch must not see else-if let x: {}",
             err
         );
     }

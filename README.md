@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.52.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.53.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -26,7 +26,7 @@ cargo build --release
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.52.0-alpha
+ooda --version   # 0.53.0-alpha
 ```
 
 ```ooda
@@ -36,17 +36,18 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.52.0-alpha (CHS M0–M5)
+## What's real in v0.53.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
-| `while` / `else if` / unary `!` | Real (interp + LLVM/WAT subset) |
+| `while` / `else if` / unary `!` | Real (interp + C + LLVM/WAT; WASM `while` polarity fixed) |
 | Option / Result / must-use / let mut | Real |
+| Nested block scopes | Real: `let` inside if/while does **not** leak (typecheck + runtime); outer `let mut` assign persists |
 | Caps + sealed effects | Static **and runtime** object-cap: free sealed ops need live handle Value; ambient-only denied |
-| `Int[lo..hi]` refinement | Real on let/assign/return including nested blocks + simple const-fold (`5+6`) |
+| `Int[lo..hi]` refinement | Real on let/assign/return **and call-site params** (const at typecheck + runtime); nested blocks + const-fold |
 | Types fail-closed | Missing returns fail; match arms unify; same-type arith/eq; if-value needs else; assert_eq types |
 | Net GET (`fetch` / `http_get` / `.get`) | Real HTTPS via curl under threaded `&NetCap` |
-| AI diagnostics (`--json-errors`) | Real JSON + measured timings; cap fixes as ooda-patch JSON (`applicability`) |
+| AI diagnostics (`--json-errors`) | Real JSON + measured timings; patch codemods including `refinement_bounds` |
 | Measured `ooda em` / `em --json` / `bench --em` | Real clocks only (W, µs, V); JSON EmReport for agents — no fake Boyd Ps |
 | Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM; IR-only link fails non-zero |
 | `ooda patch` | Real body / params / return type / requires / ensures |

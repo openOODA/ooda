@@ -417,17 +417,19 @@ impl WasmCodeGen {
         let mut wat = String::new();
         // If the condition is Float, convert to i32 (true/false).
         let cond_ty = Self::infer_expr_type(cond, locals);
+        // while cond { body }  →  break when cond is *false* (zero).
+        // Previous alphas inverted this (br_if on true), so loops never ran.
         wat.push_str("    block $break\n");
         wat.push_str("      loop $continue\n");
         wat.push_str(&Self::emit_expr(cond, locals)?);
         match cond_ty {
             "f64" => {
                 wat.push_str("        f64.const 0.0\n");
-                wat.push_str("        f64.ne\n");
+                wat.push_str("        f64.eq\n"); // 1 when false → break
             }
             _ => {
-                wat.push_str("        i64.const 0\n");
-                wat.push_str("        i64.ne\n");
+                // i64/bool: eqz → 1 when cond==0 (false) → break
+                wat.push_str("        i64.eqz\n");
             }
         }
         wat.push_str("        br_if $break\n");
@@ -829,6 +831,37 @@ mod tests {
         assert!(wat.contains("f64.mul"), "wat:\n{}", wat);
         // println is the i64 host import, so the Float value is truncated
         assert!(wat.contains("i64.trunc_f64_s"), "wat:\n{}", wat);
+    }
+
+    #[test]
+    fn while_breaks_when_condition_is_false_not_true() {
+        // Polarity: br_if $break must fire when cond is *false* (i64.eqz),
+        // not when true (old bug inverted loops so bodies never ran).
+        let prog = parse(
+            r#"
+            pub fn main() {
+                let mut i = 0;
+                while i < 3 {
+                    i = i + 1;
+                }
+                println(i);
+            }
+            "#,
+        );
+        let wat = WasmCodeGen::emit_wat(&prog).expect("emit while");
+        assert!(
+            wat.contains("i64.eqz"),
+            "while must break on false via i64.eqz:\n{}",
+            wat
+        );
+        // Must not use the inverted "ne 0 → break on true" pattern.
+        assert!(
+            !wat.contains("i64.const 0\n        i64.ne\n        br_if $break"),
+            "inverted while polarity must not appear:\n{}",
+            wat
+        );
+        assert!(wat.contains("br_if $break"), "wat:\n{}", wat);
+        assert!(wat.contains("br $continue"), "wat:\n{}", wat);
     }
 
     #[test]

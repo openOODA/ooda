@@ -968,6 +968,26 @@ impl Interpreter {
             return Err(anyhow!("Function '{}' expects {} arguments, received {}", name, func.params.len(), args.len()));
         }
 
+        // Runtime refinement: Int[lo..hi] params (non-const args that typecheck missed).
+        for (param, arg) in func.params.iter().zip(args.iter()) {
+            if let Some((lo, hi)) = crate::typecheck::int_refinement_bounds(&param.param_type) {
+                if let Value::Int(v) = arg {
+                    if *v < lo || *v > hi {
+                        return Err(anyhow!(
+                            "RefinementTypeViolation: parameter '{}' value {} out of refinement bounds [{}..{}] for function '{}' (call site at {}:{})",
+                            param.name,
+                            v,
+                            lo,
+                            hi,
+                            name,
+                            self.last_call_span.line,
+                            self.last_call_span.col
+                        ));
+                    }
+                }
+            }
+        }
+
         let mut local_env = HashMap::new();
         for (param, arg) in func.params.iter().zip(args.into_iter()) {
             local_env.insert(param.name.clone(), arg);
@@ -1036,6 +1056,29 @@ impl Interpreter {
     }
 
     fn eval_block(&mut self, block: &Block, env: &mut HashMap<String, Value>) -> Result<Value> {
+        // Scope: restore `let` bindings introduced in this block so nested
+        // if/while cannot pollute outer frames. Assignments to outer names stick.
+        let mut let_shadows: Vec<(String, Option<Value>)> = Vec::new();
+        let result = self.eval_block_inner(block, env, &mut let_shadows);
+        for (name, old) in let_shadows.into_iter().rev() {
+            match old {
+                Some(v) => {
+                    env.insert(name, v);
+                }
+                None => {
+                    env.remove(&name);
+                }
+            }
+        }
+        result
+    }
+
+    fn eval_block_inner(
+        &mut self,
+        block: &Block,
+        env: &mut HashMap<String, Value>,
+        let_shadows: &mut Vec<(String, Option<Value>)>,
+    ) -> Result<Value> {
         for stmt in &block.stmts {
             if self.pending_return.is_some() {
                 break;
@@ -1043,6 +1086,9 @@ impl Interpreter {
             match stmt {
                 Statement::Let { name, init, .. } => {
                     let val = self.eval_expr(init, env)?;
+                    if !let_shadows.iter().any(|(n, _)| n == name) {
+                        let_shadows.push((name.clone(), env.get(name).cloned()));
+                    }
                     env.insert(name.clone(), val);
                 }
                 Statement::Assign { name, value, .. } => {
@@ -1445,6 +1491,92 @@ mod tests {
         let tokens = lexer.tokenize().expect("lex");
         let mut parser = crate::parser::Parser::new(tokens);
         parser.parse_program().expect("parse")
+    }
+
+    #[test]
+    fn nested_let_does_not_pollute_outer_runtime_env() {
+        let prog = parse(
+            r#"
+            pub fn main() -> Int {
+                let x = 1;
+                if true {
+                    let x = 99;
+                }
+                return x;
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("run");
+        assert_eq!(v, Value::Int(1), "outer x must remain 1 after nested let shadow");
+    }
+
+    #[test]
+    fn outer_mut_assign_inside_if_persists() {
+        let prog = parse(
+            r#"
+            pub fn main() -> Int {
+                let mut x = 1;
+                if true {
+                    x = 2;
+                }
+                return x;
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("run");
+        assert_eq!(v, Value::Int(2), "assign to outer let mut must persist");
+    }
+
+    #[test]
+    fn nested_while_let_does_not_pollute_outer() {
+        let prog = parse(
+            r#"
+            pub fn main() -> Int {
+                let x = 1;
+                let mut i = 0;
+                while i < 1 {
+                    let x = 42;
+                    i = i + 1;
+                }
+                return x;
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("run");
+        assert_eq!(v, Value::Int(1), "while-body let must not leak");
+    }
+
+    #[test]
+    fn runtime_rejects_refinement_param_oob() {
+        let prog = parse(
+            r#"
+            pub fn port(p: Int[1..65535]) -> Int {
+                return p;
+            }
+            pub fn main() -> Int {
+                let bad = 0;
+                return port(bad);
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let res = interp.call_function("main", vec![], &mut HashMap::new());
+        assert!(res.is_err(), "non-const OOB refinement arg must fail at runtime");
+        let msg = format!("{}", res.unwrap_err());
+        assert!(
+            msg.contains("RefinementTypeViolation"),
+            "got: {}",
+            msg
+        );
     }
 
     #[test]

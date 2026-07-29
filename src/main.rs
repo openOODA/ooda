@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.52.0-alpha")]
+#[command(version = "0.53.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -973,6 +973,30 @@ fn load_and_analyze(
                     r#"{"codemod":"str_bounds","hint":"use an index in 0..chars_len(s) or a valid [start..end] slice"}"#.into(),
                     true,
                 )
+            } else if msg.contains("RefinementTypeViolation") {
+                // Int[lo..hi] on let / return / call-site arg
+                let val = msg
+                    .split("value ")
+                    .nth(1)
+                    .and_then(|s| {
+                        s.split(' ')
+                            .next()
+                            .map(|t| t.trim_end_matches(',').to_string())
+                    })
+                    .unwrap_or_else(|| "?".into());
+                let bounds = msg
+                    .split("bounds [")
+                    .nth(1)
+                    .and_then(|s| s.split(']').next())
+                    .unwrap_or("lo..hi");
+                (
+                    "Fix refinement bounds".into(),
+                    format!(
+                        "{{\"codemod\":\"refinement_bounds\",\"value\":\"{}\",\"bounds\":\"[{}]\",\"hint\":\"pass/return/assign a value inside Int[{}]\"}}",
+                        val, bounds, bounds
+                    ),
+                    true,
+                )
             } else if msg.contains("cannot assign") && msg.contains("to '") {
                 // cannot assign String to 'x' of type Int
                 let vname = msg
@@ -1213,12 +1237,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.52.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.53.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.52.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.53.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
