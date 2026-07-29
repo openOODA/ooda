@@ -285,6 +285,45 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// String `.len` via pure WAT NUL-byte scan (no host import).
+#[test]
+fn ooda_wasm_string_len_method_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wslen_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("slen.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    println("hi".len());
+    println("hello".len());
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm string .len: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("__strlen_p"), "scratch local missing:\n{}", wat);
+    assert!(wat.contains("i32.load8_u"), "byte load missing:\n{}", wat);
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(
+        lines,
+        vec!["2".to_string(), "5".to_string()],
+        "got {:?}",
+        lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Method forms `.push` / `.len` lower to free list_* on List[Int].
 #[test]
 fn ooda_wasm_list_methods_push_len_run_on_host() {

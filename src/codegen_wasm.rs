@@ -305,6 +305,42 @@ impl WasmCodeGen {
         }
     }
 
+    /// Emit pure-WAT byte length of a NUL-terminated string (leave i64 on stack).
+    /// Scratch locals `$__strlen_p` / `$__strlen_i` are declared by collect when needed.
+    fn emit_string_len(
+        recv: &Expression,
+        locals: &BTreeMap<String, &'static str>,
+    ) -> Result<String> {
+        if !locals.contains_key("__strlen_p") || !locals.contains_key("__strlen_i") {
+            bail!("internal: string .len missing scratch locals");
+        }
+        static STRLEN_LAB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let id = STRLEN_LAB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut wat = String::new();
+        wat.push_str(&Self::emit_expr(recv, locals)?);
+        wat.push_str("    local.set $__strlen_p\n");
+        wat.push_str("    i64.const 0\n");
+        wat.push_str("    local.set $__strlen_i\n");
+        wat.push_str(&format!("    block $strlen_done_{}\n", id));
+        wat.push_str(&format!("      loop $strlen_loop_{}\n", id));
+        wat.push_str("        local.get $__strlen_p\n");
+        wat.push_str("        local.get $__strlen_i\n");
+        wat.push_str("        i32.wrap_i64\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        i32.load8_u\n");
+        wat.push_str("        i32.eqz\n");
+        wat.push_str(&format!("        br_if $strlen_done_{}\n", id));
+        wat.push_str("        local.get $__strlen_i\n");
+        wat.push_str("        i64.const 1\n");
+        wat.push_str("        i64.add\n");
+        wat.push_str("        local.set $__strlen_i\n");
+        wat.push_str(&format!("        br $strlen_loop_{}\n", id));
+        wat.push_str("      end\n");
+        wat.push_str("    end\n");
+        wat.push_str("    local.get $__strlen_i\n");
+        Ok(wat)
+    }
+
     fn emit_function(func: &FunctionDecl, aliases: &std::collections::HashMap<String, Type>) -> Result<String> {
         let mut f_wat = String::new();
         let is_main = func.name == "main";
@@ -658,20 +694,19 @@ impl WasmCodeGen {
                 }
             }
             Expression::Call { name, args, .. } => {
-                // List methods on List[Int] receivers → free list_* (dual-engine parity with C).
+                // List methods on List[Int] → list_*; String .len → pure WAT NUL scan.
                 if name == ".push" || name == ".len" {
                     if args.is_empty() {
                         bail!("WASM method '{}' requires a receiver", name);
                     }
                     let recv_ty = Self::infer_expr_type(&args[0], locals);
-                    if recv_ty != "list" {
-                        bail!(
-                            "WASM method '{}' requires List[Int] receiver (got {}); use `ooda run`.",
-                            name,
-                            recv_ty
-                        );
-                    }
                     if name == ".push" {
+                        if recv_ty != "list" {
+                            bail!(
+                                "WASM .push requires List[Int] receiver (got {}); use `ooda run`.",
+                                recv_ty
+                            );
+                        }
                         if args.len() != 2 {
                             bail!("WASM .push expects receiver + one Int element");
                         }
@@ -688,10 +723,20 @@ impl WasmCodeGen {
                     } else {
                         // .len
                         if args.len() != 1 {
-                            bail!("WASM .len on List expects only a receiver");
+                            bail!("WASM .len expects only a receiver");
                         }
-                        wat.push_str(&Self::emit_expr(&args[0], locals)?);
-                        wat.push_str("    call $list_len\n");
+                        if recv_ty == "list" {
+                            wat.push_str(&Self::emit_expr(&args[0], locals)?);
+                            wat.push_str("    call $list_len\n");
+                        } else if recv_ty == "i32" {
+                            // String pointer: count bytes until NUL (stack locals only).
+                            wat.push_str(&Self::emit_string_len(&args[0], locals)?);
+                        } else {
+                            bail!(
+                                "WASM .len requires List[Int] or String receiver (got {}); use `ooda run`.",
+                                recv_ty
+                            );
+                        }
                     }
                 } else if name.starts_with('.') {
                     bail!(
@@ -823,18 +868,9 @@ impl WasmCodeGen {
                 if name == "list_new" || name == "list_push" || name == ".push" {
                     "list"
                 } else if name == "list_get" || name == "list_len" || name == ".len" {
-                    // .len on List → i64; string .len is refused at emit when recv ≠ list
-                    if name == ".len" {
-                        if let Some(recv) = args.first() {
-                            if Self::infer_expr_type(recv, locals) == "list" {
-                                return "i64";
-                            }
-                        }
-                        "i64"
-                    } else {
-                        "i64"
-                    }
+                    "i64" // list length or string byte length
                 } else {
+                    let _ = args;
                     "i64"
                 }
             }
@@ -895,9 +931,18 @@ impl WasmCodeGen {
                 Self::collect_locals_in_expr(right, locals);
             }
             Expression::Unary { expr, .. } => Self::collect_locals_in_expr(expr, locals),
-            Expression::Call { args, .. } => {
+            Expression::Call { name, args, .. } => {
                 for a in args {
                     Self::collect_locals_in_expr(a, locals);
+                }
+                // String .len needs fixed scratch locals for pure-WAT NUL scan.
+                if name == ".len" {
+                    if let Some(recv) = args.first() {
+                        if Self::infer_expr_type(recv, locals) == "i32" {
+                            locals.insert("__strlen_p".into(), "i32");
+                            locals.insert("__strlen_i".into(), "i64");
+                        }
+                    }
                 }
             }
             Expression::If {

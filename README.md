@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.95.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.96.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.95.0-alpha
+ooda --version   # 0.96.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.95.0-alpha (CHS M0–M5)
+## What's real in v0.96.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -60,7 +60,7 @@ import "lib.oo";       // relative / OODA_PATH
 | AI diagnostics (`--json-errors`) | Real JSON + measured timings; patch codemods including `refinement_bounds` |
 | Measured `ooda em` / `em --json` / `bench --em` | Real clocks only (W, µs, V); JSON EmReport for agents — no fake Boyd Ps |
 | String methods | Real on interpreter + CHS C (`.char_at` / `.str_slice`); LLVM subset refuses strings fail-closed |
-| WASM strings + List[Int] | Real: interned strings + `streq`; **List[Int]** free `list_*` + methods `.push`/`.len` → same runtime; nested locals; lazy list RT. **Refuse** List[String], other methods, concat, caps. Dev-only wasmtime smoke |
+| WASM strings + List[Int] | Real: interned strings + `streq` + **String `.len`** (pure WAT NUL scan); List[Int] free+method `.push`/`.len`; lazy list RT. Refuse List[String]/caps/other methods. Dev wasmtime smoke |
 | Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM (method forms included as of v0.69); pure compute subset may lower; IR-only link fails non-zero |
 | `EnvCap` `.env_get` | Real on **interpreter**; C build refuses (sealed) |
 | Network `pkg install` | Partial: local pin; https `*.tar.gz` via curl+tar; `.minisig`/`.sig` fail-closed when present (need pubkey/gpg; `OODA_PKG_ALLOW_UNSIGNED=1` escape); `.sha256` optional/`OODA_PKG_REQUIRE_SHA256=1` |
