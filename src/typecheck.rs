@@ -371,7 +371,9 @@ impl TypeChecker {
             }
         }
 
-        let body_ty = self.check_block(&func.body, &mut env, &mut mutable, &func.name)?;
+        let expected_ret = Ty::from_ast(&func.return_type);
+        let body_ty =
+            self.check_block(&func.body, &mut env, &mut mutable, &func.name, Some(&expected_ret))?;
 
         // Static refinement bounds check for return statements against function return_type
         if let Type::Custom(ref s) = func.return_type {
@@ -399,11 +401,18 @@ impl TypeChecker {
         }
 
         let expected = Ty::from_ast(&func.return_type);
+        // Fail-closed: expression-bodied functions must match declared return type.
+        // (Statement returns checked in check_block Return arm below.)
         if !matches!(expected, Ty::Void)
-            && !Ty::unifyable(&body_ty, &expected)
             && !matches!(body_ty, Ty::Void | Ty::Unknown)
+            && !Ty::unifyable(&body_ty, &expected)
         {
-            // Allow if returns were checked via Return statements inside
+            return Err(anyhow!(
+                "Type error in '{}': function declares return type {} but body has type {}",
+                func.name,
+                expected.display(),
+                body_ty.display()
+            ));
         }
 
         for ens in &func.ensures {
@@ -427,6 +436,7 @@ impl TypeChecker {
                 &mut venv,
                 &mut vmut,
                 &format!("verify {}", func.name),
+                None,
             )?;
         }
 
@@ -439,6 +449,7 @@ impl TypeChecker {
         env: &mut HashMap<String, Ty>,
         mutable: &mut HashMap<String, bool>,
         ctx: &str,
+        expected_ret: Option<&Ty>,
     ) -> Result<Ty> {
         let mut last = Ty::Void;
         for stmt in &block.stmts {
@@ -525,8 +536,23 @@ impl TypeChecker {
                     }
                     last = Ty::Void;
                 }
-                Statement::Return(Some(expr), _) => {
+                Statement::Return(Some(expr), span) => {
                     last = self.infer_expr(expr, env)?;
+                    if let Some(exp) = expected_ret {
+                        if !matches!(exp, Ty::Void)
+                            && !matches!(last, Ty::Unknown)
+                            && !Ty::unifyable(&last, exp)
+                        {
+                            return Err(anyhow!(
+                                "Type error at {}:{} in '{}': return type {} does not match declared {}",
+                                span.line,
+                                span.col,
+                                ctx,
+                                last.display(),
+                                exp.display()
+                            ));
+                        }
+                    }
                 }
                 Statement::Return(None, _) => {
                     last = Ty::Void;
@@ -550,9 +576,9 @@ impl TypeChecker {
                                     ct.display()
                                 ));
                             }
-                            self.check_block(then_branch, env, mutable, "if-then")?;
+                            self.check_block(then_branch, env, mutable, "if-then", expected_ret)?;
                             if let Some(eb) = else_branch {
-                                self.check_block(eb, env, mutable, "if-else")?;
+                                self.check_block(eb, env, mutable, "if-else", expected_ret)?;
                             }
                             last = Ty::Void;
                         }
@@ -570,7 +596,7 @@ impl TypeChecker {
                                     ct.display()
                                 ));
                             }
-                            self.check_block(body, env, mutable, "while-expr-stmt")?;
+                            self.check_block(body, env, mutable, "while-expr-stmt", expected_ret)?;
                             last = Ty::Void;
                         }
                         _ => {
@@ -598,7 +624,7 @@ impl TypeChecker {
                             ct.display()
                         ));
                     }
-                    self.check_block(body, env, mutable, "while-body")?;
+                    self.check_block(body, env, mutable, "while-body", expected_ret)?;
                     last = Ty::Void;
                 }
             }
@@ -621,9 +647,9 @@ impl TypeChecker {
                             ct.display()
                         ));
                     }
-                    self.check_block(then_branch, env, mutable, "if-then-tail")?;
+                    self.check_block(then_branch, env, mutable, "if-then-tail", expected_ret)?;
                     if let Some(eb) = else_branch {
-                        self.check_block(eb, env, mutable, "if-else-tail")?;
+                        self.check_block(eb, env, mutable, "if-else-tail", expected_ret)?;
                     }
                     last = Ty::Void;
                 }
@@ -823,7 +849,7 @@ impl TypeChecker {
                             Box::new(Ty::String),
                         )),
                         ".push" => Ok(Ty::List(Box::new(Ty::Unknown))),
-                        // Field access on named/anonymous structs (or Custom alias).
+                        // Field access only on struct types (fail-closed on Int/String/etc.).
                         other if other.starts_with('.') && args.len() == 1 => {
                             let field = &other[1..];
                             match &recv_ty {
@@ -859,11 +885,23 @@ impl TypeChecker {
                                             ))
                                         }
                                     } else {
-                                        Ok(Ty::Unknown)
+                                        Err(anyhow!(
+                                            "Type error at {}:{}: unknown type '{}' for field access '.{}'",
+                                            expr.span().line,
+                                            expr.span().col,
+                                            name,
+                                            field
+                                        ))
                                     }
                                 }
                                 Ty::Unknown => Ok(Ty::Unknown),
-                                _ => Ok(Ty::Unknown),
+                                other_ty => Err(anyhow!(
+                                    "Type error at {}:{}: unknown method '{}' on {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    other,
+                                    other_ty.display()
+                                )),
                             }
                         }
                         other => Err(anyhow!(
@@ -928,11 +966,11 @@ impl TypeChecker {
                 }
                 let mut env_then = env.clone();
                 let mut mut_then = HashMap::new();
-                let t1 = self.check_block(then_branch, &mut env_then, &mut mut_then, "if-then")?;
+                let t1 = self.check_block(then_branch, &mut env_then, &mut mut_then, "if-then", None)?;
                 if let Some(else_b) = else_branch {
                     let mut env_else = env.clone();
                     let mut mut_else = HashMap::new();
-                    let t2 = self.check_block(else_b, &mut env_else, &mut mut_else, "if-else")?;
+                    let t2 = self.check_block(else_b, &mut env_else, &mut mut_else, "if-else", None)?;
                     if Ty::unifyable(&t1, &t2) {
                         Ok(t1)
                     } else {
@@ -982,7 +1020,7 @@ impl TypeChecker {
                     ));
                 }
                 let mut m = HashMap::new();
-                self.check_block(body, &mut env.clone(), &mut m, "while-expr")?;
+                self.check_block(body, &mut env.clone(), &mut m, "while-expr", None)?;
                 Ok(Ty::Void)
             }
             Expression::StructLit { name, fields, span } => {
@@ -1360,6 +1398,41 @@ mod tests {
         assert!(
             err.contains("RefinementTypeViolation") && err.contains("70000"),
             "expected refinement return error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_method_on_int() {
+        let src = r#"
+            pub fn main() {
+                let x = 1;
+                let y = x.totally_fake();
+                println(y);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown method") && err.contains("totally_fake"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_return_type_mismatch() {
+        let src = r#"
+            pub fn bad() -> Int {
+                return "hi";
+            }
+            pub fn main() {
+                println(bad());
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("return type") || err.contains("does not match"),
+            "got: {}",
             err
         );
     }
