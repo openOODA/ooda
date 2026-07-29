@@ -226,8 +226,59 @@ impl LspDaemon {
                     }));
                 }
             }
+            if msg.contains("does not match declared") && msg.contains("return type") {
+                if let Some(edit) = Self::return_type_edit(uri, source, msg) {
+                    actions.push(serde_json::json!({
+                        "title": "Change declared return type to match body",
+                        "kind": "quickfix",
+                        "diagnostics": [d],
+                        "edit": edit
+                    }));
+                }
+            }
         }
         actions
+    }
+
+    /// Change `-> Declared` to `-> Found` when body return type mismatches.
+    /// Message: `return type String does not match declared Int` (+ optional `in 'name'`).
+    fn return_type_edit(
+        uri: &str,
+        source: &str,
+        msg: &str,
+    ) -> Option<serde_json::Value> {
+        if source.is_empty() {
+            return None;
+        }
+        // "return type FOUND does not match declared DECLARED"
+        let found = msg
+            .split("return type ")
+            .nth(1)?
+            .split(" does not match")
+            .next()?
+            .trim();
+        let declared = msg.split("declared ").nth(1)?.split_whitespace().next()?;
+        if found.is_empty() || declared.is_empty() || found == declared {
+            return None;
+        }
+        let fname = msg
+            .split(" in '")
+            .nth(1)
+            .and_then(|s| s.split('\'').next())
+            .unwrap_or("");
+        let (start, end) = find_fn_return_type_span(source, fname, declared)?;
+        let (sl, sc) = byte_offset_to_lsp(source, start);
+        let (el, ec) = byte_offset_to_lsp(source, end);
+        let text_edit = serde_json::json!({
+            "range": {
+                "start": { "line": sl, "character": sc },
+                "end": { "line": el, "character": ec }
+            },
+            "newText": found
+        });
+        let mut changes = serde_json::Map::new();
+        changes.insert(uri.to_string(), serde_json::Value::Array(vec![text_edit]));
+        Some(serde_json::json!({ "changes": changes }))
     }
 
     /// Insert a typed default `return …;` just before the function's closing `}`.
@@ -321,6 +372,66 @@ impl LspDaemon {
             }
         })
     }
+}
+
+/// Locate the declared return type text after `->` for `fn name` (or first `fn` if name empty).
+/// Returns half-open byte range of the type token(s) (simple: single identifier / bare type).
+fn find_fn_return_type_span(
+    source: &str,
+    name: &str,
+    expected_declared: &str,
+) -> Option<(usize, usize)> {
+    let needle = if name.is_empty() {
+        "fn ".to_string()
+    } else {
+        format!("fn {}(", name)
+    };
+    let start = source.find(&needle)?;
+    let after = &source[start..];
+    let arrow = after.find("->")?;
+    let mut i = start + arrow + 2;
+    while i < source.len() && source.as_bytes()[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let type_start = i;
+    // Consume a simple type name / bracketed form until space or `{` or requires/ensures.
+    let rest = &source[type_start..];
+    let mut end = 0usize;
+    let bytes = rest.as_bytes();
+    let mut depth = 0i32;
+    while end < bytes.len() {
+        let b = bytes[end];
+        if b == b'[' {
+            depth += 1;
+            end += 1;
+            continue;
+        }
+        if b == b']' {
+            depth -= 1;
+            end += 1;
+            continue;
+        }
+        if depth == 0
+            && (b.is_ascii_whitespace()
+                || b == b'{'
+                || rest[end..].starts_with("requires")
+                || rest[end..].starts_with("ensures"))
+        {
+            break;
+        }
+        end += 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let span = &source[type_start..type_start + end];
+    if !span.starts_with(expected_declared) {
+        // Still accept if declared type is a prefix (e.g. Int vs Int[0..10])
+        if span != expected_declared {
+            return None;
+        }
+    }
+    Some((type_start, type_start + expected_declared.len().min(end)))
 }
 
 /// Find the byte index of the closing `}` of `fn NAME` / `pub fn NAME` body.
@@ -481,5 +592,26 @@ mod tests {
         });
         let actions = LspDaemon::code_actions_for("file:///t.oo", "", &params);
         assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn code_action_return_type_mismatch_workspace_edit() {
+        let src = "pub fn f() -> Int {\n    return \"x\";\n}\npub fn main() { println(1); }\n";
+        let params = serde_json::json!({
+            "context": {
+                "diagnostics": [{
+                    "message": "Type error at 2:15 in 'f': return type String does not match declared Int"
+                }]
+            }
+        });
+        let actions = LspDaemon::code_actions_for("file:///r.oo", src, &params);
+        assert_eq!(actions.len(), 1, "expected return-type action: {:?}", actions);
+        let edits = actions[0]["edit"]["changes"]["file:///r.oo"]
+            .as_array()
+            .expect("edits");
+        assert_eq!(edits[0]["newText"], "String");
+        // Apply mentally: `-> Int` becomes `-> String`
+        let start_ch = edits[0]["range"]["start"]["character"].as_u64().unwrap();
+        assert!(start_ch > 0);
     }
 }

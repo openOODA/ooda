@@ -1223,6 +1223,77 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// String literals → data segment + println_str; dual-engine still refuses concat.
+#[test]
+fn build_wasm_string_literal_println_and_refuses_concat() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wstr_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let ok_path = dir.join("ok.oo");
+    std::fs::write(
+        &ok_path,
+        r#"
+pub fn main() {
+    println("hi");
+    let s = "hi";
+    println(s);
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "wasm", ok_path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm string println: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(ok_path.with_extension("wat")).expect("wat");
+    assert!(wat.contains("println_str"), "wat:\n{}", wat);
+    // Interned: only one "hi" data segment
+    assert_eq!(
+        wat.matches("(data (i32.const").count(),
+        1,
+        "expected interned single data segment:\n{}",
+        wat
+    );
+
+    let bad = dir.join("bad.oo");
+    std::fs::write(
+        &bad,
+        r#"
+pub fn main() {
+    let a = "a";
+    let b = "b";
+    let c = a + b;
+    println(c);
+}
+"#,
+    )
+    .unwrap();
+    let out2 = std::process::Command::new(bin)
+        .args(["build", "--target", "wasm", bad.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        !out2.status.success(),
+        "string concat must fail-closed on WASM (no pointer math)"
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out2.stderr),
+        String::from_utf8_lossy(&out2.stdout)
+    );
+    assert!(
+        err.contains("string arithmetic") || err.contains("pointer"),
+        "err={}",
+        err
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `for i in lo..hi` desugars to while in the parser; WASM must lower that path
 /// (unique $break_N/$continue_N labels) without claiming a full WASM product.
 #[test]

@@ -1,12 +1,17 @@
 // ===================================================================
 // openOODA WebAssembly (.wat) Code Generator
 //
-// Honest subset: supports Int / Bool arithmetic, function calls,
-// `let` bindings, and `if / then / else` expressions (both branches
-// required; i64 result type). Anything outside the subset
-// (String literals, Match expressions, capability IO, Float, etc.)
-// is rejected with a `bail!` so `ooda build --target wasm` fails
-// non-zero instead of silently emitting structurally invalid WAT.
+// Honest subset: Int / Bool / Float arithmetic, function calls, `let`,
+// `if`/`while`, interned String *literals* (data segments + `println_str`),
+// and pointer-identity `==`/`!=` on String after interning.
+//
+// Fail-closed (non-zero): Match, capability I/O, List/struct, string
+// methods, string concatenation / arithmetic (no silent pointer math).
+//
+// String model: each distinct UTF-8 literal is interned once into linear
+// memory as a NUL-terminated byte sequence; values are i32 offsets.
+// Identical literals share one offset (W↓ + correct pointer equality).
+// Content-equality of dynamic strings is not claimed.
 //
 // The emitted WAT is round-trip validated via `wasm-tools validate`
 // when available, otherwise checked structurally for undeclared locals
@@ -21,9 +26,26 @@ thread_local! {
     /// Nested while break/continue label pairs for the current WASM emit.
     static WASM_LOOP_STACK: std::cell::RefCell<Vec<(String, String)>> =
         std::cell::RefCell::new(Vec::new());
-    /// Global list of strings encountered during the current WASM emit.
+    /// Intern pool for string literals in the current emit (order = data layout).
     static WASM_STRINGS: std::cell::RefCell<Vec<String>> =
         std::cell::RefCell::new(Vec::new());
+}
+
+/// Intern `s` into the WASM string pool; return its i32 data-segment offset.
+/// Duplicate content reuses the first offset (zero-cost after first insert).
+fn intern_string(s: &str) -> u32 {
+    WASM_STRINGS.with(|cell| {
+        let mut strings = cell.borrow_mut();
+        let mut offset: u32 = 0;
+        for existing in strings.iter() {
+            if existing == s {
+                return offset;
+            }
+            offset = offset.saturating_add(existing.len() as u32).saturating_add(1);
+        }
+        strings.push(s.to_string());
+        offset
+    })
 }
 
 pub struct WasmCodeGen;
@@ -105,7 +127,7 @@ impl WasmCodeGen {
                 Type::Custom(_) => {}
             }
         }
-        // String returns are allowed (returns an offset as i64)
+        // String returns are allowed (i32 data offset — not a full string object).
 
         // Helper: OODA `Type` → wasm primitive type name.
         let wat_param_ty = |t: &Type| -> Result<&'static str> {
@@ -248,16 +270,7 @@ impl WasmCodeGen {
                 wat.push_str(&format!("    i64.const {}\n", if *b { 1 } else { 0 }));
             }
             Expression::Literal(Literal::String(s), _) => {
-                let mut offset = 0;
-                WASM_STRINGS.with(|strings| {
-                    let mut strings = strings.borrow_mut();
-                    let mut cur_offset = 0;
-                    for string in strings.iter() {
-                        cur_offset += string.len() + 1;
-                    }
-                    offset = cur_offset;
-                    strings.push(s.clone());
-                });
+                let offset = intern_string(s);
                 wat.push_str(&format!("    i32.const {}\n", offset));
             }
             Expression::Literal(Literal::Float(f), _) => {
@@ -276,6 +289,37 @@ impl WasmCodeGen {
                 // expressions.
                 let lhs_ty = Self::infer_expr_type(left, locals);
                 let rhs_ty = Self::infer_expr_type(right, locals);
+                let either_str = lhs_ty == "i32" || rhs_ty == "i32";
+                // String pointers are not numbers: refuse arithmetic / ordering.
+                // Eq/Neq allowed as *pointer identity* after literal interning.
+                if either_str {
+                    match op {
+                        BinOp::Eq | BinOp::Neq => {}
+                        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                            bail!(
+                                "WASM backend does not lower string arithmetic (`{:?}`); \
+                                 use `ooda run` for concat / numeric conversion (no silent pointer math).",
+                                op
+                            );
+                        }
+                        BinOp::Gt | BinOp::Lt | BinOp::Gte | BinOp::Lte => {
+                            bail!(
+                                "WASM backend does not lower ordered compare on String pointers; use `ooda run`."
+                            );
+                        }
+                        BinOp::And | BinOp::Or => {
+                            bail!("WASM backend does not lower &&/|| on String; use `ooda run`.");
+                        }
+                        BinOp::DotDot | BinOp::DotDotEq => {
+                            bail!("WASM backend does not yet lower range operators (`..`, `..=`). Use `ooda run`.")
+                        }
+                    }
+                    if lhs_ty != "i32" || rhs_ty != "i32" {
+                        bail!(
+                            "WASM backend does not mix String pointers with numeric types in binary ops; use `ooda run`."
+                        );
+                    }
+                }
                 // Promote i64 → f64 if either operand is f64.
                 let promote = |ty: &'static str, code: &mut String| {
                     if ty == "i64" && (lhs_ty == "f64" || rhs_ty == "f64") {
@@ -295,13 +339,18 @@ impl WasmCodeGen {
                 wat.push_str(&r_code);
 
                 // Both operands are now on the stack as the same type.
-                let ty = if lhs_ty == "f64" || rhs_ty == "f64" { "f64" } else if lhs_ty == "i32" || rhs_ty == "i32" { "i32" } else { "i64" };
+                let ty = if lhs_ty == "f64" || rhs_ty == "f64" {
+                    "f64"
+                } else if either_str {
+                    "i32"
+                } else {
+                    "i64"
+                };
                 match op {
                     BinOp::Add => wat.push_str(&format!("    {}.add\n", ty)),
                     BinOp::Sub => wat.push_str(&format!("    {}.sub\n", ty)),
                     BinOp::Mul => wat.push_str(&format!("    {}.mul\n", ty)),
                     BinOp::Div if ty == "i64" => wat.push_str("    i64.div_s\n"),
-                    BinOp::Div if ty == "i32" => wat.push_str("    i32.div_s\n"),
                     BinOp::Div => wat.push_str("    f64.div\n"),
                     // Comparisons yield i32 in WebAssembly; extend to i64 Bool model.
                     BinOp::Eq => {
@@ -313,19 +362,35 @@ impl WasmCodeGen {
                         wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Gt => {
-                        if ty == "i64" { wat.push_str("    i64.gt_s\n") } else if ty == "i32" { wat.push_str("    i32.gt_s\n") } else { wat.push_str("    f64.gt\n") }
+                        if ty == "i64" {
+                            wat.push_str("    i64.gt_s\n")
+                        } else {
+                            wat.push_str("    f64.gt\n")
+                        }
                         wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Lt => {
-                        if ty == "i64" { wat.push_str("    i64.lt_s\n") } else if ty == "i32" { wat.push_str("    i32.lt_s\n") } else { wat.push_str("    f64.lt\n") }
+                        if ty == "i64" {
+                            wat.push_str("    i64.lt_s\n")
+                        } else {
+                            wat.push_str("    f64.lt\n")
+                        }
                         wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Gte => {
-                        if ty == "i64" { wat.push_str("    i64.ge_s\n") } else if ty == "i32" { wat.push_str("    i32.ge_s\n") } else { wat.push_str("    f64.ge\n") }
+                        if ty == "i64" {
+                            wat.push_str("    i64.ge_s\n")
+                        } else {
+                            wat.push_str("    f64.ge\n")
+                        }
                         wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Lte => {
-                        if ty == "i64" { wat.push_str("    i64.le_s\n") } else if ty == "i32" { wat.push_str("    i32.le_s\n") } else { wat.push_str("    f64.le\n") }
+                        if ty == "i64" {
+                            wat.push_str("    i64.le_s\n")
+                        } else {
+                            wat.push_str("    f64.le\n")
+                        }
                         wat.push_str("    i64.extend_i32_u\n");
                     }
                     // Boolean ops stay i64.
@@ -336,7 +401,11 @@ impl WasmCodeGen {
                     },
                     BinOp::And | BinOp::Or => bail!(
                         "WASM backend does not yet lower {} on Float operands in this alpha.",
-                        match op { BinOp::And => "&&", BinOp::Or => "||", _ => "?" }
+                        match op {
+                            BinOp::And => "&&",
+                            BinOp::Or => "||",
+                            _ => "?"
+                        }
                     ),
                     BinOp::DotDot | BinOp::DotDotEq => {
                         bail!("WASM backend does not yet lower range operators (`..`, `..=`). Use `ooda run`.")
@@ -352,15 +421,10 @@ impl WasmCodeGen {
                 }
                 if name == "println" {
                     if args.is_empty() {
-                        bail!("WASM println requires at least one Int argument");
+                        bail!("WASM println requires at least one Int or String argument");
                     }
                     for arg in args {
-                        if matches!(arg, Expression::Literal(Literal::String(_), _)) {
-                            bail!(
-                                "WASM backend cannot lower println(String); use println(Int) or `ooda run`."
-                            );
-                        }
-                        // The imported host println takes i64 — convert f64.
+                        // Int → $println (i64); String (i32 offset) → $println_str; Float truncates.
                         let arg_ty = Self::infer_expr_type(arg, locals);
                         wat.push_str(&Self::emit_expr(arg, locals)?);
                         if arg_ty == "f64" {
@@ -440,10 +504,29 @@ impl WasmCodeGen {
             Expression::Literal(Literal::Int(_), _) => "i64",
             Expression::Literal(Literal::String(_), _) => "i32",
             Expression::Variable(name, _) => locals.get(name).copied().unwrap_or("i64"),
-            Expression::Binary { left, right, .. } => {
-                let lt = Self::infer_expr_type(left, locals);
-                let rt = Self::infer_expr_type(right, locals);
-                if lt == "f64" || rt == "f64" { "f64" } else { "i64" }
+            Expression::Binary { op, left, right, .. } => {
+                // Comparisons always yield Bool (i64 0/1). Arithmetic preserves operand class.
+                match op {
+                    BinOp::Eq
+                    | BinOp::Neq
+                    | BinOp::Gt
+                    | BinOp::Lt
+                    | BinOp::Gte
+                    | BinOp::Lte
+                    | BinOp::And
+                    | BinOp::Or => "i64",
+                    _ => {
+                        let lt = Self::infer_expr_type(left, locals);
+                        let rt = Self::infer_expr_type(right, locals);
+                        if lt == "f64" || rt == "f64" {
+                            "f64"
+                        } else if lt == "i32" || rt == "i32" {
+                            "i32"
+                        } else {
+                            "i64"
+                        }
+                    }
+                }
             }
             // Default to i64 for everything else (calls, if, etc.).
             _ => "i64",
@@ -767,6 +850,54 @@ mod tests {
         let res = WasmCodeGen::emit_wat(&prog).unwrap();
         assert!(res.contains("(memory 1)"));
         assert!(res.contains(r#"(data (i32.const 0) "\68\69\00")"#));
+    }
+
+    #[test]
+    fn interns_duplicate_string_literals_one_data_segment() {
+        let prog = parse(
+            r#"
+pub fn main() {
+    let a = "hello";
+    let b = "hello";
+    if a == b { println(1); } else { println(0); }
+}
+"#,
+        );
+        let wat = WasmCodeGen::emit_wat(&prog).unwrap();
+        // One data segment for "hello", not two
+        let data_count = wat.matches("(data (i32.const").count();
+        assert_eq!(data_count, 1, "expected single interned data segment:\n{}", wat);
+        assert!(wat.contains("i32.const 0"), "both should load offset 0:\n{}", wat);
+        assert!(wat.contains("i32.eq"), "string == is pointer eq:\n{}", wat);
+    }
+
+    #[test]
+    fn println_string_literal_uses_println_str() {
+        let prog = parse(r#"pub fn main() { println("hi"); }"#);
+        let wat = WasmCodeGen::emit_wat(&prog).unwrap();
+        assert!(wat.contains("call $println_str"), "wat:\n{}", wat);
+        assert!(wat.contains(r#"(data (i32.const 0) "\68\69\00")"#), "wat:\n{}", wat);
+    }
+
+    #[test]
+    fn refuses_string_concat_no_pointer_math() {
+        let prog = parse(
+            r#"
+pub fn main() {
+    let a = "a";
+    let b = "b";
+    let c = a + b;
+    println(c);
+}
+"#,
+        );
+        let err = WasmCodeGen::emit_wat(&prog).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("string arithmetic") || msg.contains("pointer"),
+            "expected refuse string +, got: {}",
+            msg
+        );
     }
 
     #[test]
