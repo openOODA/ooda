@@ -548,6 +548,7 @@ impl TypeChecker {
 
         let expected_ret = Ty::from_ast(&func.return_type);
         let empty_refinements = HashMap::new();
+        let ret_bounds = self.bounds_from_type_ann(&func.return_type);
         let body_ty = self.check_block(
             &func.body,
             &mut env,
@@ -555,29 +556,8 @@ impl TypeChecker {
             &func.name,
             Some(&expected_ret),
             &empty_refinements,
+            ret_bounds,
         )?;
-
-        // Static refinement bounds for returns: bare Int[lo..hi] or alias (type Port = Int[…]).
-        if let Some((min_v, max_v)) = self.bounds_from_type_ann(&func.return_type) {
-            for stmt in &func.body.stmts {
-                if let Statement::Return(Some(expr), _) = stmt {
-                    if let Some(val) = Ty::const_int(expr) {
-                        if val < min_v || val > max_v {
-                            let sp = expr.span();
-                            return Err(anyhow!(
-                                "Type error at {}:{}: RefinementTypeViolation: Returned value {} out of refinement bounds [{}..{}] for return type of function '{}'",
-                                sp.line,
-                                sp.col,
-                                val,
-                                min_v,
-                                max_v,
-                                func.name
-                            ));
-                        }
-                    }
-                }
-            }
-        }
 
         let expected = Ty::from_ast(&func.return_type);
         // Fail-closed: non-Void functions must produce a value on every path.
@@ -626,6 +606,7 @@ impl TypeChecker {
                 &format!("verify {}", func.name),
                 None,
                 &empty,
+                None,
             )?;
         }
 
@@ -642,6 +623,8 @@ impl TypeChecker {
         ctx: &str,
         expected_ret: Option<&Ty>,
         parent_refinements: &HashMap<String, (i64, i64)>,
+        // Const return-type Int[lo..hi] bounds (incl. aliases); enforced on every return + tail.
+        return_bounds: Option<(i64, i64)>,
     ) -> Result<Ty> {
         let mut last = Ty::Void;
         let mut refinements: HashMap<String, (i64, i64)> = parent_refinements.clone();
@@ -786,6 +769,22 @@ impl TypeChecker {
                             ));
                         }
                     }
+                    if let Some((min_v, max_v)) = return_bounds {
+                        if let Some(val) = Ty::const_int(expr) {
+                            if val < min_v || val > max_v {
+                                let sp = expr.span();
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: RefinementTypeViolation: Returned value {} out of refinement bounds [{}..{}] for return type in '{}'",
+                                    sp.line,
+                                    sp.col,
+                                    val,
+                                    min_v,
+                                    max_v,
+                                    ctx
+                                ));
+                            }
+                        }
+                    }
                     path_returned = true;
                 }
                 Statement::Return(None, _) => {
@@ -822,6 +821,7 @@ impl TypeChecker {
                                 "if-then",
                                 expected_ret,
                                 &refinements,
+                                return_bounds,
                             )?;
                             if let Some(eb) = else_branch {
                                 let mut env_else = env.clone();
@@ -833,6 +833,7 @@ impl TypeChecker {
                                     "if-else",
                                     expected_ret,
                                     &refinements,
+                                    return_bounds,
                                 )?;
                             }
                             last = Ty::Void;
@@ -863,6 +864,7 @@ impl TypeChecker {
                                 "while-expr-stmt",
                                 expected_ret,
                                 &refinements,
+                                return_bounds,
                             )?;
                             last = Ty::Void;
                         }
@@ -900,6 +902,7 @@ impl TypeChecker {
                         "while-body",
                         expected_ret,
                         &refinements,
+                        return_bounds,
                     )?;
                     last = Ty::Void;
                 }
@@ -942,6 +945,7 @@ impl TypeChecker {
                         "if-then-tail",
                         expected_ret,
                         &refinements,
+                        return_bounds,
                     )?;
                     if let Some(eb) = else_branch {
                         let mut env_else = env.clone();
@@ -953,12 +957,30 @@ impl TypeChecker {
                             "if-else-tail",
                             expected_ret,
                             &refinements,
+                            return_bounds,
                         )?;
                     }
                     last = Ty::Void;
                 }
                 _ => {
                     last = self.infer_expr_m(expr, env, mutable)?;
+                    // Tail expression as implicit return: enforce Int[lo..hi] when applicable.
+                    if let Some((min_v, max_v)) = return_bounds {
+                        if let Some(val) = Ty::const_int(expr) {
+                            if val < min_v || val > max_v {
+                                let sp = expr.span();
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: RefinementTypeViolation: Returned value {} out of refinement bounds [{}..{}] for return type in '{}'",
+                                    sp.line,
+                                    sp.col,
+                                    val,
+                                    min_v,
+                                    max_v,
+                                    ctx
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1761,6 +1783,7 @@ impl TypeChecker {
                     "if-then",
                     None,
                     &empty_ref,
+                    None,
                 )?;
                 if let Some(else_b) = else_branch {
                     let mut env_else = env.clone();
@@ -1772,6 +1795,7 @@ impl TypeChecker {
                         "if-else",
                         None,
                         &empty_ref,
+                        None,
                     )?;
                     if Ty::unifyable(&t1, &t2) {
                         Ok(t1)
@@ -1846,7 +1870,15 @@ impl TypeChecker {
                 }
                 let mut m = HashMap::new();
                 let empty_ref = HashMap::new();
-                self.check_block(body, &mut env.clone(), &mut m, "while-expr", None, &empty_ref)?;
+                self.check_block(
+                    body,
+                    &mut env.clone(),
+                    &mut m,
+                    "while-expr",
+                    None,
+                    &empty_ref,
+                    None,
+                )?;
                 Ok(Ty::Void)
             }
             Expression::StructLit { name, fields, span } => {
@@ -3336,5 +3368,61 @@ mod tests {
             }
         "#;
         assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn nested_return_refinement_const_oob_fails() {
+        let src = r#"
+            type Port = Int[1..10];
+            pub fn f(b: Bool) -> Port {
+                if b {
+                    return 99;
+                }
+                return 1;
+            }
+            pub fn main() { println(f(true)); }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("99"),
+            "nested if return must enforce bounds: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn while_return_refinement_const_oob_fails() {
+        let src = r#"
+            type Port = Int[1..10];
+            pub fn f() -> Port {
+                let mut i = 0;
+                while i < 1 {
+                    return 99;
+                }
+                return 1;
+            }
+            pub fn main() { println(f()); }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("99"),
+            "while return must enforce bounds: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn tail_expr_refinement_const_oob_fails() {
+        let src = r#"
+            type Port = Int[1..10];
+            pub fn f() -> Port { 99 }
+            pub fn main() { println(f()); }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("99"),
+            "tail expr return must enforce bounds: {}",
+            err
+        );
     }
 }

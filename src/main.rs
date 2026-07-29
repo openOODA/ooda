@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.59.0-alpha")]
+#[command(version = "0.60.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -1104,13 +1104,18 @@ fn load_and_analyze(
                     .nth(1)
                     .and_then(|s| s.split('\'').next())
                     .unwrap_or(".method");
+                let on_ty = msg
+                    .split(" on ")
+                    .nth(1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "Type".into());
                 (
                     "Fix method / field access".into(),
                     format!(
-                        "// '{}' is not a known method on this type — use a real method or struct field",
-                        mname
+                        "{{\"codemod\":\"unknown_method\",\"method\":\"{}\",\"receiver\":\"{}\",\"hint\":\"use a real method (.len/.char_at/.push/…) or a struct field; free-form builtins use name(recv, …)\"}}",
+                        mname, on_ty
                     ),
-                    false,
+                    true,
                 )
             } else {
                 (
@@ -1237,12 +1242,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.59.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.60.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.59.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.60.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

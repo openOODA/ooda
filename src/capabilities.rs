@@ -352,23 +352,52 @@ impl CapabilityChecker {
         match expr {
             Expression::Call { name, args, .. } => {
                 if let Some(effect) = lookup_effect(name) {
-                    if !Self::function_has_cap(func, effect.requires) {
-                        let span = expr.span();
-                        return Err(anyhow!(
-                            "Security Capability Violation: Function '{}' calls sealed effectful builtin '{}' which requires a {} parameter, but none was declared at line {}, col {}. Default-deny: grant the capability token explicitly.",
-                            func.name,
-                            name,
-                            effect.requires.type_name(),
-                            span.line,
-                            span.col
-                        ));
-                    }
+                    let span = expr.span();
+                    let has_correct_handle = args
+                        .iter()
+                        .any(|a| Self::expr_is_cap_handle(a, effect.requires, func));
+                    let wrong_kind = [
+                        CapKind::Net,
+                        CapKind::Fs,
+                        CapKind::Sys,
+                        CapKind::Env,
+                    ]
+                    .into_iter()
+                    .find(|&k| {
+                        k != effect.requires
+                            && args
+                                .iter()
+                                .any(|a| Self::expr_is_cap_handle(a, k, func))
+                    });
+
                     // Method style: receiver (args[0]) must be a live cap handle.
                     if effect.receiver_is_cap {
-                        let span = expr.span();
                         match args.first() {
                             Some(recv) if Self::expr_is_cap_handle(recv, effect.requires, func) => {}
-                            Some(_) => {
+                            Some(recv) => {
+                                // Prefer wrong-kind naming when receiver is a different cap.
+                                if let Some(got) = [
+                                    CapKind::Net,
+                                    CapKind::Fs,
+                                    CapKind::Sys,
+                                    CapKind::Env,
+                                ]
+                                .into_iter()
+                                .find(|&k| {
+                                    k != effect.requires
+                                        && Self::expr_is_cap_handle(recv, k, func)
+                                })
+                                {
+                                    return Err(anyhow!(
+                                        "Security Capability Violation: Function '{}' calls '{}' at line {}, col {} with wrong-kind handle {} (requires live {} — object-capability: kinds are not interchangeable).",
+                                        func.name,
+                                        name,
+                                        span.line,
+                                        span.col,
+                                        got.type_name(),
+                                        effect.requires.type_name()
+                                    ));
+                                }
                                 return Err(anyhow!(
                                     "Security Capability Violation: Function '{}' calls '{}' at line {}, col {} but the receiver is not a {} capability handle parameter.",
                                     func.name,
@@ -388,50 +417,39 @@ impl CapabilityChecker {
                                 ));
                             }
                         }
+                    } else if has_correct_handle {
+                        // Free sealed form with live correct handle — ok (even if ambient also present).
+                    } else if let Some(got) = wrong_kind {
+                        // Wrong-kind before ambient-missing: write_file(net, …) with only &NetCap.
+                        return Err(anyhow!(
+                            "Security Capability Violation: Function '{}' calls sealed '{}' at line {}, col {} with wrong-kind handle {} (requires live {} — object-capability: kinds are not interchangeable).",
+                            func.name,
+                            name,
+                            span.line,
+                            span.col,
+                            got.type_name(),
+                            effect.requires.type_name()
+                        ));
+                    } else if !Self::function_has_cap(func, effect.requires) {
+                        return Err(anyhow!(
+                            "Security Capability Violation: Function '{}' calls sealed effectful builtin '{}' which requires a {} parameter, but none was declared at line {}, col {}. Default-deny: grant the capability token explicitly.",
+                            func.name,
+                            name,
+                            effect.requires.type_name(),
+                            span.line,
+                            span.col
+                        ));
                     } else {
-                        // Object-capability: free sealed ops must take a live handle
-                        // argument (ambient param alone is not enough).
-                        // e.g. fetch(net, url) / write_file(fs, path, content)
-                        let span = expr.span();
-                        let has_handle_arg = args
-                            .iter()
-                            .any(|a| Self::expr_is_cap_handle(a, effect.requires, func));
-                        if !has_handle_arg {
-                            // Prefer explicit wrong-kind when another cap handle is present.
-                            let wrong_kind = [
-                                CapKind::Net,
-                                CapKind::Fs,
-                                CapKind::Sys,
-                                CapKind::Env,
-                            ]
-                            .into_iter()
-                            .find(|&k| {
-                                k != effect.requires
-                                    && args
-                                        .iter()
-                                        .any(|a| Self::expr_is_cap_handle(a, k, func))
-                            });
-                            if let Some(got) = wrong_kind {
-                                return Err(anyhow!(
-                                    "Security Capability Violation: Function '{}' calls sealed '{}' at line {}, col {} with wrong-kind handle {} (requires live {} — object-capability: kinds are not interchangeable).",
-                                    func.name,
-                                    name,
-                                    span.line,
-                                    span.col,
-                                    got.type_name(),
-                                    effect.requires.type_name()
-                                ));
-                            }
-                            return Err(anyhow!(
-                                "Security Capability Violation: Function '{}' calls sealed '{}' at line {}, col {} without passing a live {} handle argument (object-capability: ambient grant alone is not enough — use `{}(cap, …)` or a method-style receiver).",
-                                func.name,
-                                name,
-                                span.line,
-                                span.col,
-                                effect.requires.type_name(),
-                                name
-                            ));
-                        }
+                        // Ambient grant alone is not enough — must thread live handle.
+                        return Err(anyhow!(
+                            "Security Capability Violation: Function '{}' calls sealed '{}' at line {}, col {} without passing a live {} handle argument (object-capability: ambient grant alone is not enough — use `{}(cap, …)` or a method-style receiver).",
+                            func.name,
+                            name,
+                            span.line,
+                            span.col,
+                            effect.requires.type_name(),
+                            name
+                        ));
                     }
                 }
 
@@ -832,6 +850,26 @@ mod tests {
             CapabilityChecker::check_program(&prog).is_ok(),
             "match Some(cap) pattern bind must be a handle: {:?}",
             CapabilityChecker::check_program(&prog).err()
+        );
+    }
+
+    #[test]
+    fn wrong_kind_write_file_net_only_names_kinds() {
+        let src = r#"
+            pub fn main(net: &NetCap) {
+                let r = write_file(net, "/tmp/x", "y");
+                println(r);
+            }
+        "#;
+        let mut lexer = crate::lexer::Lexer::new(src);
+        let tokens = lexer.tokenize().expect("lex");
+        let mut parser = crate::parser::Parser::new(tokens);
+        let prog = parser.parse_program().expect("parse");
+        let err = CapabilityChecker::check_program(&prog).unwrap_err().to_string();
+        assert!(
+            err.contains("wrong-kind") && err.contains("NetCap") && err.contains("FsCap"),
+            "write_file(net) without FsCap must wrong-kind: {}",
+            err
         );
     }
 }

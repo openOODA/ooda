@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.59.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.60.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.59.0-alpha
+ooda --version   # 0.60.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.59.0-alpha (CHS M0–M5)
+## What's real in v0.60.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -47,6 +47,7 @@ import "lib.oo";       // relative / OODA_PATH
 | Nested block scopes | Real: `let` inside if/while does **not** leak; match-arm pattern shadows restore; outer `let mut` assign in match+if persists |
 | Type aliases | Real: unify for arith/return; `Int[lo..hi]` on params **and** let/return (const TC + runtime) |
 | Caps + sealed effects | Static **and runtime** object-cap: free sealed ops need live handle Value; ambient-only denied |
+| Nested/tail return refine | Real: const `return` inside if/while + tail expr enforces `Int[lo..hi]` / aliases |
 | `Int[lo..hi]` refinement | Real on let/assign/return/params **including via type aliases**; const typecheck + runtime |
 | Types fail-closed | Missing returns fail; match arms unify; same-type arith/eq; if-value needs else; assert_eq types |
 | Net GET (`fetch` / `http_get` / `.get`) | Real HTTPS via curl under threaded `&NetCap` |
