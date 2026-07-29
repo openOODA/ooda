@@ -846,7 +846,8 @@ impl Gen {
         }
 
         let t = self.fresh("r");
-        match name {
+        let method_name = name.strip_prefix('.').unwrap_or(name);
+        match method_name {
             "list_new" => {
                 // default int list; if used as string list context hard — use int
                 code.push_str(&format!("  OoIList {} = oo_ilist_new();\n", t));

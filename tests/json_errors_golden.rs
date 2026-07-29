@@ -1274,3 +1274,35 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn build_c_lowers_str_slice_method() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_c_slice_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    println("hello".str_slice(0, 2));
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "C must lower .str_slice: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("he"), "stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
