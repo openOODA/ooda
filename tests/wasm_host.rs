@@ -285,6 +285,45 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// String `.char_at(i)` loads byte at offset as i64 (ASCII).
+#[test]
+fn ooda_wasm_string_char_at_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wcat_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("cat.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    println("hi".char_at(0));
+    println("hi".char_at(1));
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm char_at: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("i32.load8_u"), "load8 missing:\n{}", wat);
+    let lines = run_wat(&wat).expect("host");
+    // 'h' = 104, 'i' = 105
+    assert_eq!(
+        lines,
+        vec!["104".to_string(), "105".to_string()],
+        "got {:?}",
+        lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// String `.len` via pure WAT NUL-byte scan (no host import).
 #[test]
 fn ooda_wasm_string_len_method_runs_on_host() {

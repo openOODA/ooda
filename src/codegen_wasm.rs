@@ -694,8 +694,8 @@ impl WasmCodeGen {
                 }
             }
             Expression::Call { name, args, .. } => {
-                // List methods on List[Int] → list_*; String .len → pure WAT NUL scan.
-                if name == ".push" || name == ".len" {
+                // List methods on List[Int] → list_*; String .len/.char_at → pure WAT.
+                if name == ".push" || name == ".len" || name == ".char_at" {
                     if args.is_empty() {
                         bail!("WASM method '{}' requires a receiver", name);
                     }
@@ -720,8 +720,7 @@ impl WasmCodeGen {
                         wat.push_str(&Self::emit_expr(&args[0], locals)?);
                         wat.push_str(&Self::emit_expr(&args[1], locals)?);
                         wat.push_str("    call $list_push\n");
-                    } else {
-                        // .len
+                    } else if name == ".len" {
                         if args.len() != 1 {
                             bail!("WASM .len expects only a receiver");
                         }
@@ -729,7 +728,6 @@ impl WasmCodeGen {
                             wat.push_str(&Self::emit_expr(&args[0], locals)?);
                             wat.push_str("    call $list_len\n");
                         } else if recv_ty == "i32" {
-                            // String pointer: count bytes until NUL (stack locals only).
                             wat.push_str(&Self::emit_string_len(&args[0], locals)?);
                         } else {
                             bail!(
@@ -737,6 +735,27 @@ impl WasmCodeGen {
                                 recv_ty
                             );
                         }
+                    } else {
+                        // .char_at(index) on String → i64 byte value (ASCII subset)
+                        if recv_ty != "i32" {
+                            bail!(
+                                "WASM .char_at requires String receiver (got {}); use `ooda run`.",
+                                recv_ty
+                            );
+                        }
+                        if args.len() != 2 {
+                            bail!("WASM .char_at expects receiver + Int index");
+                        }
+                        let idx_ty = Self::infer_expr_type(&args[1], locals);
+                        if idx_ty != "i64" {
+                            bail!("WASM .char_at index must be Int (got {})", idx_ty);
+                        }
+                        wat.push_str(&Self::emit_expr(&args[0], locals)?);
+                        wat.push_str(&Self::emit_expr(&args[1], locals)?);
+                        wat.push_str("    i32.wrap_i64\n");
+                        wat.push_str("    i32.add\n");
+                        wat.push_str("    i32.load8_u\n");
+                        wat.push_str("    i64.extend_i32_u\n");
                     }
                 } else if name.starts_with('.') {
                     bail!(
@@ -867,8 +886,12 @@ impl WasmCodeGen {
             Expression::Call { name, args, .. } => {
                 if name == "list_new" || name == "list_push" || name == ".push" {
                     "list"
-                } else if name == "list_get" || name == "list_len" || name == ".len" {
-                    "i64" // list length or string byte length
+                } else if name == "list_get"
+                    || name == "list_len"
+                    || name == ".len"
+                    || name == ".char_at"
+                {
+                    "i64"
                 } else {
                     let _ = args;
                     "i64"
