@@ -274,6 +274,89 @@ fn unfinished_cli_lsp_pkg_replay_exit_nonzero() {
 }
 
 #[test]
+fn json_errors_missing_return_is_patch_applicable() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_noret_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("noret.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn f() -> Int {
+}
+pub fn main() {
+    println(f());
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn check");
+    assert!(!out.status.success(), "missing return must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stderr)
+    });
+    assert!(
+        v["message"].as_str().unwrap_or("").contains("missing return")
+            || v["message"].as_str().unwrap_or("").contains("Void"),
+        "msg: {}",
+        stderr
+    );
+    assert_eq!(
+        v["suggested_fix"]["applicability"].as_str(),
+        Some("patch"),
+        "missing return should be patch-applicable: {}",
+        stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn json_errors_unreachable_after_return_is_patch_applicable() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_unreach_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("u.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn f() -> Int {
+    return 1;
+    let y = 2;
+}
+pub fn main() {
+    println(f());
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn check");
+    assert!(!out.status.success(), "unreachable after return must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stderr)
+    });
+    assert!(
+        v["message"].as_str().unwrap_or("").contains("unreachable"),
+        "msg: {}",
+        stderr
+    );
+    assert_eq!(
+        v["suggested_fix"]["applicability"].as_str(),
+        Some("patch"),
+        "unreachable should be patch-applicable: {}",
+        stderr
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ooda_patch_cli_changes_return_type() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_patch_cli_{}", std::process::id()));

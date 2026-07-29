@@ -535,7 +535,16 @@ impl TypeChecker {
     ) -> Result<Ty> {
         let mut last = Ty::Void;
         let mut refinements: HashMap<String, (i64, i64)> = parent_refinements.clone();
+        let mut path_returned = false;
         for stmt in &block.stmts {
+            if path_returned {
+                let sp = stmt_span(stmt);
+                return Err(anyhow!(
+                    "Type error at {}:{}: unreachable code after return",
+                    sp.line,
+                    sp.col
+                ));
+            }
             match stmt {
                 Statement::Let {
                     name,
@@ -672,9 +681,11 @@ impl TypeChecker {
                             ));
                         }
                     }
+                    path_returned = true;
                 }
                 Statement::Return(None, _) => {
                     last = Ty::Void;
+                    path_returned = true;
                 }
                 Statement::Expr(expr, span) => {
                     // Statement-level if/while must inherit mutability so
@@ -714,6 +725,9 @@ impl TypeChecker {
                                 )?;
                             }
                             last = Ty::Void;
+                            if expr_paths_return(expr) {
+                                path_returned = true;
+                            }
                         }
                         Expression::While {
                             cond,
@@ -777,6 +791,14 @@ impl TypeChecker {
             }
         }
         if let Some(expr) = &block.expr {
+            if path_returned {
+                let sp = expr.span();
+                return Err(anyhow!(
+                    "Type error at {}:{}: unreachable code after return",
+                    sp.line,
+                    sp.col
+                ));
+            }
             // Tail expression may be a nested `else if` chain — keep mut map.
             match expr.as_ref() {
                 Expression::If {
@@ -1505,17 +1527,21 @@ impl TypeChecker {
 
 /// True when every control-flow path through `block` executes `return`.
 /// Expression-bodied blocks (tail value) are NOT "returns" — they yield a value.
+/// An early unconditional `return` makes the rest of the block dead (still returns).
 /// Conservative: unknown constructs → false.
 fn block_always_returns(block: &Block) -> bool {
+    for stmt in &block.stmts {
+        match stmt {
+            Statement::Return(_, _) => return true,
+            Statement::Expr(e, _) if expr_paths_return(e) => return true,
+            // Other statements may fall through.
+            _ => {}
+        }
+    }
     if let Some(expr) = &block.expr {
         return expr_paths_return(expr);
     }
-    match block.stmts.last() {
-        Some(Statement::Return(Some(_), _)) | Some(Statement::Return(None, _)) => true,
-        Some(Statement::Expr(e, _)) => expr_paths_return(e),
-        Some(Statement::While { .. }) => false, // may never enter
-        _ => false,
-    }
+    false
 }
 
 fn expr_paths_return(expr: &Expression) -> bool {
@@ -1536,6 +1562,17 @@ fn expr_paths_return(expr: &Expression) -> bool {
         }
         // Bare values / calls are not return statements.
         _ => false,
+    }
+}
+
+/// Span of a statement for unreachable-code diagnostics.
+fn stmt_span(stmt: &Statement) -> crate::ast::Span {
+    match stmt {
+        Statement::Let { span, .. }
+        | Statement::Assign { span, .. }
+        | Statement::Return(_, span)
+        | Statement::Expr(_, span)
+        | Statement::While { span, .. } => *span,
     }
 }
 
@@ -2427,6 +2464,67 @@ mod tests {
         assert!(
             err.contains("division by zero"),
             "const float /0 must fail closed: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn accepts_early_return_with_dead_code_after() {
+        // Early return means the function always returns; trailing stmts are
+        // unreachable (separate diagnostic) — first ensure always-returns works.
+        let src = r#"
+            pub fn f() -> Int {
+                return 1;
+            }
+            pub fn main() {
+                println(f());
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "plain early return: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn rejects_unreachable_after_return() {
+        let src = r#"
+            pub fn f() -> Int {
+                return 1;
+                let y = 2;
+            }
+            pub fn main() {
+                println(f());
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("unreachable"),
+            "dead code after return must fail: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_unreachable_after_if_else_return() {
+        let src = r#"
+            pub fn f(x: Int) -> Int {
+                if x > 0 {
+                    return x;
+                } else {
+                    return 0;
+                }
+                let z = 1;
+            }
+            pub fn main() {
+                println(f(1));
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("unreachable"),
+            "dead code after if/else return: {}",
             err
         );
     }

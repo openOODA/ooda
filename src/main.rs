@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.49.0-alpha")]
+#[command(version = "0.50.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -884,6 +884,24 @@ fn load_and_analyze(
                     ),
                     true,
                 )
+            } else if msg.contains("missing return") {
+                (
+                    "Add return value on every path".into(),
+                    r#"{"hint":"ensure every path ends with `return <expr>;` or a tail expression of the declared type","example":"if cond { return a; } else { return b; }"}"#.into(),
+                    true,
+                )
+            } else if msg.contains("unreachable code after return") {
+                (
+                    "Remove dead code after return".into(),
+                    r#"{"hint":"delete statements after `return` — they never execute"}"#.into(),
+                    true,
+                )
+            } else if msg.contains("division by zero") {
+                (
+                    "Fix zero divisor".into(),
+                    r#"{"hint":"const divisor is 0 — change the literal or guard the division"}"#.into(),
+                    true,
+                )
             } else if msg.contains("undefined function") {
                 let fname = msg
                     .split("undefined function '")
@@ -1124,12 +1142,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.49.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.50.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.49.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.50.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
