@@ -311,8 +311,51 @@ impl LspDaemon {
                     }));
                 }
             }
+            if msg.contains(" expects ") && msg.contains(", found ") && msg.contains("argument") {
+                if let Some(edit) = Self::arg_type_mismatch_edit(uri, source, msg) {
+                    actions.push(serde_json::json!({
+                        "title": "Replace first character of argument with default expected type",
+                        "kind": "quickfix",
+                        "diagnostics": [d],
+                        "edit": edit
+                    }));
+                }
+            }
         }
         actions
+    }
+
+    /// Replace the first character of the mismatched argument with a default value of the expected type.
+    fn arg_type_mismatch_edit(
+        uri: &str,
+        source: &str,
+        msg: &str,
+    ) -> Option<serde_json::Value> {
+        if source.is_empty() {
+            return None;
+        }
+        let expected = msg.split(" expects ").nth(1)?.split(',').next()?;
+        let default_val = match expected {
+            "Int" => "0",
+            "String" => "\"\"",
+            "Bool" => "false",
+            "Float" => "0.0",
+            _ => return None,
+        };
+        let (line_1, col_1) = parse_loc(msg);
+        let line_0 = line_1.saturating_sub(1);
+        let col_0 = col_1.saturating_sub(1);
+        
+        let text_edit = serde_json::json!({
+            "range": {
+                "start": { "line": line_0, "character": col_0 },
+                "end": { "line": line_0, "character": col_0.saturating_add(1) }
+            },
+            "newText": default_val
+        });
+        let mut changes = serde_json::Map::new();
+        changes.insert(uri.to_string(), serde_json::Value::Array(vec![text_edit]));
+        Some(serde_json::json!({ "changes": changes }))
     }
 
     /// Insert `: Int` at the syntax error location for missing parameter types.
