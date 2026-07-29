@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.35.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.36.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -26,7 +26,7 @@ cargo build --release
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.35.0-alpha
+ooda --version   # 0.36.0-alpha
 ```
 
 ```ooda
@@ -36,15 +36,19 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.35.0-alpha (CHS M0–M5)
+## What's real in v0.36.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
 | `while` / `else if` / unary `!` | Real (interp + LLVM/WAT subset) |
 | Option / Result / must-use / let mut | Real |
-| Caps + sealed effects | Real (static + runtime) |
+| Caps + sealed effects | Real (static + runtime; let-alias **and** assign re-alias of cap handles) |
+| `Int[lo..hi]` refinement | Real on let init **and** later assignment of literals |
 | Net GET (`fetch` / `http_get` / `.get`) | Real HTTPS via curl under `&NetCap` |
 | AI diagnostics (`--json-errors`) | Real JSON envelope + suggested_fix |
+| Measured `ooda em` | Real clocks (parse/cap/typecheck µs, W, V) — no fake Boyd Ps / drag-% |
+| `ooda patch` | Real body / params / return type / requires / ensures |
+| `ooda migrate --edition 2026` | Partial real: exhaustive match wildcards + assigned `let`→`let mut` |
 | `type T = Int where …` | Fail-closed (use `requires` / `Int[lo..hi]`) |
 | **CHS:** `List`, string walk, structs, real FS, argv | Real on interpreter |
 | **CHS C backend** (`ooda build --target c`) | Real — gcc + `runtime/chs_rt.c` (no clang required) |
@@ -56,7 +60,7 @@ import "lib.oo";       // relative / OODA_PATH
 ## Not implemented (fail non-zero)
 
 LSP, pkg install, replay, full WASM product, PyTorch, `for` sugar, full SPEC self-host (only **CHS frontend** fixed-point is claimed).  
-`ooda migrate --edition 2026` is a **partial** real codemod (exhaustive match arms), not a full edition engine.
+`ooda migrate` is **not** a full edition engine — only the two codemods above.
 
 Stage-0 is still **Rust** (`src/**/*.rs`). That is intentional on alpha. **Beta exit criterion:** no `.rs` left — [`bootstrap/BETA.md`](bootstrap/BETA.md).
 
