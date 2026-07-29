@@ -54,7 +54,7 @@ pub fn host_chs_build(src: &Path, out_bin: &Path) -> Result<(), String> {
     CapabilityChecker::check_program(&prog).map_err(|e| format!("cap: {}", e))?;
     TypeChecker::check_program(&prog).map_err(|e| format!("type: {}", e))?;
     let rt = runtime_c_path();
-    CCodeGen::build_native(&prog, out_bin, &rt).map_err(|e| format!("build: {}", e))
+    CCodeGen::build_native(&prog, out_bin, &rt, false).map_err(|e| format!("build: {}", e))
 }
 
 // ----- C FFI (linked into native oodac via -looda) -----

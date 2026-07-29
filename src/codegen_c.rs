@@ -49,7 +49,7 @@ impl CCodeGen {
     }
 
     /// Compile .oo → native binary via gcc + chs_rt.c. Returns path to binary.
-    pub fn build_native(program: &Program, out_bin: &Path, rt_c: &Path) -> Result<()> {
+    pub fn build_native(program: &Program, out_bin: &Path, rt_c: &Path, release: bool) -> Result<()> {
         let c_src = Self::emit_c(program)?;
         let out_c = out_bin.with_extension("c");
         std::fs::write(&out_c, &c_src)?;
@@ -63,11 +63,17 @@ impl CCodeGen {
         // Link against libooda.a (staticlib) so host_ast_dump/chs_build work natively.
         let lib_dir = find_ooda_staticlib_dir();
         let mut cmd = Command::new(&gcc);
+        let opt_flag = if release { "-O3" } else { "-O0" };
         cmd.env("TMPDIR", &tmp)
             .env("TMP", &tmp)
             .env("TEMP", &tmp)
-            .arg("-O2")
-            .arg("-std=c99")
+            .arg(opt_flag);
+        
+        if release {
+            cmd.arg("-flto");
+        }
+
+        cmd.arg("-std=c99")
             .arg(&out_c)
             .arg(rt_c);
         if let Some(dir) = &lib_dir {

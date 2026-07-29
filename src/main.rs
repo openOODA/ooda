@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.77.0-alpha")]
+#[command(version = "0.78.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -414,12 +414,7 @@ fn main() -> Result<()> {
             }
         }
         Commands::Build { file, release, emit_llvm, target } => {
-            if release {
-                anyhow::bail!(
-                    "build --release is not implemented in this alpha (refused to pretend optimization). \
-                     Omit --release, or use `ooda run` for interpreted execution."
-                );
-            }
+
             let program = load_program(&file)
                 .with_context(|| format!("Failed to load '{}'", file.display()))?;
             CapabilityChecker::check_program(&program)?;
@@ -500,7 +495,7 @@ fn main() -> Result<()> {
             // Prefer CHS C backend + gcc for native (stage-1 path; no clang required).
             if target_l == "c" || target_l == "native" || target_l == "chs" {
                 let rt = runtime_c_path();
-                match CCodeGen::build_native(&program, &out_bin, &rt) {
+                match CCodeGen::build_native(&program, &out_bin, &rt, release) {
                     Ok(()) => {
                         println!(
                             "🚀 [openOODA CHS C Backend] Native executable: {} (runtime {})",
@@ -1310,9 +1305,9 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.77.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.78.0-alpha";
     // For comparing against Cargo.toml which lacks the 'v'
-    const CANONICAL_VERSION_NO_V: &str = "0.77.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.78.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
