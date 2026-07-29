@@ -268,19 +268,6 @@ impl TypeChecker {
         t.normalize(&self.type_aliases)
     }
 
-    /// Resolve `Int[lo..hi]` bounds from a type annotation, including type aliases.
-    fn refinement_bounds_of(&self, ty: &Type) -> Option<(i64, i64)> {
-        if let Some(b) = int_refinement_bounds(ty) {
-            return Some(b);
-        }
-        if let Type::Custom(name) = ty {
-            if let Some(b) = self.alias_refinements.get(name) {
-                return Some(*b);
-            }
-        }
-        None
-    }
-
     pub fn check_program(program: &Program) -> Result<()> {
         let mut tc = TypeChecker {
             functions: HashMap::new(),

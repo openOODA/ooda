@@ -116,6 +116,8 @@ pub struct Interpreter {
     argv: Vec<String>,
     /// Named struct layouts from `type Name = struct { ... }`.
     struct_defs: HashMap<String, Vec<(String, Type)>>,
+    /// `type Port = Int[lo..hi]` bounds (from_ast collapses RHS to Int).
+    alias_refinements: HashMap<String, (i64, i64)>,
     /// When `return` executes inside nested if/while blocks, set this so outer
     /// frames propagate out of the function (CHS oodac relies on this).
     pending_return: Option<Value>,
@@ -126,6 +128,7 @@ impl Interpreter {
         let mut functions = HashMap::new();
         let mut func_caps = HashMap::new();
         let mut struct_defs = HashMap::new();
+        let mut alias_refinements = HashMap::new();
         for item in program.items {
             match item {
                 Item::Function(func) => {
@@ -135,7 +138,12 @@ impl Interpreter {
                 Item::TypeAlias(name, Type::Struct { fields, .. }) => {
                     struct_defs.insert(name, fields);
                 }
-                Item::TypeAlias(..) | Item::Import { .. } => {}
+                Item::TypeAlias(name, ty) => {
+                    if let Some(b) = crate::typecheck::int_refinement_bounds(&ty) {
+                        alias_refinements.insert(name, b);
+                    }
+                }
+                Item::Import { .. } => {}
             }
         }
         Self {
@@ -148,6 +156,7 @@ impl Interpreter {
             next_thread_id: 1,
             argv: Vec::new(),
             struct_defs,
+            alias_refinements,
             pending_return: None,
         }
     }
@@ -968,9 +977,16 @@ impl Interpreter {
             return Err(anyhow!("Function '{}' expects {} arguments, received {}", name, func.params.len(), args.len()));
         }
 
-        // Runtime refinement: Int[lo..hi] params (non-const args that typecheck missed).
+        // Runtime refinement: Int[lo..hi] params, including `type Port = Int[lo..hi]`.
         for (param, arg) in func.params.iter().zip(args.iter()) {
-            if let Some((lo, hi)) = crate::typecheck::int_refinement_bounds(&param.param_type) {
+            let bounds = crate::typecheck::int_refinement_bounds(&param.param_type).or_else(|| {
+                if let Type::Custom(alias) = &param.param_type {
+                    self.alias_refinements.get(alias).copied()
+                } else {
+                    None
+                }
+            });
+            if let Some((lo, hi)) = bounds {
                 if let Value::Int(v) = arg {
                     if *v < lo || *v > hi {
                         return Err(anyhow!(
@@ -1654,6 +1670,27 @@ mod tests {
             "got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn runtime_rejects_alias_refinement_param_oob() {
+        let prog = parse(
+            r#"
+            type Port = Int[1..65535];
+            pub fn take(p: Port) -> Int {
+                return p;
+            }
+            pub fn main() -> Int {
+                let bad = 0;
+                return take(bad);
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let res = interp.call_function("main", vec![], &mut HashMap::new());
+        assert!(res.is_err(), "alias Port Int[lo..hi] non-const OOB must fail");
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("RefinementTypeViolation"), "got: {}", msg);
     }
 
     #[test]
