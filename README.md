@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.87.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.88.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.87.0-alpha
+ooda --version   # 0.88.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.87.0-alpha (CHS M0–M5)
+## What's real in v0.88.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -62,7 +62,7 @@ import "lib.oo";       // relative / OODA_PATH
 | String methods | Real on interpreter + CHS C (`.char_at` / `.str_slice`); LLVM subset refuses strings fail-closed |
 | Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM (method forms included as of v0.69); pure compute subset may lower; IR-only link fails non-zero |
 | `EnvCap` `.env_get` | Real on **interpreter**; C build refuses (sealed) |
-| Network `pkg install` | Partial: local pin; https `*.tar.gz` via curl+tar; optional GPG `.sig`, `.minisig`, and `.sha256` sidecar verify |
+| Network `pkg install` | Partial: local pin; https `*.tar.gz` via curl+tar; `.minisig`/`.sig` fail-closed when present (need pubkey/gpg; `OODA_PKG_ALLOW_UNSIGNED=1` escape); `.sha256` optional/`OODA_PKG_REQUIRE_SHA256=1` |
 | `ooda patch` | Real body / params / return type / requires / ensures |
 | `ooda migrate --edition 2026` | Partial real: exhaustive match wildcards + assigned `let`→`let mut` |
 | `type T = Int where lo..hi` | Real subset: const Int range → `Int[lo..hi]` alias; other `where` forms fail parse |
@@ -75,7 +75,7 @@ import "lib.oo";       // relative / OODA_PATH
 | `for x in list` / `lo..hi` | Real: desugars to while+list_get (interp + C); unannotated lists refine element type on assign; **C defers list kind until first push** (int vs string) |
 | `ooda build --release` | Real on CHS C path: gcc `-O3 -flto` |
 | LLVM Int/Bool/Float + while | Real (clang to link when present) |
-| LSP live diagnostics | Real via `textDocument/didOpen` & `textDocument/didChange`. Real `textDocument/codeAction` codemod patches. |
+| LSP live diagnostics | Real via `textDocument/didOpen` & `textDocument/didChange` (open-buffer store). **WorkspaceEdit** `codeAction` for `let mut` + missing-return inserts (not completion/hover/rename) |
 
 ## Not implemented (fail non-zero)
 

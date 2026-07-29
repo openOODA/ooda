@@ -71,6 +71,30 @@ pub fn to_lsp_position(line_1: usize, col_1: usize) -> (usize, usize) {
     )
 }
 
+/// Map a UTF-8 byte offset to LSP 0-indexed `(line, character)`.
+/// Character units are UTF-16 code units (LSP requirement); ASCII `.oo` sources
+/// map 1:1. Clamps past-end offsets to EOF.
+pub fn byte_offset_to_lsp(source: &str, byte: usize) -> (usize, usize) {
+    let byte = byte.min(source.len());
+    let mut line: usize = 0;
+    let mut character: usize = 0;
+    let mut i = 0usize;
+    for ch in source.chars() {
+        let ch_len = ch.len_utf8();
+        if i + ch_len > byte {
+            break;
+        }
+        i += ch_len;
+        if ch == '\n' {
+            line += 1;
+            character = 0;
+        } else {
+            character += ch.len_utf16();
+        }
+    }
+    (line, character)
+}
+
 #[cfg(test)]
 mod parse_loc_tests {
     use super::{parse_loc, to_lsp_position};
@@ -111,6 +135,18 @@ mod parse_loc_tests {
         // " at line 2" must not be parsed as line=0 from empty coords before "line"
         let msg = "error at line 3, col 9: boom";
         assert_eq!(parse_loc(msg), (3, 9));
+    }
+
+    #[test]
+    fn byte_offset_to_lsp_maps_lines() {
+        let src = "ab\ncd\nef";
+        // byte 0 → (0,0); after "ab\n" (3) → (1,0); after "ab\ncd\n" (6) → (2,0)
+        assert_eq!(super::byte_offset_to_lsp(src, 0), (0, 0));
+        assert_eq!(super::byte_offset_to_lsp(src, 3), (1, 0));
+        assert_eq!(super::byte_offset_to_lsp(src, 6), (2, 0));
+        assert_eq!(super::byte_offset_to_lsp(src, 7), (2, 1)); // 'e'
+        // clamp past end
+        assert_eq!(super::byte_offset_to_lsp(src, 999), (2, 2));
     }
 }
 

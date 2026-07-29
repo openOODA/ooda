@@ -1,8 +1,19 @@
 // ===================================================================
-// openOODA LSP — textDocumentSync diagnostics (parse + cap + typecheck)
+// openOODA LSP — textDocumentSync diagnostics + WorkspaceEdit codeActions
+// ===================================================================
+//
+// Honest surface (not a full language server):
+//   - textDocumentSync Full: didOpen / didChange → parse + cap + typecheck
+//   - textDocument/codeAction: real WorkspaceEdit for let→let mut (via migrate)
+//     and missing-return default inserts. No completion / hover / rename.
+//
+// Document texts live in a process-local HashMap (uri → source). codeAction
+// consults that store — never re-reads disk (editor buffer is source of truth).
 // ===================================================================
 use anyhow::Result;
-use crate::diagnostics::{parse_loc, to_lsp_position};
+use crate::diagnostics::{byte_offset_to_lsp, parse_loc, to_lsp_position};
+use std::collections::HashMap;
+use std::io::{BufRead, Read, Write};
 
 pub struct LspDaemon;
 
@@ -10,23 +21,26 @@ impl LspDaemon {
     pub fn start() -> Result<()> {
         eprintln!(
             "ooda lsp: textDocumentSync=Full with parse/cap/typecheck diagnostics \
+             + WorkspaceEdit codeAction for let mut / missing return \
              (not a full language server — no completion/hover/rename)."
         );
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
         let mut reader = stdin.lock();
+        // Open buffers: file:// URI → current full text (Full sync).
+        let mut docs: HashMap<String, String> = HashMap::new();
         loop {
             let mut line = String::new();
-            if std::io::BufRead::read_line(&mut reader, &mut line)? == 0 {
+            if reader.read_line(&mut line)? == 0 {
                 break;
             }
             if line.starts_with("Content-Length: ") {
                 let len_str = line.trim_start_matches("Content-Length: ").trim();
                 let len: usize = len_str.parse().unwrap_or(0);
                 let mut sep = String::new();
-                std::io::BufRead::read_line(&mut reader, &mut sep)?;
+                reader.read_line(&mut sep)?;
                 let mut buf = vec![0u8; len];
-                std::io::Read::read_exact(&mut reader, &mut buf)?;
+                reader.read_exact(&mut buf)?;
                 let json_str = String::from_utf8_lossy(&buf);
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&json_str) {
                     if let Some(method) = json.get("method").and_then(|m| m.as_str()) {
@@ -79,6 +93,7 @@ impl LspDaemon {
                                 };
 
                                 if let (Some(uri), Some(text)) = (uri, text) {
+                                    docs.insert(uri.to_string(), text.to_string());
                                     let diagnostics = Self::diagnose_source(text);
                                     let resp = serde_json::json!({
                                         "jsonrpc": "2.0",
@@ -91,6 +106,15 @@ impl LspDaemon {
                                     let _ = Self::write_message(&mut stdout, &resp);
                                 }
                             }
+                        } else if method == "textDocument/didClose" {
+                            if let Some(uri) = json
+                                .get("params")
+                                .and_then(|p| p.get("textDocument"))
+                                .and_then(|t| t.get("uri"))
+                                .and_then(|u| u.as_str())
+                            {
+                                docs.remove(uri);
+                            }
                         } else if method == "textDocument/codeAction" {
                             if let (Some(id), Some(params)) = (json.get("id"), json.get("params")) {
                                 let uri = params
@@ -98,48 +122,8 @@ impl LspDaemon {
                                     .and_then(|t| t.get("uri"))
                                     .and_then(|u| u.as_str())
                                     .unwrap_or("");
-                                
-                                let mut actions = vec![];
-                                if let Some(diags) = params.get("context").and_then(|c| c.get("diagnostics")).and_then(|d| d.as_array()) {
-                                    for d in diags {
-                                        if let Some(msg) = d.get("message").and_then(|m| m.as_str()) {
-                                            if msg.contains("immutable") || msg.contains("let mut") {
-                                                actions.push(serde_json::json!({
-                                                    "title": "Use let mut for assigned binding",
-                                                    "kind": "quickfix",
-                                                    "diagnostics": [d],
-                                                    "command": {
-                                                        "title": "Fix",
-                                                        "command": "ooda.patch",
-                                                        "arguments": [uri, msg]
-                                                    }
-                                                }));
-                                            } else if msg.contains("missing return") {
-                                                actions.push(serde_json::json!({
-                                                    "title": "Add default return value",
-                                                    "kind": "quickfix",
-                                                    "diagnostics": [d],
-                                                    "command": {
-                                                        "title": "Fix",
-                                                        "command": "ooda.patch",
-                                                        "arguments": [uri, msg]
-                                                    }
-                                                }));
-                                            } else if msg.contains("non-exhaustive match") {
-                                                actions.push(serde_json::json!({
-                                                    "title": "Cover all match variants",
-                                                    "kind": "quickfix",
-                                                    "diagnostics": [d],
-                                                    "command": {
-                                                        "title": "Fix",
-                                                        "command": "ooda.patch",
-                                                        "arguments": [uri, msg]
-                                                    }
-                                                }));
-                                            }
-                                        }
-                                    }
-                                }
+                                let source = docs.get(uri).map(|s| s.as_str()).unwrap_or("");
+                                let actions = Self::code_actions_for(uri, source, params);
                                 let resp = serde_json::json!({
                                     "jsonrpc": "2.0",
                                     "id": id,
@@ -155,7 +139,7 @@ impl LspDaemon {
         Ok(())
     }
 
-    fn write_message(stdout: &mut impl std::io::Write, resp: &serde_json::Value) -> Result<()> {
+    fn write_message(stdout: &mut impl Write, resp: &serde_json::Value) -> Result<()> {
         let resp_str = resp.to_string();
         write!(
             stdout,
@@ -165,6 +149,131 @@ impl LspDaemon {
         )?;
         stdout.flush()?;
         Ok(())
+    }
+
+    /// Build WorkspaceEdit code actions from open buffer + client diagnostics.
+    fn code_actions_for(
+        uri: &str,
+        source: &str,
+        params: &serde_json::Value,
+    ) -> Vec<serde_json::Value> {
+        let mut actions = Vec::new();
+        let diags = params
+            .get("context")
+            .and_then(|c| c.get("diagnostics"))
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let needs_let_mut = diags.iter().any(|d| {
+            d.get("message")
+                .and_then(|m| m.as_str())
+                .map(|m| m.contains("immutable") || m.contains("let mut"))
+                .unwrap_or(false)
+        });
+
+        if needs_let_mut && !source.is_empty() {
+            if let Ok(edits) = crate::migrate::suggest_let_mut_edits(source) {
+                if !edits.is_empty() {
+                    let text_edits: Vec<serde_json::Value> = edits
+                        .iter()
+                        .map(|(start, end, text)| {
+                            let (sl, sc) = byte_offset_to_lsp(source, *start);
+                            let (el, ec) = byte_offset_to_lsp(source, *end);
+                            serde_json::json!({
+                                "range": {
+                                    "start": { "line": sl, "character": sc },
+                                    "end": { "line": el, "character": ec }
+                                },
+                                "newText": text
+                            })
+                        })
+                        .collect();
+                    let related: Vec<serde_json::Value> = diags
+                        .iter()
+                        .filter(|d| {
+                            d.get("message")
+                                .and_then(|m| m.as_str())
+                                .map(|m| m.contains("immutable") || m.contains("let mut"))
+                                .unwrap_or(false)
+                        })
+                        .cloned()
+                        .collect();
+                    let mut changes = serde_json::Map::new();
+                    changes.insert(uri.to_string(), serde_json::Value::Array(text_edits));
+                    actions.push(serde_json::json!({
+                        "title": "Use let mut for assigned binding",
+                        "kind": "quickfix",
+                        "diagnostics": related,
+                        "edit": { "changes": changes }
+                    }));
+                }
+            }
+        }
+
+        for d in &diags {
+            let msg = match d.get("message").and_then(|m| m.as_str()) {
+                Some(m) => m,
+                None => continue,
+            };
+            if msg.contains("missing return") {
+                if let Some(edit) = Self::missing_return_edit(uri, source, msg) {
+                    actions.push(serde_json::json!({
+                        "title": "Insert default return value",
+                        "kind": "quickfix",
+                        "diagnostics": [d],
+                        "edit": edit
+                    }));
+                }
+            }
+        }
+        actions
+    }
+
+    /// Insert a typed default `return …;` just before the function's closing `}`.
+    /// Message shape: `function declares return type Int but body has type Void (missing return value)`
+    /// with function name in `Type error in 'NAME': …`.
+    fn missing_return_edit(
+        uri: &str,
+        source: &str,
+        msg: &str,
+    ) -> Option<serde_json::Value> {
+        if source.is_empty() {
+            return None;
+        }
+        let fname = msg
+            .split("Type error in '")
+            .nth(1)
+            .and_then(|s| s.split('\'').next())
+            .unwrap_or("");
+        if fname.is_empty() {
+            return None;
+        }
+        let ret_default = if msg.contains("return type Int") {
+            "0"
+        } else if msg.contains("return type Bool") {
+            "false"
+        } else if msg.contains("return type Float") {
+            "0.0"
+        } else if msg.contains("return type String") {
+            "\"\""
+        } else {
+            return None;
+        };
+        let body_close = find_fn_body_close(source, fname)?;
+        let (line, character) = byte_offset_to_lsp(source, body_close);
+        let indent = indent_before(source, body_close);
+        let new_text = format!("{}return {};\n{}", indent, ret_default, indent);
+        let text_edit = serde_json::json!({
+            "range": {
+                "start": { "line": line, "character": character },
+                "end": { "line": line, "character": character }
+            },
+            "newText": new_text
+        });
+        let mut changes = serde_json::Map::new();
+        changes.insert(uri.to_string(), serde_json::Value::Array(vec![text_edit]));
+        Some(serde_json::json!({ "changes": changes }))
     }
 
     /// Run lex → parse → caps → typecheck; collect LSP diagnostics.
@@ -214,9 +323,68 @@ impl LspDaemon {
     }
 }
 
+/// Find the byte index of the closing `}` of `fn NAME` / `pub fn NAME` body.
+fn find_fn_body_close(source: &str, name: &str) -> Option<usize> {
+    let patterns = [format!("fn {}(", name), format!("fn {} (", name)];
+    let mut start = None;
+    for p in &patterns {
+        if let Some(idx) = source.find(p.as_str()) {
+            start = Some(idx);
+            break;
+        }
+    }
+    let start = start?;
+    let brace = source[start..].find('{')? + start;
+    let mut depth: i32 = 0;
+    let bytes = source.as_bytes();
+    let mut i = brace;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            b'"' => {
+                // skip string
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == b'"' {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn indent_before(source: &str, byte: usize) -> String {
+    let line_start = source[..byte].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let line = &source[line_start..byte];
+    let n = line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+    // Body indent is typically closing-brace indent + 4 spaces.
+    format!("{}    ", &line[..n])
+}
+
 #[cfg(test)]
 mod tests {
-    use super::LspDaemon;
+    use super::{find_fn_body_close, LspDaemon};
+    use crate::diagnostics::byte_offset_to_lsp;
 
     #[test]
     fn parse_diagnostic_type_error_zero_index() {
@@ -249,18 +417,69 @@ mod tests {
     }
 
     #[test]
-    fn diagnose_source_flags_cap_error() {
-        let diags = LspDaemon::diagnose_source(
-            "pub fn main() { let _ = fetch(\"https://x\"); }\n",
-        );
+    fn code_action_let_mut_emits_workspace_edit() {
+        let src = "pub fn main() {\n    let x = 1;\n    x = 2;\n    println(x);\n}\n";
+        let params = serde_json::json!({
+            "context": {
+                "diagnostics": [{
+                    "message": "Type error at 2:14: cannot assign to immutable binding 'x'; use `let mut x`"
+                }]
+            }
+        });
+        let actions = LspDaemon::code_actions_for("file:///t.oo", src, &params);
+        assert_eq!(actions.len(), 1, "expected one let-mut action: {:?}", actions);
+        let edit = &actions[0]["edit"]["changes"]["file:///t.oo"];
+        assert!(edit.is_array());
+        let arr = edit.as_array().unwrap();
+        assert!(!arr.is_empty());
+        assert_eq!(arr[0]["newText"], "mut ");
+        // Insert after "let " on the line with `let x`
+        let start_line = arr[0]["range"]["start"]["line"].as_u64().unwrap();
+        assert_eq!(start_line, 1); // second line (0-indexed)
+    }
+
+    #[test]
+    fn code_action_missing_return_inserts_return_zero() {
+        let src = "pub fn f() -> Int {\n    let x = 1;\n}\npub fn main() { println(f()); }\n";
+        let params = serde_json::json!({
+            "context": {
+                "diagnostics": [{
+                    "message": "Type error in 'f': function declares return type Int but body has type Void (missing return value)"
+                }]
+            }
+        });
+        let actions = LspDaemon::code_actions_for("file:///m.oo", src, &params);
+        assert_eq!(actions.len(), 1, "expected missing-return action: {:?}", actions);
+        let edits = actions[0]["edit"]["changes"]["file:///m.oo"]
+            .as_array()
+            .expect("edits array");
+        let text = edits[0]["newText"].as_str().unwrap();
         assert!(
-            diags.iter().any(|d| d["message"]
-                .as_str()
-                .unwrap_or("")
-                .contains("Capability")
-                || d["message"].as_str().unwrap_or("").contains("fetch")),
-            "expected cap diagnostic: {:?}",
-            diags
+            text.contains("return 0;"),
+            "expected return 0 insert, got {:?}",
+            text
         );
+    }
+
+    #[test]
+    fn find_fn_body_close_basic() {
+        let src = "pub fn f() -> Int {\n    let x = 1;\n}\n";
+        let close = find_fn_body_close(src, "f").expect("close");
+        assert_eq!(&src[close..close + 1], "}");
+        let (line, _) = byte_offset_to_lsp(src, close);
+        assert_eq!(line, 2);
+    }
+
+    #[test]
+    fn code_action_no_source_yields_empty() {
+        let params = serde_json::json!({
+            "context": {
+                "diagnostics": [{
+                    "message": "cannot assign to immutable binding 'x'; use `let mut x`"
+                }]
+            }
+        });
+        let actions = LspDaemon::code_actions_for("file:///t.oo", "", &params);
+        assert!(actions.is_empty());
     }
 }

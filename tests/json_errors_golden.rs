@@ -1223,6 +1223,50 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `for i in lo..hi` desugars to while in the parser; WASM must lower that path
+/// (unique $break_N/$continue_N labels) without claiming a full WASM product.
+#[test]
+fn build_wasm_range_for_lowers_via_while() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wfor_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("for.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut s = 0;
+    for i in 0..3 {
+        s = s + i;
+    }
+    println(s);
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn build wasm");
+    assert!(
+        out.status.success(),
+        "wasm range-for build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).expect("wat");
+    assert!(
+        wat.contains("(loop") || wat.contains("loop $"),
+        "expected while/loop in WAT from for desugar:\n{}",
+        wat
+    );
+    assert!(
+        wat.contains("$break_") || wat.contains("br "),
+        "expected break label machinery in nested-capable loops:\n{}",
+        wat
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn build_c_lowers_char_at_method() {
     let bin = env!("CARGO_BIN_EXE_ooda");

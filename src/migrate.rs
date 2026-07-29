@@ -41,6 +41,30 @@ pub fn migrate_path(path: &std::path::Path, target_edition: &str) -> Result<()> 
     Ok(())
 }
 
+/// Pure in-memory let→let mut rewrites for LSP WorkspaceEdit.
+/// Each entry is `(byte_start, byte_end, replacement)` over UTF-8 source bytes
+/// (half-open range; insert-only edits use `start == end`).
+///
+/// Stack-oriented: no heap document clone beyond the rewrite vector; callers
+/// convert byte offsets to LSP positions without re-parsing.
+pub fn suggest_let_mut_edits(source: &str) -> Result<Vec<(usize, usize, String)>> {
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer
+        .tokenize()
+        .map_err(|e| anyhow!("suggest_let_mut_edits: lexer: {}", e))?;
+    let mut parser = Parser::new(tokens);
+    let program = parser
+        .parse_program()
+        .map_err(|e| anyhow!("suggest_let_mut_edits: parse: {}", e))?;
+    let mut rewrites: Vec<(usize, usize, String)> = Vec::new();
+    for item in &program.items {
+        if let Item::Function(f) = item {
+            collect_let_mut_rewrites(&f.body, source, &mut rewrites);
+        }
+    }
+    Ok(rewrites)
+}
+
 /// Migrate and print JSON MigrateReport on stdout.
 pub fn migrate_path_json(path: &std::path::Path, target_edition: &str) -> Result<MigrateReport> {
     migrate_path_inner(path, target_edition, true)
@@ -767,6 +791,19 @@ pub fn main() {
         migrate_path_inner(&path, "2026", false).expect("migrate");
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, src, "unassigned let must stay immutable");
+    }
+
+    #[test]
+    fn suggest_let_mut_edits_pure_in_memory() {
+        let src = "pub fn main() {\n    let x = 1;\n    x = 2;\n}\n";
+        let edits = suggest_let_mut_edits(src).expect("suggest");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].2, "mut ");
+        // Apply insert and confirm result
+        let (pos, end, text) = &edits[0];
+        let mut out = src.to_string();
+        out.replace_range(*pos..*end, text);
+        assert!(out.contains("let mut x = 1"));
     }
 }
 

@@ -201,16 +201,55 @@ impl PackageManager {
     }
 }
 
-/// Orchestrates integrity verification (minisign -> GPG -> SHA-256 fallback)
+/// When a cryptographic sidecar is present, verification is mandatory unless
+/// `OODA_PKG_ALLOW_UNSIGNED=1` explicitly opts out (fail-open escape hatch).
+fn allow_unsigned() -> bool {
+    std::env::var("OODA_PKG_ALLOW_UNSIGNED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Orchestrates integrity verification (minisign → GPG → SHA-256).
+///
+/// **Fail-closed on present signatures:** if a `.minisig` / `.sig` sidecar is
+/// fetched, verification must succeed. Missing pubkey / missing `minisign` /
+/// missing `gpg` does **not** silently fall through to SHA-256 unless
+/// `OODA_PKG_ALLOW_UNSIGNED=1`.
 fn verify_tarball_integrity(url: &str, tarball: &std::path::Path) -> Result<()> {
     // 1. Try minisign (.minisig)
     let minisig_url = format!("{}.minisig", url);
     let tmp_sig = tarball.with_extension("minisigtmp");
-    if std::process::Command::new("curl").args(["-fsSL", &minisig_url, "-o", tmp_sig.to_str().unwrap()]).status().map_or(false, |s| s.success()) {
+    if std::process::Command::new("curl")
+        .args(["-fsSL", &minisig_url, "-o", tmp_sig.to_str().unwrap()])
+        .status()
+        .map_or(false, |s| s.success())
+    {
         let pubkey = std::env::var("OODA_PKG_MINISIGN_PUBKEY").unwrap_or_default();
-        if !pubkey.is_empty() {
+        if pubkey.is_empty() {
+            let _ = fs::remove_file(&tmp_sig);
+            if allow_unsigned() {
+                eprintln!(
+                    "ooda pkg: .minisig present but OODA_PKG_MINISIGN_PUBKEY unset; \
+                     OODA_PKG_ALLOW_UNSIGNED=1 — continuing"
+                );
+            } else {
+                let _ = fs::remove_file(tarball);
+                bail!(
+                    "ooda pkg --install: found {} but OODA_PKG_MINISIGN_PUBKEY is not set \
+                     (fail-closed; set the pubkey or OODA_PKG_ALLOW_UNSIGNED=1)",
+                    minisig_url
+                );
+            }
+        } else {
             let status = std::process::Command::new("minisign")
-                .args(["-Vm", tarball.to_str().unwrap(), "-x", tmp_sig.to_str().unwrap(), "-P", &pubkey])
+                .args([
+                    "-Vm",
+                    tarball.to_str().unwrap(),
+                    "-x",
+                    tmp_sig.to_str().unwrap(),
+                    "-P",
+                    &pubkey,
+                ])
                 .status();
             let _ = fs::remove_file(&tmp_sig);
             match status {
@@ -218,13 +257,22 @@ fn verify_tarball_integrity(url: &str, tarball: &std::path::Path) -> Result<()> 
                     eprintln!("ooda pkg: minisign verified for {}", url);
                     return Ok(());
                 }
-                _ => {
+                Ok(_) => {
                     let _ = fs::remove_file(tarball);
-                    bail!("ooda pkg --install: minisign verification failed for {}", url);
+                    bail!(
+                        "ooda pkg --install: minisign verification failed for {}",
+                        url
+                    );
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(tarball);
+                    bail!(
+                        "ooda pkg --install: minisign not runnable ({}) while .minisig present for {}",
+                        e,
+                        url
+                    );
                 }
             }
-        } else {
-            eprintln!("ooda pkg: found {} but OODA_PKG_MINISIGN_PUBKEY is not set. Skipping minisign.", minisig_url);
         }
         let _ = fs::remove_file(&tmp_sig);
     }
@@ -232,9 +280,17 @@ fn verify_tarball_integrity(url: &str, tarball: &std::path::Path) -> Result<()> 
     // 2. Try GPG (.sig)
     let sig_url = format!("{}.sig", url);
     let tmp_sig = tarball.with_extension("sigtmp");
-    if std::process::Command::new("curl").args(["-fsSL", &sig_url, "-o", tmp_sig.to_str().unwrap()]).status().map_or(false, |s| s.success()) {
+    if std::process::Command::new("curl")
+        .args(["-fsSL", &sig_url, "-o", tmp_sig.to_str().unwrap()])
+        .status()
+        .map_or(false, |s| s.success())
+    {
         let status = std::process::Command::new("gpg")
-            .args(["--verify", tmp_sig.to_str().unwrap(), tarball.to_str().unwrap()])
+            .args([
+                "--verify",
+                tmp_sig.to_str().unwrap(),
+                tarball.to_str().unwrap(),
+            ])
             .status();
         let _ = fs::remove_file(&tmp_sig);
         match status {
@@ -242,9 +298,25 @@ fn verify_tarball_integrity(url: &str, tarball: &std::path::Path) -> Result<()> 
                 eprintln!("ooda pkg: GPG verified for {}", url);
                 return Ok(());
             }
-            _ => {
+            Ok(_) => {
                 let _ = fs::remove_file(tarball);
                 bail!("ooda pkg --install: GPG verification failed for {}", url);
+            }
+            Err(e) => {
+                if allow_unsigned() {
+                    eprintln!(
+                        "ooda pkg: gpg not runnable ({}) with .sig present; \
+                         OODA_PKG_ALLOW_UNSIGNED=1 — continuing",
+                        e
+                    );
+                } else {
+                    let _ = fs::remove_file(tarball);
+                    bail!(
+                        "ooda pkg --install: gpg not runnable ({}) while .sig present for {}",
+                        e,
+                        url
+                    );
+                }
             }
         }
     }
@@ -321,7 +393,7 @@ fn verify_tarball_sha256(url: &str, tarball: &std::path::Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::verify_tarball_sha256;
+    use super::{allow_unsigned, verify_tarball_sha256};
 
     #[test]
     fn sha256_require_without_sidecar_fails() {
@@ -338,5 +410,14 @@ mod tests {
         assert!(format!("{}", err).contains("REQUIRE_SHA256") || format!("{}", err).contains("sidecar"));
         std::env::remove_var("OODA_PKG_REQUIRE_SHA256");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allow_unsigned_env_defaults_false() {
+        std::env::remove_var("OODA_PKG_ALLOW_UNSIGNED");
+        assert!(!allow_unsigned());
+        std::env::set_var("OODA_PKG_ALLOW_UNSIGNED", "1");
+        assert!(allow_unsigned());
+        std::env::remove_var("OODA_PKG_ALLOW_UNSIGNED");
     }
 }
