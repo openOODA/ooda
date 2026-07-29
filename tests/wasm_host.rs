@@ -794,6 +794,62 @@ fn ooda_wasm_no_list_runtime_without_lists() {
         "memory not needed for pure int:\n{}",
         wat
     );
+    let lines = run_wat(&wat).expect("host pure int");
+    assert_eq!(lines, vec!["3".to_string()]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Pure Int WASM must not import string host ops (E-M D↓: minimal sealed host surface).
+#[test]
+fn ooda_wasm_pure_int_no_string_host_imports() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wpureimp");
+    let path = dir.join("pure.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut i = 0;
+    while i < 3 {
+        i = i + 1;
+    }
+    println(i);
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "pure int wasm: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("import \"env\" \"println\""),
+        "println import required:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("println_str"),
+        "pure int must not import println_str:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("\"streq\""),
+        "pure int must not import streq:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("str_contains"),
+        "pure int must not import str_contains:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(lines, vec!["3".to_string()]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
