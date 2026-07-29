@@ -1,64 +1,96 @@
-use anyhow::Result;
+//! Dev-only WAT host smoke (wasmtime).
+//!
+//! Proves Stage-0 emitted imports `env.println` / `env.println_str` / `env.streq`
+//! are enough to **run** a small module. Not a product WASM runtime and not
+//! claimed as full WASM product. `wasmtime` is a **dev-dependency** only.
+use anyhow::{bail, Result};
+use std::process::Command;
 use wasmtime::*;
 
-pub fn run_wat(wat: &str) -> Result<String> {
+#[derive(Default)]
+struct HostOut {
+    lines: Vec<String>,
+}
+
+/// Run WAT with openOODA env imports; return captured println lines (no real stdout).
+fn run_wat(wat: &str) -> Result<Vec<String>> {
     let engine = Engine::default();
     let module = Module::new(&engine, wat)?;
-    let mut store = Store::new(&engine, ());
+    let mut store = Store::new(&engine, HostOut::default());
     let mut linker = Linker::new(&engine);
 
-    // Provide env.println
-    linker.func_wrap("env", "println", |v: i64| {
-        println!("{}", v);
+    linker.func_wrap("env", "println", |mut caller: Caller<'_, HostOut>, v: i64| {
+        caller.data_mut().lines.push(format!("{}", v));
     })?;
 
-    // Provide env.println_str
-    // We need memory access to read the string.
-    // In wasmtime, we can capture the memory via caller if we use `Func::wrap`.
-    linker.func_wrap("env", "println_str", |mut caller: Caller<'_, ()>, offset: i32| {
-        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
-        let data = mem.data(&caller);
-        // String is NUL terminated
-        let start = offset as usize;
-        let mut end = start;
-        while end < data.len() && data[end] != 0 {
-            end += 1;
-        }
-        let s = std::str::from_utf8(&data[start..end]).unwrap();
-        println!("{}", s);
-    })?;
+    linker.func_wrap(
+        "env",
+        "println_str",
+        |mut caller: Caller<'_, HostOut>, offset: i32| {
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return,
+            };
+            let s = {
+                let data = mem.data(&caller);
+                let start = offset as usize;
+                if start >= data.len() {
+                    return;
+                }
+                let mut end = start;
+                while end < data.len() && data[end] != 0 {
+                    end += 1;
+                }
+                match std::str::from_utf8(&data[start..end]) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => return,
+                }
+            };
+            caller.data_mut().lines.push(s);
+        },
+    )?;
 
-    // Provide env.streq
-    linker.func_wrap("env", "streq", |mut caller: Caller<'_, ()>, a: i32, b: i32| -> i32 {
-        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
-        let data = mem.data(&caller);
-        let start_a = a as usize;
-        let mut end_a = start_a;
-        while end_a < data.len() && data[end_a] != 0 { end_a += 1; }
-        
-        let start_b = b as usize;
-        let mut end_b = start_b;
-        while end_b < data.len() && data[end_b] != 0 { end_b += 1; }
-        
-        let sa = &data[start_a..end_a];
-        let sb = &data[start_b..end_b];
-        if sa == sb { 1 } else { 0 }
-    })?;
+    linker.func_wrap(
+        "env",
+        "streq",
+        |mut caller: Caller<'_, HostOut>, a: i32, b: i32| -> i32 {
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return 0,
+            };
+            let data = mem.data(&caller);
+            let read = |off: i32| -> &[u8] {
+                let start = off as usize;
+                if start >= data.len() {
+                    return &[];
+                }
+                let mut end = start;
+                while end < data.len() && data[end] != 0 {
+                    end += 1;
+                }
+                &data[start..end]
+            };
+            if read(a) == read(b) {
+                1
+            } else {
+                0
+            }
+        },
+    )?;
 
     let instance = linker.instantiate(&mut store, &module)?;
-    
-    // Trap stdout to capture output if we wanted to? No, just run it for now.
-    if let Some(main) = instance.get_typed_func::<(), i32>(&mut store, "main").ok() {
-        main.call(&mut store, ())?;
-    } else {
-        anyhow::bail!("no main function");
+    let main = instance
+        .get_typed_func::<(), i32>(&mut store, "main")
+        .map_err(|_| anyhow::anyhow!("no export main: () -> i32"))?;
+    let code = main.call(&mut store, ())?;
+    if code != 0 {
+        bail!("main returned non-zero status {}", code);
     }
-    
-    Ok("".into())
+    Ok(store.into_data().lines)
 }
 
 #[test]
-fn test_streq_println_str() {
+fn host_streq_and_println_str_assert_output() {
     let wat = r#"
     (module
       (import "env" "println" (func $println (param i64)))
@@ -77,5 +109,58 @@ fn test_streq_println_str() {
       )
     )
     "#;
-    run_wat(wat).unwrap();
+    let lines = run_wat(wat).expect("run wat");
+    assert_eq!(
+        lines,
+        vec!["hello".to_string(), "1".to_string(), "0".to_string()],
+        "expected println_str + streq equal/unequal; got {:?}",
+        lines
+    );
+}
+
+/// End-to-end: `ooda build --target wasm` → run emitted WAT under host imports.
+#[test]
+fn ooda_wasm_string_eq_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_whost_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("eq.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    if "aa" == "aa" {
+        println(1);
+    } else {
+        println(0);
+    }
+    if "aa" == "bb" {
+        println(1);
+    } else {
+        println(0);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn ooda");
+    assert!(
+        out.status.success(),
+        "wasm build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat_path = path.with_extension("wat");
+    let wat = std::fs::read_to_string(&wat_path).expect("read wat");
+    assert!(wat.contains("call $streq"), "expected streq in WAT:\n{}", wat);
+    let lines = run_wat(&wat).expect("host run ooda WAT");
+    assert_eq!(
+        lines,
+        vec!["1".to_string(), "0".to_string()],
+        "equal then unequal string compare; got {:?}",
+        lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

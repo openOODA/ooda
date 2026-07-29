@@ -314,7 +314,7 @@ impl LspDaemon {
             if msg.contains(" expects ") && msg.contains(", found ") && msg.contains("argument") {
                 if let Some(edit) = Self::arg_type_mismatch_edit(uri, source, msg) {
                     actions.push(serde_json::json!({
-                        "title": "Replace first character of argument with default expected type",
+                        "title": "Replace argument with default of expected type",
                         "kind": "quickfix",
                         "diagnostics": [d],
                         "edit": edit
@@ -325,7 +325,10 @@ impl LspDaemon {
         actions
     }
 
-    /// Replace the first character of the mismatched argument with a default value of the expected type.
+    /// Replace the whole argument token with a typed default.
+    /// Message: `function 'f' argument 0 expects Int, found String`.
+    /// Typechecker locations typically land on the call's closing `)`; we walk back
+    /// to the preceding simple token (string / number / ident). Not first-char theater.
     fn arg_type_mismatch_edit(
         uri: &str,
         source: &str,
@@ -334,7 +337,12 @@ impl LspDaemon {
         if source.is_empty() {
             return None;
         }
-        let expected = msg.split(" expects ").nth(1)?.split(',').next()?;
+        let expected = msg
+            .split(" expects ")
+            .nth(1)?
+            .split(',')
+            .next()?
+            .trim();
         let default_val = match expected {
             "Int" => "0",
             "String" => "\"\"",
@@ -345,11 +353,17 @@ impl LspDaemon {
         let (line_1, col_1) = parse_loc(msg);
         let line_0 = line_1.saturating_sub(1);
         let col_0 = col_1.saturating_sub(1);
-        
+        let at = lsp_position_to_byte_offset(source, line_0, col_0);
+        let (start, end) = arg_token_span_near(source, at)?;
+        if end <= start {
+            return None;
+        }
+        let (sl, sc) = byte_offset_to_lsp(source, start);
+        let (el, ec) = byte_offset_to_lsp(source, end);
         let text_edit = serde_json::json!({
             "range": {
-                "start": { "line": line_0, "character": col_0 },
-                "end": { "line": line_0, "character": col_0.saturating_add(1) }
+                "start": { "line": sl, "character": sc },
+                "end": { "line": el, "character": ec }
             },
             "newText": default_val
         });
@@ -549,6 +563,129 @@ impl LspDaemon {
             }
         })
     }
+}
+
+/// End (exclusive) of a simple token starting at `start` byte: string, number, or ident.
+fn scan_token_end(source: &str, start: usize) -> Option<usize> {
+    let b = source.as_bytes();
+    if start >= b.len() {
+        return None;
+    }
+    let mut i = start;
+    // String literal "..."
+    if b[i] == b'"' {
+        i += 1;
+        while i < b.len() {
+            if b[i] == b'\\' {
+                i = (i + 2).min(b.len());
+                continue;
+            }
+            if b[i] == b'"' {
+                return Some(i + 1);
+            }
+            i += 1;
+        }
+        return None;
+    }
+    // Number (optional leading -)
+    if b[i] == b'-' || b[i].is_ascii_digit() {
+        if b[i] == b'-' {
+            i += 1;
+        }
+        let num_start = i;
+        while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') {
+            i += 1;
+        }
+        if i > num_start || (start < b.len() && b[start].is_ascii_digit()) {
+            return Some(i);
+        }
+    }
+    // Identifier / true / false
+    if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+        i += 1;
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+            i += 1;
+        }
+        return Some(i);
+    }
+    None
+}
+
+/// Span of the simple arg token near a diagnostic byte offset.
+/// Handles typechecker pointing at the call's closing `)` (exclusive end of last arg).
+fn arg_token_span_near(source: &str, at: usize) -> Option<(usize, usize)> {
+    let b = source.as_bytes();
+    if b.is_empty() {
+        return None;
+    }
+    let mut i = at.min(b.len());
+    // If pointing at whitespace, skip forward then treat delimiters.
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    // Call-site `)` / `,` → exclusive end of the preceding argument token.
+    let end = if i < b.len() && (b[i] == b')' || b[i] == b',') {
+        i
+    } else if i < b.len() {
+        // Pointing at the arg itself
+        return scan_token_end(source, i).map(|e| (i, e));
+    } else {
+        b.len()
+    };
+    // Walk back over whitespace before delimiter.
+    let mut e = end;
+    while e > 0 && b[e - 1].is_ascii_whitespace() {
+        e -= 1;
+    }
+    if e == 0 {
+        return None;
+    }
+    // String ending with "
+    if b[e - 1] == b'"' {
+        let mut j = e - 1;
+        if j == 0 {
+            return Some((0, e));
+        }
+        j -= 1;
+        while j > 0 {
+            if b[j] == b'"' {
+                let mut bs = 0usize;
+                let mut k = j;
+                while k > 0 && b[k - 1] == b'\\' {
+                    bs += 1;
+                    k -= 1;
+                }
+                if bs % 2 == 0 {
+                    return Some((j, e));
+                }
+            }
+            j -= 1;
+        }
+        if b[0] == b'"' {
+            return Some((0, e));
+        }
+        return None;
+    }
+    // Ident / number: walk back
+    let mut s = e;
+    while s > 0 {
+        let c = b[s - 1];
+        if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' {
+            s -= 1;
+        } else if c == b'-' && s >= 2 && b[s - 2].is_ascii_digit() {
+            // don't treat binary minus as part of number; only leading -
+            break;
+        } else if c == b'-' && (s == 1 || !b[s - 2].is_ascii_alphanumeric()) {
+            s -= 1;
+            break;
+        } else {
+            break;
+        }
+    }
+    if s >= e {
+        return None;
+    }
+    Some((s, e))
 }
 
 /// Leading whitespace of 0-indexed line `line_0` (spaces/tabs only).
@@ -865,5 +1002,40 @@ mod tests {
             "expected indented stub, got {:?}",
             text
         );
+    }
+
+    #[test]
+    fn code_action_arg_type_replaces_whole_string_token() {
+        // Diagnostic lands on call-site `)` (col 26 1-index for f("hello"))
+        let src = "pub fn f(x: Int) { println(x); }\npub fn main() { f(\"hello\"); }\n";
+        let params = serde_json::json!({
+            "context": {
+                "diagnostics": [{
+                    "message": "Type error at 2:26: function 'f' argument 0 expects Int, found String"
+                }]
+            }
+        });
+        let actions = LspDaemon::code_actions_for("file:///a.oo", src, &params);
+        assert_eq!(actions.len(), 1, "{:?}", actions);
+        let edit = &actions[0]["edit"]["changes"]["file:///a.oo"][0];
+        assert_eq!(edit["newText"], "0");
+        let start_c = edit["range"]["start"]["character"].as_u64().unwrap();
+        let end_c = edit["range"]["end"]["character"].as_u64().unwrap();
+        assert_eq!(end_c - start_c, 7, "start={} end={} edit={:?}", start_c, end_c, edit);
+        let line = "pub fn main() { f(\"hello\"); }";
+        let mut applied = line.to_string();
+        applied.replace_range(start_c as usize..end_c as usize, "0");
+        assert!(applied.contains("f(0)"), "applied={}", applied);
+    }
+
+    #[test]
+    fn scan_token_end_string_and_ident() {
+        assert_eq!(super::scan_token_end(r#""ab" rest"#, 0), Some(4));
+        assert_eq!(super::scan_token_end("foo bar", 0), Some(3));
+        assert_eq!(super::scan_token_end("42,", 0), Some(2));
+        let line = r#"pub fn main() { f("hello"); }"#;
+        let at = line.rfind(')').unwrap(); // call-site `)`, not `main()`
+        let (s, e) = super::arg_token_span_near(line, at).unwrap();
+        assert_eq!(&line[s..e], "\"hello\"");
     }
 }

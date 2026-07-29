@@ -645,25 +645,41 @@ impl WasmCodeGen {
             if Self::infer_expr_type(cond, locals) == "f64" { "f64" } else { "i64" },
         ));
 
-        // 2. Structured if/then/else with the unified result type
+        // 2. Structured if/then/else with the unified result type.
+        // Each arm must leave exactly one `result_ty` value — side-effect-only
+        // arms (e.g. println) push a zero of that type so wasmtime type-checks.
         wat.push_str(&format!("    (if (result {})\n", result_ty));
         wat.push_str("      (then\n");
-        for stmt in &then_branch.stmts {
-            wat.push_str(&Self::emit_stmt_wat(stmt, locals)?);
-        }
+        wat.push_str(&Self::emit_if_branch(then_branch, locals, result_ty)?);
         wat.push_str("      )\n");
         wat.push_str("      (else\n");
         if let Some(eb) = else_branch {
-            for stmt in &eb.stmts {
-                wat.push_str(&Self::emit_stmt_wat(stmt, locals)?);
-            }
+            wat.push_str(&Self::emit_if_branch(eb, locals, result_ty)?);
         } else {
-            // No-else branch: emit a default value of the unified type.
             wat.push_str(&format!("        {}.const 0\n", result_ty));
         }
         wat.push_str("      )\n");
         wat.push_str("    )\n");
 
+        Ok(wat)
+    }
+
+    /// Emit one if-arm: statements + optional tail expr, else default zero.
+    fn emit_if_branch(
+        branch: &Block,
+        locals: &BTreeMap<String, &'static str>,
+        result_ty: &'static str,
+    ) -> Result<String> {
+        let mut wat = String::new();
+        for stmt in &branch.stmts {
+            wat.push_str(&Self::emit_stmt_wat(stmt, locals)?);
+        }
+        if let Some(tail) = &branch.expr {
+            wat.push_str(&Self::emit_expr(tail, locals)?);
+        } else {
+            // No value-producing tail: synthesize unit for `(result T)`.
+            wat.push_str(&format!("        {}.const 0\n", result_ty));
+        }
         Ok(wat)
     }
 
@@ -709,9 +725,11 @@ impl WasmCodeGen {
             }
             Statement::Expr(expr, _) => {
                 wat.push_str(&Self::emit_expr(expr, locals)?);
-                // Statement-context: drop non-println call results.
-                if let Expression::Call { name, .. } = expr {
-                    if name != "println" {
+                // Statement-context: drop leftover stack values.
+                // println consumes its args; if/while/other exprs leave a value.
+                match expr {
+                    Expression::Call { name, .. } if name == "println" => {}
+                    _ => {
                         wat.push_str("        drop\n");
                     }
                 }
