@@ -60,7 +60,8 @@ impl WasmCodeGen {
         wat.push_str(";; ===================================================================\n\n");
         wat.push_str("(module\n");
         wat.push_str("  (import \"env\" \"println\" (func $println (param i64)))\n");
-        wat.push_str("  (import \"env\" \"println_str\" (func $println_str (param i32)))\n\n");
+        wat.push_str("  (import \"env\" \"println_str\" (func $println_str (param i32)))\n");
+        wat.push_str("  (import \"env\" \"streq\" (func $streq (param i32 i32) (result i32)))\n\n");
 
         let aliases = program.collect_type_aliases();
         for item in &program.items {
@@ -354,11 +355,20 @@ impl WasmCodeGen {
                     BinOp::Div => wat.push_str("    f64.div\n"),
                     // Comparisons yield i32 in WebAssembly; extend to i64 Bool model.
                     BinOp::Eq => {
-                        wat.push_str(&format!("    {}.eq\n", ty));
+                        if ty == "i32" {
+                            wat.push_str("    call $streq\n");
+                        } else {
+                            wat.push_str(&format!("    {}.eq\n", ty));
+                        }
                         wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Neq => {
-                        wat.push_str(&format!("    {}.ne\n", ty));
+                        if ty == "i32" {
+                            wat.push_str("    call $streq\n");
+                            wat.push_str("    i32.eqz\n");
+                        } else {
+                            wat.push_str(&format!("    {}.ne\n", ty));
+                        }
                         wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Gt => {
@@ -868,7 +878,7 @@ pub fn main() {
         let data_count = wat.matches("(data (i32.const").count();
         assert_eq!(data_count, 1, "expected single interned data segment:\n{}", wat);
         assert!(wat.contains("i32.const 0"), "both should load offset 0:\n{}", wat);
-        assert!(wat.contains("i32.eq"), "string == is pointer eq:\n{}", wat);
+        assert!(wat.contains("call $streq"), "string == uses streq host import:\n{}", wat);
     }
 
     #[test]

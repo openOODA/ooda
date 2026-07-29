@@ -95,6 +95,28 @@ pub fn byte_offset_to_lsp(source: &str, byte: usize) -> (usize, usize) {
     (line, character)
 }
 
+/// Map LSP 0-indexed `(line, character)` back to a byte offset.
+/// This matches `byte_offset_to_lsp` logic: character uses UTF-16 lengths.
+pub fn lsp_position_to_byte_offset(source: &str, line: usize, character: usize) -> usize {
+    let mut current_line: usize = 0;
+    let mut current_character: usize = 0;
+    let mut offset = 0;
+
+    for ch in source.chars() {
+        if current_line > line || (current_line == line && current_character >= character) {
+            break;
+        }
+        offset += ch.len_utf8();
+        if ch == '\n' {
+            current_line += 1;
+            current_character = 0;
+        } else {
+            current_character += ch.len_utf16();
+        }
+    }
+    offset
+}
+
 #[cfg(test)]
 mod parse_loc_tests {
     use super::{parse_loc, to_lsp_position};

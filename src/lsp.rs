@@ -49,7 +49,7 @@ impl LspDaemon {
                                 let res = if method == "initialize" {
                                     serde_json::json!({
                                         "capabilities": {
-                                            "textDocumentSync": 1,
+                                            "textDocumentSync": 2,
                                             "codeActionProvider": true
                                         },
                                         "serverInfo": {
@@ -77,33 +77,60 @@ impl LspDaemon {
                                     .get("textDocument")
                                     .and_then(|t| t.get("uri"))
                                     .and_then(|u| u.as_str());
-                                let text = if method == "textDocument/didOpen" {
-                                    params
-                                        .get("textDocument")
-                                        .and_then(|t| t.get("text"))
-                                        .and_then(|t| t.as_str())
-                                } else {
-                                    // Full sync: last change carries full document text.
-                                    params
-                                        .get("contentChanges")
-                                        .and_then(|c| c.as_array())
-                                        .and_then(|c| c.last())
-                                        .and_then(|c| c.get("text"))
-                                        .and_then(|t| t.as_str())
-                                };
 
-                                if let (Some(uri), Some(text)) = (uri, text) {
-                                    docs.insert(uri.to_string(), text.to_string());
-                                    let diagnostics = Self::diagnose_source(text);
-                                    let resp = serde_json::json!({
-                                        "jsonrpc": "2.0",
-                                        "method": "textDocument/publishDiagnostics",
-                                        "params": {
-                                            "uri": uri,
-                                            "diagnostics": diagnostics
+                                if let Some(uri) = uri {
+                                    if method == "textDocument/didOpen" {
+                                        let text = params
+                                            .get("textDocument")
+                                            .and_then(|t| t.get("text"))
+                                            .and_then(|t| t.as_str());
+                                        if let Some(text) = text {
+                                            docs.insert(uri.to_string(), text.to_string());
+                                            let diagnostics = Self::diagnose_source(text);
+                                            let resp = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "method": "textDocument/publishDiagnostics",
+                                                "params": {
+                                                    "uri": uri,
+                                                    "diagnostics": diagnostics
+                                                }
+                                            });
+                                            let _ = Self::write_message(&mut stdout, &resp);
                                         }
-                                    });
-                                    let _ = Self::write_message(&mut stdout, &resp);
+                                    } else {
+                                        // Incremental sync
+                                        if let Some(changes) = params.get("contentChanges").and_then(|c| c.as_array()) {
+                                            let mut text = docs.get(uri).cloned().unwrap_or_default();
+                                            for change in changes {
+                                                if let Some(range) = change.get("range") {
+                                                    let start = range.get("start").unwrap();
+                                                    let end = range.get("end").unwrap();
+                                                    let sl = start.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+                                                    let sc = start.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+                                                    let el = end.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+                                                    let ec = end.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+                                                    let new_text = change.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                                                    
+                                                    let start_idx = crate::diagnostics::lsp_position_to_byte_offset(&text, sl, sc);
+                                                    let end_idx = crate::diagnostics::lsp_position_to_byte_offset(&text, el, ec);
+                                                    text.replace_range(start_idx..end_idx, new_text);
+                                                } else {
+                                                    text = change.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                                }
+                                            }
+                                            docs.insert(uri.to_string(), text.clone());
+                                            let diagnostics = Self::diagnose_source(&text);
+                                            let resp = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "method": "textDocument/publishDiagnostics",
+                                                "params": {
+                                                    "uri": uri,
+                                                    "diagnostics": diagnostics
+                                                }
+                                            });
+                                            let _ = Self::write_message(&mut stdout, &resp);
+                                        }
+                                    }
                                 }
                             }
                         } else if method == "textDocument/didClose" {
@@ -236,8 +263,87 @@ impl LspDaemon {
                     }));
                 }
             }
+            if msg.contains("undefined variable") {
+                if let Some(edit) = Self::undefined_var_edit(uri, source, msg) {
+                    actions.push(serde_json::json!({
+                        "title": "Declare undefined variable with default value",
+                        "kind": "quickfix",
+                        "diagnostics": [d],
+                        "edit": edit
+                    }));
+                }
+            }
+            if msg.contains("Expected token Colon") && msg.contains("found RParen") {
+                if let Some(edit) = Self::arg_type_missing_edit(uri, source, msg) {
+                    actions.push(serde_json::json!({
+                        "title": "Add default Int type annotation",
+                        "kind": "quickfix",
+                        "diagnostics": [d],
+                        "edit": edit
+                    }));
+                }
+            }
         }
         actions
+    }
+
+    /// Insert `: Int` at the syntax error location for missing parameter types.
+    fn arg_type_missing_edit(
+        uri: &str,
+        source: &str,
+        msg: &str,
+    ) -> Option<serde_json::Value> {
+        if source.is_empty() {
+            return None;
+        }
+        let (line_1, col_1) = parse_loc(msg);
+        let line_0 = line_1.saturating_sub(1);
+        let col_0 = col_1.saturating_sub(1);
+        
+        let new_text = ": Int".to_string();
+        let text_edit = serde_json::json!({
+            "range": {
+                "start": { "line": line_0, "character": col_0 },
+                "end": { "line": line_0, "character": col_0 }
+            },
+            "newText": new_text
+        });
+        let mut changes = serde_json::Map::new();
+        changes.insert(uri.to_string(), serde_json::Value::Array(vec![text_edit]));
+        Some(serde_json::json!({ "changes": changes }))
+    }
+
+    /// Insert `let mut x = 0;\n` at the line of the undefined variable error.
+    fn undefined_var_edit(
+        uri: &str,
+        source: &str,
+        msg: &str,
+    ) -> Option<serde_json::Value> {
+        if source.is_empty() {
+            return None;
+        }
+        let var_name = msg
+            .split("undefined variable '")
+            .nth(1)
+            .and_then(|s| s.split('\'').next())
+            .unwrap_or("");
+        if var_name.is_empty() {
+            return None;
+        }
+        let (line_1, _) = parse_loc(msg);
+        let line_0 = line_1.saturating_sub(1);
+        
+        let new_text = format!("let mut {} = 0;\n", var_name);
+        let text_edit = serde_json::json!({
+            "range": {
+                "start": { "line": line_0, "character": 0 },
+                "end": { "line": line_0, "character": 0 }
+            },
+            "newText": new_text
+        });
+        let mut changes = serde_json::Map::new();
+        changes.insert(uri.to_string(), serde_json::Value::Array(vec![text_edit]));
+        Some(serde_json::json!({ "changes": changes }))
     }
 
     /// Change `-> Declared` to `-> Found` when body return type mismatches.
