@@ -24,19 +24,20 @@ impl LlvmCodeGen {
 
     /// Whether the program uses only the integer LLVM subset.
     pub fn assert_integer_subset(program: &Program) -> Result<()> {
+        let aliases = program.collect_type_aliases();
         for item in &program.items {
             if let Item::Function(func) = item {
-                Self::check_fn_subset(func)?;
+                Self::check_fn_subset(func, &aliases)?;
             }
         }
         Ok(())
     }
 
-    fn check_fn_subset(func: &FunctionDecl) -> Result<()> {
+    fn check_fn_subset(func: &FunctionDecl, aliases: &std::collections::HashMap<String, Type>) -> Result<()> {
         for p in &func.params {
-            Self::check_type_subset(&p.param_type, &func.name)?;
+            Self::check_type_subset(&p.param_type.resolve_alias(aliases), &func.name)?;
         }
-        Self::check_type_subset(&func.return_type, &func.name)?;
+        Self::check_type_subset(&func.return_type.resolve_alias(aliases), &func.name)?;
         for e in func.requires.iter().chain(func.ensures.iter()) {
             Self::check_expr_subset(e, &func.name)?;
         }

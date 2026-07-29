@@ -279,3 +279,45 @@ pub enum Item {
 pub struct Program {
     pub items: Vec<Item>,
 }
+
+impl Program {
+    pub fn collect_type_aliases(&self) -> std::collections::HashMap<String, Type> {
+        let mut aliases = std::collections::HashMap::new();
+        for item in &self.items {
+            if let Item::TypeAlias(name, ty) = item {
+                aliases.insert(name.clone(), ty.clone());
+            }
+        }
+        aliases
+    }
+}
+
+impl Type {
+    pub fn resolve_alias(&self, aliases: &std::collections::HashMap<String, Type>) -> Type {
+        self.resolve_alias_depth(aliases, 0)
+    }
+
+    fn resolve_alias_depth(&self, aliases: &std::collections::HashMap<String, Type>, depth: usize) -> Type {
+        if depth > 10 {
+            return self.clone();
+        }
+        match self {
+            Type::Custom(s) => {
+                if let Some(target) = aliases.get(s) {
+                    target.resolve_alias_depth(aliases, depth + 1)
+                } else if s.starts_with("Int[") && s.ends_with(']') {
+                    Type::Int
+                } else {
+                    Type::Custom(s.clone())
+                }
+            }
+            Type::Option(inner) => Type::Option(Box::new(inner.resolve_alias_depth(aliases, depth + 1))),
+            Type::Result(ok, err) => Type::Result(
+                Box::new(ok.resolve_alias_depth(aliases, depth + 1)),
+                Box::new(err.resolve_alias_depth(aliases, depth + 1)),
+            ),
+            Type::List(inner) => Type::List(Box::new(inner.resolve_alias_depth(aliases, depth + 1))),
+            other => other.clone(),
+        }
+    }
+}

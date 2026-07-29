@@ -29,9 +29,10 @@ impl WasmCodeGen {
         wat.push_str("(module\n");
         wat.push_str("  (import \"env\" \"println\" (func $println (param i64)))\n\n");
 
+        let aliases = program.collect_type_aliases();
         for item in &program.items {
             if let Item::Function(func) = item {
-                let f_wat = Self::emit_function(func)?;
+                let f_wat = Self::emit_function(func, &aliases)?;
                 wat.push_str(&f_wat);
                 wat.push('\n');
             }
@@ -42,13 +43,14 @@ impl WasmCodeGen {
         Ok(wat)
     }
 
-    fn emit_function(func: &FunctionDecl) -> Result<String> {
+    fn emit_function(func: &FunctionDecl, aliases: &std::collections::HashMap<String, Type>) -> Result<String> {
         let mut f_wat = String::new();
         let is_main = func.name == "main";
 
         // Reject capability parameters — the WASM subset has no IO model.
         for p in &func.params {
-            match p.param_type {
+            let resolved = p.param_type.resolve_alias(aliases);
+            match resolved {
                 Type::NetCap | Type::FsCap | Type::SysCap | Type::EnvCap => {
                     bail!(
                         "WASM backend does not support capability parameters in '{}' (parameter '{}'). \
@@ -73,12 +75,11 @@ impl WasmCodeGen {
                     "WASM backend does not yet support struct in '{}'. Use `ooda run`.",
                     func.name
                 ),
-                // Float is now supported in v0.24.0-alpha.
                 Type::Float | Type::Int | Type::Bool | Type::Void => {}
                 Type::Custom(_) => {}
             }
         }
-        if matches!(func.return_type, Type::String) {
+        if matches!(func.return_type.resolve_alias(aliases), Type::String) {
             bail!(
                 "WASM backend does not yet support String return in '{}'. Use `ooda run`.",
                 func.name
@@ -87,7 +88,8 @@ impl WasmCodeGen {
 
         // Helper: OODA `Type` → wasm primitive type name.
         let wat_param_ty = |t: &Type| -> Result<&'static str> {
-            Ok(match t {
+            let resolved = t.resolve_alias(aliases);
+            Ok(match resolved {
                 Type::Int | Type::Bool => "i64",
                 Type::Float => "f64",
                 Type::Void => "i64",

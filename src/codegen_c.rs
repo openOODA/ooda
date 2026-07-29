@@ -19,12 +19,13 @@ impl CCodeGen {
     }
 
     fn assert_chs_c_subset(program: &Program) -> Result<()> {
+        let aliases = program.collect_type_aliases();
         for item in &program.items {
             if let Item::Function(f) = item {
                 for p in &f.params {
-                    Self::check_ty(&p.param_type, &f.name)?;
+                    Self::check_ty(&p.param_type.resolve_alias(&aliases), &f.name)?;
                 }
-                Self::check_ty(&f.return_type, &f.name)?;
+                Self::check_ty(&f.return_type.resolve_alias(&aliases), &f.name)?;
             }
         }
         Ok(())
@@ -144,6 +145,7 @@ fn dirs_tmp() -> String {
 
 struct Gen {
     structs: HashMap<String, Vec<(String, Type)>>,
+    type_aliases: HashMap<String, Type>,
     /// name → C return type string
     fn_ret: HashMap<String, String>,
     functions: Vec<String>,
@@ -160,6 +162,7 @@ impl Gen {
     fn new() -> Self {
         Self {
             structs: HashMap::new(),
+            type_aliases: HashMap::new(),
             fn_ret: HashMap::new(),
             functions: Vec::new(),
             prelude: String::new(),
@@ -216,7 +219,8 @@ impl Gen {
     }
 
     fn c_ty(&self, t: &Type) -> String {
-        match t {
+        let resolved = t.resolve_alias(&self.type_aliases);
+        match &resolved {
             Type::Int | Type::Float => "long long".into(),
             Type::Bool => "int".into(),
             Type::Void => "void".into(),
@@ -248,6 +252,7 @@ impl Gen {
     }
 
     fn emit_program(&mut self, program: &Program) -> Result<()> {
+        self.type_aliases = program.collect_type_aliases();
         for item in &program.items {
             if let Item::TypeAlias(name, Type::Struct { fields, .. }) = item {
                 self.structs.insert(name.clone(), fields.clone());
@@ -938,12 +943,12 @@ impl Gen {
                 ));
                 Ok((code, t, "int".into()))
             }
-            "read_file" | "fs_read" => {
+            "read_file" | "fs_read" | ".read_file" => {
                 let path = cargs.last().unwrap();
                 code.push_str(&format!("  OoResS {} = oo_read_file({});\n", t, path));
                 Ok((code, t, "OoResS".into()))
             }
-            "write_file" | "fs_write" => {
+            "write_file" | "fs_write" | ".write_file" => {
                 // path, content — last two stringish
                 let path = if cargs.len() >= 2 {
                     &cargs[cargs.len() - 2]
