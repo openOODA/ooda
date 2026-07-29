@@ -7,7 +7,8 @@
 // (`list_new` / `list_push` / `list_get` / `list_len` + bump heap).
 //
 // Fail-closed (non-zero): Match, capability I/O, List[String]/non-Int lists,
-// struct, string methods, string concat/arithmetic, method-style `.push`.
+// struct, string methods, string concat/arithmetic. List methods `.push`/`.len`
+// lower to free `list_*` (not general method dispatch).
 //
 // String model: distinct UTF-8 literals interned as NUL-terminated bytes;
 // values are i32 offsets. List model: header {len,cap,data} + i64 elements
@@ -239,8 +240,16 @@ impl WasmCodeGen {
             Expression::Call { name, args, .. } => {
                 if matches!(
                     name.as_str(),
-                    "list_new" | "list_push" | "list_get" | "list_len"
+                    "list_new" | "list_push" | "list_get" | "list_len" | ".push" | ".len"
                 ) {
+                    // .len on strings is not list RT — still OK to inject if any .push/.len present
+                    // only when list methods; free list_* always need RT.
+                    if name == ".len" {
+                        // Conservative: if program has .len, may need list RT; pure string .len
+                        // still refuses at emit without RT waste if no list_* elsewhere.
+                        // Detect receiver shape is not available without env; include RT.
+                        return true;
+                    }
                     return true;
                 }
                 args.iter().any(Self::expr_needs_list)
@@ -284,6 +293,15 @@ impl WasmCodeGen {
                 other,
                 ctx
             ),
+        }
+    }
+
+    /// Map semantic local tags (`list` vs string `i32`) to WAT storage types.
+    fn wat_storage_ty(sem: &str) -> &'static str {
+        match sem {
+            "list" | "i32" => "i32",
+            "f64" => "f64",
+            _ => "i64",
         }
     }
 
@@ -334,7 +352,7 @@ impl WasmCodeGen {
                 Type::Void => "i64",
                 Type::List(inner) => {
                     Self::require_list_int(inner.as_ref(), "param")?;
-                    "i32"
+                    "list" // semantic tag; WAT storage is i32 pointer
                 }
                 _ => bail!("unsupported param type in WASM: {:?}", t),
             })
@@ -347,7 +365,11 @@ impl WasmCodeGen {
         }
         for param in &func.params {
             let ty = wat_param_ty(&param.param_type)?;
-            f_wat.push_str(&format!(" (param ${} {})", param.name, ty));
+            f_wat.push_str(&format!(
+                " (param ${} {})",
+                param.name,
+                Self::wat_storage_ty(ty)
+            ));
         }
         // The function's return type. `main` is special: the wasm
         // host entry-point returns i32, so we wrap i64 → i32 at the
@@ -357,13 +379,13 @@ impl WasmCodeGen {
             Type::String => "i32",
             Type::Float => "f64",
             Type::Void => "i64",
-            Type::List(_) => "i32",
+            Type::List(_) => "list",
             _ => "i64",
         };
         if is_main {
             f_wat.push_str(" (result i32)\n");
         } else {
-            f_wat.push_str(&format!(" (result {})\n", ret_ty));
+            f_wat.push_str(&format!(" (result {})\n", Self::wat_storage_ty(ret_ty)));
         }
 
         // Collect locals including nested while/if (for-list desugar binds loop vars inside while).
@@ -377,7 +399,11 @@ impl WasmCodeGen {
             if func.params.iter().any(|p| p.name == *name) {
                 continue;
             }
-            f_wat.push_str(&format!("    (local ${} {})\n", name, ty));
+            f_wat.push_str(&format!(
+                "    (local ${} {})\n",
+                name,
+                Self::wat_storage_ty(ty)
+            ));
         }
 
         // Walk statements, emitting body
@@ -486,8 +512,9 @@ impl WasmCodeGen {
                 let lhs_ty = Self::infer_expr_type(left, locals);
                 let rhs_ty = Self::infer_expr_type(right, locals);
                 let either_str = lhs_ty == "i32" || rhs_ty == "i32";
-                // String pointers are not numbers: refuse arithmetic / ordering.
-                // Eq/Neq allowed as *pointer identity* after literal interning.
+                let either_list = lhs_ty == "list" || rhs_ty == "list";
+                // String/list pointers are not numbers: refuse arithmetic / ordering.
+                // String Eq/Neq → streq; list Eq/Neq → i32 pointer identity.
                 if either_str {
                     match op {
                         BinOp::Eq | BinOp::Neq => {}
@@ -516,6 +543,19 @@ impl WasmCodeGen {
                         );
                     }
                 }
+                if either_list {
+                    match op {
+                        BinOp::Eq | BinOp::Neq => {
+                            if lhs_ty != "list" || rhs_ty != "list" {
+                                bail!("WASM backend does not mix List with non-List in ==/!=");
+                            }
+                        }
+                        _ => bail!(
+                            "WASM backend does not lower {:?} on List pointers; use list_get/list_len.",
+                            op
+                        ),
+                    }
+                }
                 // Promote i64 → f64 if either operand is f64.
                 let promote = |ty: &'static str, code: &mut String| {
                     if ty == "i64" && (lhs_ty == "f64" || rhs_ty == "f64") {
@@ -537,7 +577,7 @@ impl WasmCodeGen {
                 // Both operands are now on the stack as the same type.
                 let ty = if lhs_ty == "f64" || rhs_ty == "f64" {
                     "f64"
-                } else if either_str {
+                } else if either_str || either_list {
                     "i32"
                 } else {
                     "i64"
@@ -618,13 +658,47 @@ impl WasmCodeGen {
                 }
             }
             Expression::Call { name, args, .. } => {
-                if name.starts_with('.') {
+                // List methods on List[Int] receivers → free list_* (dual-engine parity with C).
+                if name == ".push" || name == ".len" {
+                    if args.is_empty() {
+                        bail!("WASM method '{}' requires a receiver", name);
+                    }
+                    let recv_ty = Self::infer_expr_type(&args[0], locals);
+                    if recv_ty != "list" {
+                        bail!(
+                            "WASM method '{}' requires List[Int] receiver (got {}); use `ooda run`.",
+                            name,
+                            recv_ty
+                        );
+                    }
+                    if name == ".push" {
+                        if args.len() != 2 {
+                            bail!("WASM .push expects receiver + one Int element");
+                        }
+                        let elem_ty = Self::infer_expr_type(&args[1], locals);
+                        if elem_ty != "i64" {
+                            bail!(
+                                "WASM .push only supports Int elements (got {}); List[String] refuse.",
+                                elem_ty
+                            );
+                        }
+                        wat.push_str(&Self::emit_expr(&args[0], locals)?);
+                        wat.push_str(&Self::emit_expr(&args[1], locals)?);
+                        wat.push_str("    call $list_push\n");
+                    } else {
+                        // .len
+                        if args.len() != 1 {
+                            bail!("WASM .len on List expects only a receiver");
+                        }
+                        wat.push_str(&Self::emit_expr(&args[0], locals)?);
+                        wat.push_str("    call $list_len\n");
+                    }
+                } else if name.starts_with('.') {
                     bail!(
                         "WASM backend does not yet support method-style calls (`{}`). Use `ooda run`.",
                         name
                     );
-                }
-                if name == "println" {
+                } else if name == "println" {
                     if args.is_empty() {
                         bail!("WASM println requires at least one Int or String argument");
                     }
@@ -637,6 +711,8 @@ impl WasmCodeGen {
                             wat.push_str("    call $println\n");
                         } else if arg_ty == "i32" {
                             wat.push_str("    call $println_str\n");
+                        } else if arg_ty == "list" {
+                            bail!("WASM println cannot print List; use list_get/list_len");
                         } else {
                             wat.push_str("    call $println\n");
                         }
@@ -743,11 +819,21 @@ impl WasmCodeGen {
                     }
                 }
             }
-            Expression::Call { name, .. } => {
-                if name == "list_new" || name == "list_push" {
-                    "i32"
-                } else if name == "list_get" || name == "list_len" {
-                    "i64"
+            Expression::Call { name, args, .. } => {
+                if name == "list_new" || name == "list_push" || name == ".push" {
+                    "list"
+                } else if name == "list_get" || name == "list_len" || name == ".len" {
+                    // .len on List → i64; string .len is refused at emit when recv ≠ list
+                    if name == ".len" {
+                        if let Some(recv) = args.first() {
+                            if Self::infer_expr_type(recv, locals) == "list" {
+                                return "i64";
+                            }
+                        }
+                        "i64"
+                    } else {
+                        "i64"
+                    }
                 } else {
                     "i64"
                 }
@@ -772,9 +858,14 @@ impl WasmCodeGen {
 
     fn collect_locals_in_stmt(stmt: &Statement, locals: &mut BTreeMap<String, &'static str>) {
         match stmt {
-            Statement::Let { name, init, type_annotation, .. } => {
+            Statement::Let {
+                name,
+                init,
+                type_annotation,
+                ..
+            } => {
                 let ty = if let Some(Type::List(_)) = type_annotation {
-                    "i32"
+                    "list"
                 } else {
                     Self::infer_expr_type(init, locals)
                 };

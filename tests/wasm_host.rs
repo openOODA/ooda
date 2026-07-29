@@ -285,6 +285,49 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Method forms `.push` / `.len` lower to free list_* on List[Int].
+#[test]
+fn ooda_wasm_list_methods_push_len_run_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wmeth_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("meth.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut xs: List[Int] = list_new();
+    xs = xs.push(10);
+    xs = xs.push(20);
+    println(xs.len());
+    println(list_get(xs, 0));
+    println(list_get(xs, 1));
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm method list: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("call $list_push"), "expected list_push lower:\n{}", wat);
+    assert!(wat.contains("call $list_len"), "expected list_len lower:\n{}", wat);
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(
+        lines,
+        vec!["2".to_string(), "10".to_string(), "20".to_string()],
+        "got {:?}",
+        lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Pure int program must not pull list runtime (W↓).
 #[test]
 fn ooda_wasm_no_list_runtime_without_lists() {
