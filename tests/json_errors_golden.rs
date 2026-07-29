@@ -48,6 +48,18 @@ fn json_errors_golden_capability_violation() {
         "cap fix should name the function or cap/effect: {}",
         diff
     );
+    // Cap fixes are machine-applicable ooda-patch JSON (not advisory theater).
+    assert_eq!(
+        v["suggested_fix"]["applicability"].as_str(),
+        Some("patch"),
+        "cap suggested_fix must be applicability=patch: {}",
+        stderr
+    );
+    assert!(
+        diff.contains("target_function") || diff.contains('{'),
+        "patch applicability should look like ooda patch JSON: {}",
+        diff
+    );
     // Honesty: no hardcoded E-M theater.
     assert!(
         v.get("em_savings").is_none(),
@@ -201,5 +213,48 @@ fn ooda_em_is_measured_not_theater() {
         !stdout.contains("OPTIMAL MANEUVERABILITY"),
         "no marketing floor: {}",
         stdout
+    );
+}
+
+#[test]
+fn ooda_em_json_is_measured_report_not_theater() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/em_demo.oo");
+    let out = std::process::Command::new(bin)
+        .args(["em", example, "--json"])
+        .output()
+        .expect("spawn ooda em --json");
+    assert!(out.status.success(), "em --json should succeed: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("em --json stdout is not JSON: {}\n{}", e, stdout)
+    });
+    assert!(v["source_bytes"].as_u64().unwrap_or(0) > 0, "W missing: {}", stdout);
+    assert!(v["parse_us"].as_u64().is_some(), "parse_us: {}", stdout);
+    assert!(v["typecheck_us"].as_u64().is_some(), "typecheck_us: {}", stdout);
+    assert!(v["total_us"].as_u64().unwrap_or(0) >= 1, "total_us: {}", stdout);
+    assert!(v.get("em_savings").is_none(), "no theater: {}", stdout);
+    assert!(!stdout.contains("82.4"), "no 82.4 theater: {}", stdout);
+    assert_eq!(v["check_failed"].as_bool(), Some(false), "em_demo should check clean: {}", stdout);
+}
+
+#[test]
+fn build_c_refuses_sealed_io_effects() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/chs_fs_roundtrip.oo");
+    let out = std::process::Command::new(bin)
+        .args(["build", example, "--target", "c"])
+        .output()
+        .expect("spawn ooda build");
+    assert!(!out.status.success(), "sealed FS must not compile to C without runtime caps");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("sealed") || err.contains("capability") || err.contains("read_file"),
+        "expected sealed I/O refuse message, got: {}",
+        err
     );
 }

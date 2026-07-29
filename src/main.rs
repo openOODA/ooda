@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.39.0-alpha")]
+#[command(version = "0.40.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -147,12 +147,15 @@ enum Commands {
     Em {
         /// Path to the .oo file
         file: PathBuf,
+        /// Emit machine-readable JSON EmReport (measured fields only; no theater scores)
+        #[arg(long)]
+        json: bool,
     },
     /// Compile .oo to native (CHS→C+gcc preferred; LLVM integer subset fallback)
     Build {
         /// Path to the .oo file
         file: PathBuf,
-        /// Reserved: optimized release build (ignored in this alpha — no-op)
+        /// Optimized release build (not implemented — fails closed if passed)
         #[arg(long)]
         release: bool,
         /// Output LLVM IR text file (.ll)
@@ -348,7 +351,7 @@ fn main() -> Result<()> {
             }
             bench::run_empirical_verification_suite(&file)?;
         }
-        Commands::Em { file } => {
+        Commands::Em { file, json } => {
             // Honest E-M: wall-clock parse + cap + typecheck only — never invent 82.4% scores.
             let source_bytes = fs::read_to_string(&file)
                 .map(|s| s.len())
@@ -366,7 +369,11 @@ fn main() -> Result<()> {
                         0,
                         true,
                     );
-                    println!("{}", report.display_summary());
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!("{}", report.display_summary());
+                    }
                     eprintln!("Load Error: {}", e);
                     std::process::exit(1);
                 }
@@ -387,7 +394,11 @@ fn main() -> Result<()> {
                 typecheck_us,
                 failed,
             );
-            println!("{}", report.display_summary());
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{}", report.display_summary());
+            }
             if failed {
                 std::process::exit(1);
             }
@@ -953,12 +964,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.39.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.40.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.39.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.40.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
@@ -1045,6 +1056,35 @@ mod version_consistency_tests {
             "install/BOOTSTRAP_PIN must match Cargo-derived canonical version \
              (sync openooda-gh-pages install defaults from this file)"
         );
+    }
+
+    /// When the monorepo sibling website is present, install entrypoints must
+    /// pin the same version (stops homepage CTA thrash to stale tags).
+    #[test]
+    fn monorepo_site_install_pins_match_canonical_if_present() {
+        let candidates = [
+            "../openOODA.github.io/install",
+            "../openOODA.github.io/install.sh",
+        ];
+        let mut saw_any = false;
+        for rel in candidates {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+            if !path.is_file() {
+                continue;
+            }
+            saw_any = true;
+            let body = std::fs::read_to_string(&path).expect("read site install");
+            let needle = format!("OODA_VERSION:-{}", CANONICAL_VERSION);
+            assert!(
+                body.contains(&needle) || body.contains(&format!("\"{}\"", CANONICAL_VERSION)),
+                "{} must pin {} (found neither OODA_VERSION:-{} nor quoted pin)",
+                path.display(),
+                CANONICAL_VERSION,
+                CANONICAL_VERSION
+            );
+        }
+        // In monorepo checkouts this must fire; bare ooda clone alone is ok to skip.
+        let _ = saw_any;
     }
 
 }

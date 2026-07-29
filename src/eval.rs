@@ -357,6 +357,34 @@ impl Interpreter {
                     effect.requires.type_name()
                 ));
             }
+            // Object-capability at runtime: free sealed ops need a live handle
+            // Value in the arg list; method-style needs receiver Capability.
+            // Ambient declaration alone is not enough (matches static checker).
+            let kind_name = effect.requires.type_name().trim_start_matches('&');
+            let arg_is_live_handle = |v: &Value| match v {
+                Value::Capability(c) => c == kind_name || c.ends_with(kind_name),
+                _ => false,
+            };
+            if effect.receiver_is_cap {
+                match args.first() {
+                    Some(v) if arg_is_live_handle(v) => {}
+                    _ => {
+                        return Err(anyhow!(
+                            "Runtime Security Capability Violation: function '{}' invoked method-style sealed '{}' without a live {} receiver handle (object-capability).",
+                            caller,
+                            name,
+                            effect.requires.type_name()
+                        ));
+                    }
+                }
+            } else if !args.iter().any(arg_is_live_handle) {
+                return Err(anyhow!(
+                    "Runtime Security Capability Violation: function '{}' invoked sealed '{}' without passing a live {} handle argument (object-capability: ambient grant alone is not enough).",
+                    caller,
+                    name,
+                    effect.requires.type_name()
+                ));
+            }
         }
 
         // Built-in functions
@@ -838,7 +866,12 @@ impl Interpreter {
             let hex_hash = format!("{:x}", result.into_bytes());
             return Ok(Value::String(hex_hash));
         } else if name == "async_spawn_internal" {
-            let task_name = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            // Optional leading SysCap token (object-cap).
+            let mut ai = 0usize;
+            if matches!(args.first(), Some(Value::Capability(_))) {
+                ai = 1;
+            }
+            let task_name = args.get(ai).map(|v| v.to_string()).unwrap_or_default();
             let id = self.next_thread_id;
             self.next_thread_id += 1;
             // Real OS thread — does work and returns a result that
@@ -856,7 +889,11 @@ impl Interpreter {
             self.threads.insert(id, handle);
             return Ok(Value::String(format!("thread#{}", id)));
         } else if name == "async_join_internal" {
-            let handle = args.get(0).map(|v| v.to_string()).unwrap_or_default();
+            let mut ai = 0usize;
+            if matches!(args.first(), Some(Value::Capability(_))) {
+                ai = 1;
+            }
+            let handle = args.get(ai).map(|v| v.to_string()).unwrap_or_default();
             let id: u64 = match handle.strip_prefix("thread#").and_then(|s| s.parse().ok()) {
                 Some(n) => n,
                 None => {
@@ -1437,7 +1474,7 @@ mod tests {
         let prog = parse(
             r#"
             pub fn ok(sys: &SysCap) -> String {
-                return async_spawn_internal("y");
+                return async_spawn_internal(sys, "y");
             }
             pub fn main() {}
             "#,
@@ -1446,7 +1483,10 @@ mod tests {
         interp.current_func = Some("ok".into());
         let res = interp.call_function(
             "async_spawn_internal",
-            vec![Value::String("y".into())],
+            vec![
+                Value::Capability("SysCap".into()),
+                Value::String("y".into()),
+            ],
             &mut HashMap::new(),
         );
         assert!(res.is_ok(), "expected ok, got: {:?}", res);
@@ -1497,6 +1537,7 @@ mod tests {
             .call_function(
                 "write_file",
                 vec![
+                    Value::Capability("FsCap".into()),
                     Value::String(path_s.clone()),
                     Value::String("hello-m0".into()),
                 ],
@@ -1508,7 +1549,10 @@ mod tests {
         let r = interp
             .call_function(
                 "read_file",
-                vec![Value::String(path_s)],
+                vec![
+                    Value::Capability("FsCap".into()),
+                    Value::String(path_s),
+                ],
                 &mut HashMap::new(),
             )
             .expect("read");
@@ -1564,9 +1608,36 @@ mod tests {
     }
 
     #[test]
+    fn fetch_ambient_only_without_handle_arg_runtime_denies() {
+        // Function declares &NetCap but call omits the live handle — object-cap deny.
+        let prog = parse(
+            r#"
+            pub fn ambient(net: &NetCap) {
+                let r = fetch("https://example.invalid");
+            }
+            pub fn main() {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("ambient".into());
+        let res = interp.call_function(
+            "fetch",
+            vec![Value::String("https://example.invalid".into())],
+            &mut HashMap::new(),
+        );
+        assert!(res.is_err(), "ambient-only fetch must deny: {:?}", res);
+        let msg = format!("{}", res.unwrap_err());
+        assert!(
+            msg.contains("object-capability") || msg.contains("live"),
+            "expected object-cap message, got: {}",
+            msg
+        );
+    }
+
+    #[test]
     fn fetch_with_netcap_returns_result_not_fake_ok() {
-        // With NetCap granted, fetch is allowed. A refused loopback URL must
-        // yield Err (or Ok if something answers) — never a hard-coded "200 OK".
+        // With NetCap granted AND live handle arg, fetch is allowed. A refused
+        // loopback URL must yield Err (or Ok if something answers) — never "200 OK".
         let prog = parse(
             r#"
             pub fn ok(net: &NetCap) -> Result[String, String] {
@@ -1586,7 +1657,7 @@ mod tests {
                 ],
                 &mut HashMap::new(),
             )
-            .expect("fetch with NetCap must be allowed");
+            .expect("fetch with live NetCap handle must be allowed");
         match res {
             Value::Err(e) => {
                 let s = format!("{}", e);

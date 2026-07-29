@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.39.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.40.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -26,7 +26,7 @@ cargo build --release
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.39.0-alpha
+ooda --version   # 0.40.0-alpha
 ```
 
 ```ooda
@@ -36,18 +36,18 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.39.0-alpha (CHS M0–M5)
+## What's real in v0.40.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
 | `while` / `else if` / unary `!` | Real (interp + LLVM/WAT subset) |
 | Option / Result / must-use / let mut | Real |
-| Caps + sealed effects | Real object-cap path: free sealed ops need a **live handle arg** (`fetch(net,url)`); method receivers; nested aliases |
+| Caps + sealed effects | Static **and runtime** object-cap: free sealed ops need live handle Value; ambient-only denied |
 | `Int[lo..hi]` refinement | Real on let/assign/return including nested blocks + simple const-fold (`5+6`) |
 | Types fail-closed | `Unknown` is not a wildcard; `Int`≠`String`; ADT holes only inside Result/Option/List |
 | Net GET (`fetch` / `http_get` / `.get`) | Real HTTPS via curl under threaded `&NetCap` |
 | AI diagnostics (`--json-errors`) | Real JSON + measured timings; cap fixes as ooda-patch JSON (`applicability`) |
-| Measured `ooda em` / `bench --em` | Real clocks only (W, µs, V) — no fake Boyd Ps / drag-% |
+| Measured `ooda em` / `em --json` / `bench --em` | Real clocks only (W, µs, V); JSON EmReport for agents — no fake Boyd Ps |
 | Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM; IR-only link fails non-zero |
 | `ooda patch` | Real body / params / return type / requires / ensures |
 | `ooda migrate --edition 2026` | Partial real: exhaustive match wildcards + assigned `let`→`let mut` |
