@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.78.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.79.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.78.0-alpha
+ooda --version   # 0.79.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.78.0-alpha (CHS M0–M5)
+## What's real in v0.79.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -64,18 +64,21 @@ import "lib.oo";       // relative / OODA_PATH
 | `EnvCap` `.env_get` | Real on **interpreter**; C build refuses (sealed) |
 | `ooda patch` | Real body / params / return type / requires / ensures |
 | `ooda migrate --edition 2026` | Partial real: exhaustive match wildcards + assigned `let`→`let mut` |
-| `type T = Int where …` | Fail-closed (use `requires` / `Int[lo..hi]`) |
+| `type T = Int where lo..hi` | Real subset: const Int range → `Int[lo..hi]` alias; other `where` forms fail parse |
 | **CHS:** `List`, string walk, structs, real FS, argv | Real on interpreter |
 | **CHS C backend** (`ooda build --target c`) | Real — gcc + `runtime/chs_rt.c` (no clang required) |
 | **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
 | **oodac** (`oodac/main.oo`) lex/parse/check/smoke-build | Real (interp + native) |
 | **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
+| `for i in lo..hi` / `lo..=hi` | Real: desugars to `let mut` + `while` (interp + C); list/iterator for fails parse |
+| `ooda build --release` | Real on CHS C path: gcc `-O3 -flto` |
 | LLVM Int/Bool/Float + while | Real (clang to link when present) |
 
 ## Not implemented (fail non-zero)
 
-LSP, pkg install, replay, full WASM product, PyTorch, `for` sugar, full SPEC self-host (only **CHS frontend** fixed-point is claimed).  
+Full LSP (current: initialize/shutdown/exit stub only), network `pkg install` (local path **pin** only), time-travel `replay` (current: re-run named fn), in-process CPython/PyTorch embed, full WASM product, list/iterator `for`, full SPEC self-host (only **CHS frontend** fixed-point is claimed).  
 `ooda migrate` is **not** a full edition engine — only the two codemods above.
+
 
 Stage-0 is still **Rust** (`src/**/*.rs`). That is intentional on alpha. **Beta exit criterion:** no `.rs` left — [`bootstrap/BETA.md`](bootstrap/BETA.md).
 

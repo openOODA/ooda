@@ -152,25 +152,48 @@ impl Parser {
             };
             let mut final_type = target_type;
             if self.peek() == &Token::Where {
-                self.advance();
+                // Honest subset: only `type T = Int where lo..hi` / `lo..=hi` with const Ints.
+                let base_is_int = matches!(&final_type, Type::Int)
+                    || matches!(&final_type, Type::Custom(s) if s == "Int");
+                if !base_is_int {
+                    let (l, c) = self.loc();
+                    return Err(anyhow!(
+                        "Parse error at {}:{}: type alias `where` only supported on Int (alias '{}').",
+                        l, c, name
+                    ));
+                }
+                self.advance(); // where
                 let expr = self.parse_expression()?;
-                let (min_s, max_s) = match expr {
-                    Expression::Binary { op: BinOp::DotDot, left, right, .. } |
-                    Expression::Binary { op: BinOp::DotDotEq, left, right, .. } => {
-                        let min_str = match *left {
-                            Expression::Literal(Literal::Int(n), _) => n.to_string(),
-                            _ => "1".to_string(),
-                        };
-                        let max_str = match *right {
-                            Expression::Literal(Literal::Int(n), _) => n.to_string(),
-                            _ => "65535".to_string(),
-                        };
-                        (min_str, max_str)
-                    }
-                    Expression::Literal(Literal::Int(n), _) => (n.to_string(), "65535".to_string()),
-                    _ => ("1".to_string(), "65535".to_string()),
+                let bounds = match expr {
+                    Expression::Binary {
+                        op: BinOp::DotDot | BinOp::DotDotEq,
+                        left,
+                        right,
+                        ..
+                    } => match (*left, *right) {
+                        (
+                            Expression::Literal(Literal::Int(lo), _),
+                            Expression::Literal(Literal::Int(hi), _),
+                        ) => Some((lo, hi)),
+                        _ => None,
+                    },
+                    _ => None,
                 };
-                final_type = Type::Custom(format!("Int[{}..{}]", min_s, max_s));
+                let Some((lo, hi)) = bounds else {
+                    let (l, c) = self.loc();
+                    return Err(anyhow!(
+                        "Parse error at {}:{}: type alias `where` requires const Int range lo..hi or lo..=hi (alias '{}').",
+                        l, c, name
+                    ));
+                };
+                if lo > hi {
+                    let (l, c) = self.loc();
+                    return Err(anyhow!(
+                        "Parse error at {}:{}: empty refinement range {}..{} for alias '{}'",
+                        l, c, lo, hi, name
+                    ));
+                }
+                final_type = Type::Custom(format!("Int[{}..{}]", lo, hi));
             }
             self.consume(Token::Semi)?;
             Ok(Item::TypeAlias(name, final_type))
@@ -378,6 +401,10 @@ impl Parser {
                 stmts.push(self.parse_return_stmt()?);
             } else if self.peek() == &Token::While {
                 stmts.push(self.parse_while_stmt()?);
+            } else if self.peek() == &Token::For {
+                let (init_stmt, while_stmt) = self.parse_for_stmts()?;
+                stmts.push(init_stmt);
+                stmts.push(while_stmt);
             } else {
                 let expr = self.parse_expression()?;
                 // Assignment: `name = expr;` (Token::Eq, not ==)
@@ -482,6 +509,76 @@ impl Parser {
         let cond = self.parse_expression()?;
         let body = self.parse_block()?;
         Ok(Statement::While { cond, body, span })
+    }
+
+    /// `for i in lo..hi { body }` or `lo..=hi` — desugars to while + increment.
+    fn parse_for_stmts(&mut self) -> Result<(Statement, Statement)> {
+        self.consume(Token::For)?;
+        let span = self.last_span();
+        let iter_name = match self.advance() {
+            Token::Ident(n) => n,
+            other => {
+                let (l, c) = self.loc();
+                return Err(anyhow::anyhow!(
+                    "Expected loop variable after `for` at {}:{}, found {:?}",
+                    l, c, other
+                ));
+            }
+        };
+        self.consume(Token::In)?;
+        let range = self.parse_expression()?;
+        let body = self.parse_block()?;
+
+        let (lo, hi, inclusive) = match range {
+            Expression::Binary { op: BinOp::DotDot, left, right, .. } => (*left, *right, false),
+            Expression::Binary { op: BinOp::DotDotEq, left, right, .. } => (*left, *right, true),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Parse error at {}:{}: `for` only supports integer ranges `lo..hi` or `lo..=hi` \
+                     (list/iterator for is not implemented). Use `while` for other loops.",
+                    span.line, span.col
+                ));
+            }
+        };
+
+        let init_stmt = Statement::Let {
+            name: iter_name.clone(),
+            mutable: true,
+            type_annotation: None,
+            init: lo,
+            span,
+        };
+
+        let cmp = if inclusive { BinOp::Lte } else { BinOp::Lt };
+        let mut while_stmts = body.stmts;
+        if let Some(tail) = body.expr {
+            while_stmts.push(Statement::Expr(*tail, span));
+        }
+        while_stmts.push(Statement::Assign {
+            name: iter_name.clone(),
+            value: Expression::Binary {
+                op: BinOp::Add,
+                left: Box::new(Expression::Variable(iter_name.clone(), span)),
+                right: Box::new(Expression::Literal(Literal::Int(1), span)),
+                span,
+            },
+            span,
+        });
+
+        let while_stmt = Statement::While {
+            cond: Expression::Binary {
+                op: cmp,
+                left: Box::new(Expression::Variable(iter_name.clone(), span)),
+                right: Box::new(hi),
+                span,
+            },
+            body: Block {
+                stmts: while_stmts,
+                expr: None,
+            },
+            span,
+        };
+        Ok((init_stmt, while_stmt))
     }
 
     /// `if cond { ... } else if ... else { ... }`

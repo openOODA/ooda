@@ -1898,3 +1898,88 @@ pub fn main() {
     assert!(stdout.contains("42"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn for_range_loop_run_and_c() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_for_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut s = 0;
+    for i in 0..4 {
+        s = s + i;
+    }
+    println(s);
+}
+"#,
+    )
+    .unwrap();
+    let run = std::process::Command::new(bin)
+        .args(["run", path.to_str().unwrap()])
+        .output()
+        .expect("run");
+    assert!(run.status.success(), "run: {}", String::from_utf8_lossy(&run.stderr));
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("6"), "0+1+2+3=6 stdout={}", stdout);
+
+    let build = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("build");
+    assert!(
+        build.status.success(),
+        "C for desugar: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let exe = path.with_extension("");
+    let out = std::process::Command::new(&exe).output().expect("exe");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("6"), "C stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pkg_install_refuses_remote_url() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let out = std::process::Command::new(bin)
+        .args(["pkg", "--install", "https://example.com/pkg.git"])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "remote pkg must fail");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("not implemented") || err.contains("remote") || err.contains("local"),
+        "got: {}",
+        err
+    );
+}
+
+#[test]
+fn where_non_const_fails_check() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_where_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(&path, "type Port = Int where x..y;\npub fn main() {}\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success());
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(err.contains("where") || err.contains("const"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}

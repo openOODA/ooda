@@ -940,28 +940,24 @@ impl Interpreter {
                 ))))),
             };
         } else if name == "python_embed_internal" {
-            let model = args.get(1).map(|v| v.to_string()).unwrap_or_default();
-            let py_script = format!(
-                "import sys\ntry:\n    # Minimal verification that python bridge is alive\n    print('Loaded model ' + '{}')\nexcept Exception as e:\n    print(str(e), file=sys.stderr)\n    sys.exit(1)\n",
-                model
-            );
-            let output = std::process::Command::new("python3")
+            // Honest: no in-process CPython / PyTorch. Do not claim models load.
+            let model = args
+                .get(1)
+                .map(|v| v.to_string())
+                .or_else(|| args.first().map(|v| v.to_string()))
+                .unwrap_or_default();
+            let py_on_path = std::process::Command::new("python3")
                 .arg("-c")
-                .arg(&py_script)
-                .output();
-            match output {
-                Ok(out) if out.status.success() => {
-                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    return Ok(Value::Ok(Box::new(Value::String(s))));
-                }
-                Ok(out) => {
-                    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                    return Ok(Value::Err(Box::new(Value::String(err))));
-                }
-                Err(e) => {
-                    return Ok(Value::Err(Box::new(Value::String(e.to_string()))));
-                }
-            }
+                .arg("print('ok')")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            return Ok(Value::Err(Box::new(Value::String(format!(
+                "python_embed_internal: in-process CPython/PyTorch embed is not implemented \
+                 (requested model '{}'; host python3 on PATH: {}). \
+                 std::python cannot load models in this alpha — fail-closed.",
+                model, py_on_path
+            )))));
         } else if name == "Ok" {
             let val = args.get(0).cloned().unwrap_or(Value::Void);
             return Ok(Value::Ok(Box::new(val)));
@@ -2108,6 +2104,71 @@ mod tests {
             assert!(matches!(target, crate::ast::Type::Custom(ref s) if s == "Int[1..65535]"));
         } else {
             panic!("Expected TypeAlias");
+        }
+    }
+
+    #[test]
+    fn where_type_alias_rejects_non_const_range() {
+        let src = r#"type Port = Int where x..y; pub fn main() {}"#;
+        let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
+        let err = crate::parser::Parser::new(tokens)
+            .parse_program()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("where") && (err.contains("const") || err.contains("range")),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn for_range_loop_runtime() {
+        let prog = parse(
+            r#"
+            pub fn main() -> Int {
+                let mut s = 0;
+                for i in 1..=3 {
+                    s = s + i;
+                }
+                return s;
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("for loop");
+        assert_eq!(v, Value::Int(6)); // 1+2+3
+    }
+
+    #[test]
+    fn python_embed_returns_honest_err() {
+        let prog = parse(
+            r#"
+            pub fn main(sys: &SysCap) -> Result[String, String] {
+                return python_embed_internal(sys, "torch");
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function(
+                "main",
+                vec![Value::Capability("SysCap".into())],
+                &mut HashMap::new(),
+            )
+            .expect("call");
+        match v {
+            Value::Err(e) => {
+                let s = format!("{:?}", e);
+                assert!(
+                    s.contains("not implemented") || s.contains("python_embed"),
+                    "got: {}",
+                    s
+                );
+            }
+            other => panic!("expected Err, got {:?}", other),
         }
     }
 

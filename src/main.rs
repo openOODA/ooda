@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.78.0-alpha")]
+#[command(version = "0.79.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -155,7 +155,7 @@ enum Commands {
     Build {
         /// Path to the .oo file
         file: PathBuf,
-        /// Optimized release build (not implemented — fails closed if passed)
+        /// Pass -O3 -flto to gcc on CHS C native path (no effect on interpreter / LLVM text emit)
         #[arg(long)]
         release: bool,
         /// Output LLVM IR text file (.ll)
@@ -1305,9 +1305,9 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.78.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.79.0-alpha";
     // For comparing against Cargo.toml which lacks the 'v'
-    const CANONICAL_VERSION_NO_V: &str = "0.78.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.79.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
