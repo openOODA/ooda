@@ -197,7 +197,7 @@ impl Gen {
         s.push_str("long long oo_ilist_get(OoIList,long long); long long oo_ilist_len(OoIList);\n");
         s.push_str("OoSList oo_slist_new(void); OoSList oo_slist_push(OoSList,OoStr);\n");
         s.push_str("OoStr oo_slist_get(OoSList,long long); long long oo_slist_len(OoSList);\n");
-        s.push_str("OoResS oo_read_file(OoStr); OoResV oo_write_file(OoStr,OoStr); int oo_path_exists(OoStr); long long oo_file_size(OoStr);\n");
+        s.push_str("OoResS oo_read_file(OoStr); OoResV oo_write_file(OoStr,OoStr); int oo_path_exists(OoStr); long long oo_file_size(OoStr); OoResS oo_env_get(OoStr);\n");
         s.push_str("void oo_print_str(OoStr); void oo_print_int(long long); void oo_print_bool(int); void oo_println(void);\n");
         s.push_str("int oo_str_eq(OoStr,OoStr);\n");
         /* Host FFI (libooda.a) — exact stage-0 dumps + real CHS build */
@@ -999,6 +999,19 @@ impl Gen {
             }
             "is_none" => {
                 code.push_str(&format!("  int {} = !({}.is_some);\n", t, cargs[0]));
+                Ok((code, t, "int".into()))
+            }
+            "env_get" => {
+                let key = cargs.last().unwrap();
+                code.push_str(&format!("  OoResS {} = oo_env_get({});\n", t, key));
+                Ok((code, t, "OoResS".into()))
+            }
+            "is_ok" => {
+                code.push_str(&format!("  int {} = ({}.ok);\n", t, cargs[0]));
+                Ok((code, t, "int".into()))
+            }
+            "is_err" => {
+                code.push_str(&format!("  int {} = !({}.ok);\n", t, cargs[0]));
                 Ok((code, t, "int".into()))
             }
             "host_ast_dump" => {

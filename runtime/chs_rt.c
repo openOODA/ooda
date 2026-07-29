@@ -231,6 +231,19 @@ long long oo_file_size(OoStr path) {
   return sz;
 }
 
+OoResS oo_env_get(OoStr key) {
+  OoResS r;
+  char *val = getenv(key.data);
+  if (val) {
+    r.ok = 1;
+    r.val = oo_str_lit(val);
+  } else {
+    r.ok = 0;
+    r.val = oo_str_lit("env var not set");
+  }
+  return r;
+}
+
 void oo_print_str(OoStr s) { fwrite(s.data, 1, (size_t)s.len, stdout); }
 void oo_print_int(long long n) { printf("%lld", n); }
 void oo_print_bool(int b) { fputs(b ? "true" : "false", stdout); }

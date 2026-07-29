@@ -1692,3 +1692,35 @@ pub fn main(fs: &FsCap) {{
     assert!(stdout.contains("10"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn run_interpreter_handles_env_get_method() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_run_env_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main(env: &EnvCap) {
+    let res = env.env_get("PATH");
+    if res.is_ok {
+        println("env ok");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["run", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "run must handle .env_get: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(stdout.contains("env ok"), "stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
