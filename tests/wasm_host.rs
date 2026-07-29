@@ -312,6 +312,28 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+/// Fixture fixtures/list_eq.oo deep equality under host.
+#[test]
+fn ooda_wasm_list_eq_fixture_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_eq.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm list_eq fixture: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("call $list_eq"), "list_eq missing:\n{}", wat);
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(lines, vec!["1".to_string(), "0".to_string()], "got {:?}", lines);
+}
+
 /// for-list desugars to while + nested `let x = list_get`; nested locals must declare.
 #[test]
 fn ooda_wasm_for_list_sum_runs_on_host() {
