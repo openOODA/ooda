@@ -313,6 +313,30 @@ pub fn main() {
 }
 
 
+
+/// Fixture fixtures/string_ops.oo combined string methods under host.
+#[test]
+fn ooda_wasm_string_ops_fixture_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/string_ops.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "wasm string_ops: {}", String::from_utf8_lossy(&out.stderr));
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("str_contains") || wat.contains("call $str_contains"));
+    let lines = run_wat(&wat).expect("host");
+    // len=5, char h=104, contains=1, slice=ell
+    assert_eq!(
+        lines,
+        vec!["5".to_string(), "104".to_string(), "1".to_string(), "ell".to_string()],
+        "got {:?}",
+        lines
+    );
+}
+
 /// Fixture fixtures/list_eq.oo deep equality under host.
 #[test]
 fn ooda_wasm_list_eq_fixture_runs_on_host() {
