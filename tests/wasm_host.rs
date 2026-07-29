@@ -315,6 +315,7 @@ pub fn main() {
 
 
 /// Fixture fixtures/string_ops.oo combined string methods under host.
+/// Variable String receiver — must not inject dead list RT (W↓).
 #[test]
 fn ooda_wasm_string_ops_fixture_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
@@ -327,6 +328,15 @@ fn ooda_wasm_string_ops_fixture_runs_on_host() {
     assert!(out.status.success(), "wasm string_ops: {}", String::from_utf8_lossy(&out.stderr));
     let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
     assert!(wat.contains("str_contains") || wat.contains("call $str_contains"));
+    assert!(
+        !wat.contains("$list_new")
+            && !wat.contains("$list_len")
+            && !wat.contains("$list_push")
+            && !wat.contains("$list_get")
+            && !wat.contains("$list_eq"),
+        "string_ops.oo is string-only; list RT must not inject:\n{}",
+        wat
+    );
     let lines = run_wat(&wat).expect("host");
     // len=5, char h=104, contains=1, slice=ell
     assert_eq!(
@@ -788,6 +798,8 @@ fn ooda_wasm_no_list_runtime_without_lists() {
 }
 
 /// String-only programs need memory but must not inject list_* RT (W↓).
+/// Drives **variable** String receivers (not only literals) so list-RT injection
+/// from naive non-literal `.len` cannot slip through.
 #[test]
 fn ooda_wasm_string_only_no_list_runtime() {
     let bin = env!("CARGO_BIN_EXE_ooda");
@@ -797,8 +809,10 @@ fn ooda_wasm_string_only_no_list_runtime() {
         &path,
         r#"
 pub fn main() {
-    println("ab".len());
-    println("ab".char_at(0));
+    let s = "ab";
+    println(s.len());
+    println(s.char_at(0));
+    println("cd".len());
 }
 "#,
     )
@@ -815,11 +829,62 @@ pub fn main() {
     let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
     assert!(wat.contains("(memory"), "strings need memory:\n{}", wat);
     assert!(
-        !wat.contains("$list_new") && !wat.contains("$list_len"),
-        "list RT must not inject for string-only:\n{}",
+        !wat.contains("$list_new")
+            && !wat.contains("$list_len")
+            && !wat.contains("$list_push")
+            && !wat.contains("$list_get")
+            && !wat.contains("$list_eq"),
+        "list RT must not inject for variable String methods:\n{}",
         wat
     );
     let lines = run_wat(&wat).expect("host");
-    assert_eq!(lines, vec!["2".to_string(), "97".to_string()]);
+    assert_eq!(
+        lines,
+        vec!["2".to_string(), "97".to_string(), "2".to_string()]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Variable String `.len` must not pull dead `$list_*` runtime (skeptic gap).
+#[test]
+fn ooda_wasm_var_string_len_no_list_runtime() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wvarlen");
+    let path = dir.join("varlen.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let s = "hello";
+    println(s.len());
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "var string len wasm: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        !wat.contains("$list_new"),
+        "variable String .len must not emit $list_new:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("$list_len")
+            && !wat.contains("$list_push")
+            && !wat.contains("$list_get")
+            && !wat.contains("$list_eq"),
+        "variable String .len must not emit list RT:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(lines, vec!["5".to_string()]);
     let _ = std::fs::remove_dir_all(&dir);
 }

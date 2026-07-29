@@ -349,17 +349,22 @@ impl WasmCodeGen {
         match expr {
             Expression::Call { name, args, .. } => {
                 match name.as_str() {
+                    // Explicit list ops always need the bump-heap list runtime.
                     "list_new" | "list_push" | "list_get" | "list_len" | ".push" => return true,
                     ".len" => {
-                        // String-literal `.len` is pure WAT (no list RT). Variable `.len`
-                        // may be List[Int] → need list_len runtime.
-                        match args.first() {
-                            Some(Expression::Literal(Literal::String(_), _)) => {}
-                            Some(_) => return true,
-                            None => {}
+                        // E-M W↓: String `.len` is pure WAT (NUL scan), whether the
+                        // receiver is a literal or a String-typed local (`i32`).
+                        // List `.len` needs `$list_len` only when the receiver is
+                        // list-shaped (list_new/list_push/.push or nested list expr).
+                        // Do NOT inject list RT for every non-literal `.len` — that
+                        // falsely bloated `let s = "hi"; s.len()` and string_ops.oo.
+                        if let Some(recv) = args.first() {
+                            if Self::expr_is_list_shaped(recv) {
+                                return true;
+                            }
                         }
                     }
-                    ".char_at" => {} // string-only pure WAT
+                    ".char_at" | ".contains" | ".str_slice" => {} // string surface, not list RT
                     _ => {}
                 }
                 args.iter().any(Self::expr_needs_list)
@@ -392,6 +397,38 @@ impl WasmCodeGen {
             }
             Expression::Literal(_, _) | Expression::Variable(_, _) => false,
         }
+    }
+
+    /// True when `expr` is known to produce a List pointer (not String i32).
+    /// Used to decide whether `.len` needs `$list_len` RT vs pure string WAT.
+    /// List-typed parameters / annotations still force RT via `program_needs_list_runtime`
+    /// and `stmt_needs_list`; this only classifies expression shape at a use site.
+    fn expr_is_list_shaped(expr: &Expression) -> bool {
+        match expr {
+            Expression::Call { name, .. } => {
+                matches!(name.as_str(), "list_new" | "list_push" | ".push")
+            }
+            Expression::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::block_tail_is_list_shaped(then_branch)
+                    || else_branch
+                        .as_ref()
+                        .map(|b| Self::block_tail_is_list_shaped(b))
+                        .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    fn block_tail_is_list_shaped(block: &Block) -> bool {
+        block
+            .expr
+            .as_ref()
+            .map(|e| Self::expr_is_list_shaped(e))
+            .unwrap_or(false)
     }
 
     fn require_list_int(inner: &Type, ctx: &str) -> Result<()> {
