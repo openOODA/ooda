@@ -407,6 +407,32 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fixture fixtures/list_sum.oo — method .push + for-list; println-only host (no string imports).
+#[test]
+fn ooda_wasm_list_sum_fixture_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_sum.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm list_sum: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("call $list_push") || wat.contains("call $list_get"));
+    assert!(
+        !wat.contains("println_str") && !wat.contains("\"streq\"") && !wat.contains("str_contains"),
+        "list_sum is Int-only; no string host imports:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(lines, vec!["6".to_string()], "got {:?}", lines);
+}
+
 #[test]
 fn ooda_wasm_refuses_list_string_push() {
     let bin = env!("CARGO_BIN_EXE_ooda");
