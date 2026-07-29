@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.93.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.94.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.93.0-alpha
+ooda --version   # 0.94.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.93.0-alpha (CHS M0–M5)
+## What's real in v0.94.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -60,7 +60,7 @@ import "lib.oo";       // relative / OODA_PATH
 | AI diagnostics (`--json-errors`) | Real JSON + measured timings; patch codemods including `refinement_bounds` |
 | Measured `ooda em` / `em --json` / `bench --em` | Real clocks only (W, µs, V); JSON EmReport for agents — no fake Boyd Ps |
 | String methods | Real on interpreter + CHS C (`.char_at` / `.str_slice`); LLVM subset refuses strings fail-closed |
-| WASM strings (subset) | Real: interned literals → data segment + `println_str`; `==`/`!=` via host `env.streq`; statement `if` arms type-check (side-effect arms synthesize zero). **concat/arith refuse**. Dev-only wasmtime smoke (not product host). Not methods / lists / caps |
+| WASM strings + List[Int] | Real: interned strings + `streq`; **List[Int]** via `list_new`/`push`/`get`/`len` + bump heap (injected only when used); nested locals for `for`→while; statement `if`/`while` stack-clean. **Refuse** List[String], methods, concat, caps. Dev-only wasmtime smoke |
 | Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM (method forms included as of v0.69); pure compute subset may lower; IR-only link fails non-zero |
 | `EnvCap` `.env_get` | Real on **interpreter**; C build refuses (sealed) |
 | Network `pkg install` | Partial: local pin; https `*.tar.gz` via curl+tar; `.minisig`/`.sig` fail-closed when present (need pubkey/gpg; `OODA_PKG_ALLOW_UNSIGNED=1` escape); `.sha256` optional/`OODA_PKG_REQUIRE_SHA256=1` |

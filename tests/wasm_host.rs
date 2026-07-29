@@ -196,12 +196,118 @@ pub fn main() {
     );
     let wat_path = path.with_extension("wat");
     let wat = std::fs::read_to_string(&wat_path).expect("read wat");
+    assert!(wat.contains("$list_new"), "list runtime missing:\n{}", wat);
     let lines = run_wat(&wat).expect("host run ooda WAT");
     assert_eq!(
         lines,
         vec!["2".to_string(), "42".to_string(), "99".to_string()],
         "list output got {:?}",
         lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// for-list desugars to while + nested `let x = list_get`; nested locals must declare.
+#[test]
+fn ooda_wasm_for_list_sum_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wforlist_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("forlist.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut xs: List[Int] = list_new();
+    xs = list_push(xs, 1);
+    xs = list_push(xs, 2);
+    xs = list_push(xs, 3);
+    let mut s = 0;
+    for x in xs {
+        s = s + x;
+    }
+    println(s);
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn ooda");
+    assert!(
+        out.status.success(),
+        "wasm for-list build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).expect("wat");
+    assert!(wat.contains("(local $x "), "nested loop var local missing:\n{}", wat);
+    let lines = run_wat(&wat).expect("host run");
+    assert_eq!(lines, vec!["6".to_string()], "sum 1+2+3; got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ooda_wasm_refuses_list_string_push() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wlstr_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("bad.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut xs = list_new();
+    xs = list_push(xs, "nope");
+    println(list_len(xs));
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        !out.status.success(),
+        "List[String] via string push must fail-closed"
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("list_push") || err.contains("List[Int]") || err.contains("Int elements"),
+        "err={}",
+        err
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Pure int program must not pull list runtime (W↓).
+#[test]
+fn ooda_wasm_no_list_runtime_without_lists() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wnolist_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("pure.oo");
+    std::fs::write(&path, "pub fn main() { println(1 + 2); }\n").unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        !wat.contains("$list_new"),
+        "list runtime should not inject without lists:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("(memory"),
+        "memory not needed for pure int:\n{}",
+        wat
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

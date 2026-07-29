@@ -3,19 +3,20 @@
 //
 // Honest subset: Int / Bool / Float arithmetic, function calls, `let`,
 // `if`/`while`, interned String *literals* (data segments + `println_str`),
-// and content `==`/`!=` via host import `env.streq` (NUL-terminated).
+// content `==`/`!=` via host `env.streq`, and **List[Int]** only
+// (`list_new` / `list_push` / `list_get` / `list_len` + bump heap).
 //
-// Fail-closed (non-zero): Match, capability I/O, List/struct, string
-// methods, string concatenation / arithmetic (no silent pointer math).
+// Fail-closed (non-zero): Match, capability I/O, List[String]/non-Int lists,
+// struct, string methods, string concat/arithmetic, method-style `.push`.
 //
-// String model: each distinct UTF-8 literal is interned once into linear
-// memory as a NUL-terminated byte sequence; values are i32 offsets.
-// Identical literals share one offset (W↓). Equality uses `$streq` so
-// distinct intern slots with equal content also compare equal (host-defined).
+// String model: distinct UTF-8 literals interned as NUL-terminated bytes;
+// values are i32 offsets. List model: header {len,cap,data} + i64 elements
+// on a bump heap (`$heap` global). List runtime is injected only when used (W↓).
 //
-// The emitted WAT is round-trip validated via `wasm-tools validate`
-// when available, otherwise checked structurally for undeclared locals
-// and missing `return` instructions.
+// Locals: nested `let` inside while/if (e.g. for-list desugar) are collected
+// into the function's local table so wasmtime type-checks.
+//
+// WAT validated via `wasm-tools validate` when available, else structurally.
 // ===================================================================
 use crate::ast::*;
 use anyhow::{anyhow, bail, Result};
@@ -63,6 +64,7 @@ impl WasmCodeGen {
         wat.push_str("  (import \"env\" \"println_str\" (func $println_str (param i32)))\n");
         wat.push_str("  (import \"env\" \"streq\" (func $streq (param i32 i32) (result i32)))\n\n");
         let aliases = program.collect_type_aliases();
+        let needs_list_rt = Self::program_needs_list_runtime(program);
         let mut funcs_wat = String::new();
         for item in &program.items {
             if let Item::Function(func) = item {
@@ -72,28 +74,42 @@ impl WasmCodeGen {
             }
         }
 
-        WASM_STRINGS.with(|strings| {
-            let strings = strings.borrow();
+        let string_count = WASM_STRINGS.with(|s| s.borrow().len());
+        let needs_memory = needs_list_rt || string_count > 0;
+        if needs_memory {
             wat.push_str("  (memory 1)\n");
             wat.push_str("  (export \"memory\" (memory 0))\n");
-            let mut offset = 0;
-            if !strings.is_empty() {
-                for s in strings.iter() {
+            let mut offset = 0usize;
+            WASM_STRINGS.with(|strings| {
+                for s in strings.borrow().iter() {
                     let mut hex_str = String::new();
                     for b in s.as_bytes() {
                         hex_str.push_str(&format!("\\{:02x}", b));
                     }
-                    hex_str.push_str("\\00"); // null terminator
+                    hex_str.push_str("\\00");
                     wat.push_str(&format!("  (data (i32.const {}) \"{}\")\n", offset, hex_str));
                     offset += s.len() + 1;
                 }
+            });
+            if needs_list_rt {
+                let heap_start = (offset + 15) & !15;
+                wat.push_str(&format!(
+                    "  (global $heap (mut i32) (i32.const {}))\n",
+                    heap_start
+                ));
+                wat.push_str(Self::list_runtime_wat());
             }
-            let heap_start = (offset + 15) & !15;
-            wat.push_str(&format!("  (global $heap (mut i32) (i32.const {}))\n", heap_start));
-        });
+        }
 
-        // Inject List[Int] subset runtime.
-        wat.push_str(r#"
+        wat.push_str(&funcs_wat);
+        wat.push_str(")\n");
+        Self::validate_wat(&wat)?;
+        Ok(wat)
+    }
+
+    /// List[Int] bump-heap runtime (only emitted when the program uses lists).
+    fn list_runtime_wat() -> &'static str {
+        r#"
   (func $list_new (result i32)
     (local $ptr i32)
     (local.set $ptr (global.get $heap))
@@ -150,12 +166,125 @@ impl WasmCodeGen {
     (local.get $list)
     return
   )
-"#);
+"#
+    }
 
-        wat.push_str(&funcs_wat);
-        wat.push_str(")\n");
-        Self::validate_wat(&wat)?;
-        Ok(wat)
+    fn program_needs_list_runtime(program: &Program) -> bool {
+        for item in &program.items {
+            if let Item::Function(f) = item {
+                if Self::type_is_list(&f.return_type) {
+                    return true;
+                }
+                for p in &f.params {
+                    if Self::type_is_list(&p.param_type) {
+                        return true;
+                    }
+                }
+                if Self::block_needs_list(&f.body) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn type_is_list(t: &Type) -> bool {
+        matches!(t, Type::List(_))
+    }
+
+    fn block_needs_list(block: &Block) -> bool {
+        for stmt in &block.stmts {
+            if Self::stmt_needs_list(stmt) {
+                return true;
+            }
+        }
+        if let Some(e) = &block.expr {
+            return Self::expr_needs_list(e);
+        }
+        false
+    }
+
+    fn stmt_needs_list(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Let {
+                type_annotation,
+                init,
+                ..
+            } => {
+                if type_annotation
+                    .as_ref()
+                    .map(Self::type_is_list)
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+                Self::expr_needs_list(init)
+            }
+            Statement::Assign { value, .. } | Statement::Return(Some(value), _) => {
+                Self::expr_needs_list(value)
+            }
+            Statement::Expr(e, _) => Self::expr_needs_list(e),
+            Statement::While { cond, body, .. } => {
+                Self::expr_needs_list(cond) || Self::block_needs_list(body)
+            }
+            Statement::FieldAssign { object, value, .. } => {
+                Self::expr_needs_list(object) || Self::expr_needs_list(value)
+            }
+            Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => false,
+        }
+    }
+
+    fn expr_needs_list(expr: &Expression) -> bool {
+        match expr {
+            Expression::Call { name, args, .. } => {
+                if matches!(
+                    name.as_str(),
+                    "list_new" | "list_push" | "list_get" | "list_len"
+                ) {
+                    return true;
+                }
+                args.iter().any(Self::expr_needs_list)
+            }
+            Expression::Binary { left, right, .. } => {
+                Self::expr_needs_list(left) || Self::expr_needs_list(right)
+            }
+            Expression::Unary { expr, .. } => Self::expr_needs_list(expr),
+            Expression::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::expr_needs_list(cond)
+                    || Self::block_needs_list(then_branch)
+                    || else_branch
+                        .as_ref()
+                        .map(|b| Self::block_needs_list(b))
+                        .unwrap_or(false)
+            }
+            Expression::While { cond, body, .. } => {
+                Self::expr_needs_list(cond) || Self::block_needs_list(body)
+            }
+            Expression::Match { expr, arms, .. } => {
+                Self::expr_needs_list(expr) || arms.iter().any(|a| Self::expr_needs_list(&a.body))
+            }
+            Expression::StructLit { fields, .. } => {
+                fields.iter().any(|(_, e)| Self::expr_needs_list(e))
+            }
+            Expression::Literal(_, _) | Expression::Variable(_, _) => false,
+        }
+    }
+
+    fn require_list_int(inner: &Type, ctx: &str) -> Result<()> {
+        match inner {
+            Type::Int => Ok(()),
+            Type::Custom(s) if s == "Int" || s == "_" => Ok(()), // unrefined / pending
+            other => bail!(
+                "WASM backend only supports List[Int] (not {:?}) in '{}'. Use `ooda run` for List[String] etc.",
+                other,
+                ctx
+            ),
+        }
     }
 
     fn emit_function(func: &FunctionDecl, aliases: &std::collections::HashMap<String, Type>) -> Result<String> {
@@ -179,7 +308,9 @@ impl WasmCodeGen {
                     "WASM backend does not yet support Option/Result in '{}'. Use `ooda run`.",
                     func.name
                 ),
-                Type::List(_) => {}
+                Type::List(inner) => {
+                    Self::require_list_int(inner.as_ref(), &func.name)?;
+                }
                 Type::Struct { .. } => bail!(
                     "WASM backend does not yet support struct in '{}'. Use `ooda run`.",
                     func.name
@@ -187,6 +318,9 @@ impl WasmCodeGen {
                 Type::Float | Type::Int | Type::Bool | Type::Void => {}
                 Type::Custom(_) => {}
             }
+        }
+        if let Type::List(inner) = &func.return_type {
+            Self::require_list_int(inner.as_ref(), &func.name)?;
         }
         // String returns are allowed (i32 data offset — not a full string object).
 
@@ -198,7 +332,10 @@ impl WasmCodeGen {
                 Type::String => "i32",
                 Type::Float => "f64",
                 Type::Void => "i64",
-                Type::List(_) => "i32",
+                Type::List(inner) => {
+                    Self::require_list_int(inner.as_ref(), "param")?;
+                    "i32"
+                }
                 _ => bail!("unsupported param type in WASM: {:?}", t),
             })
         };
@@ -229,21 +366,17 @@ impl WasmCodeGen {
             f_wat.push_str(&format!(" (result {})\n", ret_ty));
         }
 
-        // Collect declared locals (from `let` bindings) with their
-        // inferred wasm type. We infer the type from the literal
-        // shape of the initializer; for non-literal initializers we
-        // fall back to i64.
+        // Collect locals including nested while/if (for-list desugar binds loop vars inside while).
         let mut locals: BTreeMap<String, &'static str> = BTreeMap::new();
-        // Params are also addressable as locals via the same names.
         for p in &func.params {
             locals.insert(p.name.clone(), wat_param_ty(&p.param_type)?);
         }
-        for stmt in &func.body.stmts {
-            if let Statement::Let { name, init, .. } = stmt {
-                locals.insert(name.clone(), Self::infer_expr_type(init, &locals));
-            }
-        }
+        Self::collect_locals_in_block(&func.body, &mut locals);
         for (name, ty) in &locals {
+            // Params already appear as (param …); re-declaring as local is invalid.
+            if func.params.iter().any(|p| p.name == *name) {
+                continue;
+            }
             f_wat.push_str(&format!("    (local ${} {})\n", name, ty));
         }
 
@@ -509,6 +642,16 @@ impl WasmCodeGen {
                         }
                     }
                 } else {
+                    if name == "list_push" && args.len() >= 2 {
+                        let elem_ty = Self::infer_expr_type(&args[1], locals);
+                        if elem_ty != "i64" {
+                            bail!(
+                                "WASM list_push only supports Int elements (got {}); \
+                                 List[String]/non-Int refuse. Use `ooda run`.",
+                                elem_ty
+                            );
+                        }
+                    }
                     for arg in args {
                         wat.push_str(&Self::emit_expr(arg, locals)?);
                     }
@@ -603,12 +746,97 @@ impl WasmCodeGen {
             Expression::Call { name, .. } => {
                 if name == "list_new" || name == "list_push" {
                     "i32"
+                } else if name == "list_get" || name == "list_len" {
+                    "i64"
                 } else {
                     "i64"
                 }
             }
             // Default to i64 for everything else (if, match, etc.).
             _ => "i64",
+        }
+    }
+
+    /// Collect `let` bindings in a block and nested while/if (stack-only map updates).
+    fn collect_locals_in_block(
+        block: &Block,
+        locals: &mut BTreeMap<String, &'static str>,
+    ) {
+        for stmt in &block.stmts {
+            Self::collect_locals_in_stmt(stmt, locals);
+        }
+        if let Some(e) = &block.expr {
+            Self::collect_locals_in_expr(e, locals);
+        }
+    }
+
+    fn collect_locals_in_stmt(stmt: &Statement, locals: &mut BTreeMap<String, &'static str>) {
+        match stmt {
+            Statement::Let { name, init, type_annotation, .. } => {
+                let ty = if let Some(Type::List(_)) = type_annotation {
+                    "i32"
+                } else {
+                    Self::infer_expr_type(init, locals)
+                };
+                locals.insert(name.clone(), ty);
+                Self::collect_locals_in_expr(init, locals);
+            }
+            Statement::Assign { value, .. } | Statement::Return(Some(value), _) => {
+                Self::collect_locals_in_expr(value, locals);
+            }
+            Statement::Expr(e, _) => Self::collect_locals_in_expr(e, locals),
+            Statement::While { cond, body, .. } => {
+                Self::collect_locals_in_expr(cond, locals);
+                Self::collect_locals_in_block(body, locals);
+            }
+            Statement::FieldAssign { object, value, .. } => {
+                Self::collect_locals_in_expr(object, locals);
+                Self::collect_locals_in_expr(value, locals);
+            }
+            Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => {}
+        }
+    }
+
+    fn collect_locals_in_expr(expr: &Expression, locals: &mut BTreeMap<String, &'static str>) {
+        match expr {
+            Expression::Binary { left, right, .. } => {
+                Self::collect_locals_in_expr(left, locals);
+                Self::collect_locals_in_expr(right, locals);
+            }
+            Expression::Unary { expr, .. } => Self::collect_locals_in_expr(expr, locals),
+            Expression::Call { args, .. } => {
+                for a in args {
+                    Self::collect_locals_in_expr(a, locals);
+                }
+            }
+            Expression::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_locals_in_expr(cond, locals);
+                Self::collect_locals_in_block(then_branch, locals);
+                if let Some(eb) = else_branch {
+                    Self::collect_locals_in_block(eb, locals);
+                }
+            }
+            Expression::While { cond, body, .. } => {
+                Self::collect_locals_in_expr(cond, locals);
+                Self::collect_locals_in_block(body, locals);
+            }
+            Expression::Match { expr, arms, .. } => {
+                Self::collect_locals_in_expr(expr, locals);
+                for arm in arms {
+                    Self::collect_locals_in_expr(&arm.body, locals);
+                }
+            }
+            Expression::StructLit { fields, .. } => {
+                for (_, e) in fields {
+                    Self::collect_locals_in_expr(e, locals);
+                }
+            }
+            Expression::Literal(_, _) | Expression::Variable(_, _) => {}
         }
     }
 
@@ -644,9 +872,10 @@ impl WasmCodeGen {
         wat.push_str(&format!("        br ${}\n", cont_lab));
         wat.push_str("      end\n");
         wat.push_str("    end\n");
-        WASM_LOOP_STACK.with(|s| { s.borrow_mut().pop(); });
-        wat.push_str("    i32.const 0\n");
-        wat.push_str("    drop\n");
+        WASM_LOOP_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
+        // while is statement-only: no stack residue (do not push dummy values).
         Ok(wat)
     }
 
@@ -805,8 +1034,6 @@ impl WasmCodeGen {
             }
             Statement::While { cond, body, .. } => {
                 wat.push_str(&Self::emit_while(cond, body, locals)?);
-                // emit_while leaves an i32.const 0 — drop it in statement context.
-                wat.push_str("        drop\n");
             }
         }
         Ok(wat)
