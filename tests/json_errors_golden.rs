@@ -1223,6 +1223,52 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Content equality on WASM uses host `streq` (not pointer `i32.eq` alone).
+#[test]
+fn build_wasm_string_content_eq_uses_streq() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wstreq_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("eq.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    if "aa" == "bb" {
+        println(1);
+    } else {
+        println(0);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm streq build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).expect("wat");
+    assert!(
+        wat.contains("(import \"env\" \"streq\""),
+        "missing streq import:\n{}",
+        wat
+    );
+    assert!(wat.contains("call $streq"), "missing streq call:\n{}", wat);
+    // Two distinct data segments for aa/bb
+    assert_eq!(
+        wat.matches("(data (i32.const").count(),
+        2,
+        "expected two data segments:\n{}",
+        wat
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// String literals → data segment + println_str; dual-engine still refuses concat.
 #[test]
 fn build_wasm_string_literal_println_and_refuses_concat() {

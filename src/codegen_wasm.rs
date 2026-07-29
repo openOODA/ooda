@@ -3,15 +3,15 @@
 //
 // Honest subset: Int / Bool / Float arithmetic, function calls, `let`,
 // `if`/`while`, interned String *literals* (data segments + `println_str`),
-// and pointer-identity `==`/`!=` on String after interning.
+// and content `==`/`!=` via host import `env.streq` (NUL-terminated).
 //
 // Fail-closed (non-zero): Match, capability I/O, List/struct, string
 // methods, string concatenation / arithmetic (no silent pointer math).
 //
 // String model: each distinct UTF-8 literal is interned once into linear
 // memory as a NUL-terminated byte sequence; values are i32 offsets.
-// Identical literals share one offset (W↓ + correct pointer equality).
-// Content-equality of dynamic strings is not claimed.
+// Identical literals share one offset (W↓). Equality uses `$streq` so
+// distinct intern slots with equal content also compare equal (host-defined).
 //
 // The emitted WAT is round-trip validated via `wasm-tools validate`
 // when available, otherwise checked structurally for undeclared locals

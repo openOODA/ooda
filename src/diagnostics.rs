@@ -95,23 +95,40 @@ pub fn byte_offset_to_lsp(source: &str, byte: usize) -> (usize, usize) {
     (line, character)
 }
 
-/// Map LSP 0-indexed `(line, character)` back to a byte offset.
-/// This matches `byte_offset_to_lsp` logic: character uses UTF-16 lengths.
+/// Map LSP 0-indexed `(line, character)` back to a UTF-8 byte offset.
+///
+/// Character units are UTF-16 (LSP). **Clamps** past-end of line to the line's
+/// end (before `\n` or EOF) and past-end of document to `source.len()` — so
+/// incremental edits never walk into the next line when `character` is large.
 pub fn lsp_position_to_byte_offset(source: &str, line: usize, character: usize) -> usize {
     let mut current_line: usize = 0;
     let mut current_character: usize = 0;
-    let mut offset = 0;
+    let mut offset = 0usize;
+    let mut chars = source.chars().peekable();
 
-    for ch in source.chars() {
-        if current_line > line || (current_line == line && current_character >= character) {
-            break;
+    // Advance to the target line start (or EOF if line is past the end).
+    while current_line < line {
+        match chars.next() {
+            Some(ch) => {
+                offset += ch.len_utf8();
+                if ch == '\n' {
+                    current_line += 1;
+                }
+            }
+            None => return source.len(),
         }
-        offset += ch.len_utf8();
-        if ch == '\n' {
-            current_line += 1;
-            current_character = 0;
-        } else {
-            current_character += ch.len_utf16();
+    }
+
+    // On the target line: advance up to `character` UTF-16 units, stop at EOL/EOF.
+    while current_character < character {
+        match chars.peek().copied() {
+            None => break,
+            Some('\n') => break, // clamp: do not cross into next line
+            Some(ch) => {
+                chars.next();
+                offset += ch.len_utf8();
+                current_character += ch.len_utf16();
+            }
         }
     }
     offset
@@ -169,6 +186,26 @@ mod parse_loc_tests {
         assert_eq!(super::byte_offset_to_lsp(src, 7), (2, 1)); // 'e'
         // clamp past end
         assert_eq!(super::byte_offset_to_lsp(src, 999), (2, 2));
+    }
+
+    #[test]
+    fn lsp_position_clamps_past_end_of_line() {
+        let src = "ab\ncd\n";
+        // character past "ab" must stay on line 0 end (byte 2), not spill to line 1
+        assert_eq!(super::lsp_position_to_byte_offset(src, 0, 999), 2);
+        assert_eq!(super::lsp_position_to_byte_offset(src, 1, 999), 5); // after "cd"
+        // past last line → EOF
+        assert_eq!(super::lsp_position_to_byte_offset(src, 99, 0), src.len());
+    }
+
+    #[test]
+    fn lsp_position_roundtrip_with_byte_offset() {
+        let src = "hello\nworld\n";
+        for byte in 0..=src.len() {
+            let (l, c) = super::byte_offset_to_lsp(src, byte);
+            let back = super::lsp_position_to_byte_offset(src, l, c);
+            assert_eq!(back, byte, "roundtrip fail at byte {}", byte);
+        }
     }
 }
 

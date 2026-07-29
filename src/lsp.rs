@@ -3,25 +3,67 @@
 // ===================================================================
 //
 // Honest surface (not a full language server):
-//   - textDocumentSync Full: didOpen / didChange → parse + cap + typecheck
-//   - textDocument/codeAction: real WorkspaceEdit for let→let mut (via migrate)
-//     and missing-return default inserts. No completion / hover / rename.
+//   - textDocumentSync Incremental (kind 2): didOpen + ranged didChange
+//     (full-document changes without `range` still accepted)
+//   - textDocument/codeAction: WorkspaceEdit for let→let mut, missing return,
+//     return-type mismatch, undefined var stub, missing `: Type` on params
+//   - No completion / hover / rename
 //
 // Document texts live in a process-local HashMap (uri → source). codeAction
 // consults that store — never re-reads disk (editor buffer is source of truth).
 // ===================================================================
 use anyhow::Result;
-use crate::diagnostics::{byte_offset_to_lsp, parse_loc, to_lsp_position};
+use crate::diagnostics::{byte_offset_to_lsp, lsp_position_to_byte_offset, parse_loc, to_lsp_position};
 use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 
 pub struct LspDaemon;
 
+/// Apply LSP `contentChanges` (incremental ranges and/or full replaces) to `text`.
+/// Pure: no I/O. Positions are clamped via `lsp_position_to_byte_offset`.
+/// Inverted ranges are ordered so `replace_range` never panics.
+pub fn apply_content_changes(text: &str, changes: &[serde_json::Value]) -> String {
+    let mut text = text.to_string();
+    for change in changes {
+        if let Some(range) = change.get("range") {
+            let start = match range.get("start") {
+                Some(s) => s,
+                None => continue,
+            };
+            let end = match range.get("end") {
+                Some(e) => e,
+                None => continue,
+            };
+            let sl = start.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+            let sc = start.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+            let el = end.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+            let ec = end.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
+            let new_text = change.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            let start_idx = lsp_position_to_byte_offset(&text, sl, sc);
+            let end_idx = lsp_position_to_byte_offset(&text, el, ec);
+            let (lo, hi) = if start_idx <= end_idx {
+                (start_idx, end_idx)
+            } else {
+                (end_idx, start_idx)
+            };
+            text.replace_range(lo..hi, new_text);
+        } else {
+            // Full document replace (clients may still send this under Incremental).
+            text = change
+                .get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+        }
+    }
+    text
+}
+
 impl LspDaemon {
     pub fn start() -> Result<()> {
         eprintln!(
-            "ooda lsp: textDocumentSync=Full with parse/cap/typecheck diagnostics \
-             + WorkspaceEdit codeAction for let mut / missing return \
+            "ooda lsp: textDocumentSync=Incremental with parse/cap/typecheck diagnostics \
+             + WorkspaceEdit codeAction (let mut / missing return / return type / undef var) \
              (not a full language server — no completion/hover/rename)."
         );
         let stdin = std::io::stdin();
@@ -98,26 +140,12 @@ impl LspDaemon {
                                             let _ = Self::write_message(&mut stdout, &resp);
                                         }
                                     } else {
-                                        // Incremental sync
-                                        if let Some(changes) = params.get("contentChanges").and_then(|c| c.as_array()) {
-                                            let mut text = docs.get(uri).cloned().unwrap_or_default();
-                                            for change in changes {
-                                                if let Some(range) = change.get("range") {
-                                                    let start = range.get("start").unwrap();
-                                                    let end = range.get("end").unwrap();
-                                                    let sl = start.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
-                                                    let sc = start.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
-                                                    let el = end.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
-                                                    let ec = end.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as usize;
-                                                    let new_text = change.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                                                    
-                                                    let start_idx = crate::diagnostics::lsp_position_to_byte_offset(&text, sl, sc);
-                                                    let end_idx = crate::diagnostics::lsp_position_to_byte_offset(&text, el, ec);
-                                                    text.replace_range(start_idx..end_idx, new_text);
-                                                } else {
-                                                    text = change.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string();
-                                                }
-                                            }
+                                        // Incremental (or full) contentChanges
+                                        if let Some(changes) =
+                                            params.get("contentChanges").and_then(|c| c.as_array())
+                                        {
+                                            let base = docs.get(uri).map(|s| s.as_str()).unwrap_or("");
+                                            let text = apply_content_changes(base, changes);
                                             docs.insert(uri.to_string(), text.clone());
                                             let diagnostics = Self::diagnose_source(&text);
                                             let resp = serde_json::json!({
@@ -313,7 +341,7 @@ impl LspDaemon {
         Some(serde_json::json!({ "changes": changes }))
     }
 
-    /// Insert `let mut x = 0;\n` at the line of the undefined variable error.
+    /// Insert `let mut x = 0;\n` at the start of the diagnostic line, preserving indent.
     fn undefined_var_edit(
         uri: &str,
         source: &str,
@@ -332,8 +360,8 @@ impl LspDaemon {
         }
         let (line_1, _) = parse_loc(msg);
         let line_0 = line_1.saturating_sub(1);
-        
-        let new_text = format!("let mut {} = 0;\n", var_name);
+        let indent = line_indent(source, line_0);
+        let new_text = format!("{}let mut {} = 0;\n", indent, var_name);
         let text_edit = serde_json::json!({
             "range": {
                 "start": { "line": line_0, "character": 0 },
@@ -478,6 +506,30 @@ impl LspDaemon {
             }
         })
     }
+}
+
+/// Leading whitespace of 0-indexed line `line_0` (spaces/tabs only).
+fn line_indent(source: &str, line_0: usize) -> String {
+    let mut current = 0usize;
+    let mut start = 0usize;
+    for (i, ch) in source.char_indices() {
+        if current == line_0 {
+            start = i;
+            break;
+        }
+        if ch == '\n' {
+            current += 1;
+            start = i + 1;
+        }
+    }
+    if current != line_0 && line_0 > 0 {
+        // past EOF — no indent
+        return String::new();
+    }
+    source[start..]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect()
 }
 
 /// Locate the declared return type text after `->` for `fn name` (or first `fn` if name empty).
@@ -719,5 +771,56 @@ mod tests {
         // Apply mentally: `-> Int` becomes `-> String`
         let start_ch = edits[0]["range"]["start"]["character"].as_u64().unwrap();
         assert!(start_ch > 0);
+    }
+
+    #[test]
+    fn apply_content_changes_incremental_replace() {
+        let base = "pub fn main() {\n    println(1);\n}\n";
+        let changes = vec![serde_json::json!({
+            "range": {
+                "start": { "line": 1, "character": 12 },
+                "end": { "line": 1, "character": 13 }
+            },
+            "text": "42"
+        })];
+        let out = super::apply_content_changes(base, &changes);
+        assert!(out.contains("println(42)"), "got:\n{}", out);
+    }
+
+    #[test]
+    fn apply_content_changes_clamps_character_past_eol() {
+        let base = "ab\ncd\n";
+        // Replace "spilled" range that claims character 999 on line 0 → clamp to end of "ab"
+        let changes = vec![serde_json::json!({
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 999 }
+            },
+            "text": "XY"
+        })];
+        let out = super::apply_content_changes(base, &changes);
+        assert_eq!(out, "XY\ncd\n", "got {:?}", out);
+    }
+
+    #[test]
+    fn code_action_undefined_var_preserves_indent() {
+        let src = "pub fn main() {\n    println(foo);\n}\n";
+        let params = serde_json::json!({
+            "context": {
+                "diagnostics": [{
+                    "message": "Type error at 2:12: undefined variable 'foo'"
+                }]
+            }
+        });
+        let actions = LspDaemon::code_actions_for("file:///u.oo", src, &params);
+        assert!(!actions.is_empty(), "{:?}", actions);
+        let text = actions[0]["edit"]["changes"]["file:///u.oo"][0]["newText"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.starts_with("    let mut foo = 0;"),
+            "expected indented stub, got {:?}",
+            text
+        );
     }
 }
