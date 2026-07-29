@@ -402,9 +402,8 @@ impl Parser {
             } else if self.peek() == &Token::While {
                 stmts.push(self.parse_while_stmt()?);
             } else if self.peek() == &Token::For {
-                let (init_stmt, while_stmt) = self.parse_for_stmts()?;
-                stmts.push(init_stmt);
-                stmts.push(while_stmt);
+                let mut for_stmts = self.parse_for_stmts()?;
+                stmts.append(&mut for_stmts);
             } else {
                 let expr = self.parse_expression()?;
                 // Assignment: `name = expr;` (Token::Eq, not ==)
@@ -511,8 +510,8 @@ impl Parser {
         Ok(Statement::While { cond, body, span })
     }
 
-    /// `for i in lo..hi { body }` or `lo..=hi` — desugars to while + increment.
-    fn parse_for_stmts(&mut self) -> Result<(Statement, Statement)> {
+    /// `for i in lo..hi { body }` or `for item in list { body }` — desugars into primitive statements.
+    fn parse_for_stmts(&mut self) -> Result<Vec<Statement>> {
         self.consume(Token::For)?;
         let span = self.last_span();
         let iter_name = match self.advance() {
@@ -526,21 +525,21 @@ impl Parser {
             }
         };
         self.consume(Token::In)?;
-        let range = self.parse_expression()?;
+        let iterable = self.parse_expression()?;
         let body = self.parse_block()?;
 
-        let (lo, hi, inclusive) = match range {
-            Expression::Binary { op: BinOp::DotDot, left, right, .. } => (*left, *right, false),
-            Expression::Binary { op: BinOp::DotDotEq, left, right, .. } => (*left, *right, true),
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Parse error at {}:{}: `for` only supports integer ranges `lo..hi` or `lo..=hi` \
-                     (list/iterator for is not implemented). Use `while` for other loops.",
-                    span.line, span.col
-                ));
+        match iterable {
+            Expression::Binary { op: BinOp::DotDot, left, right, .. } => {
+                self.desugar_range_for(iter_name, *left, *right, false, body, span)
             }
-        };
+            Expression::Binary { op: BinOp::DotDotEq, left, right, .. } => {
+                self.desugar_range_for(iter_name, *left, *right, true, body, span)
+            }
+            expr => self.desugar_list_for(iter_name, expr, body, span),
+        }
+    }
 
+    fn desugar_range_for(&self, iter_name: String, lo: Expression, hi: Expression, inclusive: bool, body: Block, span: Span) -> Result<Vec<Statement>> {
         let init_stmt = Statement::Let {
             name: iter_name.clone(),
             mutable: true,
@@ -578,7 +577,95 @@ impl Parser {
             },
             span,
         };
-        Ok((init_stmt, while_stmt))
+        Ok(vec![init_stmt, while_stmt])
+    }
+
+    fn desugar_list_for(&mut self, iter_name: String, expr: Expression, body: Block, span: Span) -> Result<Vec<Statement>> {
+        // let _list = expr;
+        // let mut _i = 0;
+        // while _i < .len(_list) {
+        //     let item = _list[_i];
+        //     body
+        //     _i = _i + 1;
+        // }
+        let list_var = format!("__list_{}_{}", span.line, span.col);
+        let idx_var = format!("__idx_{}_{}", span.line, span.col);
+
+        let init_list = Statement::Let {
+            name: list_var.clone(),
+            mutable: false,
+            type_annotation: None,
+            init: expr,
+            span,
+        };
+
+        let init_idx = Statement::Let {
+            name: idx_var.clone(),
+            mutable: true,
+            type_annotation: None,
+            init: Expression::Literal(Literal::Int(0), span),
+            span,
+        };
+
+        let mut while_stmts = vec![];
+        
+        // let iter_name = _list[_idx];
+        let bind_item = Statement::Let {
+            name: iter_name,
+            mutable: false,
+            type_annotation: None,
+            init: Expression::Call {
+                name: "list_get".into(),
+                args: vec![
+                    Expression::Variable(list_var.clone(), span),
+                    Expression::Variable(idx_var.clone(), span),
+                ],
+                span,
+                propagate_err: false,
+            },
+            span,
+        };
+        while_stmts.push(bind_item);
+
+        while_stmts.extend(body.stmts);
+        if let Some(tail) = body.expr {
+            while_stmts.push(Statement::Expr(*tail, span));
+        }
+
+        // _idx = _idx + 1;
+        while_stmts.push(Statement::Assign {
+            name: idx_var.clone(),
+            value: Expression::Binary {
+                op: BinOp::Add,
+                left: Box::new(Expression::Variable(idx_var.clone(), span)),
+                right: Box::new(Expression::Literal(Literal::Int(1), span)),
+                span,
+            },
+            span,
+        });
+
+        let cond = Expression::Binary {
+            op: BinOp::Lt,
+            left: Box::new(Expression::Variable(idx_var.clone(), span)),
+            right: Box::new(Expression::Call {
+                name: "list_len".into(),
+                args: vec![Expression::Variable(list_var, span)],
+                span,
+                propagate_err: false,
+            }),
+            span,
+        };
+
+        let while_stmt = Statement::While {
+            cond,
+            body: Block {
+                stmts: while_stmts,
+                expr: None,
+            },
+            span,
+        };
+
+        Ok(vec![init_list, init_idx, while_stmt])
     }
 
     /// `if cond { ... } else if ... else { ... }`

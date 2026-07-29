@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.79.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.80.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.79.0-alpha
+ooda --version   # 0.80.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.79.0-alpha (CHS M0–M5)
+## What's real in v0.80.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -70,13 +70,13 @@ import "lib.oo";       // relative / OODA_PATH
 | **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
 | **oodac** (`oodac/main.oo`) lex/parse/check/smoke-build | Real (interp + native) |
 | **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
-| `for i in lo..hi` / `lo..=hi` | Real: desugars to `let mut` + `while` (interp + C); list/iterator for fails parse |
+| `for x in list` / `lo..hi` | Real: desugars to `let mut` + `while` + `list_get`/`list_len` (interp + C) |
 | `ooda build --release` | Real on CHS C path: gcc `-O3 -flto` |
 | LLVM Int/Bool/Float + while | Real (clang to link when present) |
 
 ## Not implemented (fail non-zero)
 
-Full LSP (current: initialize/shutdown/exit stub only), network `pkg install` (local path **pin** only), time-travel `replay` (current: re-run named fn), in-process CPython/PyTorch embed, full WASM product, list/iterator `for`, full SPEC self-host (only **CHS frontend** fixed-point is claimed).  
+Full LSP (current: initialize/shutdown/exit stub only), network `pkg install` (local path **pin** only), time-travel `replay` (current: re-run named fn), in-process CPython/PyTorch embed, full WASM product, full SPEC self-host (only **CHS frontend** fixed-point is claimed).  
 `ooda migrate` is **not** a full edition engine — only the two codemods above.
 
 
