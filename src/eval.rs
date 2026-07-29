@@ -1608,6 +1608,37 @@ mod tests {
     }
 
     #[test]
+    fn write_file_with_wrong_kind_handle_runtime_denies() {
+        // Live NetCap is not a valid handle for Fs sealed write_file.
+        let prog = parse(
+            r#"
+            pub fn mix(net: &NetCap, fs: &FsCap) {
+                let r = write_file(net, "/tmp/x", "y");
+            }
+            pub fn main() {}
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.current_func = Some("mix".into());
+        let res = interp.call_function(
+            "write_file",
+            vec![
+                Value::Capability("NetCap".into()),
+                Value::String("/tmp/x".into()),
+                Value::String("y".into()),
+            ],
+            &mut HashMap::new(),
+        );
+        assert!(res.is_err(), "wrong-kind handle must deny: {:?}", res);
+        let msg = format!("{}", res.unwrap_err());
+        assert!(
+            msg.contains("object-capability") || msg.contains("live") || msg.contains("FsCap"),
+            "got: {}",
+            msg
+        );
+    }
+
+    #[test]
     fn fetch_ambient_only_without_handle_arg_runtime_denies() {
         // Function declares &NetCap but call omits the live handle — object-cap deny.
         let prog = parse(

@@ -75,7 +75,8 @@ fn format_param(p: &Parameter) -> String {
     format!("{}: {}{}", p.name, ref_str, format_type(&p.param_type))
 }
 
-fn format_type(t: &Type) -> String {
+/// Source-like type rendering for outlines / reflect (not Debug).
+pub fn format_type(t: &Type) -> String {
     match t {
         Type::Int => "Int".into(),
         Type::Float => "Float".into(),
@@ -122,7 +123,7 @@ fn format_literal(lit: &Literal) -> String {
 /// This handles the small subset that contracts actually use:
 /// literals, variables, binary comparisons (`a >= 0`, `result * b == a`),
 /// method calls (`x.len()`, `y.to_string()`), and logical connectives.
-fn format_expr(expr: &Expression) -> String {
+pub fn format_expr(expr: &Expression) -> String {
     match expr {
         Expression::Literal(lit, _) => format_literal(lit),
         Expression::Variable(name, _) => name.clone(),

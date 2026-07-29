@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.41.0-alpha")]
+#[command(version = "0.42.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -244,6 +244,9 @@ enum Commands {
         /// Target edition (e.g. 2026)
         #[arg(long, default_value = "2026")]
         edition: String,
+        /// Emit machine-readable MigrateReport JSON (counts only)
+        #[arg(long)]
+        json: bool,
     },
     /// Canonical dumps for CHS golden parity (tokens / ast / check)
     Dump {
@@ -682,8 +685,15 @@ fn main() -> Result<()> {
         Commands::Replay { file, target } => {
             replay::ReplayEngine::replay_execution(&file.display().to_string(), &target)?;
         }
-        Commands::Migrate { file, edition } => {
-            migrate::MigrationEngine::migrate_codebase(&file.display().to_string(), &edition)?;
+        Commands::Migrate { file, edition, json } => {
+            if json {
+                let _ = migrate::migrate_path_json(&file, &edition)?;
+            } else {
+                migrate::MigrationEngine::migrate_codebase(
+                    &file.display().to_string(),
+                    &edition,
+                )?;
+            }
         }
     }
 
@@ -984,12 +994,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.41.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.42.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.41.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.42.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

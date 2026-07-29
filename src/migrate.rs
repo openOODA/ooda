@@ -15,22 +15,39 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
+/// Summary of a migrate run (for humans and `ooda migrate --json`).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MigrateReport {
+    pub file: String,
+    pub edition: String,
+    pub match_wildcard_arms: usize,
+    pub let_mut_fixes: usize,
+    pub changed: bool,
+}
+
 /// CLI-facing wrapper. `ooda migrate <file> --edition <year>` is
 /// wired to this in main.rs.
 pub struct MigrationEngine;
 
 impl MigrationEngine {
     pub fn migrate_codebase(file_path: &str, target_edition: &str) -> Result<()> {
-        migrate_path_inner(std::path::Path::new(file_path), target_edition)
+        let _ = migrate_path_inner(std::path::Path::new(file_path), target_edition, false)?;
+        Ok(())
     }
 }
 
 /// Path-based entry point (also exported for tests).
 pub fn migrate_path(path: &std::path::Path, target_edition: &str) -> Result<()> {
-    migrate_path_inner(path, target_edition)
+    let _ = migrate_path_inner(path, target_edition, false)?;
+    Ok(())
 }
 
-fn migrate_path_inner(path: &std::path::Path, target_edition: &str) -> Result<()> {
+/// Migrate and print JSON MigrateReport on stdout.
+pub fn migrate_path_json(path: &std::path::Path, target_edition: &str) -> Result<MigrateReport> {
+    migrate_path_inner(path, target_edition, true)
+}
+
+fn migrate_path_inner(path: &std::path::Path, target_edition: &str, json: bool) -> Result<MigrateReport> {
     if target_edition != "2026" {
         bail!(
             "ooda migrate only supports target-edition 2026 in this alpha \
@@ -69,13 +86,25 @@ fn migrate_path_inner(path: &std::path::Path, target_edition: &str) -> Result<()
         }
     }
 
+    let report = MigrateReport {
+        file: path.display().to_string(),
+        edition: target_edition.to_string(),
+        match_wildcard_arms: match_count,
+        let_mut_fixes: mut_count,
+        changed: !rewrites.is_empty(),
+    };
+
     if rewrites.is_empty() {
-        println!(
-            "✓ [openOODA migrate] {} is already on edition {} (no changes needed).",
-            path.display(),
-            target_edition
-        );
-        return Ok(());
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!(
+                "✓ [openOODA migrate] {} is already on edition {} (no changes needed).",
+                path.display(),
+                target_edition
+            );
+        }
+        return Ok(report);
     }
 
     // Apply in reverse byte order so earlier offsets stay valid.
@@ -86,15 +115,19 @@ fn migrate_path_inner(path: &std::path::Path, target_edition: &str) -> Result<()
     }
     fs::write(path, &new_code)?;
 
-    println!(
-        "🔧 [openOODA migrate] {} (edition {}): {} match wildcard arm(s), {} let→let mut fix(es). \
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "🔧 [openOODA migrate] {} (edition {}): {} match wildcard arm(s), {} let→let mut fix(es). \
          Replace each `_ => process_exit(1)` with a real handler when present.",
-        path.display(),
-        target_edition,
-        match_count,
-        mut_count
-    );
-    Ok(())
+            path.display(),
+            target_edition,
+            match_count,
+            mut_count
+        );
+    }
+    Ok(report)
 }
 
 /// Codemod #2: `let x` that is later assigned → `let mut x`.
@@ -598,7 +631,7 @@ pub fn main() {
 }
 "#;
         let path = temp_oo("mig_result.oo", src);
-        migrate_path_inner(&path, "2026").expect("migrate");
+        migrate_path_inner(&path, "2026", false).expect("migrate");
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -627,7 +660,7 @@ pub fn main() {
 }
 "#;
         let path = temp_oo("mig_option.oo", src);
-        migrate_path_inner(&path, "2026").expect("migrate");
+        migrate_path_inner(&path, "2026", false).expect("migrate");
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -649,7 +682,7 @@ pub fn main() {
 }
 "#;
         let path = temp_oo("mig_already.oo", src);
-        migrate_path_inner(&path, "2026").expect("migrate");
+        migrate_path_inner(&path, "2026", false).expect("migrate");
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, src, "should not change already-exhaustive match");
     }
@@ -657,7 +690,7 @@ pub fn main() {
     #[test]
     fn unknown_edition_fails_closed() {
         let path = temp_oo("mig_unknown.oo", "pub fn main() {}");
-        let res = migrate_path_inner(&path, "1999");
+        let res = migrate_path_inner(&path, "1999", false);
         assert!(res.is_err());
         assert!(format!("{}", res.unwrap_err()).contains("only supports"));
     }
@@ -673,7 +706,7 @@ pub fn main() {
 }
 "#;
         let path = temp_oo("mig_let_mut.oo", src);
-        migrate_path_inner(&path, "2026").expect("migrate");
+        migrate_path_inner(&path, "2026", false).expect("migrate");
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(
@@ -696,7 +729,7 @@ pub fn main() {
 }
 "#;
         let path2 = temp_oo("mig_let_mut_already.oo", mut_src);
-        migrate_path_inner(&path2, "2026").expect("migrate");
+        migrate_path_inner(&path2, "2026", false).expect("migrate");
         let after2 = std::fs::read_to_string(&path2).unwrap();
         assert_eq!(after2, mut_src, "already-mut should be unchanged");
         assert!(
@@ -715,7 +748,7 @@ pub fn main() {
 }
 "#;
         let path = temp_oo("mig_let_no_assign.oo", src);
-        migrate_path_inner(&path, "2026").expect("migrate");
+        migrate_path_inner(&path, "2026", false).expect("migrate");
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, src, "unassigned let must stay immutable");
     }
