@@ -1611,3 +1611,44 @@ pub fn main(fs: &FsCap) {
     assert!(stdout.contains("exists"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn run_interpreter_handles_read_write_file_methods() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_run_rw_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let target_file = dir.join("test.txt");
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        format!(
+            r#"
+pub fn main(fs: &FsCap) {{
+    let res = fs.write_file("{}", "hello ooda");
+    if res.is_ok {{
+        let r = fs.read_file("{}");
+        match r {{
+            Ok(content) => println(content),
+            Err(e) => println(e),
+        }}
+    }}
+}}
+"#,
+            target_file.display(),
+            target_file.display()
+        ),
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["run", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "run must handle .write_file / .read_file: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("hello ooda"), "stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
