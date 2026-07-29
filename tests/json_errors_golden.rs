@@ -1393,3 +1393,34 @@ pub fn main() { println(f(true)); }
     assert!(err.contains("RefinementTypeViolation"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn build_c_lowers_sys_exec_method() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_c_sys_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main(sys: &SysCap) -> Int {
+    let code = sys.sys_exec("true");
+    return code;
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "C must lower .sys_exec: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let _ = std::fs::remove_dir_all(&dir);
+}

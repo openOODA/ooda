@@ -996,6 +996,14 @@ impl Gen {
                 code.push_str(&format!("  exit((int)({}));\n", cargs[0]));
                 Ok((code, "0".into(), "int".into()))
             }
+            "sys_exec" | "system_exec" => {
+                let cmd = cargs.last().unwrap();
+                code.push_str(&format!(
+                    "  int {} = system({}.data ? {}.data : \"\");\n",
+                    t, cmd, cmd
+                ));
+                Ok((code, t, "int".into()))
+            }
             "Ok" => {
                 // Result ok — payload is String or generic; use OoResS
                 let v = cargs.get(0).cloned().unwrap_or_else(|| "oo_str_lit(\"\")".into());

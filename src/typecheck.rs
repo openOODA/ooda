@@ -1191,7 +1191,7 @@ impl TypeChecker {
                     // Object-cap method arities (including receiver). Fail-closed.
                     let method_arity_ok = match name.as_str() {
                         ".write_file" => args.len() == 3, // recv, path, content
-                        ".read_file" | ".env_get" | ".get" => args.len() == 2, // recv, arg
+                        ".read_file" | ".env_get" | ".get" | ".sys_exec" => args.len() == 2, // recv, arg
                         ".len" | ".trim" | ".to_lowercase" | ".to_string"
                         | ".is_ok" | ".is_err" | ".is_some" | ".is_none" => args.len() == 1,
                         ".char_at" => args.len() == 2, // recv, index
@@ -1203,7 +1203,7 @@ impl TypeChecker {
                         let expected = match name.as_str() {
                             ".write_file" => 3,
                             ".str_slice" => 3,
-                            ".read_file" | ".env_get" | ".get" | ".push" | ".char_at" => 2,
+                            ".read_file" | ".env_get" | ".get" | ".push" | ".char_at" | ".sys_exec" => 2,
                             _ => 1,
                         };
                         return Err(anyhow!(
@@ -1304,6 +1304,7 @@ impl TypeChecker {
                             }
                             Ok(Ty::String)
                         }
+                        ".sys_exec" => Ok(Ty::Int),
                         ".trim" | ".to_lowercase" | ".to_string" => Ok(Ty::String),
                         ".is_ok" | ".is_err" | ".is_some" | ".is_none" => Ok(Ty::Bool),
                         ".get" | ".read_file" | ".env_get" => Ok(Ty::Result(
