@@ -543,6 +543,8 @@ impl Gen {
                 code.push_str("  }\n");
                 Ok(code)
             }
+            Statement::Break(_) => Ok("  break;\n".into()),
+            Statement::Continue(_) => Ok("  continue;\n".into()),
         }
     }
 
@@ -936,7 +938,7 @@ impl Gen {
                 code.push_str(&format!("  OoIList {} = oo_ilist_new();\n", t));
                 Ok((code, t, "OoIList".into()))
             }
-            "list_push" => {
+            "push" | "list_push" => {
                 let list = &cargs[0];
                 let item = &cargs[1];
                 let lty = arg_tys.first().map(|s| s.as_str()).unwrap_or("");

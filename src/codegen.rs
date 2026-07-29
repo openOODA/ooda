@@ -99,6 +99,7 @@ impl LlvmCodeGen {
                 }
                 Statement::Return(Some(e), _) => Self::check_expr_subset(e, ctx)?,
                 Statement::Return(None, _) => {}
+            Statement::Break(_) | Statement::Continue(_) => {}
                 Statement::Expr(e, _) => Self::check_expr_subset(e, ctx)?,
                 Statement::While { cond, body, .. } => {
                     Self::check_expr_subset(cond, ctx)?;
@@ -296,6 +297,11 @@ impl LlvmCodeGen {
                         f_ir.push_str(&format!("  ret {} {}\n", ret_ty, val));
                     }
                     returned = true;
+                }
+                Statement::Break(_) | Statement::Continue(_) => {
+                    bail!(
+                        "LLVM integer-subset backend does not support break/continue. Use `ooda run` or `ooda build --target c`."
+                    );
                 }
                 Statement::Return(None, _) => {
                     if is_main {

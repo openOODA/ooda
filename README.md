@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.83.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.84.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.83.0-alpha
+ooda --version   # 0.84.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.83.0-alpha (CHS M0–M5)
+## What's real in v0.84.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -62,7 +62,7 @@ import "lib.oo";       // relative / OODA_PATH
 | String methods | Real on interpreter + CHS C (`.char_at` / `.str_slice`); LLVM subset refuses strings fail-closed |
 | Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM (method forms included as of v0.69); pure compute subset may lower; IR-only link fails non-zero |
 | `EnvCap` `.env_get` | Real on **interpreter**; C build refuses (sealed) |
-| Network `pkg install` | Downloads over `http/https` with `curl`, extracts via `tar`, and pins local path hash |
+| Network `pkg install` | Partial: **https://…/*.tar.gz** via host `curl`+`tar` cache; local path pin; **git clone / registry / sigs not supported** |
 | `ooda patch` | Real body / params / return type / requires / ensures |
 | `ooda migrate --edition 2026` | Partial real: exhaustive match wildcards + assigned `let`→`let mut` |
 | `type T = Int where lo..hi` | Real subset: const Int range → `Int[lo..hi]` alias; other `where` forms fail parse |
@@ -71,13 +71,14 @@ import "lib.oo";       // relative / OODA_PATH
 | **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
 | **oodac** (`oodac/main.oo`) lex/parse/check/smoke-build | Real (interp + native) |
 | **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
+| `break` / `continue` | Real in while/for (interp + CHS C); LLVM/WASM refuse; outside loop fails typecheck |
 | `for x in list` / `lo..hi` | Real: desugars to while+list_get (interp + C); unannotated lists refine element type on assign; **C defers list kind until first push** (int vs string) |
 | `ooda build --release` | Real on CHS C path: gcc `-O3 -flto` |
 | LLVM Int/Bool/Float + while | Real (clang to link when present) |
 
 ## Not implemented (fail non-zero)
 
-Full LSP (current: initialize/shutdown/exit stub only), time-travel `replay` (current: re-run named fn), in-process CPython/PyTorch embed, full WASM product, full SPEC self-host (only **CHS frontend** fixed-point is claimed).  
+Full LSP (initialize/shutdown/exit stub only), full package registry/git-clone/signature verify (partial https tarball only), time-travel `replay` (re-run named fn only), in-process CPython/PyTorch embed, full WASM product, full SPEC self-host (CHS frontend fixed-point only).  
 `ooda migrate` is **not** a full edition engine — only the two codemods above.
 
 

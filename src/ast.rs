@@ -175,6 +175,10 @@ pub enum Statement {
         span: Span,
     },
     Return(Option<Expression>, Span),
+    /// Exit the innermost `while`/`for` loop.
+    Break(Span),
+    /// Continue the innermost `while`/`for` loop.
+    Continue(Span),
     Expr(Expression, Span),
     While {
         cond: Expression,
@@ -267,6 +271,7 @@ fn stmt_calls_old(s: &Statement) -> bool {
         Statement::Return(None, _) => false,
         Statement::Expr(e, _) => expression_calls_old(e),
         Statement::While { cond, body, .. } => expression_calls_old(cond) || block_calls_old(body),
+        Statement::Break(_) | Statement::Continue(_) => false,
     }
 }
 

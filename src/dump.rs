@@ -22,6 +22,8 @@ pub fn token_kind_name(tok: &Token) -> String {
         Token::While => "KW_WHILE".into(),
         Token::For => "KW_FOR".into(),
         Token::In => "KW_IN".into(),
+        Token::Break => "KW_BREAK".into(),
+        Token::Continue => "KW_CONTINUE".into(),
         Token::Return => "KW_RETURN".into(),
         Token::Type => "KW_TYPE".into(),
         Token::Where => "KW_WHERE".into(),
@@ -85,6 +87,8 @@ pub fn token_text(tok: &Token) -> String {
         Token::While => "while".into(),
         Token::For => "for".into(),
         Token::In => "in".into(),
+        Token::Break => "break".into(),
+        Token::Continue => "continue".into(),
         Token::Return => "return".into(),
         Token::Type => "type".into(),
         Token::Where => "where".into(),
@@ -286,6 +290,18 @@ fn dump_stmt(out: &mut String, stmt: &Statement, idx: usize, depth: usize) {
                 pad, idx, span.line, span.col
             ));
             dump_expr(out, e, depth + 1);
+        }
+        Statement::Break(span) => {
+            out.push_str(&format!(
+                "{}STMT[{}] BREAK @{}:{}\n",
+                pad, idx, span.line, span.col
+            ));
+        }
+        Statement::Continue(span) => {
+            out.push_str(&format!(
+                "{}STMT[{}] CONTINUE @{}:{}\n",
+                pad, idx, span.line, span.col
+            ));
         }
         Statement::Return(None, span) => {
             out.push_str(&format!(

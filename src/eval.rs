@@ -121,6 +121,9 @@ pub struct Interpreter {
     /// When `return` executes inside nested if/while blocks, set this so outer
     /// frames propagate out of the function (CHS oodac relies on this).
     pending_return: Option<Value>,
+    /// Loop control: break/continue the innermost while/for.
+    pending_break: bool,
+    pending_continue: bool,
 }
 
 impl Interpreter {
@@ -158,6 +161,8 @@ impl Interpreter {
             struct_defs,
             alias_refinements,
             pending_return: None,
+            pending_break: false,
+            pending_continue: false,
         }
     }
 
@@ -1259,9 +1264,20 @@ impl Interpreter {
                     self.pending_return = Some(Value::Void);
                     return Ok(Value::Void);
                 }
+                Statement::Break(_) => {
+                    self.pending_break = true;
+                    return Ok(Value::Void);
+                }
+                Statement::Continue(_) => {
+                    self.pending_continue = true;
+                    return Ok(Value::Void);
+                }
                 Statement::Expr(expr, _) => {
                     self.eval_expr(expr, env)?;
-                    if self.pending_return.is_some() {
+                    if self.pending_return.is_some()
+                        || self.pending_break
+                        || self.pending_continue
+                    {
                         return Ok(self.pending_return.clone().unwrap_or(Value::Void));
                     }
                 }
@@ -1278,12 +1294,20 @@ impl Interpreter {
                         if self.pending_return.is_some() {
                             break;
                         }
+                        if self.pending_break {
+                            self.pending_break = false;
+                            break;
+                        }
+                        if self.pending_continue {
+                            self.pending_continue = false;
+                            continue;
+                        }
                     }
                 }
             }
         }
 
-        if self.pending_return.is_some() {
+        if self.pending_return.is_some() || self.pending_break || self.pending_continue {
             return Ok(self.pending_return.clone().unwrap_or(Value::Void));
         }
 
@@ -1361,11 +1385,25 @@ impl Interpreter {
             }
             Expression::While { cond, body, .. } => {
                 loop {
+                    if self.pending_return.is_some() {
+                        break;
+                    }
                     let c = self.eval_expr(cond, env)?;
                     if c != Value::Bool(true) {
                         break;
                     }
                     self.eval_block(body, env)?;
+                    if self.pending_return.is_some() {
+                        break;
+                    }
+                    if self.pending_break {
+                        self.pending_break = false;
+                        break;
+                    }
+                    if self.pending_continue {
+                        self.pending_continue = false;
+                        continue;
+                    }
                 }
                 Ok(Value::Void)
             }
@@ -2115,6 +2153,35 @@ mod tests {
             "got: {}",
             err
         );
+    }
+
+    #[test]
+    fn break_continue_while_runtime() {
+        let prog = parse(
+            r#"
+            pub fn main() -> Int {
+                let mut i = 0;
+                let mut s = 0;
+                while i < 10 {
+                    i = i + 1;
+                    if i == 3 {
+                        continue;
+                    }
+                    if i == 5 {
+                        break;
+                    }
+                    s = s + i;
+                }
+                return s;
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("break/continue");
+        // i=1,2,4 summed (3 continued, 5 broke) => 7
+        assert_eq!(v, Value::Int(7));
     }
 
     #[test]

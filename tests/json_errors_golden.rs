@@ -1946,24 +1946,35 @@ pub fn main() {
 
 
 #[test]
-fn pkg_install_refuses_git_url() {
+fn pkg_install_refuses_unsupported_remote() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let out = std::process::Command::new(bin)
-        .args(["pkg", "--install", "git@github.com:openOODA/helloworld.git"])
-        .output()
-        .expect("spawn");
-    assert!(!out.status.success(), "git ssh pkg must fail");
-    let err = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout)
-    );
-    assert!(
-        err.contains("SSH URLs not supported") || err.contains("git@"),
-        "unexpected output: {}",
-        err
-    );
+    for url in [
+        "git@github.com:openOODA/helloworld.git",
+        "https://github.com/openOODA/helloworld.git",
+        "https://example.com/pkg.zip",
+    ] {
+        let out = std::process::Command::new(bin)
+            .args(["pkg", "--install", url])
+            .output()
+            .expect("spawn");
+        assert!(!out.status.success(), "must fail: {}", url);
+        let err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            err.contains("not supported")
+                || err.contains("tar.gz")
+                || err.contains("git")
+                || err.contains("tarball"),
+            "url={} err={}",
+            url,
+            err
+        );
+    }
 }
+
 
 #[test]
 fn where_non_const_fails_check() {
@@ -2124,5 +2135,63 @@ pub fn main(fs: &FsCap) {
         "got: {}",
         err
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn break_continue_run_and_c() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_bc_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut i = 0;
+    let mut s = 0;
+    while i < 10 {
+        i = i + 1;
+        if i == 3 { continue; }
+        if i == 5 { break; }
+        s = s + i;
+    }
+    println(s);
+}
+"#,
+    )
+    .unwrap();
+    let run = std::process::Command::new(bin)
+        .args(["run", path.to_str().unwrap()])
+        .output()
+        .expect("run");
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert!(String::from_utf8_lossy(&run.stdout).contains("7"), "stdout={}", String::from_utf8_lossy(&run.stdout));
+    let build = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("build");
+    assert!(build.status.success(), "C: {}", String::from_utf8_lossy(&build.stderr));
+    let exe = path.with_extension("");
+    let out = std::process::Command::new(&exe).output().expect("exe");
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("7"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn break_outside_loop_fails_check() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_br_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(&path, "pub fn main() { break; }\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success());
+    let err = format!("{}{}", String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
+    assert!(err.contains("break") || err.contains("loop"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }

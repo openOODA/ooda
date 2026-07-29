@@ -211,6 +211,11 @@ pub const EFFECT_BUILTINS: &[EffectBuiltin] = &[
         receiver_is_cap: false,
     },
     EffectBuiltin {
+        name: ".env_set",
+        requires: CapKind::Env,
+        receiver_is_cap: true,
+    },
+    EffectBuiltin {
         name: ".env_get",
         requires: CapKind::Env,
         receiver_is_cap: true,
@@ -270,6 +275,7 @@ fn collect_sealed_in_block(block: &Block, found: &mut std::collections::BTreeSet
                 collect_sealed_in_block(body, found);
             }
             Statement::Return(None, _) => {}
+            Statement::Break(_) | Statement::Continue(_) => {}
         }
     }
     if let Some(e) = &block.expr {
@@ -379,6 +385,7 @@ impl CapabilityChecker {
                     Self::check_block(body, func, funcs)?;
                 }
                 Statement::Return(None, _) => {}
+            Statement::Break(_) | Statement::Continue(_) => {}
             }
         }
         if let Some(expr) = &block.expr {
@@ -643,6 +650,7 @@ impl CapabilityChecker {
                     Self::collect_cap_aliases_in_block(body, handles);
                 }
                 Statement::Return(None, _) => {}
+            Statement::Break(_) | Statement::Continue(_) => {}
             }
         }
         if let Some(expr) = &block.expr {

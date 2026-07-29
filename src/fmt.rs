@@ -121,6 +121,8 @@ fn format_stmt(stmt: &Statement, indent: usize) -> String {
         }
         Statement::Return(Some(e), _) => format!("return {};", format_expr(e)),
         Statement::Return(None, _) => "return;".into(),
+        Statement::Break(_) => "break;".into(),
+        Statement::Continue(_) => "continue;".into(),
         Statement::Expr(e, _) => format!("{};", format_expr(e)),
         Statement::While { cond, body, .. } => {
             format!(

@@ -159,6 +159,7 @@ fn collect_assigned_names(block: &Block, assigned: &mut HashSet<String>) {
                 collect_assigned_in_expr(e, assigned)
             }
             Statement::Return(None, _) => {}
+            Statement::Break(_) | Statement::Continue(_) => {}
             Statement::While { cond, body, .. } => {
                 collect_assigned_in_expr(cond, assigned);
                 collect_assigned_names(body, assigned);
@@ -249,6 +250,7 @@ fn collect_immutable_lets_needing_mut(
                 collect_immutable_lets_in_expr(e, source, assigned, rewrites)
             }
             Statement::Return(None, _) => {}
+            Statement::Break(_) | Statement::Continue(_) => {}
             Statement::While { cond, body, .. } => {
                 collect_immutable_lets_in_expr(cond, source, assigned, rewrites);
                 collect_immutable_lets_needing_mut(body, source, assigned, rewrites);
@@ -379,6 +381,7 @@ fn collect_match_rewrites(
                 collect_in_expr(expr, source, rewrites);
             }
             Statement::Return(None, _) => {}
+            Statement::Break(_) | Statement::Continue(_) => {}
             Statement::Expr(expr, _) => {
                 collect_in_expr(expr, source, rewrites);
             }

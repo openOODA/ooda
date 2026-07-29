@@ -168,6 +168,11 @@ impl WasmCodeGen {
                     f_wat.push_str("    return\n");
                     emitted_return = true;
                 }
+                Statement::Break(_) | Statement::Continue(_) => {
+                    bail!(
+                        "WASM backend does not support break/continue. Use `ooda run` or `ooda build --target c`."
+                    );
+                }
                 Statement::Return(None, _) => {
                     if is_main {
                         f_wat.push_str("    i32.const 0\n");
@@ -572,6 +577,9 @@ impl WasmCodeGen {
             Statement::Return(Some(expr), _) => {
                 wat.push_str(&Self::emit_expr(expr, locals)?);
                 wat.push_str("        return\n");
+            }
+            Statement::Break(_) | Statement::Continue(_) => {
+                bail!("WASM backend does not support break/continue. Use `ooda run` or `ooda build --target c`.");
             }
             Statement::Return(None, _) => {
                 wat.push_str("        return\n");

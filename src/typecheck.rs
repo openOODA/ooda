@@ -243,6 +243,8 @@ pub struct TypeChecker {
     active_list_lens: std::cell::RefCell<HashMap<String, i64>>,
     /// Enclosing function return type (for `?` legality).
     current_return: std::cell::RefCell<Option<Ty>>,
+    /// Nesting depth of while/for (desugared while) for break/continue.
+    loop_depth: std::cell::Cell<u32>,
 }
 
 /// Parse `Int[lo..hi]` refinement bounds from a type annotation.
@@ -291,6 +293,7 @@ impl TypeChecker {
             alias_refinements: HashMap::new(),
             active_list_lens: std::cell::RefCell::new(HashMap::new()),
             current_return: std::cell::RefCell::new(None),
+            loop_depth: std::cell::Cell::new(0),
         };
 
         // Collect type aliases first (named structs for StructLit).
@@ -1005,6 +1008,28 @@ impl TypeChecker {
                     last = Ty::Void;
                     path_returned = true;
                 }
+                Statement::Break(span) => {
+                    if self.loop_depth.get() == 0 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: `break` outside of loop",
+                            span.line,
+                            span.col
+                        ));
+                    }
+                    last = Ty::Void;
+                    path_returned = true;
+                }
+                Statement::Continue(span) => {
+                    if self.loop_depth.get() == 0 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: `continue` outside of loop",
+                            span.line,
+                            span.col
+                        ));
+                    }
+                    last = Ty::Void;
+                    path_returned = true;
+                }
                 Statement::Expr(expr, span) => {
                     // Statement-level if/while must inherit mutability so
                     // `let mut x` can be assigned inside branches (CHS oodac).
@@ -1071,7 +1096,8 @@ impl TypeChecker {
                             }
                             let mut env_w = env.clone();
                             let mut mut_w = mutable.clone();
-                            self.check_block(
+                            self.loop_depth.set(self.loop_depth.get() + 1);
+                            let wres = self.check_block(
                                 body,
                                 &mut env_w,
                                 &mut mut_w,
@@ -1079,7 +1105,9 @@ impl TypeChecker {
                                 expected_ret,
                                 &refinements,
                                 return_bounds,
-                            )?;
+                            );
+                            self.loop_depth.set(self.loop_depth.get().saturating_sub(1));
+                            wres?;
                             last = Ty::Void;
                         }
                         _ => {
@@ -1109,7 +1137,8 @@ impl TypeChecker {
                     }
                     let mut env_w = env.clone();
                     let mut mut_w = mutable.clone();
-                    self.check_block(
+                    self.loop_depth.set(self.loop_depth.get() + 1);
+                    let wres = self.check_block(
                         body,
                         &mut env_w,
                         &mut mut_w,
@@ -1117,7 +1146,9 @@ impl TypeChecker {
                         expected_ret,
                         &refinements,
                         return_bounds,
-                    )?;
+                    );
+                    self.loop_depth.set(self.loop_depth.get().saturating_sub(1));
+                    wres?;
                     last = Ty::Void;
                 }
             }
@@ -2458,7 +2489,7 @@ impl TypeChecker {
 fn block_always_returns(block: &Block) -> bool {
     for stmt in &block.stmts {
         match stmt {
-            Statement::Return(_, _) => return true,
+            Statement::Return(_, _) | Statement::Break(_) | Statement::Continue(_) => return true,
             Statement::Expr(e, _) if expr_paths_return(e) => return true,
             // Other statements may fall through.
             _ => {}
@@ -2498,6 +2529,8 @@ fn stmt_span(stmt: &Statement) -> crate::ast::Span {
         | Statement::Assign { span, .. }
         | Statement::FieldAssign { span, .. }
         | Statement::Return(_, span)
+        | Statement::Break(span)
+        | Statement::Continue(span)
         | Statement::Expr(_, span)
         | Statement::While { span, .. } => *span,
     }
@@ -2539,7 +2572,7 @@ pub fn program_uses_try_operator(program: &Program) -> bool {
                 expr_has_try(object) || expr_has_try(value)
             }
             Statement::Return(Some(e), _) | Statement::Expr(e, _) => expr_has_try(e),
-            Statement::Return(None, _) => false,
+            Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => false,
             Statement::While { cond, body, .. } => expr_has_try(cond) || block_has_try(body),
         }) || b.expr.as_ref().map(|e| expr_has_try(e)).unwrap_or(false)
     }

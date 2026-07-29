@@ -404,6 +404,16 @@ impl Parser {
             } else if self.peek() == &Token::For {
                 let mut for_stmts = self.parse_for_stmts()?;
                 stmts.append(&mut for_stmts);
+            } else if self.peek() == &Token::Break {
+                self.advance();
+                let span = self.last_span();
+                self.consume(Token::Semi)?;
+                stmts.push(Statement::Break(span));
+            } else if self.peek() == &Token::Continue {
+                self.advance();
+                let span = self.last_span();
+                self.consume(Token::Semi)?;
+                stmts.push(Statement::Continue(span));
             } else {
                 let expr = self.parse_expression()?;
                 // Assignment: `name = expr;` (Token::Eq, not ==)
