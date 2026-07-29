@@ -35,7 +35,8 @@ impl LspDaemon {
                                 let res = if method == "initialize" {
                                     serde_json::json!({
                                         "capabilities": {
-                                            "textDocumentSync": 1
+                                            "textDocumentSync": 1,
+                                            "codeActionProvider": true
                                         },
                                         "serverInfo": {
                                             "name": "ooda-lsp",
@@ -89,6 +90,62 @@ impl LspDaemon {
                                     });
                                     let _ = Self::write_message(&mut stdout, &resp);
                                 }
+                            }
+                        } else if method == "textDocument/codeAction" {
+                            if let (Some(id), Some(params)) = (json.get("id"), json.get("params")) {
+                                let uri = params
+                                    .get("textDocument")
+                                    .and_then(|t| t.get("uri"))
+                                    .and_then(|u| u.as_str())
+                                    .unwrap_or("");
+                                
+                                let mut actions = vec![];
+                                if let Some(diags) = params.get("context").and_then(|c| c.get("diagnostics")).and_then(|d| d.as_array()) {
+                                    for d in diags {
+                                        if let Some(msg) = d.get("message").and_then(|m| m.as_str()) {
+                                            if msg.contains("immutable") || msg.contains("let mut") {
+                                                actions.push(serde_json::json!({
+                                                    "title": "Use let mut for assigned binding",
+                                                    "kind": "quickfix",
+                                                    "diagnostics": [d],
+                                                    "command": {
+                                                        "title": "Fix",
+                                                        "command": "ooda.patch",
+                                                        "arguments": [uri, msg]
+                                                    }
+                                                }));
+                                            } else if msg.contains("missing return") {
+                                                actions.push(serde_json::json!({
+                                                    "title": "Add default return value",
+                                                    "kind": "quickfix",
+                                                    "diagnostics": [d],
+                                                    "command": {
+                                                        "title": "Fix",
+                                                        "command": "ooda.patch",
+                                                        "arguments": [uri, msg]
+                                                    }
+                                                }));
+                                            } else if msg.contains("non-exhaustive match") {
+                                                actions.push(serde_json::json!({
+                                                    "title": "Cover all match variants",
+                                                    "kind": "quickfix",
+                                                    "diagnostics": [d],
+                                                    "command": {
+                                                        "title": "Fix",
+                                                        "command": "ooda.patch",
+                                                        "arguments": [uri, msg]
+                                                    }
+                                                }));
+                                            }
+                                        }
+                                    }
+                                }
+                                let resp = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": id,
+                                    "result": actions
+                                });
+                                let _ = Self::write_message(&mut stdout, &resp);
                             }
                         }
                     }

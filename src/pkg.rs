@@ -120,10 +120,9 @@ impl PackageManager {
                         bail!("Failed to download package from {}", repo);
                     }
 
-                    // Signed/integrity verify: optional companion URL.sha256 (or .sha256sum).
-                    // Format: `<hex>  <filename>` or bare 64-char hex. Fail closed on mismatch.
+                    // Signed/integrity verify: optional companion URL.sha256 (or .sha256sum), .sig (GPG), or .minisig (minisign).
                     // OODA_PKG_REQUIRE_SHA256=1 requires a sidecar; default warns if absent.
-                    verify_tarball_sha256(repo, &tarball)?;
+                    verify_tarball_integrity(repo, &tarball)?;
 
                     let extract_status = std::process::Command::new("tar")
                         .args(["-xzf", tarball.to_str().unwrap(), "-C", extract_dir.to_str().unwrap()])
@@ -200,6 +199,58 @@ impl PackageManager {
         );
         Ok(())
     }
+}
+
+/// Orchestrates integrity verification (minisign -> GPG -> SHA-256 fallback)
+fn verify_tarball_integrity(url: &str, tarball: &std::path::Path) -> Result<()> {
+    // 1. Try minisign (.minisig)
+    let minisig_url = format!("{}.minisig", url);
+    let tmp_sig = tarball.with_extension("minisigtmp");
+    if std::process::Command::new("curl").args(["-fsSL", &minisig_url, "-o", tmp_sig.to_str().unwrap()]).status().map_or(false, |s| s.success()) {
+        let pubkey = std::env::var("OODA_PKG_MINISIGN_PUBKEY").unwrap_or_default();
+        if !pubkey.is_empty() {
+            let status = std::process::Command::new("minisign")
+                .args(["-Vm", tarball.to_str().unwrap(), "-x", tmp_sig.to_str().unwrap(), "-P", &pubkey])
+                .status();
+            let _ = fs::remove_file(&tmp_sig);
+            match status {
+                Ok(st) if st.success() => {
+                    eprintln!("ooda pkg: minisign verified for {}", url);
+                    return Ok(());
+                }
+                _ => {
+                    let _ = fs::remove_file(tarball);
+                    bail!("ooda pkg --install: minisign verification failed for {}", url);
+                }
+            }
+        } else {
+            eprintln!("ooda pkg: found {} but OODA_PKG_MINISIGN_PUBKEY is not set. Skipping minisign.", minisig_url);
+        }
+        let _ = fs::remove_file(&tmp_sig);
+    }
+
+    // 2. Try GPG (.sig)
+    let sig_url = format!("{}.sig", url);
+    let tmp_sig = tarball.with_extension("sigtmp");
+    if std::process::Command::new("curl").args(["-fsSL", &sig_url, "-o", tmp_sig.to_str().unwrap()]).status().map_or(false, |s| s.success()) {
+        let status = std::process::Command::new("gpg")
+            .args(["--verify", tmp_sig.to_str().unwrap(), tarball.to_str().unwrap()])
+            .status();
+        let _ = fs::remove_file(&tmp_sig);
+        match status {
+            Ok(st) if st.success() => {
+                eprintln!("ooda pkg: GPG verified for {}", url);
+                return Ok(());
+            }
+            _ => {
+                let _ = fs::remove_file(tarball);
+                bail!("ooda pkg --install: GPG verification failed for {}", url);
+            }
+        }
+    }
+
+    // 3. Fallback to SHA-256
+    verify_tarball_sha256(url, tarball)
 }
 
 /// Verify downloaded tarball against `{url}.sha256` or `{url}.sha256sum` when available.
