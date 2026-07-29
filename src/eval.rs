@@ -1050,6 +1050,31 @@ impl Interpreter {
             body_result?
         };
 
+        // Return-type Int[lo..hi] (bare or type alias) — fail closed for non-const paths.
+        if let Some((lo, hi)) = crate::typecheck::int_refinement_bounds(&func.return_type).or_else(
+            || {
+                if let Type::Custom(alias) = &func.return_type {
+                    self.alias_refinements.get(alias).copied()
+                } else {
+                    None
+                }
+            },
+        ) {
+            if let Value::Int(v) = &return_val {
+                if *v < lo || *v > hi {
+                    return Err(anyhow!(
+                        "RefinementTypeViolation: return value {} out of refinement bounds [{}..{}] for function '{}' (call site at {}:{})",
+                        v,
+                        lo,
+                        hi,
+                        name,
+                        self.last_call_span.line,
+                        self.last_call_span.col
+                    ));
+                }
+            }
+        }
+
         // 3. Evaluate Postconditions (ensures)
         if !func.ensures.is_empty() {
             let mut post_env = local_env.clone();
@@ -2169,4 +2194,27 @@ mod tests {
         let mut interp = Interpreter::new(prog);
         assert!(interp.execute_all().is_ok());
     }
+
+    #[test]
+    fn runtime_rejects_alias_return_refinement_oob() {
+        let prog = parse(
+            r#"
+            type Port = Int[1..10];
+            pub fn f(x: Int) -> Port {
+                return x;
+            }
+            pub fn main() -> Int {
+                let bad = 99;
+                let _p = f(bad);
+                return 0;
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let res = interp.call_function("main", vec![], &mut HashMap::new());
+        assert!(res.is_err(), "non-const alias return OOB must fail");
+        let msg = format!("{}", res.unwrap_err());
+        assert!(msg.contains("RefinementTypeViolation"), "got: {}", msg);
+    }
+
 }

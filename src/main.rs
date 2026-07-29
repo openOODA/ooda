@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.57.0-alpha")]
+#[command(version = "0.58.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -1237,12 +1237,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.57.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.58.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.57.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.58.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

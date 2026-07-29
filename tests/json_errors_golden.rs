@@ -1241,3 +1241,36 @@ pub fn main() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn build_c_lowers_char_at_method() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_c_cat_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    println("hi".char_at(0));
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "C must lower .char_at: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains('h'), "stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

@@ -268,6 +268,17 @@ impl TypeChecker {
         t.normalize(&self.type_aliases)
     }
 
+    /// `Int[lo..hi]` or a type alias that expands to one (`type Port = Int[1..10]`).
+    fn bounds_from_type_ann(&self, ann: &Type) -> Option<(i64, i64)> {
+        int_refinement_bounds(ann).or_else(|| {
+            if let Type::Custom(name) = ann {
+                self.alias_refinements.get(name).copied()
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn check_program(program: &Program) -> Result<()> {
         let mut tc = TypeChecker {
             functions: HashMap::new(),
@@ -546,28 +557,22 @@ impl TypeChecker {
             &empty_refinements,
         )?;
 
-        // Static refinement bounds check for return statements against function return_type
-        if let Type::Custom(ref s) = func.return_type {
-            if let Some(rest) = s.strip_prefix("Int[").and_then(|str_s| str_s.strip_suffix("]")) {
-                if let Some((min_s, max_s)) = rest.split_once("..") {
-                    let min_v: i64 = min_s.parse().unwrap_or(i64::MIN);
-                    let max_v: i64 = max_s.parse().unwrap_or(i64::MAX);
-                    for stmt in &func.body.stmts {
-                        if let Statement::Return(Some(expr), _) = stmt {
-                            if let Some(val) = Ty::const_int(expr) {
-                                if val < min_v || val > max_v {
-                                    let sp = expr.span();
-                                    return Err(anyhow!(
-                                        "Type error at {}:{}: RefinementTypeViolation: Returned value {} out of refinement bounds [{}..{}] for return type of function '{}'",
-                                        sp.line,
-                                        sp.col,
-                                        val,
-                                        min_v,
-                                        max_v,
-                                        func.name
-                                    ));
-                                }
-                            }
+        // Static refinement bounds for returns: bare Int[lo..hi] or alias (type Port = Int[…]).
+        if let Some((min_v, max_v)) = self.bounds_from_type_ann(&func.return_type) {
+            for stmt in &func.body.stmts {
+                if let Statement::Return(Some(expr), _) = stmt {
+                    if let Some(val) = Ty::const_int(expr) {
+                        if val < min_v || val > max_v {
+                            let sp = expr.span();
+                            return Err(anyhow!(
+                                "Type error at {}:{}: RefinementTypeViolation: Returned value {} out of refinement bounds [{}..{}] for return type of function '{}'",
+                                sp.line,
+                                sp.col,
+                                val,
+                                min_v,
+                                max_v,
+                                func.name
+                            ));
                         }
                     }
                 }
@@ -680,26 +685,21 @@ impl TypeChecker {
                     }
                     if let Some(ann) = type_annotation {
                         let want = Ty::from_ast(ann);
-                        if let Type::Custom(ref s) = ann {
-                            if let Some(rest) = s.strip_prefix("Int[").and_then(|str_s| str_s.strip_suffix("]")) {
-                                if let Some((min_s, max_s)) = rest.split_once("..") {
-                                    let min_v: i64 = min_s.parse().unwrap_or(i64::MIN);
-                                    let max_v: i64 = max_s.parse().unwrap_or(i64::MAX);
-                                    refinements.insert(name.clone(), (min_v, max_v));
-                                    if let Some(val) = Ty::const_int(init) {
-                                        if val < min_v || val > max_v {
-                                            let sp = init.span();
-                                            return Err(anyhow!(
-                                                "Type error at {}:{}: RefinementTypeViolation: Value {} out of refinement bounds [{}..{}] for '{}'",
-                                                sp.line,
-                                                sp.col,
-                                                val,
-                                                min_v,
-                                                max_v,
-                                                name
-                                            ));
-                                        }
-                                    }
+                        // Bare Int[lo..hi] or type alias that carries those bounds.
+                        if let Some((min_v, max_v)) = self.bounds_from_type_ann(ann) {
+                            refinements.insert(name.clone(), (min_v, max_v));
+                            if let Some(val) = Ty::const_int(init) {
+                                if val < min_v || val > max_v {
+                                    let sp = init.span();
+                                    return Err(anyhow!(
+                                        "Type error at {}:{}: RefinementTypeViolation: Value {} out of refinement bounds [{}..{}] for '{}'",
+                                        sp.line,
+                                        sp.col,
+                                        val,
+                                        min_v,
+                                        max_v,
+                                        name
+                                    ));
                                 }
                             }
                         }
@@ -3288,5 +3288,53 @@ mod tests {
             "match+if assign to outer let mut: {:?}",
             check(src).err()
         );
+    }
+
+    #[test]
+    fn alias_let_refinement_const_oob_fails() {
+        let src = r#"
+            type Port = Int[1..10];
+            pub fn main() {
+                let p: Port = 99;
+                println(p);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("99"),
+            "alias let ann must enforce bounds: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn alias_return_refinement_const_oob_fails() {
+        let src = r#"
+            type Port = Int[1..10];
+            pub fn f() -> Port {
+                return 99;
+            }
+            pub fn main() {
+                println(f());
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("99"),
+            "alias return must enforce bounds: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn alias_let_refinement_in_bounds_ok() {
+        let src = r#"
+            type Port = Int[1..10];
+            pub fn main() {
+                let p: Port = 5;
+                println(p);
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
     }
 }

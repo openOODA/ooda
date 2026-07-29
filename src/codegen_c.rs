@@ -1056,6 +1056,27 @@ impl Gen {
                 code.push_str("  oo_println();\n");
                 Ok((code, "0".into(), "int".into()))
             }
+            // Method-style string ops: same runtime as free functions (dual-engine parity).
+            ".char_at" => {
+                if cargs.len() != 2 {
+                    bail!("C backend: .char_at expects receiver + index");
+                }
+                code.push_str(&format!(
+                    "  OoStr {} = oo_char_at({}, {});\n",
+                    t, cargs[0], cargs[1]
+                ));
+                Ok((code, t, "OoStr".into()))
+            }
+            ".str_slice" => {
+                if cargs.len() != 3 {
+                    bail!("C backend: .str_slice expects receiver + start + end");
+                }
+                code.push_str(&format!(
+                    "  OoStr {} = oo_str_slice({}, {}, {});\n",
+                    t, cargs[0], cargs[1], cargs[2]
+                ));
+                Ok((code, t, "OoStr".into()))
+            }
             other if other.starts_with('.') => {
                 bail!("C backend: unsupported method {}", other)
             }

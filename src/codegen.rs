@@ -124,17 +124,19 @@ impl LlvmCodeGen {
                 Self::check_expr_subset(right, ctx)
             }
             Expression::Call { name, args, .. } => {
-                if name.starts_with('.') && name != ".len" {
-                    // .len on strings is out of subset; .len on ints unsupported
+                // Integer-subset: no String methods. Fail closed with honest recovery path.
+                if name.starts_with('.') {
                     bail!(
-                        "LLVM integer-subset backend does not support method '{}' in '{}'.",
+                        "LLVM integer-subset backend does not support method '{}' in '{}' \
+                         (no String/list methods; use Int/Bool only or `ooda run` / `ooda build --target c`).",
                         name,
                         ctx
                     );
                 }
-                if name.starts_with('.') {
+                if matches!(name.as_str(), "char_at" | "str_slice" | "chars_len") {
                     bail!(
-                        "LLVM integer-subset backend does not support method '{}' in '{}'.",
+                        "LLVM integer-subset backend does not lower '{}' in '{}' \
+                         (string surface; use `ooda run` or `ooda build --target c`).",
                         name,
                         ctx
                     );
@@ -802,5 +804,43 @@ mod tests {
         let main_body = ir.split("define i32 @main()").nth(1).unwrap();
         let ret_count = main_body.matches("ret ").count();
         assert_eq!(ret_count, 1);
+    }
+
+    #[test]
+    fn refuses_char_at_string_surface() {
+        let err = emit(
+            r#"
+            pub fn main() {
+                let c = char_at("hi", 0);
+                println(c);
+            }
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("char_at") || err.contains("string") || err.contains("String"),
+            "LLVM must refuse string char_at: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn refuses_char_at_method() {
+        let err = emit(
+            r#"
+            pub fn main() {
+                let c = "hi".char_at(0);
+                println(c);
+            }
+        "#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("method") || err.contains("char_at") || err.contains("String") || err.contains("string"),
+            "LLVM must refuse .char_at: {}",
+            err
+        );
     }
 }
