@@ -317,24 +317,21 @@ impl TypeChecker {
             "None".into(),
             (vec![], Ty::Option(Box::new(Ty::Unknown))),
         );
-        // Sealed effects (arg types loosely checked)
-        for name in [
-            "fetch",
-            "downloadData",
-            "http_get",
-            "net_get",
-            "read_file",
-            "write_file",
-            "fs_read",
-            "fs_write",
-            "sys_exec",
-            "exec",
-            "spawn_process",
-            "env_get",
-            "env_set",
-        ] {
+        // Sealed effects: loose args, concrete Result returns (fail-closed product surface)
+        let res_s = Ty::Result(Box::new(Ty::String), Box::new(Ty::String));
+        let res_v = Ty::Result(Box::new(Ty::Void), Box::new(Ty::String));
+        for name in ["fetch", "downloadData", "http_get", "net_get", "read_file", "fs_read", "env_get"]
+        {
             tc.functions
-                .insert(name.into(), (vec![Ty::Unknown], Ty::Unknown));
+                .insert(name.into(), (vec![Ty::Unknown], res_s.clone()));
+        }
+        for name in ["write_file", "fs_write", "env_set"] {
+            tc.functions
+                .insert(name.into(), (vec![Ty::Unknown], res_v.clone()));
+        }
+        for name in ["sys_exec", "exec", "spawn_process"] {
+            tc.functions
+                .insert(name.into(), (vec![Ty::Unknown], res_s.clone()));
         }
 
         for item in &program.items {
@@ -817,9 +814,15 @@ impl TypeChecker {
                         }
                         ".trim" | ".to_lowercase" | ".to_string" => Ok(Ty::String),
                         ".is_ok" | ".is_err" | ".is_some" | ".is_none" => Ok(Ty::Bool),
-                        ".get" | ".read_file" | ".write_file" | ".env_get" | ".push" => {
-                            Ok(Ty::Unknown)
-                        }
+                        ".get" | ".read_file" | ".env_get" => Ok(Ty::Result(
+                            Box::new(Ty::String),
+                            Box::new(Ty::String),
+                        )),
+                        ".write_file" => Ok(Ty::Result(
+                            Box::new(Ty::Void),
+                            Box::new(Ty::String),
+                        )),
+                        ".push" => Ok(Ty::List(Box::new(Ty::Unknown))),
                         // Field access on named/anonymous structs (or Custom alias).
                         other if other.starts_with('.') && args.len() == 1 => {
                             let field = &other[1..];
@@ -863,7 +866,12 @@ impl TypeChecker {
                                 _ => Ok(Ty::Unknown),
                             }
                         }
-                        _ => Ok(Ty::Unknown),
+                        other => Err(anyhow!(
+                            "Type error at {}:{}: unknown method '{}'",
+                            expr.span().line,
+                            expr.span().col,
+                            other
+                        )),
                     };
                 }
 
@@ -894,8 +902,14 @@ impl TypeChecker {
                     return Ok(ret.clone());
                 }
 
-                // Unknown function: still type-check args; return Unknown
-                Ok(Ty::Unknown)
+                // Fail-closed: unknown free functions must not soft-accept as Ty::Unknown.
+                // (Methods and registered builtins are handled above.)
+                Err(anyhow!(
+                    "Type error at {}:{}: undefined function '{}'",
+                    expr.span().line,
+                    expr.span().col,
+                    name
+                ))
             }
             Expression::If {
                 cond,
@@ -1348,5 +1362,36 @@ mod tests {
             "expected refinement return error, got: {}",
             err
         );
+    }
+
+    #[test]
+    fn rejects_undefined_function_fail_closed() {
+        let src = r#"
+            pub fn main() {
+                let x = totally_missing_builtin(1);
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("undefined function") && err.contains("totally_missing_builtin"),
+            "expected undefined function error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fetch_is_typed_as_result() {
+        let src = r#"
+            pub fn ok(net: &NetCap) {
+                let r = fetch("https://example.invalid");
+                assert_eq!(r.is_err(), true);
+            }
+            pub fn main(net: &NetCap) {
+                ok(net);
+            }
+        "#;
+        // Must typecheck: fetch returns Result so .is_err is valid
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
     }
 }

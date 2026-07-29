@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.31.0-alpha")]
+#[command(version = "0.32.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -654,6 +654,34 @@ fn load_and_analyze(
         let (line, col) = parse_loc(&msg);
         let capability_us = cap_start.elapsed().as_micros();
         if json_errors {
+            // Surgical-ish fix: name the offending function when present in the message.
+            let fn_name = msg
+                .split("Function '")
+                .nth(1)
+                .and_then(|s| s.split('\'').next())
+                .unwrap_or("f");
+            let effect = if msg.contains("'fetch'") || msg.contains("fetch") {
+                "fetch(url)"
+            } else if msg.contains("read_file") {
+                "read_file(path)"
+            } else {
+                "/* sealed effect */"
+            };
+            let cap_ty = if msg.contains("NetCap") {
+                "&NetCap"
+            } else if msg.contains("FsCap") {
+                "&FsCap"
+            } else if msg.contains("SysCap") {
+                "&SysCap"
+            } else if msg.contains("EnvCap") {
+                "&EnvCap"
+            } else {
+                "&NetCap"
+            };
+            let diff = format!(
+                "pub fn {}(cap: {}, ...) {{\n    // grant capability on the enclosing function\n    let _ = {};\n}}",
+                fn_name, cap_ty, effect
+            );
             AiDiagnostic::new(
                 "CapabilitySecurityViolation",
                 file,
@@ -662,10 +690,7 @@ fn load_and_analyze(
                 msg.clone(),
                 "Function attempts I/O without receiving explicit capability token handle.",
             )
-            .with_fix(
-                "Grant Capability Token",
-                "fn f(net: &NetCap, ...) { ... fetch(url); }  // pass net from main()",
-            )
+            .with_fix("Grant Capability Token", diff)
             .with_timings(parse_us, capability_us)
             .print_json();
         } else {
@@ -814,12 +839,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.31.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.32.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.31.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.32.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

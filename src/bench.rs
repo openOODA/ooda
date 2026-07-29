@@ -1,5 +1,5 @@
 // ===================================================================
-// openOODA Empirical Claim Verification Suite (v0.10.0-alpha)
+// openOODA Empirical Claim Verification Suite
 //
 // This bench prints an honest per-proof verdict. The trailing summary
 // says "ALL EMPIRICAL CLAIMS VERIFIED" only when every proof actually
@@ -45,7 +45,7 @@ pub fn run_empirical_verification_suite(file_path: &Path) -> Result<()> {
     writeln!(out, "\n🔬 ===================================================================")?;
     writeln!(out, "   openOODA EMPIRICAL CLAIM VERIFICATION & BENCHMARK SUITE")?;
     writeln!(out, "   Target Source File: {}", file_path.display())?;
-    writeln!(out, "   Suite Version: v0.10.0-alpha")?;
+    writeln!(out, "   Suite Version: {}", env!("CARGO_PKG_VERSION"))?;
     writeln!(out, "   ===================================================================\n")?;
     out.flush()?;
 

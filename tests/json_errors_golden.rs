@@ -41,12 +41,12 @@ fn json_errors_golden_capability_violation() {
         "suggested_fix required for AI auto-fix: {}",
         stderr
     );
+    let diff = v["suggested_fix"]["diff"].as_str().unwrap_or("");
+    assert!(!diff.is_empty(), "suggested_fix.diff must be non-empty");
     assert!(
-        !v["suggested_fix"]["diff"]
-            .as_str()
-            .unwrap_or("")
-            .is_empty(),
-        "suggested_fix.diff must be non-empty"
+        diff.contains("rogue_fetch") || diff.contains("NetCap") || diff.contains("fetch"),
+        "cap fix should name the function or cap/effect: {}",
+        diff
     );
     // Honesty: no hardcoded E-M theater.
     assert!(
