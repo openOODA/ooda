@@ -164,3 +164,44 @@ pub fn main() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn ooda_wasm_list_int_subset() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_whost_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("list.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut xs = list_new();
+    xs = list_push(xs, 42);
+    xs = list_push(xs, 99);
+    println(list_len(xs));
+    println(list_get(xs, 0));
+    println(list_get(xs, 1));
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn ooda");
+    assert!(
+        out.status.success(),
+        "wasm build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat_path = path.with_extension("wat");
+    let wat = std::fs::read_to_string(&wat_path).expect("read wat");
+    let lines = run_wat(&wat).expect("host run ooda WAT");
+    assert_eq!(
+        lines,
+        vec!["2".to_string(), "42".to_string(), "99".to_string()],
+        "list output got {:?}",
+        lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

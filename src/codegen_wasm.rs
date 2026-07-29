@@ -62,22 +62,22 @@ impl WasmCodeGen {
         wat.push_str("  (import \"env\" \"println\" (func $println (param i64)))\n");
         wat.push_str("  (import \"env\" \"println_str\" (func $println_str (param i32)))\n");
         wat.push_str("  (import \"env\" \"streq\" (func $streq (param i32 i32) (result i32)))\n\n");
-
         let aliases = program.collect_type_aliases();
+        let mut funcs_wat = String::new();
         for item in &program.items {
             if let Item::Function(func) = item {
                 let f_wat = Self::emit_function(func, &aliases)?;
-                wat.push_str(&f_wat);
-                wat.push('\n');
+                funcs_wat.push_str(&f_wat);
+                funcs_wat.push('\n');
             }
         }
 
         WASM_STRINGS.with(|strings| {
             let strings = strings.borrow();
+            wat.push_str("  (memory 1)\n");
+            wat.push_str("  (export \"memory\" (memory 0))\n");
+            let mut offset = 0;
             if !strings.is_empty() {
-                wat.push_str("  (memory 1)\n");
-                wat.push_str("  (export \"memory\" (memory 0))\n");
-                let mut offset = 0;
                 for s in strings.iter() {
                     let mut hex_str = String::new();
                     for b in s.as_bytes() {
@@ -88,8 +88,71 @@ impl WasmCodeGen {
                     offset += s.len() + 1;
                 }
             }
+            let heap_start = (offset + 15) & !15;
+            wat.push_str(&format!("  (global $heap (mut i32) (i32.const {}))\n", heap_start));
         });
 
+        // Inject List[Int] subset runtime.
+        wat.push_str(r#"
+  (func $list_new (result i32)
+    (local $ptr i32)
+    (local.set $ptr (global.get $heap))
+    (global.set $heap (i32.add (local.get $ptr) (i32.const 16)))
+    (i32.store (local.get $ptr) (i32.const 0))
+    (i32.store offset=4 (local.get $ptr) (i32.const 0))
+    (i32.store offset=8 (local.get $ptr) (i32.const 0))
+    (local.get $ptr)
+    return
+  )
+  (func $list_len (param $list i32) (result i64)
+    (i64.extend_i32_u (i32.load (local.get $list)))
+    return
+  )
+  (func $list_get (param $list i32) (param $index i64) (result i64)
+    (local $data i32)
+    (local.set $data (i32.load offset=8 (local.get $list)))
+    (i64.load (i32.add (local.get $data) (i32.mul (i32.wrap_i64 (local.get $index)) (i32.const 8))))
+    return
+  )
+  (func $list_push (param $list i32) (param $elem i64) (result i32)
+    (local $len i32) (local $cap i32) (local $data i32) (local $new_cap i32) (local $new_data i32) (local $i i32)
+    (local.set $len (i32.load (local.get $list)))
+    (local.set $cap (i32.load offset=4 (local.get $list)))
+    (local.set $data (i32.load offset=8 (local.get $list)))
+    (if (i32.eq (local.get $len) (local.get $cap))
+      (then
+        (if (i32.eqz (local.get $cap))
+          (then (local.set $new_cap (i32.const 4)))
+          (else (local.set $new_cap (i32.mul (local.get $cap) (i32.const 2))))
+        )
+        (local.set $new_data (global.get $heap))
+        (global.set $heap (i32.add (local.get $new_data) (i32.mul (local.get $new_cap) (i32.const 8))))
+        (if (i32.gt_u (local.get $cap) (i32.const 0))
+          (then
+            (local.set $i (i32.const 0))
+            (loop $copy_loop
+              (i64.store
+                (i32.add (local.get $new_data) (i32.mul (local.get $i) (i32.const 8)))
+                (i64.load (i32.add (local.get $data) (i32.mul (local.get $i) (i32.const 8))))
+              )
+              (local.set $i (i32.add (local.get $i) (i32.const 1)))
+              (br_if $copy_loop (i32.lt_u (local.get $i) (local.get $cap)))
+            )
+          )
+        )
+        (i32.store offset=4 (local.get $list) (local.get $new_cap))
+        (i32.store offset=8 (local.get $list) (local.get $new_data))
+        (local.set $data (local.get $new_data))
+      )
+    )
+    (i64.store (i32.add (local.get $data) (i32.mul (local.get $len) (i32.const 8))) (local.get $elem))
+    (i32.store (local.get $list) (i32.add (local.get $len) (i32.const 1)))
+    (local.get $list)
+    return
+  )
+"#);
+
+        wat.push_str(&funcs_wat);
         wat.push_str(")\n");
         Self::validate_wat(&wat)?;
         Ok(wat)
@@ -116,10 +179,7 @@ impl WasmCodeGen {
                     "WASM backend does not yet support Option/Result in '{}'. Use `ooda run`.",
                     func.name
                 ),
-                Type::List(_) => bail!(
-                    "WASM backend does not yet support List in '{}'. Use `ooda run`.",
-                    func.name
-                ),
+                Type::List(_) => {}
                 Type::Struct { .. } => bail!(
                     "WASM backend does not yet support struct in '{}'. Use `ooda run`.",
                     func.name
@@ -138,6 +198,7 @@ impl WasmCodeGen {
                 Type::String => "i32",
                 Type::Float => "f64",
                 Type::Void => "i64",
+                Type::List(_) => "i32",
                 _ => bail!("unsupported param type in WASM: {:?}", t),
             })
         };
@@ -159,6 +220,7 @@ impl WasmCodeGen {
             Type::String => "i32",
             Type::Float => "f64",
             Type::Void => "i64",
+            Type::List(_) => "i32",
             _ => "i64",
         };
         if is_main {
@@ -538,7 +600,14 @@ impl WasmCodeGen {
                     }
                 }
             }
-            // Default to i64 for everything else (calls, if, etc.).
+            Expression::Call { name, .. } => {
+                if name == "list_new" || name == "list_push" {
+                    "i32"
+                } else {
+                    "i64"
+                }
+            }
+            // Default to i64 for everything else (if, match, etc.).
             _ => "i64",
         }
     }
