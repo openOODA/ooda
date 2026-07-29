@@ -1949,9 +1949,8 @@ pub fn main() {
 fn pkg_install_refuses_unsupported_remote() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     for url in [
-        "git@github.com:openOODA/helloworld.git",
-        "https://github.com/openOODA/helloworld.git",
         "https://example.com/pkg.zip",
+        "http://example.com/not_tarball.rar",
     ] {
         let out = std::process::Command::new(bin)
             .args(["pkg", "--install", url])
@@ -1964,10 +1963,7 @@ fn pkg_install_refuses_unsupported_remote() {
             String::from_utf8_lossy(&out.stdout)
         );
         assert!(
-            err.contains("not supported")
-                || err.contains("tar.gz")
-                || err.contains("git")
-                || err.contains("tarball"),
+            err.contains("tar.gz") || err.contains("tgz"),
             "url={} err={}",
             url,
             err

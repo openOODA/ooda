@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.84.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.85.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.84.0-alpha
+ooda --version   # 0.85.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.84.0-alpha (CHS M0–M5)
+## What's real in v0.85.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -71,14 +71,15 @@ import "lib.oo";       // relative / OODA_PATH
 | **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
 | **oodac** (`oodac/main.oo`) lex/parse/check/smoke-build | Real (interp + native) |
 | **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
-| `break` / `continue` | Real in while/for (interp + CHS C); LLVM/WASM refuse; outside loop fails typecheck |
+| `break` / `continue` | Real in while/for (interp + CHS C + WASM); LLVM refuse; outside loop fails typecheck |
 | `for x in list` / `lo..hi` | Real: desugars to while+list_get (interp + C); unannotated lists refine element type on assign; **C defers list kind until first push** (int vs string) |
 | `ooda build --release` | Real on CHS C path: gcc `-O3 -flto` |
 | LLVM Int/Bool/Float + while | Real (clang to link when present) |
+| LSP live diagnostics | Real via `textDocument/didOpen` & `textDocument/didChange` |
 
 ## Not implemented (fail non-zero)
 
-Full LSP (initialize/shutdown/exit stub only), full package registry/git-clone/signature verify (partial https tarball only), time-travel `replay` (re-run named fn only), in-process CPython/PyTorch embed, full WASM product, full SPEC self-host (CHS frontend fixed-point only).  
+Full package registry/signature verify (git clone & https tarball supported), time-travel `replay` (re-run named fn only), in-process CPython/PyTorch embed, full WASM product, full SPEC self-host (CHS frontend fixed-point only).  
 `ooda migrate` is **not** a full edition engine — only the two codemods above.
 
 

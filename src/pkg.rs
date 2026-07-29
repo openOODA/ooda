@@ -36,48 +36,51 @@ impl PackageManager {
     /// - **https://…/*.tar.gz|*.tgz**: download with `curl`, extract with `tar` into
     ///   `~/.cache/ooda/pkg/<url-hash>/`, then pin that tree
     ///
-    /// Fail-closed: git@, git clone URLs, non-tarball https, missing curl/tar.
+    /// Fail-closed: git@, git clone URLs, non-tarball https, missing curl
     pub fn install(repo: &str) -> Result<()> {
-        if repo.starts_with("git@")
+        let is_git = repo.starts_with("git@")
             || repo.contains("git://")
             || repo.ends_with(".git")
             || repo.contains(".git#")
-            || repo.contains(".git?")
-        {
-            bail!(
-                "ooda pkg --install: git repositories are not supported in this alpha \
-                 (refused '{}'). Use a local path or an https://…/*.tar.gz tarball.",
-                repo
-            );
-        }
-
-        let is_remote = repo.starts_with("http://") || repo.starts_with("https://");
+            || repo.contains(".git?");
+        let is_remote = is_git || repo.starts_with("http://") || repo.starts_with("https://");
         let p_owned;
 
         if is_remote {
             let lower = repo.to_ascii_lowercase();
-            if !(lower.ends_with(".tar.gz") || lower.ends_with(".tgz")) {
+            if !is_git && !(lower.ends_with(".tar.gz") || lower.ends_with(".tgz")) {
                 bail!(
-                    "ooda pkg --install: remote install only accepts https://…/*.tar.gz or *.tgz \
-                     (got '{}'). No package registry or git clone.",
+                    "ooda pkg --install: remote install only accepts git urls or https://…/*.tar.gz|*.tgz \
+                     (got '{}'). No package registry.",
                     repo
                 );
             }
-            if std::process::Command::new("curl")
-                .arg("--version")
-                .output()
-                .map(|o| !o.status.success())
-                .unwrap_or(true)
-            {
-                bail!("ooda pkg --install: `curl` not available on PATH (required for remote tarballs)");
-            }
-            if std::process::Command::new("tar")
-                .arg("--version")
-                .output()
-                .map(|o| !o.status.success())
-                .unwrap_or(true)
-            {
-                bail!("ooda pkg --install: `tar` not available on PATH (required for remote tarballs)");
+            if is_git {
+                if std::process::Command::new("git")
+                    .arg("--version")
+                    .output()
+                    .map(|o| !o.status.success())
+                    .unwrap_or(true)
+                {
+                    bail!("ooda pkg --install: `git` not available on PATH (required for git URLs)");
+                }
+            } else {
+                if std::process::Command::new("curl")
+                    .arg("--version")
+                    .output()
+                    .map(|o| !o.status.success())
+                    .unwrap_or(true)
+                {
+                    bail!("ooda pkg --install: `curl` not available on PATH (required for remote tarballs)");
+                }
+                if std::process::Command::new("tar")
+                    .arg("--version")
+                    .output()
+                    .map(|o| !o.status.success())
+                    .unwrap_or(true)
+                {
+                    bail!("ooda pkg --install: `tar` not available on PATH (required for remote tarballs)");
+                }
             }
 
             use sha2::{Digest, Sha256};
@@ -95,43 +98,49 @@ impl PackageManager {
 
             let extract_dir = cache_dir.join("tree");
             if !extract_dir.exists() {
-                fs::create_dir_all(&extract_dir)?;
-                let tarball = cache_dir.join("pkg.tar.gz");
-                eprintln!("ooda pkg: downloading {} …", repo);
-                let status = std::process::Command::new("curl")
-                    .args(["-fsSL", repo, "-o"])
-                    .arg(&tarball)
-                    .status()?;
-                if !status.success() {
-                    let _ = fs::remove_dir_all(&cache_dir);
-                    bail!("ooda pkg --install: curl failed for {}", repo);
-                }
-                let extract_status = std::process::Command::new("tar")
-                    .args(["-xzf"])
-                    .arg(&tarball)
-                    .arg("-C")
-                    .arg(&extract_dir)
-                    .status()?;
-                if !extract_status.success() {
-                    let _ = fs::remove_dir_all(&cache_dir);
-                    bail!(
-                        "ooda pkg --install: tar extract failed for {} (not a valid .tar.gz?)",
-                        repo
-                    );
+                fs::create_dir_all(&cache_dir)?;
+                
+                if is_git {
+                    eprintln!("ooda pkg: cloning {} …", repo);
+                    let status = std::process::Command::new("git")
+                        .args(["clone", "--depth", "1", repo, extract_dir.to_str().unwrap()])
+                        .status()?;
+                    if !status.success() {
+                        bail!("Failed to clone package from {}", repo);
+                    }
+                } else {
+                    fs::create_dir_all(&extract_dir)?;
+                    let tarball = cache_dir.join("pkg.tar.gz");
+                    eprintln!("ooda pkg: downloading {} …", repo);
+                    let status = std::process::Command::new("curl")
+                        .args(["-fsSL", repo, "-o", tarball.to_str().unwrap()])
+                        .status()?;
+                    if !status.success() {
+                        bail!("Failed to download package from {}", repo);
+                    }
+
+                    let extract_status = std::process::Command::new("tar")
+                        .args(["-xzf", tarball.to_str().unwrap(), "-C", extract_dir.to_str().unwrap()])
+                        .status()?;
+                    if !extract_status.success() {
+                        bail!("Failed to extract package from {}", repo);
+                    }
                 }
             }
-
+            
+            // If the tarball or repo contains a single root folder (common for github tarballs), we use that folder.
             let mut pkg_root = extract_dir.clone();
             if let Ok(entries) = fs::read_dir(&extract_dir) {
                 let entries: Vec<_> = entries.filter_map(Result::ok).collect();
                 if entries.len() == 1 {
-                    if let Ok(ft) = entries[0].file_type() {
-                        if ft.is_dir() {
+                    if let Ok(file_type) = entries[0].file_type() {
+                        if file_type.is_dir() {
                             pkg_root = entries[0].path();
                         }
                     }
                 }
             }
+            
             p_owned = pkg_root;
         } else {
             p_owned = std::path::PathBuf::from(repo);

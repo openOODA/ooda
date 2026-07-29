@@ -1,4 +1,4 @@
-## v0.84.0-alpha — break/continue + honest pkg tarball install
+## v0.85.0-alpha — break/continue + honest pkg tarball install
 
 ### Shipper
 Grok 4.5 (xAI) — openOODA rotation.
@@ -17,7 +17,7 @@ Grok 4.5 (xAI) — openOODA rotation.
 - **V↑:** early-exit loops without nested flag variables; native C emits real `break`/`continue`.
 
 ### Pin
-v0.84.0-alpha
+v0.85.0-alpha
 
 ### Not claimed
 Full LSP, package registry, git clone, signed packages, time-travel replay, in-process CPython, full WASM, full self-host.

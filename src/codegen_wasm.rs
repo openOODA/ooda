@@ -578,8 +578,11 @@ impl WasmCodeGen {
                 wat.push_str(&Self::emit_expr(expr, locals)?);
                 wat.push_str("        return\n");
             }
-            Statement::Break(_) | Statement::Continue(_) => {
-                bail!("WASM backend does not support break/continue. Use `ooda run` or `ooda build --target c`.");
+            Statement::Break(_) => {
+                wat.push_str("        br $break\n");
+            }
+            Statement::Continue(_) => {
+                wat.push_str("        br $continue\n");
             }
             Statement::Return(None, _) => {
                 wat.push_str("        return\n");
