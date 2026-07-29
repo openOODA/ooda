@@ -46,7 +46,7 @@ import "lib.oo";       // relative / OODA_PATH
 | Option / Result / must-use / let mut | Real |
 | Nested block scopes | Real: `let` inside if/while does **not** leak; match-arm pattern shadows restore; outer `let mut` assign in match+if persists |
 | Type aliases | Real: unify for arith/return; `Int[lo..hi]` on params **and** let/return (const TC + runtime) |
-| Caps + sealed effects | Static **and runtime** object-cap: free sealed ops need live handle Value; ambient-only denied |
+| Caps + sealed effects | **Interpreter:** static + runtime object-cap (live handle). **C/LLVM/WASM:** sealed free **and method** forms (`.read_file`, `.path_exists`, `.file_size`, `.env_get`, `.sys_exec`, …) are **refused** at build — no ambient native bypass |
 | `?` try-operator | Real: unwraps Result; early-return on Err; only in Result-returning fns; build refuses outside interp |
 | Bool match | Real: `true`/`false` patterns + exhaustiveness |
 | `.contains` | Real on String (interp + CHS C) |
@@ -55,11 +55,12 @@ import "lib.oo";       // relative / OODA_PATH
 | Nested/tail return refine | Real: const `return` inside if/while + tail expr enforces `Int[lo..hi]` / aliases |
 | `Int[lo..hi]` refinement | Real on let/assign/return/params **including via type aliases**; const typecheck + runtime |
 | Types fail-closed | Missing returns fail; match arms unify; same-type arith/eq; if-value needs else; assert_eq types |
-| Net GET (`fetch` / `http_get` / `.get`) | Real HTTPS via curl under threaded `&NetCap` |
+| Net GET (`fetch` / `http_get` / `.get`) | Real HTTPS via curl under threaded `&NetCap` (interpreter) |
 | AI diagnostics (`--json-errors`) | Real JSON + measured timings; patch codemods including `refinement_bounds` |
 | Measured `ooda em` / `em --json` / `bench --em` | Real clocks only (W, µs, V); JSON EmReport for agents — no fake Boyd Ps |
 | String methods | Real on interpreter + CHS C (`.char_at` / `.str_slice`); LLVM subset refuses strings fail-closed |
-| Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM; IR-only link fails non-zero |
+| Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM (method forms included as of v0.69); pure compute subset may lower; IR-only link fails non-zero |
+| `EnvCap` `.env_get` | Real on **interpreter**; C build refuses (sealed) |
 | `ooda patch` | Real body / params / return type / requires / ensures |
 | `ooda migrate --edition 2026` | Partial real: exhaustive match wildcards + assigned `let`→`let mut` |
 | `type T = Int where …` | Fail-closed (use `requires` / `Int[lo..hi]`) |

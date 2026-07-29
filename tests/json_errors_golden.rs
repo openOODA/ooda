@@ -1395,7 +1395,7 @@ pub fn main() { println(f(true)); }
 }
 
 #[test]
-fn build_c_lowers_sys_exec_method() {
+fn build_c_refuses_sys_exec_method() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_c_sys_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -1415,13 +1415,19 @@ pub fn main(sys: &SysCap) -> Int {
         .output()
         .expect("spawn");
     assert!(
-        out.status.success(),
-        "C must lower .sys_exec: {}",
-        String::from_utf8_lossy(&out.stderr)
+        !out.status.success(),
+        "C must refuse sealed .sys_exec without runtime cap tokens"
     );
-    let exe = path.with_extension("");
-    let run = std::process::Command::new(&exe).output().expect("run");
-    assert!(run.status.success());
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("sealed") || err.contains(".sys_exec") || err.contains("sys_exec"),
+        "expected sealed refuse, got: {}",
+        err
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1579,7 +1585,7 @@ pub fn main() {
 }
 
 #[test]
-fn build_c_lowers_path_exists_method() {
+fn build_c_refuses_path_exists_method() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_c_exists_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -1600,15 +1606,19 @@ pub fn main(fs: &FsCap) {
         .output()
         .expect("spawn");
     assert!(
-        out.status.success(),
-        "C must lower .path_exists: {}",
-        String::from_utf8_lossy(&out.stderr)
+        !out.status.success(),
+        "C must refuse sealed .path_exists without runtime cap tokens"
     );
-    let exe = path.with_extension("");
-    let run = std::process::Command::new(&exe).output().expect("run");
-    assert!(run.status.success());
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(stdout.contains("exists"), "stdout={}", stdout);
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("sealed") || err.contains("path_exists"),
+        "expected sealed refuse, got: {}",
+        err
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1654,26 +1664,21 @@ pub fn main(fs: &FsCap) {{
 }
 
 #[test]
-fn build_c_lowers_file_size_method() {
+fn build_c_refuses_file_size_method() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_c_sz_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
-    let target_file = dir.join("data.txt");
-    std::fs::write(&target_file, "1234567890").unwrap();
     let path = dir.join("m.oo");
     std::fs::write(
         &path,
-        format!(
-            r#"
-pub fn main(fs: &FsCap) {{
-    let sz = fs.file_size("{}");
-    if sz > 0 {{
+        r#"
+pub fn main(fs: &FsCap) {
+    let sz = fs.file_size("/etc/hosts");
+    if sz > 0 {
         println(sz);
-    }}
-}}
+    }
+}
 "#,
-            target_file.display()
-        ),
     )
     .unwrap();
     let out = std::process::Command::new(bin)
@@ -1681,15 +1686,19 @@ pub fn main(fs: &FsCap) {{
         .output()
         .expect("spawn");
     assert!(
-        out.status.success(),
-        "C must lower .file_size: {}",
-        String::from_utf8_lossy(&out.stderr)
+        !out.status.success(),
+        "C must refuse sealed .file_size without runtime cap tokens"
     );
-    let exe = path.with_extension("");
-    let run = std::process::Command::new(&exe).output().expect("run");
-    assert!(run.status.success());
-    let stdout = String::from_utf8_lossy(&run.stdout);
-    assert!(stdout.contains("10"), "stdout={}", stdout);
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("sealed") || err.contains("file_size"),
+        "expected sealed refuse, got: {}",
+        err
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1720,7 +1729,115 @@ pub fn main(env: &EnvCap) {
         "run must handle .env_get: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("env ok"), "stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn build_c_refuses_env_get_method() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_c_env_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main(env: &EnvCap) {
+    let res = env.env_get("PATH");
+    if res.is_ok {
+        println("env ok");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        !out.status.success(),
+        "C must refuse sealed .env_get without runtime cap tokens"
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("sealed") || err.contains("env_get"),
+        "expected sealed refuse, got: {}",
+        err
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn run_interpreter_handles_env_get_missing_key() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_run_env_miss_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    // Unlikely to be set in CI; if set, test still passes on is_err branch absence.
+    std::fs::write(
+        &path,
+        r#"
+pub fn main(env: &EnvCap) {
+    let res = env.env_get("OODA_TEST_MISSING_ENV_KEY_9f3a2c1b");
+    if res.is_err {
+        println("missing ok");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["run", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "run must handle missing .env_get: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("missing ok"), "stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn build_c_lowers_result_is_ok_without_sealed_io() {
+    // Pure Result probe (no sealed I/O) must still compile on C.
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_c_isok_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let r: Result[String, String] = Ok("hi");
+    if r.is_ok {
+        println("ok");
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "C must lower Result.is_ok without sealed I/O: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("ok"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }

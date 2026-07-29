@@ -139,6 +139,21 @@ pub const EFFECT_BUILTINS: &[EffectBuiltin] = &[
         receiver_is_cap: false,
     },
     EffectBuiltin {
+        name: ".path_exists",
+        requires: CapKind::Fs,
+        receiver_is_cap: true,
+    },
+    EffectBuiltin {
+        name: "file_size",
+        requires: CapKind::Fs,
+        receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: ".file_size",
+        requires: CapKind::Fs,
+        receiver_is_cap: true,
+    },
+    EffectBuiltin {
         name: "http_download",
         requires: CapKind::Net,
         receiver_is_cap: false,
@@ -148,6 +163,11 @@ pub const EFFECT_BUILTINS: &[EffectBuiltin] = &[
         name: "sys_exec",
         requires: CapKind::Sys,
         receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: ".sys_exec",
+        requires: CapKind::Sys,
+        receiver_is_cap: true,
     },
     EffectBuiltin {
         name: "extract_tar_gz",
@@ -706,6 +726,68 @@ mod tests {
         "#,
         );
         assert!(CapabilityChecker::check_program(&prog).is_err());
+    }
+
+    #[test]
+    fn method_forms_are_sealed_for_dual_engine() {
+        // Method-style FS/Sys/Env must appear in collect_sealed so build refuses.
+        let prog = parse_program(
+            r#"
+            pub fn fs_m(fs: &FsCap) {
+                let _ = fs.path_exists("/tmp");
+                let _ = fs.file_size("/tmp/x");
+            }
+            pub fn sys_m(sys: &SysCap) {
+                let _ = sys.sys_exec("true");
+            }
+            pub fn env_m(env: &EnvCap) {
+                let _ = env.env_get("PATH");
+            }
+        "#,
+        );
+        let sealed = collect_sealed_effect_names(&prog);
+        for need in [".path_exists", ".file_size", ".sys_exec", ".env_get"] {
+            assert!(
+                sealed.iter().any(|s| s == need),
+                "missing sealed method {} in {:?}",
+                need,
+                sealed
+            );
+        }
+        assert!(
+            CapabilityChecker::check_program(&prog).is_ok(),
+            "with live receivers, method forms must typecheck caps: {:?}",
+            CapabilityChecker::check_program(&prog).err()
+        );
+    }
+
+    #[test]
+    fn denies_path_exists_method_without_fscap_receiver() {
+        let prog = parse_program(
+            r#"
+            pub fn rogue() {
+                let b = path_exists("/tmp");
+            }
+        "#,
+        );
+        // free path_exists without handle
+        assert!(CapabilityChecker::check_program(&prog).is_err());
+        let prog2 = parse_program(
+            r#"
+            pub fn rogue(net: &NetCap) {
+                let b = net.path_exists("/tmp");
+            }
+        "#,
+        );
+        let err = CapabilityChecker::check_program(&prog2).unwrap_err().to_string();
+        assert!(
+            err.contains("wrong-kind")
+                || err.contains("not a")
+                || err.contains("FsCap")
+                || err.contains("capability"),
+            "wrong receiver kind: {}",
+            err
+        );
     }
 
     #[test]

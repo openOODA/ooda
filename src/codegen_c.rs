@@ -311,7 +311,11 @@ impl Gen {
         let mut env = HashMap::new();
         for p in &f.params {
             params.push(format!("{} {}", self.c_ty(&p.param_type), p.name));
-            env.insert(p.name.clone(), self.c_ty(&p.param_type));
+            let env_ty = match &p.param_type {
+                Type::FsCap | Type::EnvCap | Type::SysCap | Type::NetCap => "/*cap*/".into(),
+                other => self.c_ty(other),
+            };
+            env.insert(p.name.clone(), env_ty);
         }
         let mut code = format!(
             "{} oo_{}({}) {{\n",
@@ -341,8 +345,13 @@ impl Gen {
         for p in &f.params {
             match &p.param_type {
                 Type::FsCap | Type::EnvCap | Type::SysCap | Type::NetCap => {
-                    code.push_str(&format!("  int {} = 1; /* capability token */\n", p.name));
-                    env.insert(p.name.clone(), "int".into());
+                    // Compile-only placeholder. Runtime object-cap is interpreter-only;
+                    // dual-engine refuses sealed I/O before this path for sealed programs.
+                    code.push_str(&format!(
+                        "  int {} = 1; /* cap token erased on C (no runtime gate) */\n",
+                        p.name
+                    ));
+                    env.insert(p.name.clone(), "/*cap*/".into());
                 }
                 Type::List(inner) if matches!(**inner, Type::String) || p.name == "args" || p.name == "argv" => {
                     code.push_str("  OoSList args = oo_slist_new();\n");
@@ -790,11 +799,13 @@ impl Gen {
                     }
                     return Ok((code, t, "long long".into()));
                 }
-                if field == "is_ok" || field == "is_err" {
+                // Option/Result both use OoResS.ok (not a distinct is_some field).
+                if field == "is_ok" || field == "is_err" || field == "is_some" || field == "is_none"
+                {
                     let (c, v, _) = self.emit_expr(&args[0], env)?;
                     let t = self.fresh("io");
                     let mut code = c;
-                    if field == "is_ok" {
+                    if field == "is_ok" || field == "is_some" {
                         code.push_str(&format!("  int {} = ({}).ok;\n", t, v));
                     } else {
                         code.push_str(&format!("  int {} = !({}).ok;\n", t, v));
@@ -823,32 +834,26 @@ impl Gen {
         let mut code = String::new();
         let mut cargs = Vec::new();
         let mut arg_tys = Vec::new();
+        let method_name_early = name.strip_prefix('.').unwrap_or(name);
+        let skip_cap_args = matches!(
+            method_name_early,
+            "read_file"
+                | "write_file"
+                | "fs_read"
+                | "fs_write"
+                | "env_get"
+                | "path_exists"
+                | "fs_exists"
+                | "file_size"
+                | "sys_exec"
+        );
         for a in args {
-            // skip pure capability args for free functions
-            if let Expression::Variable(n, _) = a {
-                if env.get(n).map(|t| t == "int" || t == "/*cap*/").unwrap_or(false)
-                    && matches!(
-                        name,
-                        "read_file" | "write_file" | "fs_read" | "fs_write" | "env_get"
-                    )
-                {
-                    // still need path/content only
-                }
-            }
             let (c, v, ty) = self.emit_expr(a, env)?;
             code.push_str(&c);
-            // Filter capability dummy ints for builtins that don't take them in C
-            if ty == "int" && matches!(name, "read_file" | "write_file" | "fs_read" | "fs_write") {
-                // could be cap — only skip if it's a known cap var
+            // Skip erased capability tokens by type (not by parameter name).
+            if skip_cap_args && (ty == "/*cap*/" || ty == "int") {
                 if let Expression::Variable(n, _) = a {
-                    if env.get(n).map(|t| t.as_str()) == Some("int")
-                        && (n.contains("fs")
-                            || n.contains("cap")
-                            || n == "fs"
-                            || n == "net"
-                            || n == "sys"
-                            || n == "env")
-                    {
+                    if env.get(n).map(|t| t.as_str()) == Some("/*cap*/") {
                         continue;
                     }
                 }
@@ -993,26 +998,30 @@ impl Gen {
                 code.push_str(&format!("  long long {} = oo_file_size({});\n", t, path));
                 Ok((code, t, "long long".into()))
             }
-            "is_some" => {
-                code.push_str(&format!("  int {} = ({}.is_some);\n", t, cargs[0]));
-                Ok((code, t, "int".into()))
-            }
-            "is_none" => {
-                code.push_str(&format!("  int {} = !({}.is_some);\n", t, cargs[0]));
-                Ok((code, t, "int".into()))
-            }
-            "env_get" => {
-                let key = cargs.last().unwrap();
-                code.push_str(&format!("  OoResS {} = oo_env_get({});\n", t, key));
-                Ok((code, t, "OoResS".into()))
-            }
-            "is_ok" => {
+            // Option and Result both lower to OoResS { int ok; OoStr val; }.
+            "is_some" | "is_ok" => {
+                if cargs.is_empty() {
+                    bail!("C backend: .{} needs a receiver", method_name);
+                }
                 code.push_str(&format!("  int {} = ({}.ok);\n", t, cargs[0]));
                 Ok((code, t, "int".into()))
             }
-            "is_err" => {
+            "is_none" | "is_err" => {
+                if cargs.is_empty() {
+                    bail!("C backend: .{} needs a receiver", method_name);
+                }
                 code.push_str(&format!("  int {} = !({}.ok);\n", t, cargs[0]));
                 Ok((code, t, "int".into()))
+            }
+            "env_get" => {
+                // Dead for sealed programs: dual-engine refuse in main.rs. Kept for
+                // host/smoke paths that emit C without the sealed gate.
+                if cargs.is_empty() {
+                    bail!("C backend: env_get needs a key argument");
+                }
+                let key = cargs.last().unwrap();
+                code.push_str(&format!("  OoResS {} = oo_env_get({});\n", t, key));
+                Ok((code, t, "OoResS".into()))
             }
             "host_ast_dump" => {
                 code.push_str(&format!(

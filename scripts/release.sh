@@ -9,6 +9,12 @@
 #     share/README.md
 #     share/DESIGN.md         # if present
 #     std/.gitkeep            # slot for OODA_STD (not a full std clone)
+#
+# Release train (do not reverse):
+#   1) Bump + test ooda; notes must match `git show` for the tag
+#   2) Tag ooda and publish the GitHub Release + tarball asset
+#   3) Only then pin docs / openOODA.github.io / qa to the same version
+# Sibling install scripts must not advertise a pin without a released asset.
 # ===================================================================
 set -euo pipefail
 
