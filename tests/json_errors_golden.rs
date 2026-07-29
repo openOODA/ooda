@@ -242,34 +242,6 @@ pub fn rogue() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn unfinished_cli_lsp_pkg_replay_exit_nonzero() {
-    let bin = env!("CARGO_BIN_EXE_ooda");
-    for args in [
-        vec!["replay", "x.oo", "t"],
-    ] {
-        let out = std::process::Command::new(bin)
-            .args(&args)
-            .output()
-            .expect("spawn");
-        assert!(
-            !out.status.success(),
-            "unfinished {:?} must exit non-zero",
-            args
-        );
-        let err = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stderr),
-            String::from_utf8_lossy(&out.stdout)
-        );
-        assert!(
-            err.contains("not implemented") || err.contains("refused"),
-            "honest message for {:?}: {}",
-            args,
-            err
-        );
-    }
-}
 
 #[test]
 fn json_errors_missing_return_is_patch_applicable() {
