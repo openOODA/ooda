@@ -2086,18 +2086,18 @@ mod tests {
     }
 
     #[test]
-    fn where_type_alias_is_fail_closed() {
+    fn where_type_alias_parses_successfully() {
         let src = r#"type Port = Int where 1..=65535; pub fn main() {}"#;
         let tokens = crate::lexer::Lexer::new(src).tokenize().expect("lex");
-        let err = crate::parser::Parser::new(tokens)
+        let prog = crate::parser::Parser::new(tokens)
             .parse_program()
-            .expect_err("where must fail-closed");
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("where") && msg.contains("not implemented"),
-            "got: {}",
-            msg
-        );
+            .expect("where must parse successfully");
+        if let crate::ast::Item::TypeAlias(name, target) = &prog.items[0] {
+            assert_eq!(name, "Port");
+            assert!(matches!(target, crate::ast::Type::Custom(ref s) if s == "Int[1..65535]"));
+        } else {
+            panic!("Expected TypeAlias");
+        }
     }
 
     #[test]

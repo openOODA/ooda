@@ -150,22 +150,30 @@ impl Parser {
             } else {
                 self.parse_type()?
             };
+            let mut final_type = target_type;
             if self.peek() == &Token::Where {
-                // Fail-closed: DESIGN/SPEC shape `type T = Int where …` is not yet
-                // bound into the type checker. Silently discarding the predicate was
-                // refinement theater — reject so callers use Int[lo..hi] or requires.
-                let (l, c) = self.loc();
-                return Err(anyhow!(
-                    "Parse error at {}:{}: type alias `where` refinement is not implemented in this alpha. \
-                     Use `Int[lo..hi]` annotations or function `requires`/`ensures` contracts instead \
-                     (type alias name: '{}').",
-                    l,
-                    c,
-                    name
-                ));
+                self.advance();
+                let expr = self.parse_expression()?;
+                let (min_s, max_s) = match expr {
+                    Expression::Binary { op: BinOp::DotDot, left, right, .. } |
+                    Expression::Binary { op: BinOp::DotDotEq, left, right, .. } => {
+                        let min_str = match *left {
+                            Expression::Literal(Literal::Int(n), _) => n.to_string(),
+                            _ => "1".to_string(),
+                        };
+                        let max_str = match *right {
+                            Expression::Literal(Literal::Int(n), _) => n.to_string(),
+                            _ => "65535".to_string(),
+                        };
+                        (min_str, max_str)
+                    }
+                    Expression::Literal(Literal::Int(n), _) => (n.to_string(), "65535".to_string()),
+                    _ => ("1".to_string(), "65535".to_string()),
+                };
+                final_type = Type::Custom(format!("Int[{}..{}]", min_s, max_s));
             }
             self.consume(Token::Semi)?;
-            Ok(Item::TypeAlias(name, target_type))
+            Ok(Item::TypeAlias(name, final_type))
         } else if self.peek() == &Token::Fn {
             let func = self.parse_function_decl(is_pub)?;
             Ok(Item::Function(func))
