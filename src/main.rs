@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.61.0-alpha")]
+#[command(version = "0.62.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -284,9 +284,9 @@ fn main() -> Result<()> {
                 let (line, col) = parse_loc(&msg);
                 if json_errors {
                     AiDiagnostic::new("RuntimeContractError", &file, line, col, msg.clone(), "Execution failed or precondition/postcondition contract violated.")
-                        .with_fix(
+                        .with_patch_fix(
                             "Satisfy requires / handle ensures",
-                            "Check call-site arguments against `requires`; error includes call site line:col when available.",
+                            r#"{"codemod":"contract","hint":"requires failed: fix call-site args; ensures failed: fix function body or postcondition; see call site line:col"}"#,
                         )
                         .with_timings(
                             timings.parse_us,
@@ -1242,12 +1242,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.61.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.62.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.61.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.62.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

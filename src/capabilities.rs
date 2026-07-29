@@ -223,6 +223,10 @@ fn collect_sealed_in_block(block: &Block, found: &mut std::collections::BTreeSet
         match stmt {
             Statement::Let { init, .. } => collect_sealed_in_expr(init, found),
             Statement::Assign { value, .. } => collect_sealed_in_expr(value, found),
+            Statement::FieldAssign { object, value, .. } => {
+                collect_sealed_in_expr(object, found);
+                collect_sealed_in_expr(value, found);
+            }
             Statement::Return(Some(e), _) | Statement::Expr(e, _) => {
                 collect_sealed_in_expr(e, found)
             }
@@ -329,6 +333,10 @@ impl CapabilityChecker {
             match stmt {
                 Statement::Let { init, .. } => Self::check_expr(init, func, funcs)?,
                 Statement::Assign { value, .. } => Self::check_expr(value, func, funcs)?,
+                Statement::FieldAssign { object, value, .. } => {
+                    Self::check_expr(object, func, funcs)?;
+                    Self::check_expr(value, func, funcs)?;
+                }
                 Statement::Return(Some(expr), _) => Self::check_expr(expr, func, funcs)?,
                 Statement::Expr(expr, _) => Self::check_expr(expr, func, funcs)?,
                 Statement::While { cond, body, .. } => {
@@ -586,6 +594,10 @@ impl CapabilityChecker {
                             handles.insert(name.clone());
                         }
                     }
+                    Self::collect_cap_aliases_in_expr(value, handles);
+                }
+                Statement::FieldAssign { object, value, .. } => {
+                    Self::collect_cap_aliases_in_expr(object, handles);
                     Self::collect_cap_aliases_in_expr(value, handles);
                 }
                 Statement::Return(Some(e), _) | Statement::Expr(e, _) => {

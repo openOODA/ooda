@@ -1139,6 +1139,39 @@ impl Interpreter {
                     let val = self.eval_expr(value, env)?;
                     env.insert(name.clone(), val);
                 }
+                Statement::FieldAssign {
+                    object,
+                    field,
+                    value,
+                    ..
+                } => {
+                    let Expression::Variable(obj_name, _) = object else {
+                        return Err(anyhow!(
+                            "Runtime error: field assign requires variable receiver"
+                        ));
+                    };
+                    let val = self.eval_expr(value, env)?;
+                    let entry = env.get_mut(obj_name).ok_or_else(|| {
+                        anyhow!("Runtime error: undefined variable '{}'", obj_name)
+                    })?;
+                    match entry {
+                        Value::Record { fields, .. } => {
+                            if !fields.contains_key(field) {
+                                return Err(anyhow!(
+                                    "Runtime error: struct has no field '{}'",
+                                    field
+                                ));
+                            }
+                            fields.insert(field.clone(), val);
+                        }
+                        other => {
+                            return Err(anyhow!(
+                                "Runtime error: field assign on non-struct value {:?}",
+                                other
+                            ));
+                        }
+                    }
+                }
                 Statement::Return(Some(expr), _) => {
                     let v = self.eval_expr(expr, env)?;
                     self.pending_return = Some(v.clone());
@@ -2217,4 +2250,21 @@ mod tests {
         assert!(msg.contains("RefinementTypeViolation"), "got: {}", msg);
     }
 
+
+    #[test]
+    fn field_assign_runtime() {
+        let prog = parse(
+            r#"
+            type Pt = struct { x: Int, y: Int };
+            pub fn main() -> Int {
+                let mut p = Pt { x: 1, y: 2 };
+                p.x = 7;
+                return p.x;
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp.call_function("main", vec![], &mut HashMap::new()).expect("run");
+        assert_eq!(v, Value::Int(7));
+    }
 }

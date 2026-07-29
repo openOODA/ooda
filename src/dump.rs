@@ -260,6 +260,15 @@ fn dump_stmt(out: &mut String, stmt: &Statement, idx: usize, depth: usize) {
             ));
             dump_expr(out, init, depth + 1);
         }
+        Statement::FieldAssign { object, field, value, span } => {
+            out.push_str(&format!(
+                "{}STMT[{}] FIELD_ASSIGN .{} @{}:{}
+",
+                pad, idx, field, span.line, span.col
+            ));
+            dump_expr(out, object, depth + 1);
+            dump_expr(out, value, depth + 1);
+        }
         Statement::Assign { name, value, span } => {
             out.push_str(&format!(
                 "{}STMT[{}] ASSIGN name={} @{}:{}\n",

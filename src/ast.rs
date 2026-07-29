@@ -167,6 +167,13 @@ pub enum Statement {
         value: Expression,
         span: Span,
     },
+    /// Field assignment (`obj.field = expr;`). Requires `obj` to be `let mut` struct.
+    FieldAssign {
+        object: Expression,
+        field: String,
+        value: Expression,
+        span: Span,
+    },
     Return(Option<Expression>, Span),
     Expr(Expression, Span),
     While {
@@ -253,6 +260,9 @@ fn stmt_calls_old(s: &Statement) -> bool {
     match s {
         Statement::Let { init, .. } => expression_calls_old(init),
         Statement::Assign { value, .. } => expression_calls_old(value),
+        Statement::FieldAssign { object, value, .. } => {
+            expression_calls_old(object) || expression_calls_old(value)
+        }
         Statement::Return(Some(e), _) => expression_calls_old(e),
         Statement::Return(None, _) => false,
         Statement::Expr(e, _) => expression_calls_old(e),

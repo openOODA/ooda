@@ -116,6 +116,9 @@ fn format_stmt(stmt: &Statement, indent: usize) -> String {
         Statement::Assign { name, value, .. } => {
             format!("{} = {};", name, format_expr(value))
         }
+        Statement::FieldAssign { object, field, value, .. } => {
+            format!("{}.{} = {};", format_expr(object), field, format_expr(value))
+        }
         Statement::Return(Some(e), _) => format!("return {};", format_expr(e)),
         Statement::Return(None, _) => "return;".into(),
         Statement::Expr(e, _) => format!("{};", format_expr(e)),

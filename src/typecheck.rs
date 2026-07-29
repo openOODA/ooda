@@ -239,6 +239,8 @@ pub struct TypeChecker {
     type_aliases: HashMap<String, Ty>,
     /// `type Port = Int[lo..hi]` — bounds keyed by alias name (from_ast collapses to Int).
     alias_refinements: HashMap<String, (i64, i64)>,
+    /// Active block's const list lengths (set by check_block for list_get OOB).
+    active_list_lens: std::cell::RefCell<HashMap<String, i64>>,
 }
 
 /// Parse `Int[lo..hi]` refinement bounds from a type annotation.
@@ -285,6 +287,7 @@ impl TypeChecker {
             param_refinements: HashMap::new(),
             type_aliases: HashMap::new(),
             alias_refinements: HashMap::new(),
+            active_list_lens: std::cell::RefCell::new(HashMap::new()),
         };
 
         // Collect type aliases first (named structs for StructLit).
@@ -613,6 +616,19 @@ impl TypeChecker {
         Ok(())
     }
 
+
+    /// Const length of list_new / list_push chains, using env of known binding lengths.
+    fn const_list_len(expr: &Expression, env_lens: &HashMap<String, i64>) -> Option<i64> {
+        match expr {
+            Expression::Call { name, args, .. } if name == "list_new" && args.is_empty() => Some(0),
+            Expression::Call { name, args, .. } if name == "list_push" && args.len() == 2 => {
+                Self::const_list_len(&args[0], env_lens).map(|n| n + 1)
+            }
+            Expression::Variable(name, _) => env_lens.get(name).copied(),
+            _ => None,
+        }
+    }
+
     /// Typecheck a block. `parent_refinements` carries `Int[lo..hi]` bounds from
     /// enclosing scopes so nested `if`/`while` still enforce assignment bounds.
     fn check_block(
@@ -628,7 +644,12 @@ impl TypeChecker {
     ) -> Result<Ty> {
         let mut last = Ty::Void;
         let mut refinements: HashMap<String, (i64, i64)> = parent_refinements.clone();
+        // Const list lengths for list_new / list_push chains (fail-closed list_get OOB).
+        let mut list_lens: HashMap<String, i64> = HashMap::new();
         let mut path_returned = false;
+        // Sync for list_get const checks inside infer_expr.
+        *self.active_list_lens.borrow_mut() = list_lens.clone();
+
         for stmt in &block.stmts {
             if path_returned {
                 let sp = stmt_span(stmt);
@@ -701,6 +722,12 @@ impl TypeChecker {
                     } else {
                         env.insert(name.clone(), init_ty);
                     }
+                    if let Some(len) = Self::const_list_len(init, &list_lens) {
+                        list_lens.insert(name.clone(), len);
+                    } else {
+                        list_lens.remove(name);
+                    }
+                    *self.active_list_lens.borrow_mut() = list_lens.clone();
                     mutable.insert(name.clone(), *is_mut);
                     last = Ty::Void;
                 }
@@ -747,6 +774,87 @@ impl TypeChecker {
                             span.col,
                             vty.display(),
                             name,
+                            want.display()
+                        ));
+                    }
+                    if let Some(len) = Self::const_list_len(value, &list_lens) {
+                        list_lens.insert(name.clone(), len);
+                    } else {
+                        list_lens.remove(name);
+                    }
+                    *self.active_list_lens.borrow_mut() = list_lens.clone();
+                    last = Ty::Void;
+                }
+                Statement::FieldAssign {
+                    object,
+                    field,
+                    value,
+                    span,
+                } => {
+                    let obj_ty = self.infer_expr(object, env)?;
+                    // Mutability: only `let mut` root Variable may be field-assigned.
+                    match object {
+                        Expression::Variable(name, _) => {
+                            if !mutable.get(name).copied().unwrap_or(false) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: cannot assign to field of immutable binding '{}'; use `let mut {}`",
+                                    span.line,
+                                    span.col,
+                                    name,
+                                    name
+                                ));
+                            }
+                        }
+                        _ => {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: field assign requires a simple variable receiver (e.g. p.x = …)",
+                                span.line,
+                                span.col
+                            ));
+                        }
+                    }
+                    let fields = match &obj_ty {
+                        Ty::Struct { fields, .. } => fields.clone(),
+                        Ty::Custom(n) => match self.type_aliases.get(n) {
+                            Some(Ty::Struct { fields, .. }) => fields.clone(),
+                            _ => {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: field assign on non-struct type {}",
+                                    span.line,
+                                    span.col,
+                                    obj_ty.display()
+                                ));
+                            }
+                        },
+                        other => {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: field assign on non-struct type {}",
+                                span.line,
+                                span.col,
+                                other.display()
+                            ));
+                        }
+                    };
+                    let want = fields
+                        .iter()
+                        .find(|(n, _)| n == field)
+                        .map(|(_, t)| t.clone())
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "Type error at {}:{}: struct has no field '{}'",
+                                span.line,
+                                span.col,
+                                field
+                            )
+                        })?;
+                    let vty = self.infer_expr(value, env)?;
+                    if !self.unify(&vty, &want) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: cannot assign {} to field '{}' of type {}",
+                            span.line,
+                            span.col,
+                            vty.display(),
+                            field,
                             want.display()
                         ));
                     }
@@ -917,7 +1025,7 @@ impl TypeChecker {
                     sp.col
                 ));
             }
-            // Tail expression may be a nested `else if` chain.
+            // Tail expression may be a nested `else if` chain or match.
             // Clone env/mutable per branch so `else if` desugar cannot leak
             // sibling `let`s (else if is a nested if as the else block's tail).
             match expr.as_ref() {
@@ -961,6 +1069,30 @@ impl TypeChecker {
                         )?;
                     }
                     last = Ty::Void;
+                }
+                Expression::Match { arms, span: mspan, .. } => {
+                    last = self.infer_expr_m(expr, env, mutable)?;
+                    // Const arm values as implicit return: enforce Int[lo..hi].
+                    if let Some((min_v, max_v)) = return_bounds {
+                        for arm in arms {
+                            if let Some(val) = Ty::const_int(&arm.body) {
+                                if val < min_v || val > max_v {
+                                    let sp = arm.body.span();
+                                    return Err(anyhow!(
+                                        "Type error at {}:{}: RefinementTypeViolation: Returned value {} out of refinement bounds [{}..{}] for match arm return type in '{}' (match at {}:{})",
+                                        sp.line,
+                                        sp.col,
+                                        val,
+                                        min_v,
+                                        max_v,
+                                        ctx,
+                                        mspan.line,
+                                        mspan.col
+                                    ));
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {
                     last = self.infer_expr_m(expr, env, mutable)?;
@@ -1485,6 +1617,29 @@ impl TypeChecker {
                             expr.span().col,
                             arg_tys[1].display()
                         ));
+                    }
+                    // Const index bounds: negative always fail; known list lengths fail OOB.
+                    if let Some(idx) = Ty::const_int(&args[1]) {
+                        if idx < 0 {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: list_get index {} is negative (const bounds check)",
+                                expr.span().line,
+                                expr.span().col,
+                                idx
+                            ));
+                        }
+                        let lens = self.active_list_lens.borrow();
+                        if let Some(len) = Self::const_list_len(&args[0], &lens) {
+                            if idx >= len {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: list_get index {} out of bounds for list of length {} (const bounds check)",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    idx,
+                                    len
+                                ));
+                            }
+                        }
                     }
                     return match &arg_tys[0] {
                         Ty::List(inner) => Ok((**inner).clone()),
@@ -2064,6 +2219,7 @@ fn stmt_span(stmt: &Statement) -> crate::ast::Span {
     match stmt {
         Statement::Let { span, .. }
         | Statement::Assign { span, .. }
+        | Statement::FieldAssign { span, .. }
         | Statement::Return(_, span)
         | Statement::Expr(_, span)
         | Statement::While { span, .. } => *span,
@@ -3425,5 +3581,79 @@ mod tests {
             "tail expr return must enforce bounds: {}",
             err
         );
+    }
+
+    #[test]
+    fn match_arm_const_return_refinement_oob_fails() {
+        let src = r#"
+            type Port = Int[1..10];
+            pub fn f() -> Port {
+                match Ok(1) {
+                    Ok(v) => 99,
+                    Err(e) => 1,
+                }
+            }
+            pub fn main() { println(f()); }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("99"),
+            "match arm const return: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn list_get_const_oob_fails() {
+        let src = r#"
+            pub fn main() {
+                let xs = list_new();
+                let ys = list_push(xs, 1);
+                let z = list_get(ys, 5);
+                println(z);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("out of bounds") || err.contains("list_get"),
+            "list_get const OOB: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn list_get_negative_const_fails() {
+        let src = r#"
+            pub fn main() {
+                let xs = list_new();
+                let ys = list_push(xs, 1);
+                let z = list_get(ys, 0 - 1);
+                println(z);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(err.contains("negative") || err.contains("out of bounds"), "{}", err);
+    }
+
+    #[test]
+    fn field_assign_typechecks_and_rejects_immutable() {
+        let ok = r#"
+            type Pt = struct { x: Int, y: Int };
+            pub fn main() {
+                let mut p = Pt { x: 1, y: 2 };
+                p.x = 3;
+                println(p.x);
+            }
+        "#;
+        assert!(check(ok).is_ok(), "{:?}", check(ok).err());
+        let bad = r#"
+            type Pt = struct { x: Int, y: Int };
+            pub fn main() {
+                let p = Pt { x: 1, y: 2 };
+                p.x = 3;
+            }
+        "#;
+        let err = check(bad).unwrap_err().to_string();
+        assert!(err.contains("immutable") || err.contains("let mut"), "{}", err);
     }
 }

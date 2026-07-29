@@ -429,6 +429,17 @@ impl Gen {
                 env.insert(name.clone(), cty.clone());
                 Ok(format!("{}  {} {} = {};\n", c, cty, name, v))
             }
+            Statement::FieldAssign { object, field, value, .. } => {
+                // CHS structs are C structs: obj.field = value
+                let Expression::Variable(obj_name, _) = object else {
+                    bail!("C backend: field assign requires variable receiver");
+                };
+                let (vcode, vtmp, vty) = self.emit_expr(value, env)?;
+                let mut code = vcode;
+                code.push_str(&format!("  {}.{} = {};\n", obj_name, field, vtmp));
+                let _ = vty;
+                Ok(code)
+            }
             Statement::Assign { name, value, .. } => {
                 let (c, v, _) = self.emit_expr(value, env)?;
                 Ok(format!("{}  {} = {};\n", c, name, v))

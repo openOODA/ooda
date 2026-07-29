@@ -93,6 +93,10 @@ impl LlvmCodeGen {
                     Self::check_expr_subset(init, ctx)?;
                 }
                 Statement::Assign { value, .. } => Self::check_expr_subset(value, ctx)?,
+                Statement::FieldAssign { object, value, .. } => {
+                    Self::check_expr_subset(object, ctx)?;
+                    Self::check_expr_subset(value, ctx)?;
+                }
                 Statement::Return(Some(e), _) => Self::check_expr_subset(e, ctx)?,
                 Statement::Return(None, _) => {}
                 Statement::Expr(e, _) => Self::check_expr_subset(e, ctx)?,
@@ -260,6 +264,9 @@ impl LlvmCodeGen {
                     f_ir.push_str(&format!("  %var_{} = alloca {}\n", name, vty));
                     f_ir.push_str(&format!("  store {} {}, {}* %var_{}\n", vty, val, vty, name));
                     locals.insert(name.clone(), vty);
+                }
+                Statement::FieldAssign { .. } => {
+                    bail!("LLVM integer-subset backend does not support field assignment. Use `ooda run` or `ooda build --target c`.");
                 }
                 Statement::Assign { name, value, .. } => {
                     let (val, code, r, vty) = Self::emit_expr(value, reg, &locals)?;

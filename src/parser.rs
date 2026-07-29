@@ -386,6 +386,24 @@ impl Parser {
                         continue;
                     }
                 }
+                // Field assignment: `obj.field = expr;` (desugared field access is Call .field)
+                if let Expression::Call { name, args, span, .. } = &expr {
+                    if name.starts_with('.')
+                        && args.len() == 1
+                        && self.peek() == &Token::Eq
+                    {
+                        self.advance();
+                        let value = self.parse_expression()?;
+                        self.consume(Token::Semi)?;
+                        stmts.push(Statement::FieldAssign {
+                            object: args[0].clone(),
+                            field: name[1..].to_string(),
+                            value,
+                            span: *span,
+                        });
+                        continue;
+                    }
+                }
                 if self.peek() == &Token::Semi {
                     self.advance();
                     stmts.push(Statement::Expr(expr, self.last_span()));

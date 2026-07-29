@@ -148,6 +148,13 @@ fn collect_assigned_names(block: &Block, assigned: &mut HashSet<String>) {
                 assigned.insert(name.clone());
                 collect_assigned_in_expr(value, assigned);
             }
+            Statement::FieldAssign { object, value, .. } => {
+                if let Expression::Variable(n, _) = object {
+                    assigned.insert(n.clone());
+                }
+                collect_assigned_in_expr(object, assigned);
+                collect_assigned_in_expr(value, assigned);
+            }
             Statement::Let { init, .. } => collect_assigned_in_expr(init, assigned),
             Statement::Return(Some(e), _) | Statement::Expr(e, _) => {
                 collect_assigned_in_expr(e, assigned)
@@ -215,6 +222,9 @@ fn collect_immutable_lets_needing_mut(
 ) {
     for stmt in &block.stmts {
         match stmt {
+            Statement::FieldAssign { .. } => {
+                // Field assigns do not rewrite `let` → `let mut` here.
+            }
             Statement::Let {
                 name,
                 mutable,
@@ -360,6 +370,10 @@ fn collect_match_rewrites(
                 collect_in_expr(init, source, rewrites);
             }
             Statement::Assign { value, .. } => {
+                collect_in_expr(value, source, rewrites);
+            }
+            Statement::FieldAssign { object, value, .. } => {
+                collect_in_expr(object, source, rewrites);
                 collect_in_expr(value, source, rewrites);
             }
             Statement::Return(Some(expr), _) => {

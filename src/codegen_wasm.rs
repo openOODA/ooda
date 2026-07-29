@@ -148,6 +148,9 @@ impl WasmCodeGen {
                     f_wat.push_str(&e_wat);
                     f_wat.push_str(&format!("    local.set ${}\n", name));
                 }
+                Statement::FieldAssign { .. } => {
+                    bail!("WASM backend does not support field assignment. Use `ooda run`.");
+                }
                 Statement::Assign { name, value, .. } => {
                     if !locals.contains_key(name) {
                         // Allow assign to params (also addressable as locals in WASM)
@@ -559,6 +562,9 @@ impl WasmCodeGen {
                 wat.push_str(&Self::emit_expr(init, locals)?);
                 wat.push_str(&format!("        local.set ${}\n", name));
             }
+                Statement::FieldAssign { .. } => {
+                    bail!("WASM backend does not support field assignment. Use `ooda run`.");
+                }
             Statement::Assign { name, value, .. } => {
                 wat.push_str(&Self::emit_expr(value, locals)?);
                 wat.push_str(&format!("        local.set ${}\n", name));
