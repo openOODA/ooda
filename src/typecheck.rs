@@ -375,6 +375,32 @@ impl TypeChecker {
         }
 
         let body_ty = self.check_block(&func.body, &mut env, &mut mutable, &func.name)?;
+
+        // Static refinement bounds check for return statements against function return_type
+        if let Type::Custom(ref s) = func.return_type {
+            if let Some(rest) = s.strip_prefix("Int[").and_then(|str_s| str_s.strip_suffix("]")) {
+                if let Some((min_s, max_s)) = rest.split_once("..") {
+                    let min_v: i64 = min_s.parse().unwrap_or(i64::MIN);
+                    let max_v: i64 = max_s.parse().unwrap_or(i64::MAX);
+                    for stmt in &func.body.stmts {
+                        if let Statement::Return(Some(Expression::Literal(Literal::Int(val), l_span)), _) = stmt {
+                            if *val < min_v || *val > max_v {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: RefinementTypeViolation: Returned value {} out of refinement bounds [{}..{}] for return type of function '{}'",
+                                    l_span.line,
+                                    l_span.col,
+                                    val,
+                                    min_v,
+                                    max_v,
+                                    func.name
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let expected = Ty::from_ast(&func.return_type);
         if !matches!(expected, Ty::Void)
             && !Ty::unifyable(&body_ty, &expected)
@@ -1306,4 +1332,21 @@ mod tests {
         assert!(check(src).is_ok(), "{:?}", check(src).err());
     }
 
+    #[test]
+    fn rejects_out_of_bounds_refinement_return_value() {
+        let src = r#"
+            pub fn get_port() -> Int[1..65535] {
+                return 70000;
+            }
+            pub fn main() {
+                println(get_port());
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("70000"),
+            "expected refinement return error, got: {}",
+            err
+        );
+    }
 }

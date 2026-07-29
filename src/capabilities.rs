@@ -392,20 +392,39 @@ impl CapabilityChecker {
         Ok(())
     }
 
-    /// Cap handle is either a parameter of the right type, or a variable known to be that param.
+    /// Cap handle is either a parameter of the right type, or a variable known to be aliased to that param.
     fn expr_is_cap_handle(expr: &Expression, kind: CapKind, func: &FunctionDecl) -> bool {
         match expr {
-            Expression::Variable(name, _) => func
-                .params
-                .iter()
-                .any(|p| p.name == *name && kind.matches_type(&p.param_type)),
-            // Free-function style: fetch(url) with net: &NetCap on the function —
-            // no cap in args; treat as ambient grant (already checked function_has_cap).
-            // When cap_arg_index points past available design, callers skip this.
-            _ => {
-                // Non-variable receivers are not trusted as forged caps.
+            Expression::Variable(name, _) => {
+                // 1. Direct parameter check
+                if func
+                    .params
+                    .iter()
+                    .any(|p| p.name == *name && kind.matches_type(&p.param_type))
+                {
+                    return true;
+                }
+                // 2. Let-alias check: trace `let alias = cap_param;`
+                for stmt in &func.body.stmts {
+                    if let Statement::Let {
+                        name: let_name,
+                        init,
+                        ..
+                    } = stmt
+                    {
+                        if let_name == name {
+                            if let Expression::Variable(init_name, _) = init {
+                                return func
+                                    .params
+                                    .iter()
+                                    .any(|p| p.name == *init_name && kind.matches_type(&p.param_type));
+                            }
+                        }
+                    }
+                }
                 false
             }
+            _ => false,
         }
     }
 }
@@ -481,6 +500,18 @@ mod tests {
                 fs.write_file("app.log", message);
             }
         "#,
+        );
+    }
+
+    #[test]
+    fn allows_let_aliased_capability_handle() {
+        let prog = parse_program(
+            r#"
+            pub fn main(fs: &FsCap) {
+                let fs_alias = fs;
+                fs_alias.write_file("note.txt", "hello");
+            }
+            "#,
         );
         assert!(CapabilityChecker::check_program(&prog).is_ok());
     }

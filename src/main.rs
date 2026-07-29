@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.29.0-alpha")]
+#[command(version = "0.28.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -137,6 +137,14 @@ enum Commands {
     },
     /// Run empirical benchmarks & claim verification suite on .oo file
     Bench {
+        /// Path to the .oo file
+        file: PathBuf,
+        /// Display Energy-Maneuverability (E-M) Specific Excess Power breakdown
+        #[arg(long)]
+        em: bool,
+    },
+    /// Calculate and display Energy-Maneuverability (E-M) Specific Excess Power (Ps) breakdown
+    Em {
         /// Path to the .oo file
         file: PathBuf,
     },
@@ -303,8 +311,13 @@ fn main() -> Result<()> {
                 Err(code) => std::process::exit(code),
             }
         }
-        Commands::Bench { file } => {
+        Commands::Bench { file, em: _ } => {
             bench::run_empirical_verification_suite(&file)?;
+        }
+        Commands::Em { file } => {
+            let code_len = fs::metadata(&file).map(|m| m.len() as usize).unwrap_or(2048);
+            let em_savings = ooda::em::EmSavings::calculate(500, 300, code_len, None);
+            println!("{}", em_savings.display_summary());
         }
         Commands::Build { file, release: _, emit_llvm, target } => {
             let program = load_program(&file)
