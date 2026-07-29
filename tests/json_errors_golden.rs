@@ -890,3 +890,110 @@ fn ooda_patch_json_reports_ok() {
     assert!(after.contains("a * b"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn json_errors_list_elem_mismatch_is_patch_applicable() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_list_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("list.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let xs = list_new();
+    let ys = list_push(xs, 1);
+    let zs = list_push(ys, "a");
+    println(list_len(zs));
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn check");
+    assert!(!out.status.success(), "mixed list elements must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stderr)
+    });
+    assert_eq!(v["error_type"].as_str(), Some("TypeError"));
+    assert_eq!(
+        v["suggested_fix"]["applicability"].as_str(),
+        Some("patch"),
+        "list elem fix: {}",
+        stderr
+    );
+    let diff = v["suggested_fix"]["diff"].as_str().unwrap_or("");
+    assert!(
+        diff.contains("list_elem") || diff.contains("List"),
+        "codemod: {}",
+        diff
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn json_errors_assign_type_is_patch_applicable() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_asg_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("asg.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut x = 1;
+    x = "hi";
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn check");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stderr)
+    });
+    assert_eq!(
+        v["suggested_fix"]["applicability"].as_str(),
+        Some("patch"),
+        "assign type: {}",
+        stderr
+    );
+    let diff = v["suggested_fix"]["diff"].as_str().unwrap_or("");
+    assert!(
+        diff.contains("assign_type") && diff.contains("x"),
+        "codemod: {}",
+        diff
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ooda_context_nests_reflection_json() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.oo");
+    let out = std::process::Command::new(bin)
+        .args(["context", example, "greet", "--tier", "8gb"])
+        .output()
+        .expect("spawn context");
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Strip banner line if present
+    let json_start = stdout.find('{').expect(&stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout[json_start..]).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stdout)
+    });
+    assert_eq!(v["target_symbol"].as_str(), Some("greet"));
+    assert!(
+        v["context"].is_object(),
+        "context must be nested object (not escaped string): {}",
+        stdout
+    );
+    assert_eq!(v["context"]["symbol"].as_str(), Some("greet"));
+}

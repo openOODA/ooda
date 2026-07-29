@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.50.0-alpha")]
+#[command(version = "0.51.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -946,6 +946,50 @@ fn load_and_analyze(
                     ),
                     true,
                 )
+            } else if msg.contains("cannot assign") && msg.contains("to '") {
+                // cannot assign String to 'x' of type Int
+                let vname = msg
+                    .split("to '")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+                    .unwrap_or("x");
+                let found = msg
+                    .split("cannot assign ")
+                    .nth(1)
+                    .and_then(|s| s.split(' ').next())
+                    .unwrap_or("?");
+                let expected = msg
+                    .split("of type ")
+                    .nth(1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "?".into());
+                (
+                    "Fix assignment types".into(),
+                    format!(
+                        "{{\"codemod\":\"assign_type\",\"binding\":\"{}\",\"expected\":\"{}\",\"found\":\"{}\",\"hint\":\"assign a {} value or change the binding's type\"}}",
+                        vname, expected, found, expected
+                    ),
+                    true,
+                )
+            } else if msg.contains("list element type mismatch") {
+                let expected = msg
+                    .split("List[")
+                    .nth(1)
+                    .and_then(|s| s.split(']').next())
+                    .unwrap_or("?");
+                let found = msg
+                    .split("cannot push ")
+                    .nth(1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "?".into());
+                (
+                    "Fix list element type".into(),
+                    format!(
+                        "{{\"codemod\":\"list_elem\",\"expected\":\"{}\",\"found\":\"{}\",\"hint\":\"push only {} values or start a new list\"}}",
+                        expected, found, expected
+                    ),
+                    true,
+                )
             } else if msg.contains("return type") && msg.contains("does not match declared") {
                 // return type String does not match declared Int — in 'f'
                 let fname = msg
@@ -1142,12 +1186,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.50.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.51.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.50.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.51.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

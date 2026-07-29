@@ -1027,8 +1027,9 @@ impl TypeChecker {
                         .first()
                         .ok_or_else(|| anyhow!("Type error: method '{}' missing receiver", name))?;
                     let recv_ty = self.infer_expr(recv, env)?;
+                    let mut method_arg_tys = Vec::new();
                     for a in args.iter().skip(1) {
-                        self.infer_expr(a, env)?;
+                        method_arg_tys.push(self.infer_expr(a, env)?);
                     }
                     // Object-cap method arities (including receiver). Fail-closed.
                     let method_arity_ok = match name.as_str() {
@@ -1045,9 +1046,6 @@ impl TypeChecker {
                             ".read_file" | ".env_get" | ".get" | ".push" => 2,
                             _ => 1,
                         };
-                        // Report as free-function style counts for AI codemod parity:
-                        // "expects N argument(s), found M" where N/M exclude nothing
-                        // (includes receiver desugar count).
                         return Err(anyhow!(
                             "Type error at {}:{}: function '{}' expects {} argument(s), found {}",
                             expr.span().line,
@@ -1080,7 +1078,35 @@ impl TypeChecker {
                             Box::new(Ty::Void),
                             Box::new(Ty::String),
                         )),
-                        ".push" => Ok(Ty::List(Box::new(Ty::Unknown))),
+                        ".push" => {
+                            // recv.push(elem)
+                            match &recv_ty {
+                                Ty::List(inner) => {
+                                    let elem_ty =
+                                        method_arg_tys.first().cloned().unwrap_or(Ty::Unknown);
+                                    let out = if matches!(inner.as_ref(), Ty::Unknown) {
+                                        elem_ty
+                                    } else if Ty::unifyable_or_unknown_hole(inner, &elem_ty) {
+                                        (**inner).clone()
+                                    } else {
+                                        return Err(anyhow!(
+                                            "Type error at {}:{}: list element type mismatch: List[{}] cannot push {}",
+                                            expr.span().line,
+                                            expr.span().col,
+                                            inner.display(),
+                                            elem_ty.display()
+                                        ));
+                                    };
+                                    Ok(Ty::List(Box::new(out)))
+                                }
+                                other => Err(anyhow!(
+                                    "Type error at {}:{}: .push requires List receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    other.display()
+                                )),
+                            }
+                        }
                         // Field access only on struct types (fail-closed on Int/String/etc.).
                         other if other.starts_with('.') && args.len() == 1 => {
                             let field = &other[1..];
@@ -1148,6 +1174,109 @@ impl TypeChecker {
                 let mut arg_tys = Vec::new();
                 for a in args {
                     arg_tys.push(self.infer_expr(a, env)?);
+                }
+
+                // List surface: track element types (no soft List[Unknown] forever).
+                if name == "list_new" {
+                    if !arg_tys.is_empty() {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'list_new' expects 0 argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    return Ok(Ty::List(Box::new(Ty::Unknown)));
+                }
+                if name == "list_push" {
+                    if arg_tys.len() != 2 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'list_push' expects 2 argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    let elem = match &arg_tys[0] {
+                        Ty::List(inner) => (**inner).clone(),
+                        other => {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: function 'list_push' argument 0 expects List, found {}",
+                                expr.span().line,
+                                expr.span().col,
+                                other.display()
+                            ));
+                        }
+                    };
+                    let pushed = &arg_tys[1];
+                    let out_elem = if matches!(elem, Ty::Unknown) {
+                        pushed.clone()
+                    } else if Ty::unifyable_or_unknown_hole(&elem, pushed) {
+                        // Prefer concrete list element over Unknown push (shouldn't happen often).
+                        if matches!(pushed, Ty::Unknown) {
+                            elem
+                        } else if Ty::unifyable(&elem, pushed) {
+                            elem
+                        } else {
+                            // hole on one side only — keep non-Unknown
+                            elem
+                        }
+                    } else {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: list element type mismatch: List[{}] cannot push {}",
+                            expr.span().line,
+                            expr.span().col,
+                            elem.display(),
+                            pushed.display()
+                        ));
+                    };
+                    return Ok(Ty::List(Box::new(out_elem)));
+                }
+                if name == "list_get" {
+                    if arg_tys.len() != 2 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'list_get' expects 2 argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    if !Ty::unifyable_or_unknown_hole(&arg_tys[1], &Ty::Int) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'list_get' argument 1 expects Int, found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys[1].display()
+                        ));
+                    }
+                    return match &arg_tys[0] {
+                        Ty::List(inner) => Ok((**inner).clone()),
+                        other => Err(anyhow!(
+                            "Type error at {}:{}: function 'list_get' argument 0 expects List, found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            other.display()
+                        )),
+                    };
+                }
+                if name == "list_len" {
+                    if arg_tys.len() != 1 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'list_len' expects 1 argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    return match &arg_tys[0] {
+                        Ty::List(_) => Ok(Ty::Int),
+                        other => Err(anyhow!(
+                            "Type error at {}:{}: function 'list_len' argument 0 expects List, found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            other.display()
+                        )),
+                    };
                 }
 
                 // ADT constructors: payload-driven Result/Option (cuts match-arm Unknown vs Int).
@@ -2525,6 +2654,61 @@ mod tests {
         assert!(
             err.contains("unreachable"),
             "dead code after if/else return: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_list_push_element_type_mismatch() {
+        let src = r#"
+            pub fn main() {
+                let xs = list_new();
+                let ys = list_push(xs, 1);
+                let zs = list_push(ys, "a");
+                println(list_len(zs));
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("list element type mismatch")
+                || (err.contains("List[Int]") && err.contains("String")),
+            "heterogeneous list push must fail: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn accepts_homogeneous_list_push_and_get() {
+        let src = r#"
+            pub fn main() {
+                let xs = list_new();
+                let ys = list_push(xs, 1);
+                let zs = list_push(ys, 2);
+                let n = list_get(zs, 0);
+                println(n);
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "homogeneous Int list: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn list_get_element_type_flows_to_use() {
+        // After push Int, list_get yields Int — cannot use as String return.
+        let src = r#"
+            pub fn bad() -> String {
+                let xs = list_new();
+                let ys = list_push(xs, 1);
+                return list_get(ys, 0);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("return type") || err.contains("String") || err.contains("Int"),
+            "list_get Int must not soft-accept as String: {}",
             err
         );
     }
