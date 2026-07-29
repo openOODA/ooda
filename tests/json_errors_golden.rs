@@ -2034,3 +2034,93 @@ pub fn main() {
     assert!(stdout.contains("30"), "C stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn for_string_list_run_and_c() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_sfor_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut xs = list_new();
+    xs = list_push(xs, "a");
+    xs = list_push(xs, "b");
+    let mut out = "";
+    for x in xs {
+        out = out + x;
+    }
+    println(out);
+}
+"#,
+    )
+    .unwrap();
+    let run = std::process::Command::new(bin)
+        .args(["run", path.to_str().unwrap()])
+        .output()
+        .expect("run");
+    assert!(
+        run.status.success(),
+        "string list for run: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&run.stdout).contains("ab"),
+        "stdout={}",
+        String::from_utf8_lossy(&run.stdout)
+    );
+
+    let build = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("build");
+    assert!(
+        build.status.success(),
+        "string list for C: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let exe = path.with_extension("");
+    let out = std::process::Command::new(&exe).output().expect("exe");
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("ab"),
+        "C stdout={}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn build_c_refuses_mkdir_p_method() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_mkdir_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main(fs: &FsCap) {
+    fs.mkdir_p("/tmp/ooda_should_refuse_c");
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "C must refuse sealed .mkdir_p");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("sealed") || err.contains("mkdir"),
+        "got: {}",
+        err
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

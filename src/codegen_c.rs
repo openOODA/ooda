@@ -451,9 +451,22 @@ impl Gen {
             } => {
                 // Prefer annotation for empty list_new() so List[String] vs List[Int] is correct.
                 let ann_ty = type_annotation.as_ref().map(|t| self.c_ty(t));
+                // Unannotated bare list_new: defer C type until first list_push (E-M: no
+                // dual-representation union; zero drag until first element).
+                if matches!(
+                    init,
+                    Expression::Call { name: n, args, .. } if n == "list_new" && args.is_empty()
+                ) && ann_ty.is_none()
+                {
+                    env.insert(name.clone(), "OoListPending".into());
+                    return Ok(format!(
+                        "  /* pending list {} — kind fixed on first push */\n",
+                        name
+                    ));
+                }
                 let (mut c, mut v, ty) = self.emit_expr(init, env)?;
                 let cty = ann_ty.clone().unwrap_or(ty.clone());
-                // Relower bare list_new to matching empty list type.
+                // Relower bare list_new to matching empty list type when annotated.
                 if matches!(init, Expression::Call { name: n, args, .. } if n == "list_new" && args.is_empty())
                 {
                     if cty == "OoSList" {
@@ -479,7 +492,18 @@ impl Gen {
                 Ok(code)
             }
             Statement::Assign { name, value, .. } => {
-                let (c, v, _) = self.emit_expr(value, env)?;
+                let (c, v, ty) = self.emit_expr(value, env)?;
+                // First write into a pending list: declare with concrete OoIList/OoSList.
+                if env.get(name).map(|s| s.as_str()) == Some("OoListPending") {
+                    env.insert(name.clone(), ty.clone());
+                    return Ok(format!("{}  {} {} = {};\n", c, ty, name, v));
+                }
+                // Refine env if push produced a more specific list kind.
+                if (ty == "OoSList" || ty == "OoIList")
+                    && env.get(name).map(|s| s.as_str()) != Some(ty.as_str())
+                {
+                    env.insert(name.clone(), ty.clone());
+                }
                 Ok(format!("{}  {} = {};\n", c, name, v))
             }
             Statement::Return(Some(e), _) => {
@@ -908,20 +932,42 @@ impl Gen {
         let method_name = name.strip_prefix('.').unwrap_or(name);
         match method_name {
             "list_new" => {
-                // default int list; if used as string list context hard — use int
+                // Bare expression form (not through pending let): default int list.
                 code.push_str(&format!("  OoIList {} = oo_ilist_new();\n", t));
                 Ok((code, t, "OoIList".into()))
             }
             "list_push" => {
                 let list = &cargs[0];
                 let item = &cargs[1];
-                let lty = &arg_tys[0];
-                if lty == "OoSList" || arg_tys.get(1).map(|s| s.as_str()) == Some("OoStr") {
-                    code.push_str(&format!(
-                        "  OoSList {} = oo_slist_push({}, {});\n",
-                        t, list, item
-                    ));
+                let lty = arg_tys.first().map(|s| s.as_str()).unwrap_or("");
+                let item_ty = arg_tys.get(1).map(|s| s.as_str()).unwrap_or("");
+                // Kind from list type, or first element when list is still pending.
+                let as_str = lty == "OoSList"
+                    || item_ty == "OoStr"
+                    || (lty == "OoListPending" && item_ty == "OoStr");
+                if as_str {
+                    if lty == "OoListPending" {
+                        let empty = self.fresh("sl0");
+                        code.push_str(&format!("  OoSList {} = oo_slist_new();\n", empty));
+                        code.push_str(&format!(
+                            "  OoSList {} = oo_slist_push({}, {});\n",
+                            t, empty, item
+                        ));
+                    } else {
+                        code.push_str(&format!(
+                            "  OoSList {} = oo_slist_push({}, {});\n",
+                            t, list, item
+                        ));
+                    }
                     Ok((code, t, "OoSList".into()))
+                } else if lty == "OoListPending" {
+                    let empty = self.fresh("il0");
+                    code.push_str(&format!("  OoIList {} = oo_ilist_new();\n", empty));
+                    code.push_str(&format!(
+                        "  OoIList {} = oo_ilist_push({}, {});\n",
+                        t, empty, item
+                    ));
+                    Ok((code, t, "OoIList".into()))
                 } else {
                     code.push_str(&format!(
                         "  OoIList {} = oo_ilist_push({}, {});\n",
@@ -931,13 +977,17 @@ impl Gen {
                 }
             }
             "list_get" => {
-                let lty = &arg_tys[0];
+                let lty = arg_tys.first().map(|s| s.as_str()).unwrap_or("");
                 if lty == "OoSList" {
                     code.push_str(&format!(
                         "  OoStr {} = oo_slist_get({}, {});\n",
                         t, cargs[0], cargs[1]
                     ));
                     Ok((code, t, "OoStr".into()))
+                } else if lty == "OoListPending" {
+                    // Empty pending — should not be read; emit typed zero for compile.
+                    code.push_str(&format!("  long long {} = 0; /* empty pending list_get */\n", t));
+                    Ok((code, t, "long long".into()))
                 } else {
                     code.push_str(&format!(
                         "  long long {} = oo_ilist_get({}, {});\n",
@@ -947,12 +997,14 @@ impl Gen {
                 }
             }
             "list_len" => {
-                let lty = &arg_tys[0];
+                let lty = arg_tys.first().map(|s| s.as_str()).unwrap_or("");
                 if lty == "OoSList" {
                     code.push_str(&format!(
                         "  long long {} = oo_slist_len({});\n",
                         t, cargs[0]
                     ));
+                } else if lty == "OoListPending" {
+                    code.push_str(&format!("  long long {} = 0; /* empty pending list */\n", t));
                 } else {
                     code.push_str(&format!(
                         "  long long {} = oo_ilist_len({});\n",
@@ -1287,7 +1339,33 @@ mod tests {
             "#,
         );
         let c = CCodeGen::emit_c(&p).expect("emit");
-        assert!(c.contains("oo_ilist_new"), "{}", c);
+        assert!(c.contains("oo_ilist_new") || c.contains("oo_ilist_push"), "{}", c);
         assert!(c.contains("oo_chars_len"), "{}", c);
+    }
+
+    #[test]
+    fn emits_c_for_string_list_pending() {
+        let p = parse(
+            r#"
+            pub fn main() {
+                let mut xs = list_new();
+                xs = list_push(xs, "a");
+                xs = list_push(xs, "b");
+                println(list_len(xs));
+            }
+            "#,
+        );
+        let c = CCodeGen::emit_c(&p).expect("emit");
+        let main = c.split("int main").nth(1).unwrap_or(&c);
+        assert!(
+            main.contains("oo_slist_new") && main.contains("oo_slist_push"),
+            "string list body must use slist: {}",
+            main
+        );
+        assert!(
+            !main.contains("oo_ilist_push") && !main.contains("OoIList xs"),
+            "must not use int list for string elements: {}",
+            main
+        );
     }
 }

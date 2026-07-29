@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.81.0-alpha")]
+#[command(version = "0.82.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -1077,6 +1077,14 @@ fn load_and_analyze(
                     ),
                     true,
                 )
+            } else if msg.contains("matching numeric types")
+                || (msg.contains("arithmetic") && msg.contains("found"))
+            {
+                (
+                    "Annotate list/element types before arithmetic".into(),
+                    r#"{"codemod":"arith_types","hint":"use List[Int]/List[String] annotations or push homogeneous elements before `for` so element type is not `_`"}"#.into(),
+                    true,
+                )
             } else if msg.contains("return type") && msg.contains("does not match declared") {
                 // return type String does not match declared Int — in 'f'
                 let fname = msg
@@ -1298,9 +1306,9 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.81.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.82.0-alpha";
     // For comparing against Cargo.toml which lacks the 'v'
-    const CANONICAL_VERSION_NO_V: &str = "0.81.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.82.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

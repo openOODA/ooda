@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.81.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.82.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.81.0-alpha
+ooda --version   # 0.82.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.81.0-alpha (CHS M0–M5)
+## What's real in v0.82.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -70,7 +70,7 @@ import "lib.oo";       // relative / OODA_PATH
 | **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
 | **oodac** (`oodac/main.oo`) lex/parse/check/smoke-build | Real (interp + native) |
 | **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
-| `for x in list` / `lo..hi` | Real: desugars to `let mut` + `while` + `list_get`/`list_len` (interp + C); unannotated `list_new`+`push` refines element type on assign |
+| `for x in list` / `lo..hi` | Real: desugars to while+list_get (interp + C); unannotated lists refine element type on assign; **C defers list kind until first push** (int vs string) |
 | `ooda build --release` | Real on CHS C path: gcc `-O3 -flto` |
 | LLVM Int/Bool/Float + while | Real (clang to link when present) |
 

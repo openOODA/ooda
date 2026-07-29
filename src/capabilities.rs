@@ -124,14 +124,29 @@ pub const EFFECT_BUILTINS: &[EffectBuiltin] = &[
         receiver_is_cap: false,
     },
     EffectBuiltin {
+        name: ".mkdir_p",
+        requires: CapKind::Fs,
+        receiver_is_cap: true,
+    },
+    EffectBuiltin {
         name: "copy_file",
         requires: CapKind::Fs,
         receiver_is_cap: false,
     },
     EffectBuiltin {
+        name: ".copy_file",
+        requires: CapKind::Fs,
+        receiver_is_cap: true,
+    },
+    EffectBuiltin {
         name: "chmod_exec",
         requires: CapKind::Fs,
         receiver_is_cap: false,
+    },
+    EffectBuiltin {
+        name: ".chmod_exec",
+        requires: CapKind::Fs,
+        receiver_is_cap: true,
     },
     EffectBuiltin {
         name: "path_exists",
@@ -736,6 +751,7 @@ mod tests {
             pub fn fs_m(fs: &FsCap) {
                 let _ = fs.path_exists("/tmp");
                 let _ = fs.file_size("/tmp/x");
+                let _ = fs.mkdir_p("/tmp/ooda_test_dir");
             }
             pub fn sys_m(sys: &SysCap) {
                 let _ = sys.sys_exec("true");
@@ -746,7 +762,13 @@ mod tests {
         "#,
         );
         let sealed = collect_sealed_effect_names(&prog);
-        for need in [".path_exists", ".file_size", ".sys_exec", ".env_get"] {
+        for need in [
+            ".path_exists",
+            ".file_size",
+            ".sys_exec",
+            ".env_get",
+            ".mkdir_p",
+        ] {
             assert!(
                 sealed.iter().any(|s| s == need),
                 "missing sealed method {} in {:?}",
