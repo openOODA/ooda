@@ -470,18 +470,24 @@ impl TypeChecker {
         }
 
         let expected = Ty::from_ast(&func.return_type);
-        // Fail-closed: expression-bodied functions must match declared return type.
-        // (Statement returns checked in check_block Return arm below.)
-        if !matches!(expected, Ty::Void)
-            && !matches!(body_ty, Ty::Void | Ty::Unknown)
-            && !Ty::unifyable(&body_ty, &expected)
-        {
-            return Err(anyhow!(
-                "Type error in '{}': function declares return type {} but body has type {}",
-                func.name,
-                expected.display(),
-                body_ty.display()
-            ));
+        // Fail-closed: non-Void functions must produce a value (no silent Void body).
+        // (Statement `return` types are also checked in check_block Return arm.)
+        if !matches!(expected, Ty::Void) {
+            if matches!(body_ty, Ty::Void) {
+                return Err(anyhow!(
+                    "Type error in '{}': function declares return type {} but body has type Void (missing return value)",
+                    func.name,
+                    expected.display()
+                ));
+            }
+            if !matches!(body_ty, Ty::Unknown) && !Ty::unifyable(&body_ty, &expected) {
+                return Err(anyhow!(
+                    "Type error in '{}': function declares return type {} but body has type {}",
+                    func.name,
+                    expected.display(),
+                    body_ty.display()
+                ));
+            }
         }
 
         for ens in &func.ensures {
@@ -880,8 +886,10 @@ impl TypeChecker {
                         }
                     }
                     BinOp::Eq | BinOp::Neq => {
-                        // Fail-closed: no String == Int soft-Bool.
-                        if Ty::unifyable(&lt, &rt) || (lt.is_numeric() && rt.is_numeric()) {
+                        // Fail-closed: matching types only (no Int == Float soft-Bool).
+                        if Ty::unifyable(&lt, &rt)
+                            || matches!((&lt, &rt), (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float))
+                        {
                             Ok(Ty::Bool)
                         } else {
                             Err(anyhow!(
@@ -957,7 +965,8 @@ impl TypeChecker {
                     ));
                 }
 
-                // Methods: .len, .trim, etc.
+                // Methods: .len, .trim, sealed object-cap methods, etc.
+                // `args[0]` is the receiver (desugared).
                 if name.starts_with('.') {
                     let recv = args
                         .first()
@@ -965,6 +974,33 @@ impl TypeChecker {
                     let recv_ty = self.infer_expr(recv, env)?;
                     for a in args.iter().skip(1) {
                         self.infer_expr(a, env)?;
+                    }
+                    // Object-cap method arities (including receiver). Fail-closed.
+                    let method_arity_ok = match name.as_str() {
+                        ".write_file" => args.len() == 3, // recv, path, content
+                        ".read_file" | ".env_get" | ".get" => args.len() == 2, // recv, arg
+                        ".len" | ".trim" | ".to_lowercase" | ".to_string"
+                        | ".is_ok" | ".is_err" | ".is_some" | ".is_none" => args.len() == 1,
+                        ".push" => args.len() == 2,
+                        _ => true, // field access / unknown handled below
+                    };
+                    if !method_arity_ok {
+                        let expected = match name.as_str() {
+                            ".write_file" => 3,
+                            ".read_file" | ".env_get" | ".get" | ".push" => 2,
+                            _ => 1,
+                        };
+                        // Report as free-function style counts for AI codemod parity:
+                        // "expects N argument(s), found M" where N/M exclude nothing
+                        // (includes receiver desugar count).
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function '{}' expects {} argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            name,
+                            expected,
+                            args.len()
+                        ));
                     }
                     return match name.as_str() {
                         ".len" => {
@@ -1240,6 +1276,16 @@ impl TypeChecker {
                         ))
                     }
                 } else {
+                    // Fail-closed: value-producing if without else has no type on false path
+                    // (was runtime () / Void while typecheck claimed Int).
+                    if !matches!(t1, Ty::Void | Ty::Unknown) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: if expression producing {} requires an else branch",
+                            expr.span().line,
+                            expr.span().col,
+                            t1.display()
+                        ));
+                    }
                     Ok(t1)
                 }
             }
@@ -2092,6 +2138,135 @@ mod tests {
         assert!(
             check(src).is_ok(),
             "sys_exec varargs: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn method_write_file_wrong_arity_fails() {
+        let src = r#"
+            pub fn bad(fs: &FsCap) {
+                let r = fs.write_file("/tmp/x");
+                match r { Ok(_) => 0, Err(_) => 1 };
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains(".write_file") && (err.contains("expects 3") || err.contains("found 2")),
+            "method write_file arity: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn method_write_file_full_arity_ok() {
+        let src = r#"
+            pub fn ok(fs: &FsCap) {
+                let r = fs.write_file("app.log", "hi");
+                match r { Ok(_) => 0, Err(_) => 1 };
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "method write_file(path, content): {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn rejects_missing_return_on_non_void_fn() {
+        let src = r#"
+            pub fn f() -> Int {
+            }
+            pub fn main() {
+                println(f());
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("missing return") || err.contains("Void"),
+            "empty body -> Int must fail, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_statement_body_without_return_for_int_fn() {
+        let src = r#"
+            pub fn f(x: Int) -> Int {
+                let y = x + 1;
+            }
+            pub fn main() {
+                println(f(1));
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("missing return") || err.contains("Void"),
+            "no return in Int fn must fail, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_int_eq_float() {
+        let src = r#"
+            pub fn main() {
+                let b = 1 == 1.0;
+                println(b);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("cannot compare") || err.contains("equality"),
+            "Int == Float must fail, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_if_expr_without_else_non_void() {
+        let src = r#"
+            pub fn main() {
+                let x = if true { 1 };
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("else") || err.contains("if expression"),
+            "if-as-value without else must fail, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn accepts_if_stmt_without_else() {
+        let src = r#"
+            pub fn main() {
+                if true {
+                    println(1);
+                }
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "statement if without else is fine: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn accepts_if_expr_with_else() {
+        let src = r#"
+            pub fn main() {
+                let x = if true { 1 } else { 0 };
+                println(x);
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "if/else value: {:?}",
             check(src).err()
         );
     }

@@ -695,3 +695,115 @@ pub fn rogue() {
     assert!(v.get("em_savings").is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn json_errors_return_type_mismatch_is_patch_applicable() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_ret_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ret.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn f() -> Int {
+    return "x";
+}
+pub fn main() {
+    println(f());
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn check");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stderr)
+    });
+    assert_eq!(v["error_type"].as_str(), Some("TypeError"));
+    assert_eq!(
+        v["suggested_fix"]["applicability"].as_str(),
+        Some("patch"),
+        "return type fix: {}",
+        stderr
+    );
+    let diff = v["suggested_fix"]["diff"].as_str().unwrap_or("");
+    assert!(
+        diff.contains("return_type") && diff.contains("f"),
+        "codemod return_type: {}",
+        diff
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn json_errors_method_write_file_arity() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_mwf_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("mwf.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn bad(fs: &FsCap) {
+    let r = fs.write_file("/tmp/x");
+    match r { Ok(_) => 0, Err(_) => 1 };
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn check");
+    assert!(!out.status.success(), "method arity must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stderr)
+    });
+    let msg = v["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains(".write_file") && msg.contains("expects 3"),
+        "msg: {}",
+        msg
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ooda_patch_json_reports_ok() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_pj_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("p.oo");
+    std::fs::write(
+        &path,
+        "pub fn add(a: Int, b: Int) -> Int {\n    return a + b;\n}\n",
+    )
+    .unwrap();
+    let diff = r#"{"target_function":"add","new_body":"return a * b;"}"#;
+    let out = std::process::Command::new(bin)
+        .args([
+            "patch",
+            path.to_str().unwrap(),
+            "--diff",
+            diff,
+            "--json",
+        ])
+        .output()
+        .expect("spawn patch --json");
+    assert!(out.status.success(), "stderr={}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stdout)
+    });
+    assert_eq!(v["ok"].as_bool(), Some(true));
+    assert_eq!(v["changed"].as_bool(), Some(true));
+    assert_eq!(v["target_function"].as_str(), Some("add"));
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(after.contains("a * b"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

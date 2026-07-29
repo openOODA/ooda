@@ -515,11 +515,8 @@ fn validate_and_write(file_path: &Path, new_code: &str, target: &str) -> Result<
     })?;
 
     fs::write(file_path, new_code)?;
-    println!(
-        "✂️  [openOODA Surgical Patcher] Successfully patched function '{}' in {}",
-        target,
-        file_path.display()
-    );
+    // Success message is printed by the CLI (so `patch --json` can emit pure JSON).
+    let _ = target;
     Ok(())
 }
 

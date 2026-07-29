@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.47.0-alpha")]
+#[command(version = "0.48.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -188,6 +188,9 @@ enum Commands {
         /// JSON patch string
         #[arg(long)]
         diff: String,
+        /// Emit machine-readable JSON result (file, target, ok) after apply
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect symbol reflection metadata (types, contracts, capabilities)
     Reflect {
@@ -629,8 +632,47 @@ fn main() -> Result<()> {
                 interpreter.fuzz_all()?;
             }
         }
-        Commands::Patch { file, diff } => {
-            patch::apply_patch(&file, &diff)?;
+        Commands::Patch { file, diff, json } => {
+            let target = serde_json::from_str::<serde_json::Value>(&diff)
+                .ok()
+                .and_then(|v| {
+                    v.get("target_function")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "".into());
+            match patch::apply_patch(&file, &diff) {
+                Ok(()) => {
+                    if json {
+                        let report = serde_json::json!({
+                            "file": file.display().to_string(),
+                            "target_function": target,
+                            "ok": true,
+                            "changed": true,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!(
+                            "✂️  [openOODA Surgical Patcher] Successfully patched function '{}' in {}",
+                            if target.is_empty() { "<fn>" } else { &target },
+                            file.display()
+                        );
+                    }
+                }
+                Err(e) => {
+                    if json {
+                        let report = serde_json::json!({
+                            "file": file.display().to_string(),
+                            "target_function": target,
+                            "ok": false,
+                            "changed": false,
+                            "error": format!("{}", e),
+                        });
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    }
+                    return Err(e);
+                }
+            }
         }
         Commands::Reflect { file, symbol } => {
             let code = fs::read_to_string(&file)?;
@@ -886,6 +928,31 @@ fn load_and_analyze(
                     ),
                     true,
                 )
+            } else if msg.contains("return type") && msg.contains("does not match declared") {
+                // return type String does not match declared Int — in 'f'
+                let fname = msg
+                    .split("in '")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+                    .unwrap_or("f");
+                let found = msg
+                    .split("return type ")
+                    .nth(1)
+                    .and_then(|s| s.split(' ').next())
+                    .unwrap_or("?");
+                let expected = msg
+                    .split("declared ")
+                    .nth(1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "?".into());
+                (
+                    "Align return type and body".into(),
+                    format!(
+                        "{{\"codemod\":\"return_type\",\"target_function\":\"{}\",\"declared\":\"{}\",\"found\":\"{}\",\"hint\":\"change body to return {} or patch new_return_type\"}}",
+                        fname, expected, found, expected
+                    ),
+                    true,
+                )
             } else if msg.contains("argument ") && msg.contains("expects ") && msg.contains("found ") {
                 // Arg type: function 'f' argument N expects T, found U
                 let fname = msg
@@ -1057,12 +1124,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.47.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.48.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.47.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.48.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
