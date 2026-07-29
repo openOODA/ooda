@@ -237,6 +237,8 @@ pub struct TypeChecker {
     param_refinements: HashMap<String, Vec<Option<(i64, i64)>>>,
     /// Named type aliases (including named structs) for StructLit typing.
     type_aliases: HashMap<String, Ty>,
+    /// `type Port = Int[lo..hi]` — bounds keyed by alias name (from_ast collapses to Int).
+    alias_refinements: HashMap<String, (i64, i64)>,
 }
 
 /// Parse `Int[lo..hi]` refinement bounds from a type annotation.
@@ -262,16 +264,37 @@ impl TypeChecker {
         Ty::unifyable_or_unknown_hole_with_aliases(a, b, &self.type_aliases)
     }
 
+    fn norm(&self, t: &Ty) -> Ty {
+        t.normalize(&self.type_aliases)
+    }
+
+    /// Resolve `Int[lo..hi]` bounds from a type annotation, including type aliases.
+    fn refinement_bounds_of(&self, ty: &Type) -> Option<(i64, i64)> {
+        if let Some(b) = int_refinement_bounds(ty) {
+            return Some(b);
+        }
+        if let Type::Custom(name) = ty {
+            if let Some(b) = self.alias_refinements.get(name) {
+                return Some(*b);
+            }
+        }
+        None
+    }
+
     pub fn check_program(program: &Program) -> Result<()> {
         let mut tc = TypeChecker {
             functions: HashMap::new(),
             param_refinements: HashMap::new(),
             type_aliases: HashMap::new(),
+            alias_refinements: HashMap::new(),
         };
 
         // Collect type aliases first (named structs for StructLit).
         for item in &program.items {
             if let Item::TypeAlias(name, ty) = item {
+                if let Some(b) = int_refinement_bounds(ty) {
+                    tc.alias_refinements.insert(name.clone(), b);
+                }
                 tc.type_aliases
                     .insert(name.clone(), Ty::from_ast(ty));
             }
@@ -481,7 +504,15 @@ impl TypeChecker {
                 let bounds: Vec<Option<(i64, i64)>> = f
                     .params
                     .iter()
-                    .map(|p| int_refinement_bounds(&p.param_type))
+                    .map(|p| {
+                        int_refinement_bounds(&p.param_type).or_else(|| {
+                            if let Type::Custom(name) = &p.param_type {
+                                tc.alias_refinements.get(name).copied()
+                            } else {
+                                None
+                            }
+                        })
+                    })
                     .collect();
                 tc.functions.insert(f.name.clone(), (params, ret));
                 tc.param_refinements.insert(f.name.clone(), bounds);
@@ -569,7 +600,7 @@ impl TypeChecker {
                     ));
                 }
                 // All paths return; per-return types already checked in check_block.
-            } else if !matches!(body_ty, Ty::Unknown) && !Ty::unifyable(&body_ty, &expected) {
+            } else if !matches!(body_ty, Ty::Unknown) && !self.unify(&body_ty, &expected) {
                 return Err(anyhow!(
                     "Type error in '{}': function declares return type {} but body has type {}",
                     func.name,
@@ -685,7 +716,7 @@ impl TypeChecker {
                                 }
                             }
                         }
-                        if !Ty::unifyable(&init_ty, &want) {
+                        if !self.unify(&init_ty, &want) {
                             return Err(anyhow!(
                                 "Type error at {}:{} in '{}': let '{}' annotated as {} but initializer has type {}",
                                 span.line,
@@ -739,7 +770,7 @@ impl TypeChecker {
                     }
                     let vty = self.infer_expr(value, env)?;
                     let want = env.get(name).cloned().unwrap_or(Ty::Unknown);
-                    if !Ty::unifyable(&vty, &want) {
+                    if !self.unify(&vty, &want) {
                         return Err(anyhow!(
                             "Type error at {}:{}: cannot assign {} to '{}' of type {}",
                             span.line,
@@ -756,7 +787,7 @@ impl TypeChecker {
                     if let Some(exp) = expected_ret {
                         if !matches!(exp, Ty::Void)
                             && !matches!(last, Ty::Unknown)
-                            && !Ty::unifyable(&last, exp)
+                            && !self.unify(&last, exp)
                         {
                             return Err(anyhow!(
                                 "Type error at {}:{} in '{}': return type {} does not match declared {}",
@@ -849,7 +880,7 @@ impl TypeChecker {
                             last = Ty::Void;
                         }
                         _ => {
-                            let t = self.infer_expr(expr, env)?;
+                            let t = self.infer_expr_m(expr, env, mutable)?;
                             // DESIGN must-use: discarded Result/Option is a hard error.
                             if matches!(t, Ty::Result(_, _) | Ty::Option(_)) {
                                 return Err(anyhow!(
@@ -940,7 +971,7 @@ impl TypeChecker {
                     last = Ty::Void;
                 }
                 _ => {
-                    last = self.infer_expr(expr, env)?;
+                    last = self.infer_expr_m(expr, env, mutable)?;
                 }
             }
         }
@@ -948,6 +979,16 @@ impl TypeChecker {
     }
 
     fn infer_expr(&self, expr: &Expression, env: &HashMap<String, Ty>) -> Result<Ty> {
+        let empty_mut = HashMap::new();
+        self.infer_expr_m(expr, env, &empty_mut)
+    }
+
+    fn infer_expr_m(
+        &self,
+        expr: &Expression,
+        env: &HashMap<String, Ty>,
+        mutable: &HashMap<String, bool>,
+    ) -> Result<Ty> {
         match expr {
             Expression::Literal(Literal::Int(_), _) => Ok(Ty::Int),
             Expression::Literal(Literal::Float(_), _) => Ok(Ty::Float),
@@ -965,14 +1006,17 @@ impl TypeChecker {
             Expression::Binary { op, left, right, .. } => {
                 let lt = self.infer_expr(left, env)?;
                 let rt = self.infer_expr(right, env)?;
+                // Normalize type aliases (`type Port = Int`) before numeric/string shape checks.
+                let ln = self.norm(&lt);
+                let rn = self.norm(&rt);
                 match op {
                     BinOp::Add => {
-                        if matches!(lt, Ty::String) || matches!(rt, Ty::String) {
-                            if Ty::unifyable(&lt, &Ty::String) && Ty::unifyable(&rt, &Ty::String) {
+                        if matches!(ln, Ty::String) || matches!(rn, Ty::String) {
+                            if matches!(ln, Ty::String) && matches!(rn, Ty::String) {
                                 return Ok(Ty::String);
                             }
-                            if matches!(lt, Ty::String) && matches!(rt, Ty::Int | Ty::Float)
-                                || matches!(rt, Ty::String) && matches!(lt, Ty::Int | Ty::Float)
+                            if matches!(ln, Ty::String) && matches!(rn, Ty::Int | Ty::Float)
+                                || matches!(rn, Ty::String) && matches!(ln, Ty::Int | Ty::Float)
                             {
                                 return Err(anyhow!(
                                     "Type error at {}:{}: cannot concatenate {} and {} with '+'; convert with .to_string() first",
@@ -991,10 +1035,10 @@ impl TypeChecker {
                             ));
                         }
                         // Same-type numeric only — reject Int+Float (was typecheck-green, runtime trap).
-                        if matches!((&lt, &rt), (Ty::Int, Ty::Int)) {
+                        if matches!((&ln, &rn), (Ty::Int, Ty::Int)) {
                             return Ok(Ty::Int);
                         }
-                        if matches!((&lt, &rt), (Ty::Float, Ty::Float)) {
+                        if matches!((&ln, &rn), (Ty::Float, Ty::Float)) {
                             return Ok(Ty::Float);
                         }
                         return Err(anyhow!(
@@ -1029,9 +1073,9 @@ impl TypeChecker {
                                 }
                             }
                         }
-                        if matches!((&lt, &rt), (Ty::Int, Ty::Int)) {
+                        if matches!((&ln, &rn), (Ty::Int, Ty::Int)) {
                             Ok(Ty::Int)
-                        } else if matches!((&lt, &rt), (Ty::Float, Ty::Float)) {
+                        } else if matches!((&ln, &rn), (Ty::Float, Ty::Float)) {
                             Ok(Ty::Float)
                         } else {
                             Err(anyhow!(
@@ -1045,8 +1089,9 @@ impl TypeChecker {
                     }
                     BinOp::Eq | BinOp::Neq => {
                         // Fail-closed: matching types only (no Int == Float soft-Bool).
-                        if Ty::unifyable(&lt, &rt)
-                            || matches!((&lt, &rt), (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float))
+                        // Aliases normalize so `Port == Int` works when Port = Int.
+                        if self.unify(&lt, &rt)
+                            || matches!((&ln, &rn), (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float))
                         {
                             Ok(Ty::Bool)
                         } else {
@@ -1060,7 +1105,7 @@ impl TypeChecker {
                         }
                     }
                     BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte => {
-                        if matches!((&lt, &rt), (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float)) {
+                        if matches!((&ln, &rn), (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float)) {
                             Ok(Ty::Bool)
                         } else {
                             Err(anyhow!(
@@ -1073,7 +1118,7 @@ impl TypeChecker {
                         }
                     }
                     BinOp::And | BinOp::Or => {
-                        if Ty::unifyable(&lt, &Ty::Bool) && Ty::unifyable(&rt, &Ty::Bool) {
+                        if matches!(ln, Ty::Bool) && matches!(rn, Ty::Bool) {
                             Ok(Ty::Bool)
                         } else {
                             Err(anyhow!(
@@ -1140,13 +1185,16 @@ impl TypeChecker {
                         ".read_file" | ".env_get" | ".get" => args.len() == 2, // recv, arg
                         ".len" | ".trim" | ".to_lowercase" | ".to_string"
                         | ".is_ok" | ".is_err" | ".is_some" | ".is_none" => args.len() == 1,
+                        ".char_at" => args.len() == 2, // recv, index
+                        ".str_slice" => args.len() == 3, // recv, start, end
                         ".push" => args.len() == 2,
                         _ => true, // field access / unknown handled below
                     };
                     if !method_arity_ok {
                         let expected = match name.as_str() {
                             ".write_file" => 3,
-                            ".read_file" | ".env_get" | ".get" | ".push" => 2,
+                            ".str_slice" => 3,
+                            ".read_file" | ".env_get" | ".get" | ".push" | ".char_at" => 2,
                             _ => 1,
                         };
                         return Err(anyhow!(
@@ -1170,6 +1218,82 @@ impl TypeChecker {
                                     recv_ty.display()
                                 ))
                             }
+                        }
+                        ".char_at" => {
+                            if !matches!(recv_ty, Ty::String) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: .char_at requires String receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    recv_ty.display()
+                                ));
+                            }
+                            let idx_ty = method_arg_tys.first().cloned().unwrap_or(Ty::Unknown);
+                            if !self.unify_or_hole(&idx_ty, &Ty::Int) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: .char_at index expects Int, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    idx_ty.display()
+                                ));
+                            }
+                            // Const bounds when receiver is a string literal.
+                            if let (Some(s), Some(idx)) = (
+                                args.first().and_then(|a| Ty::const_str(a)),
+                                args.get(1).and_then(|a| Ty::const_int(a)),
+                            ) {
+                                let len = s.chars().count() as i64;
+                                if idx < 0 || idx >= len {
+                                    return Err(anyhow!(
+                                        "Type error at {}:{}: char_at index {} out of bounds for string literal of length {} (const bounds check)",
+                                        expr.span().line,
+                                        expr.span().col,
+                                        idx,
+                                        len
+                                    ));
+                                }
+                            }
+                            Ok(Ty::String)
+                        }
+                        ".str_slice" => {
+                            if !matches!(recv_ty, Ty::String) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: .str_slice requires String receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    recv_ty.display()
+                                ));
+                            }
+                            for (i, expect_name) in [(0, "start"), (1, "end")] {
+                                let t = method_arg_tys.get(i).cloned().unwrap_or(Ty::Unknown);
+                                if !self.unify_or_hole(&t, &Ty::Int) {
+                                    return Err(anyhow!(
+                                        "Type error at {}:{}: .str_slice {} expects Int, found {}",
+                                        expr.span().line,
+                                        expr.span().col,
+                                        expect_name,
+                                        t.display()
+                                    ));
+                                }
+                            }
+                            if let (Some(s), Some(start), Some(end)) = (
+                                args.first().and_then(|a| Ty::const_str(a)),
+                                args.get(1).and_then(|a| Ty::const_int(a)),
+                                args.get(2).and_then(|a| Ty::const_int(a)),
+                            ) {
+                                let len = s.chars().count() as i64;
+                                if start < 0 || end < start || end > len {
+                                    return Err(anyhow!(
+                                        "Type error at {}:{}: str_slice[{}..{}] out of bounds for string literal of length {} (const bounds check)",
+                                        expr.span().line,
+                                        expr.span().col,
+                                        start,
+                                        end,
+                                        len
+                                    ));
+                                }
+                            }
+                            Ok(Ty::String)
                         }
                         ".trim" | ".to_lowercase" | ".to_string" => Ok(Ty::String),
                         ".is_ok" | ".is_err" | ".is_some" | ".is_none" => Ok(Ty::Bool),
@@ -1635,10 +1759,13 @@ impl TypeChecker {
                         ct.display()
                     ));
                 }
+                // Expression-level if: inherit env. Mut map is empty here (infer_expr
+                // has no parent mut); statement-level if in check_block carries real mut.
+                // Match/value-if that assign outer `let mut` use eval shadow-restore;
+                // typecheck of those assigns is best-effort via env-only (see check_block Match).
                 let mut env_then = env.clone();
-                let mut mut_then = HashMap::new();
-                // Expression-level if has no parent refinement map here; empty is correct
-                // (statement-level if inherits via check_block's refinements param).
+                let mut mut_then = mutable.clone();
+                // Expression-level if inherits mutability from parent (match arms, value-if).
                 let empty_ref = HashMap::new();
                 let t1 = self.check_block(
                     then_branch,
@@ -1650,7 +1777,7 @@ impl TypeChecker {
                 )?;
                 if let Some(else_b) = else_branch {
                     let mut env_else = env.clone();
-                    let mut mut_else = HashMap::new();
+                    let mut mut_else = mutable.clone();
                     let t2 = self.check_block(
                         else_b,
                         &mut env_else,
@@ -1821,7 +1948,7 @@ impl TypeChecker {
                         }
                         Pattern::Literal(_) => {}
                     }
-                    let t = self.infer_expr(&arm.body, &arm_env)?;
+                    let t = self.infer_expr_m(&arm.body, &arm_env, mutable)?;
                     match &result {
                         None => result = Some(t),
                         Some(prev) => {
@@ -3084,6 +3211,95 @@ mod tests {
             err.contains("undefined variable") && err.contains("'x'"),
             "else-branch must not see else-if let x: {}",
             err
+        );
+    }
+
+    #[test]
+    fn type_alias_int_unifies_for_arith_and_return() {
+        let src = r#"
+            type Port = Int;
+            pub fn bump(p: Port) -> Int {
+                return p + 1;
+            }
+            pub fn main() {
+                println(bump(3));
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "Port=Int must unify for + and return: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn type_alias_refinement_param_const_oob_fails() {
+        let src = r#"
+            type Port = Int[1..65535];
+            pub fn take(p: Port) -> Int {
+                return 1;
+            }
+            pub fn main() {
+                println(take(0));
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation"),
+            "alias Int[lo..hi] param must enforce const OOB: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn method_char_at_on_string_literal_in_bounds() {
+        let src = r#"
+            pub fn main() {
+                let c = "hi".char_at(0);
+                println(c);
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn method_char_at_const_oob_fails() {
+        let src = r#"
+            pub fn main() {
+                let c = "hi".char_at(99);
+                println(c);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("out of bounds") && err.contains("char_at"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn match_if_outer_mut_assign_typechecks() {
+        let src = r#"
+            pub fn main() -> Int {
+                let mut x = 0;
+                let r = Ok(5);
+                match r {
+                    Ok(v) => if true {
+                        x = v;
+                        v
+                    } else {
+                        0
+                    },
+                    Err(e) => 0,
+                };
+                return x;
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "match+if assign to outer let mut: {:?}",
+            check(src).err()
         );
     }
 }

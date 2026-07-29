@@ -727,7 +727,7 @@ impl Interpreter {
                 }
                 _ => return Err(anyhow!("chars_len expects String")),
             }
-        } else if name == "char_at" {
+        } else if name == "char_at" || name == ".char_at" {
             let s = match args.get(0) {
                 Some(Value::String(s)) => s.clone(),
                 _ => return Err(anyhow!("char_at expects String")),
@@ -747,7 +747,7 @@ impl Interpreter {
                     s.chars().count()
                 )),
             };
-        } else if name == "str_slice" {
+        } else if name == "str_slice" || name == ".str_slice" {
             let s = match args.get(0) {
                 Some(Value::String(s)) => s.clone(),
                 _ => return Err(anyhow!("str_slice expects String")),
@@ -1258,9 +1258,22 @@ impl Interpreter {
             Expression::Match { expr, arms, .. } => {
                 let target = self.eval_expr(expr, env)?;
                 for arm in arms {
-                    let mut arm_env = env.clone();
-                    if self.bind_pattern(&arm.pattern, &target, &mut arm_env) {
-                        return self.eval_expr(&arm.body, &mut arm_env);
+                    // Bind pattern vars into the shared env with shadow restore so
+                    // outer `let mut` assigns inside arm bodies (e.g. if-expr) persist.
+                    let mut pattern_shadows: Vec<(String, Option<Value>)> = Vec::new();
+                    if self.bind_pattern_shadow(&arm.pattern, &target, env, &mut pattern_shadows) {
+                        let result = self.eval_expr(&arm.body, env);
+                        for (name, old) in pattern_shadows.into_iter().rev() {
+                            match old {
+                                Some(v) => {
+                                    env.insert(name, v);
+                                }
+                                None => {
+                                    env.remove(&name);
+                                }
+                            }
+                        }
+                        return result;
                     }
                 }
                 Err(anyhow!("Exhaustive match failure: no pattern matched {:?}", target))
@@ -1310,6 +1323,27 @@ impl Interpreter {
     }
 
     fn bind_pattern(&self, pattern: &Pattern, val: &Value, env: &mut HashMap<String, Value>) -> bool {
+        let mut shadows = Vec::new();
+        self.bind_pattern_shadow(pattern, val, env, &mut shadows)
+    }
+
+    /// Bind pattern variables into `env`, recording prior values in `shadows` for restore.
+    fn bind_pattern_shadow(
+        &self,
+        pattern: &Pattern,
+        val: &Value,
+        env: &mut HashMap<String, Value>,
+        shadows: &mut Vec<(String, Option<Value>)>,
+    ) -> bool {
+        let shadow_insert = |env: &mut HashMap<String, Value>,
+                             shadows: &mut Vec<(String, Option<Value>)>,
+                             name: &str,
+                             v: Value| {
+            if !shadows.iter().any(|(n, _)| n == name) {
+                shadows.push((name.to_string(), env.get(name).cloned()));
+            }
+            env.insert(name.to_string(), v);
+        };
         match (pattern, val) {
             (Pattern::Wildcard, _) => true,
             (Pattern::Literal(Literal::Int(p)), Value::Int(v)) => p == v,
@@ -1317,19 +1351,19 @@ impl Interpreter {
             (Pattern::Literal(Literal::Bool(p)), Value::Bool(v)) => p == v,
             (Pattern::Variant { name, arg }, Value::Ok(inner)) if name == "Ok" => {
                 if let Some(var_name) = arg {
-                    env.insert(var_name.clone(), *inner.clone());
+                    shadow_insert(env, shadows, var_name, *inner.clone());
                 }
                 true
             }
             (Pattern::Variant { name, arg }, Value::Err(inner)) if name == "Err" => {
                 if let Some(var_name) = arg {
-                    env.insert(var_name.clone(), *inner.clone());
+                    shadow_insert(env, shadows, var_name, *inner.clone());
                 }
                 true
             }
             (Pattern::Variant { name, arg }, Value::Some(inner)) if name == "Some" => {
                 if let Some(var_name) = arg {
-                    env.insert(var_name.clone(), *inner.clone());
+                    shadow_insert(env, shadows, var_name, *inner.clone());
                 }
                 true
             }
@@ -1553,6 +1587,49 @@ mod tests {
             .call_function("main", vec![], &mut HashMap::new())
             .expect("run");
         assert_eq!(v, Value::Int(1), "while-body let must not leak");
+    }
+
+    #[test]
+    fn match_if_outer_mut_assign_persists() {
+        let prog = parse(
+            r#"
+            pub fn main() -> Int {
+                let mut x = 0;
+                let r = Ok(5);
+                match r {
+                    Ok(v) => if true {
+                        x = v;
+                        v
+                    } else {
+                        0
+                    },
+                    Err(e) => 0,
+                };
+                return x;
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("run");
+        assert_eq!(v, Value::Int(5), "outer mut x must be 5 after match arm assign");
+    }
+
+    #[test]
+    fn method_char_at_runtime() {
+        let prog = parse(
+            r#"
+            pub fn main() -> String {
+                return "hi".char_at(1);
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("run");
+        assert_eq!(v, Value::String("i".into()));
     }
 
     #[test]

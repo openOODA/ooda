@@ -278,19 +278,30 @@ impl WasmCodeGen {
                     BinOp::Mul => wat.push_str(&format!("    {}.mul\n", ty)),
                     BinOp::Div if ty == "i64" => wat.push_str("    i64.div_s\n"),
                     BinOp::Div => wat.push_str("    f64.div\n"),
-                    BinOp::Eq => wat.push_str(&format!("    {}.eq\n", ty)),
-                    BinOp::Neq => wat.push_str(&format!("    {}.ne\n", ty)),
+                    // Comparisons yield i32 in WebAssembly; extend to i64 Bool model.
+                    BinOp::Eq => {
+                        wat.push_str(&format!("    {}.eq\n", ty));
+                        wat.push_str("    i64.extend_i32_u\n");
+                    }
+                    BinOp::Neq => {
+                        wat.push_str(&format!("    {}.ne\n", ty));
+                        wat.push_str("    i64.extend_i32_u\n");
+                    }
                     BinOp::Gt => {
                         if ty == "i64" { wat.push_str("    i64.gt_s\n") } else { wat.push_str("    f64.gt\n") }
+                        wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Lt => {
                         if ty == "i64" { wat.push_str("    i64.lt_s\n") } else { wat.push_str("    f64.lt\n") }
+                        wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Gte => {
                         if ty == "i64" { wat.push_str("    i64.ge_s\n") } else { wat.push_str("    f64.ge\n") }
+                        wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Lte => {
                         if ty == "i64" { wat.push_str("    i64.le_s\n") } else { wat.push_str("    f64.le\n") }
+                        wat.push_str("    i64.extend_i32_u\n");
                     }
                     // Boolean ops stay i64.
                     BinOp::And | BinOp::Or if ty == "i64" => match op {
@@ -862,6 +873,12 @@ mod tests {
         );
         assert!(wat.contains("br_if $break"), "wat:\n{}", wat);
         assert!(wat.contains("br $continue"), "wat:\n{}", wat);
+        // Comparisons produce i32 in WASM; we extend to i64 Bool model.
+        assert!(
+            wat.contains("i64.extend_i32_u"),
+            "compare result must extend i32→i64:\n{}",
+            wat
+        );
     }
 
     #[test]
