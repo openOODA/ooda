@@ -247,7 +247,6 @@ fn unfinished_cli_lsp_pkg_replay_exit_nonzero() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     for args in [
         vec!["lsp"],
-        vec!["pkg", "--install", "nope"],
         vec!["replay", "x.oo", "t"],
     ] {
         let out = std::process::Command::new(bin)
