@@ -223,6 +223,13 @@ int oo_str_eq(OoStr a, OoStr b) {
   return memcmp(a.data, b.data, (size_t)a.len) == 0;
 }
 
+int oo_str_contains(OoStr hay, OoStr needle) {
+  if (needle.len == 0) return 1;
+  if (needle.len > hay.len) return 0;
+  /* null-terminated copies for strstr; OoStr data is always 0-terminated by constructors */
+  return strstr(hay.data, needle.data) != NULL;
+}
+
 /* ----- Host FFI wrappers (symbols from libooda.a) ----- */
 extern char *ooda_host_ast_dump(const char *path);
 extern char *ooda_host_check(const char *path);

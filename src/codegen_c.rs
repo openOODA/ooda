@@ -191,6 +191,7 @@ impl Gen {
         s.push_str("OoStr oo_str_lit(const char*); OoStr oo_str_concat(OoStr,OoStr);\n");
         s.push_str("long long oo_str_byte_len(OoStr); long long oo_chars_len(OoStr);\n");
         s.push_str("OoStr oo_char_at(OoStr,long long); OoStr oo_str_slice(OoStr,long long,long long);\n");
+        s.push_str("int oo_str_contains(OoStr,OoStr);\n");
         s.push_str("int oo_char_is_digit(OoStr); int oo_char_is_alpha(OoStr); int oo_char_is_space(OoStr);\n");
         s.push_str("OoIList oo_ilist_new(void); OoIList oo_ilist_push(OoIList,long long);\n");
         s.push_str("long long oo_ilist_get(OoIList,long long); long long oo_ilist_len(OoIList);\n");
@@ -1082,6 +1083,16 @@ impl Gen {
                 }
                 code.push_str("  oo_println();\n");
                 Ok((code, "0".into(), "int".into()))
+            }
+            ".contains" => {
+                if cargs.len() != 2 {
+                    bail!("C backend: .contains expects receiver + needle");
+                }
+                code.push_str(&format!(
+                    "  int {} = oo_str_contains({}, {});\n",
+                    t, cargs[0], cargs[1]
+                ));
+                Ok((code, t, "int".into()))
             }
             // Method-style string ops: same runtime as free functions (dual-engine parity).
             ".char_at" => {

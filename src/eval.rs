@@ -811,6 +811,17 @@ impl Interpreter {
                     ))
                 }
             }
+        } else if name == ".contains" {
+            match (args.get(0), args.get(1)) {
+                (Some(Value::String(hay)), Some(Value::String(needle))) => {
+                    return Ok(Value::Bool(hay.contains(needle.as_str())));
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "Method .contains() expects String receiver and String needle"
+                    ))
+                }
+            }
         } else if name == ".to_string" {
             if let Some(v) = args.get(0) {
                 return Ok(Value::String(v.to_string()));
@@ -2265,6 +2276,44 @@ mod tests {
         );
         let mut interp = Interpreter::new(prog);
         let v = interp.call_function("main", vec![], &mut HashMap::new()).expect("run");
+        assert_eq!(v, Value::Int(7));
+    }
+
+    #[test]
+    fn contains_method_runtime() {
+        let prog = parse(
+            r#"
+            pub fn main() -> Bool {
+                return "hello".contains("ell");
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp.call_function("main", vec![], &mut HashMap::new()).expect("run");
+        assert_eq!(v, Value::Bool(true));
+    }
+
+    #[test]
+    fn question_mark_runtime_ok() {
+        let prog = parse(
+            r#"
+            pub fn f() -> Result[Int, String] { return Ok(7); }
+            pub fn g() -> Result[Int, String] {
+                let x = f()?;
+                return Ok(x);
+            }
+            pub fn main() -> Int {
+                match g() {
+                    Ok(v) => v,
+                    Err(e) => 0,
+                }
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("run");
         assert_eq!(v, Value::Int(7));
     }
 }

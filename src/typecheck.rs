@@ -1274,7 +1274,28 @@ impl TypeChecker {
                     BinOp::DotDot | BinOp::DotDotEq => Ok(Ty::Int), // range sugar; not a full range type yet
                 }
             }
-            Expression::Call { name, args, span, .. } => {
+            Expression::Call {
+                name,
+                args,
+                span,
+                propagate_err,
+                ..
+            } => {
+                // Apply `?`: Result[T, E] → T (must not leave Result wrapped).
+                let apply_try = |ty: Ty| -> Result<Ty> {
+                    if !*propagate_err {
+                        return Ok(ty);
+                    }
+                    match ty {
+                        Ty::Result(ok, _) => Ok(*ok),
+                        other => Err(anyhow!(
+                            "Type error at {}:{}: `?` requires Result, found {}",
+                            span.line,
+                            span.col,
+                            other.display()
+                        )),
+                    }
+                };
                 // `old(x)` references a parameter snapshot. The first arg
                 // must be a Variable that exists in the enclosing
                 // function's parameter list (the `env` here is the
@@ -1347,7 +1368,7 @@ impl TypeChecker {
                             args.len()
                         ));
                     }
-                    return match name.as_str() {
+                    let method_ty = match name.as_str() {
                         ".len" => {
                             if matches!(recv_ty, Ty::String | Ty::List(_)) {
                                 Ok(Ty::Int)
@@ -1537,7 +1558,8 @@ impl TypeChecker {
                             expr.span().col,
                             other
                         )),
-                    };
+                    }?;
+                    return apply_try(method_ty);
                 }
 
                 let mut arg_tys = Vec::new();
@@ -1897,7 +1919,7 @@ impl TypeChecker {
                             }
                         }
                     }
-                    return Ok(ret.clone());
+                    return apply_try(ret.clone());
                 }
 
                 // Fail-closed: unknown free functions must not soft-accept as Ty::Unknown.
@@ -2098,6 +2120,8 @@ impl TypeChecker {
                 let mut has_err = false;
                 let mut has_some = false;
                 let mut has_none = false;
+                let mut has_true = false;
+                let mut has_false = false;
                 let mut has_wildcard = false;
                 for arm in arms {
                     let mut arm_env = env.clone();
@@ -2121,6 +2145,8 @@ impl TypeChecker {
                                 arm_env.insert(var.clone(), payload);
                             }
                         }
+                        Pattern::Literal(Literal::Bool(true)) => has_true = true,
+                        Pattern::Literal(Literal::Bool(false)) => has_false = true,
                         Pattern::Literal(_) => {}
                     }
                     let t = self.infer_expr_m(&arm.body, &arm_env, mutable)?;
@@ -2148,12 +2174,19 @@ impl TypeChecker {
                     }
                 }
 
-                // DESIGN: exhaustive matching for Result/Option (no silent fall-through).
+                // DESIGN: exhaustive matching for Result/Option/Bool (no silent fall-through).
                 if !has_wildcard {
                     match &scrutinee_ty {
                         Ty::Result(_, _) if !(has_ok && has_err) => {
                             return Err(anyhow!(
                                 "Type error at {}:{}: non-exhaustive match on Result — cover both Ok(_) and Err(_), or use `_`",
+                                span.line,
+                                span.col
+                            ));
+                        }
+                        Ty::Bool if !(has_true && has_false) => {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: non-exhaustive match on Bool — cover both true and false, or use `_`",
                                 span.line,
                                 span.col
                             ));
@@ -3655,5 +3688,75 @@ mod tests {
         "#;
         let err = check(bad).unwrap_err().to_string();
         assert!(err.contains("immutable") || err.contains("let mut"), "{}", err);
+    }
+
+    #[test]
+    fn question_mark_unwraps_result() {
+        let src = r#"
+            pub fn f() -> Result[Int, String] { return Ok(1); }
+            pub fn g() -> Result[Int, String] {
+                let x = f()?;
+                return Ok(x);
+            }
+            pub fn main() {
+                match g() {
+                    Ok(v) => println(v),
+                    Err(e) => println(e),
+                }
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn question_mark_on_non_result_fails() {
+        let src = r#"
+            pub fn main() {
+                let x = 1?;
+                println(x);
+            }
+        "#;
+        // may fail parse or type
+        let r = check(src);
+        assert!(r.is_err(), "1? must fail");
+    }
+
+    #[test]
+    fn bool_match_true_false_exhaustive() {
+        let src = r#"
+            pub fn f(b: Bool) -> Int {
+                match b {
+                    true => 1,
+                    false => 0,
+                }
+            }
+            pub fn main() { println(f(true)); }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn bool_match_nonexhaustive_fails() {
+        let src = r#"
+            pub fn f(b: Bool) -> Int {
+                match b {
+                    true => 1,
+                }
+            }
+            pub fn main() { println(f(true)); }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(err.contains("non-exhaustive") || err.contains("Bool"), "{}", err);
+    }
+
+    #[test]
+    fn contains_method_typechecks() {
+        let src = r#"
+            pub fn main() {
+                let ok = "hello".contains("ell");
+                println(ok);
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
     }
 }
