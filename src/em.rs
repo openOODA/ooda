@@ -1,10 +1,9 @@
 // ===================================================================
 // openOODA Energy-Maneuverability telemetry (honest, measured only)
 //
-// Boyd / E-M framing for the toolchain loop:
-//   Ps ~ V * (T - D) / W
-// We do **not** invent drag-eliminated milliseconds or 82.4% scores.
-// We report measured µs (latency), source weight W, and throughput V.
+// Boyd / E-M is the *design lens* (raise V, cut D, cut W). This report does
+// **not** fabricate T/D forces or 82.4% scores. It reports measured wall-clock
+// µs (latency), source weight W, and derived throughput V = W/time.
 // ===================================================================
 use serde::{Deserialize, Serialize};
 
@@ -21,9 +20,10 @@ pub struct EmReport {
     pub total_us: u128,
     /// V proxy: source bytes processed per second on the analyze path.
     pub analyze_throughput_bps: f64,
-    /// Ps proxy: throughput per byte of source weight (1/s). Higher = faster relative to W.
-    pub ps_proxy_per_sec: f64,
-    /// True if capability or typecheck failed (drag that forces a rework loop).
+    /// Inverse latency (Hz-ish): 1e6/total_us. Higher = faster analyze pass.
+    /// Not full Boyd Ps = V·(T−D)/W (needs real T/D instrumentation).
+    pub inverse_latency_per_sec: f64,
+    /// True if capability or typecheck failed (rework loop until fixed).
     pub check_failed: bool,
 }
 
@@ -42,11 +42,7 @@ impl EmReport {
             .max(1);
         let analyze_throughput_bps =
             (source_bytes as f64) * 1_000_000.0 / (total_us as f64);
-        let ps_proxy_per_sec = if source_bytes == 0 {
-            0.0
-        } else {
-            analyze_throughput_bps / (source_bytes as f64)
-        };
+        let inverse_latency_per_sec = 1_000_000.0 / (total_us as f64);
         Self {
             file: file.into(),
             source_bytes,
@@ -55,7 +51,7 @@ impl EmReport {
             typecheck_us,
             total_us,
             analyze_throughput_bps,
-            ps_proxy_per_sec,
+            inverse_latency_per_sec,
             check_failed,
         }
     }
@@ -63,14 +59,14 @@ impl EmReport {
     pub fn display_summary(&self) -> String {
         format!(
             "[openOODA E-M] measured analysis of {}\n\
-               W (source weight):     {} bytes\n\
-               parse:                 {} µs\n\
-               capability check:      {} µs\n\
-               typecheck:             {} µs\n\
-               total (latency):       {} µs\n\
+               W (source weight):      {} bytes\n\
+               load+parse:             {} µs\n\
+               capability check:       {} µs\n\
+               typecheck:              {} µs\n\
+               total (latency):        {} µs\n\
                V (analyze throughput): {:.0} B/s\n\
-               Ps proxy (V/W):        {:.2} /s{}\n\
-               (No invented drag-% or floor scores — values are wall-clock measurements.)",
+               1/latency:              {:.2} /s{}\n\
+               (Measured clocks only — not invented drag-% or Boyd Ps scores.)",
             self.file,
             self.source_bytes,
             self.parse_us,
@@ -78,9 +74,9 @@ impl EmReport {
             self.typecheck_us,
             self.total_us,
             self.analyze_throughput_bps,
-            self.ps_proxy_per_sec,
+            self.inverse_latency_per_sec,
             if self.check_failed {
-                "\n   check_failed:          true (rework loop — D > 0 until fixed)"
+                "\n   check_failed:           true (rework until green — D > 0)"
             } else {
                 ""
             }

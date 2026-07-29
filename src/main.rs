@@ -261,7 +261,7 @@ fn main() -> Result<()> {
             json_errors,
             args,
         } => {
-            let (program, _timings) = match load_and_analyze(&file, json_errors) {
+            let (program, timings) = match load_and_analyze(&file, json_errors) {
                 Ok(p) => p,
                 Err(code) => std::process::exit(code),
             };
@@ -275,6 +275,10 @@ fn main() -> Result<()> {
                         .with_fix(
                             "Satisfy requires / handle ensures",
                             "Check call-site arguments against `requires`; error includes call site line:col when available.",
+                        )
+                        .with_timings(
+                            timings.parse_us,
+                            timings.capability_us.saturating_add(timings.typecheck_us),
                         )
                         .print_json();
                 } else {
