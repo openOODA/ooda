@@ -63,7 +63,10 @@ impl WasmCodeGen {
         wat.push_str("(module\n");
         wat.push_str("  (import \"env\" \"println\" (func $println (param i64)))\n");
         wat.push_str("  (import \"env\" \"println_str\" (func $println_str (param i32)))\n");
-        wat.push_str("  (import \"env\" \"streq\" (func $streq (param i32 i32) (result i32)))\n\n");
+        wat.push_str("  (import \"env\" \"streq\" (func $streq (param i32 i32) (result i32)))\n");
+        wat.push_str(
+            "  (import \"env\" \"str_contains\" (func $str_contains (param i32 i32) (result i32)))\n\n",
+        );
         let aliases = program.collect_type_aliases();
         let needs_list_rt = Self::program_needs_list_runtime(program);
         let mut funcs_wat = String::new();
@@ -724,8 +727,8 @@ impl WasmCodeGen {
                 }
             }
             Expression::Call { name, args, .. } => {
-                // List methods on List[Int] → list_*; String .len/.char_at → pure WAT.
-                if name == ".push" || name == ".len" || name == ".char_at" {
+                // List methods on List[Int] → list_*; String .len/.char_at/.contains → WAT/host.
+                if name == ".push" || name == ".len" || name == ".char_at" || name == ".contains" {
                     if args.is_empty() {
                         bail!("WASM method '{}' requires a receiver", name);
                     }
@@ -765,7 +768,7 @@ impl WasmCodeGen {
                                 recv_ty
                             );
                         }
-                    } else {
+                    } else if name == ".char_at" {
                         // .char_at(index) on String → i64 byte value (ASCII subset)
                         if recv_ty != "i32" {
                             bail!(
@@ -785,6 +788,25 @@ impl WasmCodeGen {
                         wat.push_str("    i32.wrap_i64\n");
                         wat.push_str("    i32.add\n");
                         wat.push_str("    i32.load8_u\n");
+                        wat.push_str("    i64.extend_i32_u\n");
+                    } else {
+                        // .contains(needle) on String → host str_contains → Bool i64
+                        if recv_ty != "i32" {
+                            bail!(
+                                "WASM .contains requires String receiver (got {}); use `ooda run`.",
+                                recv_ty
+                            );
+                        }
+                        if args.len() != 2 {
+                            bail!("WASM .contains expects receiver + String needle");
+                        }
+                        let needle_ty = Self::infer_expr_type(&args[1], locals);
+                        if needle_ty != "i32" {
+                            bail!("WASM .contains needle must be String (got {})", needle_ty);
+                        }
+                        wat.push_str(&Self::emit_expr(&args[0], locals)?);
+                        wat.push_str(&Self::emit_expr(&args[1], locals)?);
+                        wat.push_str("    call $str_contains\n");
                         wat.push_str("    i64.extend_i32_u\n");
                     }
                 } else if name.starts_with('.') {
@@ -920,6 +942,7 @@ impl WasmCodeGen {
                     || name == "list_len"
                     || name == ".len"
                     || name == ".char_at"
+                    || name == ".contains"
                 {
                     "i64"
                 } else {

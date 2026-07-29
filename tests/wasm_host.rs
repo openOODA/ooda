@@ -52,6 +52,34 @@ fn run_wat(wat: &str) -> Result<Vec<String>> {
 
     linker.func_wrap(
         "env",
+        "str_contains",
+        |mut caller: Caller<'_, HostOut>, hay: i32, needle: i32| -> i32 {
+            let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                Some(m) => m,
+                None => return 0,
+            };
+            let data = mem.data(&caller);
+            let read = |off: i32| -> String {
+                let start = off as usize;
+                if start >= data.len() {
+                    return String::new();
+                }
+                let mut end = start;
+                while end < data.len() && data[end] != 0 {
+                    end += 1;
+                }
+                String::from_utf8_lossy(&data[start..end]).into_owned()
+            };
+            if read(hay).contains(&read(needle)) {
+                1
+            } else {
+                0
+            }
+        },
+    )?;
+
+    linker.func_wrap(
+        "env",
         "streq",
         |mut caller: Caller<'_, HostOut>, a: i32, b: i32| -> i32 {
             let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
@@ -373,6 +401,56 @@ fn ooda_wasm_string_walk_fixture_runs_on_host() {
         "walk got {:?}",
         lines
     );
+}
+
+/// String `.contains` via host `str_contains` (real ooda→WAT→host path).
+#[test]
+fn ooda_wasm_string_contains_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wcont_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("cont.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    if "hello".contains("ell") {
+        println(1);
+    } else {
+        println(0);
+    }
+    if "hello".contains("xyz") {
+        println(1);
+    } else {
+        println(0);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "contains wasm: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("call $str_contains"),
+        "missing str_contains:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(
+        lines,
+        vec!["1".to_string(), "0".to_string()],
+        "got {:?}",
+        lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// String `.char_at(i)` loads byte at offset as i64 (ASCII).
