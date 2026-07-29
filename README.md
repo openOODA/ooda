@@ -73,4 +73,6 @@ See `bootstrap/CHS.md` (CHS freeze) and `bootstrap/BETA.md` (zero-Rust beta gate
 
 ---
 
+Ship notes: [GitHub Releases](https://github.com/openOODA/ooda/releases) (not root RELEASE_NOTES files; history recoverable via git).
+
 Related: `spec`, `qa`, `std` (.oo), `openOODA.github.io`.
