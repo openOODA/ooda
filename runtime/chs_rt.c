@@ -213,6 +213,15 @@ OoResV oo_write_file(OoStr path, OoStr content) {
   return r;
 }
 
+int oo_path_exists(OoStr path) {
+  FILE *f = fopen(path.data, "rb");
+  if (f) {
+    fclose(f);
+    return 1;
+  }
+  return 0;
+}
+
 void oo_print_str(OoStr s) { fwrite(s.data, 1, (size_t)s.len, stdout); }
 void oo_print_int(long long n) { printf("%lld", n); }
 void oo_print_bool(int b) { fputs(b ? "true" : "false", stdout); }
