@@ -5,7 +5,7 @@ use ooda::capabilities::CapabilityChecker;
 use ooda::codegen::LlvmCodeGen;
 use ooda::codegen_c::{runtime_c_path, CCodeGen};
 use ooda::codegen_wasm::WasmCodeGen;
-use ooda::diagnostics::{AiDiagnostic, DiagnosticTimings};
+use ooda::diagnostics::AiDiagnostic;
 use ooda::dump::{format_ast_dump, format_check_err, format_check_ok, format_token_dump};
 use ooda::eval::Interpreter;
 use ooda::fmt;
@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.80.0-alpha")]
+#[command(version = "0.81.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -311,7 +311,7 @@ fn main() -> Result<()> {
                             "ok",
                             "parse + capabilities + types passed",
                         );
-                        d = d.with_timings(t.parse_us, t.capability_us + t.typecheck_us);
+                        d = t.attach(d);
                         d.print_json();
                     } else {
                         println!(
@@ -771,18 +771,11 @@ struct AnalyzeTimings {
 }
 
 impl AnalyzeTimings {
-    fn total_us(&self) -> u128 {
-        self.parse_us
-            .saturating_add(self.capability_us)
-            .saturating_add(self.typecheck_us)
-    }
-    fn to_diag_timings(&self) -> DiagnosticTimings {
-        // Only attach parse + typecheck; the capability pass is folded
-        // into typecheck conceptually (both run after parse).
-        DiagnosticTimings {
-            parse_us: self.parse_us,
-            check_us: self.capability_us.saturating_add(self.typecheck_us),
-        }
+    fn attach(self, d: AiDiagnostic) -> AiDiagnostic {
+        d.with_timings(
+            self.parse_us,
+            self.capability_us.saturating_add(self.typecheck_us),
+        )
     }
 }
 
@@ -1305,9 +1298,9 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.80.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.81.0-alpha";
     // For comparing against Cargo.toml which lacks the 'v'
-    const CANONICAL_VERSION_NO_V: &str = "0.80.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.81.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

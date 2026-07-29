@@ -13,7 +13,6 @@ use crate::parser::Parser;
 use anyhow::{anyhow, bail, Result};
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
 
 /// Summary of a migrate run (for humans and `ooda migrate --json`).
 #[derive(Debug, Clone, serde::Serialize)]

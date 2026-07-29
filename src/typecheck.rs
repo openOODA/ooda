@@ -623,6 +623,39 @@ impl TypeChecker {
     }
 
 
+    /// If `want` has Unknown holes that `got` fills, return the refined type.
+    /// Otherwise None (keep existing env binding).
+    fn refine_type(want: &Ty, got: &Ty) -> Option<Ty> {
+        match (want, got) {
+            (Ty::Unknown, g) if !matches!(g, Ty::Unknown) => Some(g.clone()),
+            (Ty::List(w), Ty::List(g)) => {
+                if matches!(w.as_ref(), Ty::Unknown) && !matches!(g.as_ref(), Ty::Unknown) {
+                    Some(Ty::List(g.clone()))
+                } else if let Some(inner) = Self::refine_type(w, g) {
+                    Some(Ty::List(Box::new(inner)))
+                } else {
+                    None
+                }
+            }
+            (Ty::Option(w), Ty::Option(g)) => {
+                Self::refine_type(w, g).map(|i| Ty::Option(Box::new(i)))
+            }
+            (Ty::Result(wa, we), Ty::Result(ga, ge)) => {
+                let a = Self::refine_type(wa, ga);
+                let e = Self::refine_type(we, ge);
+                if a.is_none() && e.is_none() {
+                    None
+                } else {
+                    Some(Ty::Result(
+                        Box::new(a.unwrap_or_else(|| (**wa).clone())),
+                        Box::new(e.unwrap_or_else(|| (**we).clone())),
+                    ))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Const length of list_new / list_push chains, using env of known binding lengths.
     fn const_list_len(expr: &Expression, env_lens: &HashMap<String, i64>) -> Option<i64> {
         match expr {
@@ -852,6 +885,12 @@ impl TypeChecker {
                             name,
                             want.display()
                         ));
+                    }
+                    // Refine env when assignment narrows Unknown holes (e.g. List[_]
+                    // from list_new becomes List[Int] after list_push). Critical for
+                    // `for x in xs` after unannotated list building.
+                    if let Some(refined) = Self::refine_type(&want, &vty) {
+                        env.insert(name.clone(), refined);
                     }
                     if let Some(len) = Self::const_list_len(value, &list_lens) {
                         list_lens.insert(name.clone(), len);
@@ -3489,6 +3528,25 @@ mod tests {
             "heterogeneous list push must fail: {}",
             err
         );
+    }
+
+    #[test]
+    fn list_push_assign_refines_element_type_for_for_loop() {
+        // Unannotated list_new + push must refine List[_] → List[Int] so
+        // `for x in xs { s = s + x }` typechecks (list-for desugar uses list_get).
+        let src = r#"
+            pub fn main() -> Int {
+                let mut xs = list_new();
+                xs = list_push(xs, 10);
+                xs = list_push(xs, 20);
+                let mut s = 0;
+                for x in xs {
+                    s = s + x;
+                }
+                return s;
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
     }
 
     #[test]

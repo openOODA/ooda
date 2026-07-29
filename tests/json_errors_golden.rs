@@ -1983,3 +1983,54 @@ fn where_non_const_fails_check() {
     assert!(err.contains("where") || err.contains("const"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn for_list_iteration_run_and_c() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_listfor_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut xs = list_new();
+    xs = list_push(xs, 10);
+    xs = list_push(xs, 20);
+    let mut s = 0;
+    for x in xs {
+        s = s + x;
+    }
+    println(s);
+}
+"#,
+    )
+    .unwrap();
+    let run = std::process::Command::new(bin)
+        .args(["run", path.to_str().unwrap()])
+        .output()
+        .expect("run");
+    assert!(
+        run.status.success(),
+        "list for run: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("30"), "stdout={}", stdout);
+
+    let build = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("build");
+    assert!(
+        build.status.success(),
+        "list for C: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let exe = path.with_extension("");
+    let out = std::process::Command::new(&exe).output().expect("exe");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("30"), "C stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}

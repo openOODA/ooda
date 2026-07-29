@@ -1481,11 +1481,6 @@ impl Interpreter {
         }
     }
 
-    fn bind_pattern(&self, pattern: &Pattern, val: &Value, env: &mut HashMap<String, Value>) -> bool {
-        let mut shadows = Vec::new();
-        self.bind_pattern_shadow(pattern, val, env, &mut shadows)
-    }
-
     /// Bind pattern variables into `env`, recording prior values in `shadows` for restore.
     fn bind_pattern_shadow(
         &self,
