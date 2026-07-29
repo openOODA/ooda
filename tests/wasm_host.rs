@@ -453,6 +453,53 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Empty lists: deep-equal (len 0) even with distinct headers; must call $list_eq.
+#[test]
+fn ooda_wasm_empty_list_deep_eq() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wemptyeq_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("empty.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let a: List[Int] = list_new();
+    let b: List[Int] = list_new();
+    if a == b {
+        println(1);
+    } else {
+        println(0);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "empty list eq build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("call $list_eq"),
+        "empty list == must use list_eq:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(
+        lines,
+        vec!["1".to_string()],
+        "empty deep eq; got {:?}",
+        lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// List ==/!= is **deep equality** of content.
 #[test]
 fn ooda_wasm_list_deep_eq_not_streq() {
@@ -492,12 +539,19 @@ pub fn main() {
         String::from_utf8_lossy(&out.stderr)
     );
     let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
-    assert!(!wat.contains("call $streq"), "must not use streq for lists");
+    assert!(
+        wat.contains("call $list_eq"),
+        "list == must call $list_eq:\n{}",
+        wat
+    );
+    // Module may still *import* streq for string ops; list compares must not *call* streq.
+    let list_eq_calls = wat.matches("call $list_eq").count();
+    assert!(list_eq_calls >= 2, "expected two list compares, wat:\n{}", wat);
     let lines = run_wat(&wat).unwrap();
     assert_eq!(
         lines,
         vec!["1".to_string(), "1".to_string()],
-        "a==a is true, a==b is true (deep eq); got {:?}",
+        "a==a true, a==b deep-eq true; got {:?}",
         lines
     );
     let _ = std::fs::remove_dir_all(&dir);

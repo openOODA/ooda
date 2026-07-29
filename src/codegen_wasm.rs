@@ -573,7 +573,7 @@ impl WasmCodeGen {
                 let either_str = lhs_ty == "i32" || rhs_ty == "i32";
                 let either_list = lhs_ty == "list" || rhs_ty == "list";
                 // String/list pointers are not numbers: refuse arithmetic / ordering.
-                // String Eq/Neq → streq; list Eq/Neq → i32 pointer identity.
+                // String Eq/Neq → $streq (content). List Eq/Neq → $list_eq (deep Int content).
                 if either_str {
                     match op {
                         BinOp::Eq | BinOp::Neq => {}
@@ -648,8 +648,8 @@ impl WasmCodeGen {
                     BinOp::Div if ty == "i64" => wat.push_str("    i64.div_s\n"),
                     BinOp::Div => wat.push_str("    f64.div\n"),
                     // Comparisons yield i32 in WebAssembly; extend to i64 Bool model.
-                    // String (semantic i32): content via $streq. List: header pointer i32.eq/ne.
-                    // Never run streq on list pointers (distinct headers must compare unequal).
+                    // String: $streq content. List: $list_eq deep elementwise Int equality
+                    // (aligns with interpreter Value::List PartialEq). Never $streq on lists.
                     BinOp::Eq => {
                         if either_str {
                             wat.push_str("    call $streq\n");
