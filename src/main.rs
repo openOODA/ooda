@@ -5,7 +5,7 @@ use ooda::capabilities::CapabilityChecker;
 use ooda::codegen::LlvmCodeGen;
 use ooda::codegen_c::{runtime_c_path, CCodeGen};
 use ooda::codegen_wasm::WasmCodeGen;
-use ooda::diagnostics::AiDiagnostic;
+use ooda::diagnostics::{parse_loc, AiDiagnostic};
 use ooda::dump::{format_ast_dump, format_check_err, format_check_ok, format_token_dump};
 use ooda::eval::Interpreter;
 use ooda::fmt;
@@ -31,95 +31,11 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.85.0-alpha")]
+#[command(version = "0.86.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-}
-
-/// Extract `line:col` from messages emitted by the parser, typechecker,
-/// and capability checker. Recognises these formats in priority order:
-///
-/// 1. `at LINE:COL`            — parser, typechecker (`Type error at 4:26: …`)
-/// 2. `at line LINE, col COL`  — capability checker (`… at line 2, col 52.`)
-/// 3. `line N`                 — fallback, column defaults to 1
-fn parse_loc(msg: &str) -> (usize, usize) {
-    // Format 1: ` at LINE:COL `
-    if let Some(idx) = msg.find(" at ") {
-        let rest = &msg[idx + 4..];
-        let coords: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_digit() || *c == ':')
-            .collect();
-        let parts: Vec<&str> = coords.split(':').collect();
-        if parts.len() >= 2 {
-            if let (Ok(l), Ok(c)) = (parts[0].parse(), parts[1].parse()) {
-                return (l, c);
-            }
-        }
-    }
-    // Format 2: ` at line LINE, col COL `
-    if let Some(idx) = msg.find(" at line ") {
-        let after_line = &msg[idx + " at line ".len()..];
-        let line_str: String = after_line
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if let Ok(l) = line_str.parse::<usize>() {
-            if let Some(comma_idx) = after_line.find(" col ") {
-                let after_col = &after_line[comma_idx + " col ".len()..];
-                let col_str: String = after_col
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                if let Ok(c) = col_str.parse::<usize>() {
-                    return (l, c);
-                }
-            }
-            // `at line LINE` with no column → column 1.
-            return (l, 1);
-        }
-    }
-    // Format 3: `line N`
-    if let Some(idx) = msg.find("line ") {
-        let rest = &msg[idx + 5..];
-        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(l) = num.parse() {
-            return (l, 1);
-        }
-    }
-    (1, 1)
-}
-
-#[cfg(test)]
-mod parse_loc_tests {
-    use super::parse_loc;
-
-    #[test]
-    fn extracts_at_line_col_format() {
-        let (l, c) = parse_loc("Type error at 4:26: undefined variable 'foo'");
-        assert_eq!((l, c), (4, 26));
-    }
-
-    #[test]
-    fn extracts_capability_at_line_comma_col_format() {
-        let msg = "Security Capability Violation: Function 'rogue_fetch' calls sealed effectful builtin 'fetch' which requires a &NetCap parameter, but none was declared at line 2, col 52. Default-deny: grant the capability token explicitly.";
-        let (l, c) = parse_loc(msg);
-        assert_eq!((l, c), (2, 52));
-    }
-
-    #[test]
-    fn extracts_fallback_line_format() {
-        let (l, c) = parse_loc("Expected token at line 7");
-        assert_eq!((l, c), (7, 1));
-    }
-
-    #[test]
-    fn defaults_to_one_one_when_no_match() {
-        let (l, c) = parse_loc("totally unstructured error message");
-        assert_eq!((l, c), (1, 1));
-    }
 }
 
 #[derive(Subcommand)]
@@ -1306,9 +1222,9 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.85.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.86.0-alpha";
     // For comparing against Cargo.toml which lacks the 'v'
-    const CANONICAL_VERSION_NO_V: &str = "0.85.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.86.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

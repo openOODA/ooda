@@ -17,6 +17,12 @@ use anyhow::{anyhow, bail, Result};
 use std::collections::{BTreeMap, HashSet};
 use std::process::Command;
 
+thread_local! {
+    /// Nested while break/continue label pairs for the current WASM emit.
+    static WASM_LOOP_STACK: std::cell::RefCell<Vec<(String, String)>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
 pub struct WasmCodeGen;
 
 impl WasmCodeGen {
@@ -168,11 +174,6 @@ impl WasmCodeGen {
                     f_wat.push_str("    return\n");
                     emitted_return = true;
                 }
-                Statement::Break(_) | Statement::Continue(_) => {
-                    bail!(
-                        "WASM backend does not support break/continue. Use `ooda run` or `ooda build --target c`."
-                    );
-                }
                 Statement::Return(None, _) => {
                     if is_main {
                         f_wat.push_str("    i32.const 0\n");
@@ -182,23 +183,9 @@ impl WasmCodeGen {
                     }
                     emitted_return = true;
                 }
-                Statement::Expr(expr, _) => {
-                    let e_wat = Self::emit_expr(expr, &locals)?;
-                    f_wat.push_str(&e_wat);
-                    // Statement context: drop leftover stack value for non-void calls like println.
-                    if matches!(expr, Expression::Call { name, .. } if name == "println") {
-                        // println is imported as (param i64) with no result — nothing to drop.
-                    } else if matches!(expr, Expression::Call { .. } | Expression::Binary { .. } | Expression::Variable(_, _) | Expression::Literal(_, _)) {
-                        // User fns return i64 — drop if used as statement.
-                        if let Expression::Call { name, .. } = expr {
-                            if name != "println" {
-                                f_wat.push_str("    drop\n");
-                            }
-                        }
-                    }
-                }
-                Statement::While { cond, body, .. } => {
-                    f_wat.push_str(&Self::emit_while(cond, body, &locals)?);
+                other => {
+                    // Let / assign / expr / while / break / continue
+                    f_wat.push_str(&Self::emit_stmt_wat(other, &locals)?);
                 }
             }
         }
@@ -436,12 +423,15 @@ impl WasmCodeGen {
         locals: &BTreeMap<String, &'static str>,
     ) -> Result<String> {
         let mut wat = String::new();
-        // If the condition is Float, convert to i32 (true/false).
         let cond_ty = Self::infer_expr_type(cond, locals);
-        // while cond { body }  →  break when cond is *false* (zero).
-        // Previous alphas inverted this (br_if on true), so loops never ran.
-        wat.push_str("    block $break\n");
-        wat.push_str("      loop $continue\n");
+        static LOOP_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let id = LOOP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let br_lab = format!("break_{}", id);
+        let cont_lab = format!("continue_{}", id);
+        WASM_LOOP_STACK.with(|s| s.borrow_mut().push((br_lab.clone(), cont_lab.clone())));
+        // while cond { body } → break when cond is *false* (zero).
+        wat.push_str(&format!("    block ${}\n", br_lab));
+        wat.push_str(&format!("      loop ${}\n", cont_lab));
         wat.push_str(&Self::emit_expr(cond, locals)?);
         match cond_ty {
             "f64" => {
@@ -449,19 +439,17 @@ impl WasmCodeGen {
                 wat.push_str("        f64.eq\n"); // 1 when false → break
             }
             _ => {
-                // i64/bool: eqz → 1 when cond==0 (false) → break
                 wat.push_str("        i64.eqz\n");
             }
         }
-        wat.push_str("        br_if $break\n");
+        wat.push_str(&format!("        br_if ${}\n", br_lab));
         for stmt in &body.stmts {
             wat.push_str(&Self::emit_stmt_wat(stmt, locals)?);
         }
-        wat.push_str("        br $continue\n");
+        wat.push_str(&format!("        br ${}\n", cont_lab));
         wat.push_str("      end\n");
         wat.push_str("    end\n");
-        // The block has no result, but stack-polymorphic wasm needs
-        // an inert value to satisfy validation — emit an i32.const 0.
+        WASM_LOOP_STACK.with(|s| { s.borrow_mut().pop(); });
         wat.push_str("    i32.const 0\n");
         wat.push_str("    drop\n");
         Ok(wat)
@@ -579,10 +567,16 @@ impl WasmCodeGen {
                 wat.push_str("        return\n");
             }
             Statement::Break(_) => {
-                wat.push_str("        br $break\n");
+                let br = WASM_LOOP_STACK.with(|s| {
+                    s.borrow().last().map(|(b, _)| b.clone())
+                }).ok_or_else(|| anyhow::anyhow!("WASM: break outside loop"))?;
+                wat.push_str(&format!("        br ${}\n", br));
             }
             Statement::Continue(_) => {
-                wat.push_str("        br $continue\n");
+                let cont = WASM_LOOP_STACK.with(|s| {
+                    s.borrow().last().map(|(_, c)| c.clone())
+                }).ok_or_else(|| anyhow::anyhow!("WASM: continue outside loop"))?;
+                wat.push_str(&format!("        br ${}\n", cont));
             }
             Statement::Return(None, _) => {
                 wat.push_str("        return\n");
@@ -886,16 +880,57 @@ mod tests {
         );
         // Must not use the inverted "ne 0 → break on true" pattern.
         assert!(
-            !wat.contains("i64.const 0\n        i64.ne\n        br_if $break"),
+            !wat.contains("i64.ne\n        br_if $break_"),
             "inverted while polarity must not appear:\n{}",
             wat
         );
-        assert!(wat.contains("br_if $break"), "wat:\n{}", wat);
-        assert!(wat.contains("br $continue"), "wat:\n{}", wat);
+        assert!(
+            wat.contains("br_if $break_") || wat.contains("br_if $break"),
+            "wat:\n{}",
+            wat
+        );
+        assert!(
+            wat.contains("br $continue_") || wat.contains("br $continue"),
+            "wat:\n{}",
+            wat
+        );
         // Comparisons produce i32 in WASM; we extend to i64 Bool model.
         assert!(
             wat.contains("i64.extend_i32_u"),
             "compare result must extend i32→i64:\n{}",
+            wat
+        );
+    }
+
+    #[test]
+    fn nested_while_break_uses_unique_labels() {
+        // Locals must be declared at function top — declare j outside.
+        let prog = parse(
+            r#"
+            pub fn main() -> Int {
+                let mut i = 0;
+                let mut j = 0;
+                while i < 2 {
+                    j = 0;
+                    while j < 3 {
+                        if j == 1 { break; }
+                        j = j + 1;
+                    }
+                    i = i + 1;
+                }
+                return i;
+            }
+            "#,
+        );
+        let wat = WasmCodeGen::emit_wat(&prog).expect("emit nested while");
+        assert!(
+            wat.matches("block $break_").count() >= 2,
+            "expected unique nested break labels, got:\n{}",
+            wat
+        );
+        assert!(
+            wat.contains("br $break_"),
+            "inner break must target labeled break block:\n{}",
             wat
         );
     }

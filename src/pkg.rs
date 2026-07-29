@@ -25,7 +25,7 @@ impl PackageManager {
         println!(
             "Initialized ooda.json for project '{}'. \
              `ooda pkg --install` supports local paths and https://…/*.tar.gz (curl+tar). \
-             No registry, no git clone, no signature verify in this alpha.",
+             Local path pin; https .tar.gz (+ optional .sha256 sidecar); git clone if git available. Set OODA_PKG_REQUIRE_SHA256=1 to fail closed without a matching sidecar for tarballs.",
             project_name
         );
         Ok(())
@@ -116,8 +116,14 @@ impl PackageManager {
                         .args(["-fsSL", repo, "-o", tarball.to_str().unwrap()])
                         .status()?;
                     if !status.success() {
+                        let _ = fs::remove_dir_all(&cache_dir);
                         bail!("Failed to download package from {}", repo);
                     }
+
+                    // Signed/integrity verify: optional companion URL.sha256 (or .sha256sum).
+                    // Format: `<hex>  <filename>` or bare 64-char hex. Fail closed on mismatch.
+                    // OODA_PKG_REQUIRE_SHA256=1 requires a sidecar; default warns if absent.
+                    verify_tarball_sha256(repo, &tarball)?;
 
                     let extract_status = std::process::Command::new("tar")
                         .args(["-xzf", tarball.to_str().unwrap(), "-C", extract_dir.to_str().unwrap()])
@@ -187,11 +193,99 @@ impl PackageManager {
 
         println!(
             "Pinned '{}' → {} (hash {}). Remote installs cache under ~/.cache/ooda/pkg/. \
-             No registry resolve, no signature verify, no automatic OODA_PATH wiring.",
+             No registry resolve, no automatic OODA_PATH wiring. Tarball SHA-256 sidecar verified when present.",
             repo,
             p.display(),
             hash
         );
         Ok(())
+    }
+}
+
+/// Verify downloaded tarball against `{url}.sha256` or `{url}.sha256sum` when available.
+fn verify_tarball_sha256(url: &str, tarball: &std::path::Path) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let require = std::env::var("OODA_PKG_REQUIRE_SHA256")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let candidates = [format!("{}.sha256", url), format!("{}.sha256sum", url)];
+    let mut expected: Option<String> = None;
+    for side in &candidates {
+        let tmp = tarball.with_extension("sha256tmp");
+        let status = std::process::Command::new("curl")
+            .args(["-fsSL", side, "-o"])
+            .arg(&tmp)
+            .status();
+        if let Ok(st) = status {
+            if st.success() {
+                if let Ok(body) = fs::read_to_string(&tmp) {
+                    let hex = body
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_lowercase();
+                    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                        expected = Some(hex);
+                        let _ = fs::remove_file(&tmp);
+                        break;
+                    }
+                }
+                let _ = fs::remove_file(&tmp);
+            }
+        }
+    }
+    let bytes = fs::read(tarball)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual = format!("{:x}", hasher.finalize());
+    match expected {
+        Some(exp) if exp == actual => {
+            eprintln!("ooda pkg: SHA-256 verified for {}", url);
+            Ok(())
+        }
+        Some(exp) => {
+            let _ = fs::remove_file(tarball);
+            bail!(
+                "ooda pkg --install: SHA-256 mismatch for {}\n  expected {}\n  actual   {}",
+                url, exp, actual
+            );
+        }
+        None if require => {
+            let _ = fs::remove_file(tarball);
+            bail!(
+                "ooda pkg --install: OODA_PKG_REQUIRE_SHA256=1 but no {}.sha256 sidecar found",
+                url
+            );
+        }
+        None => {
+            eprintln!(
+                "ooda pkg: no .sha256 sidecar for {} (set OODA_PKG_REQUIRE_SHA256=1 to require)",
+                url
+            );
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify_tarball_sha256;
+
+    #[test]
+    fn sha256_require_without_sidecar_fails() {
+        let dir = std::env::temp_dir().join(format!("ooda_sha_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let tar = dir.join("pkg.tar.gz");
+        std::fs::write(&tar, b"hello-pkg-bytes").unwrap();
+        // No network sidecar; REQUIRE unset → ok with warning path
+        std::env::remove_var("OODA_PKG_REQUIRE_SHA256");
+        assert!(verify_tarball_sha256("https://example.invalid/no-side.tar.gz", &tar).is_ok());
+        // Require without sidecar fails
+        std::env::set_var("OODA_PKG_REQUIRE_SHA256", "1");
+        let err = verify_tarball_sha256("https://example.invalid/no-side.tar.gz", &tar).unwrap_err();
+        assert!(format!("{}", err).contains("REQUIRE_SHA256") || format!("{}", err).contains("sidecar"));
+        std::env::remove_var("OODA_PKG_REQUIRE_SHA256");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

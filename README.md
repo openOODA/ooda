@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.85.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.86.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.85.0-alpha
+ooda --version   # 0.86.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.85.0-alpha (CHS M0–M5)
+## What's real in v0.86.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -62,7 +62,7 @@ import "lib.oo";       // relative / OODA_PATH
 | String methods | Real on interpreter + CHS C (`.char_at` / `.str_slice`); LLVM subset refuses strings fail-closed |
 | Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM (method forms included as of v0.69); pure compute subset may lower; IR-only link fails non-zero |
 | `EnvCap` `.env_get` | Real on **interpreter**; C build refuses (sealed) |
-| Network `pkg install` | Partial: **https://…/*.tar.gz** via host `curl`+`tar` cache; local path pin; **git clone / registry / sigs not supported** |
+| Network `pkg install` | Partial: local pin; https `*.tar.gz` via curl+tar; optional `.sha256` sidecar verify; `OODA_PKG_REQUIRE_SHA256=1` fail-closed; git clone if `git` present; **no registry/GPG** |
 | `ooda patch` | Real body / params / return type / requires / ensures |
 | `ooda migrate --edition 2026` | Partial real: exhaustive match wildcards + assigned `let`→`let mut` |
 | `type T = Int where lo..hi` | Real subset: const Int range → `Int[lo..hi]` alias; other `where` forms fail parse |
@@ -79,7 +79,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ## Not implemented (fail non-zero)
 
-Full package registry/signature verify (git clone & https tarball supported), time-travel `replay` (re-run named fn only), in-process CPython/PyTorch embed, full WASM product, full SPEC self-host (CHS frontend fixed-point only).  
+Full LSP (no completion/hover/rename), full package registry/GPG signing, time-travel replay, in-process CPython/PyTorch, **full WASM product** (still subset + sealed refuse), full SPEC self-host.  
 `ooda migrate` is **not** a full edition engine — only the two codemods above.
 
 

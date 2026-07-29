@@ -1,14 +1,16 @@
 // ===================================================================
-// openOODA LSP — AI Diagnostics via `textDocument/didOpen|didChange`
+// openOODA LSP — textDocumentSync diagnostics (parse + cap + typecheck)
 // ===================================================================
 use anyhow::Result;
+use crate::diagnostics::{parse_loc, to_lsp_position};
 
 pub struct LspDaemon;
 
 impl LspDaemon {
     pub fn start() -> Result<()> {
         eprintln!(
-            "ooda lsp: starting with full textDocumentSync for live diagnostics."
+            "ooda lsp: textDocumentSync=Full with parse/cap/typecheck diagnostics \
+             (not a full language server — no completion/hover/rename)."
         );
         let stdin = std::io::stdin();
         let mut stdout = std::io::stdout();
@@ -33,7 +35,7 @@ impl LspDaemon {
                                 let res = if method == "initialize" {
                                     serde_json::json!({
                                         "capabilities": {
-                                            "textDocumentSync": 1 // Full
+                                            "textDocumentSync": 1
                                         },
                                         "serverInfo": {
                                             "name": "ooda-lsp",
@@ -48,54 +50,35 @@ impl LspDaemon {
                                     "id": id,
                                     "result": res
                                 });
-                                let resp_str = resp.to_string();
-                                use std::io::Write;
-                                write!(
-                                    stdout,
-                                    "Content-Length: {}\r\n\r\n{}",
-                                    resp_str.len(),
-                                    resp_str
-                                )?;
-                                stdout.flush()?;
+                                Self::write_message(&mut stdout, &resp)?;
                             }
                         } else if method == "exit" {
                             break;
-                        } else if method == "textDocument/didOpen" || method == "textDocument/didChange" {
+                        } else if method == "textDocument/didOpen"
+                            || method == "textDocument/didChange"
+                        {
                             if let Some(params) = json.get("params") {
-                                let uri = if method == "textDocument/didOpen" {
-                                    params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str())
-                                } else {
-                                    params.get("textDocument").and_then(|t| t.get("uri")).and_then(|u| u.as_str())
-                                };
+                                let uri = params
+                                    .get("textDocument")
+                                    .and_then(|t| t.get("uri"))
+                                    .and_then(|u| u.as_str());
                                 let text = if method == "textDocument/didOpen" {
-                                    params.get("textDocument").and_then(|t| t.get("text")).and_then(|t| t.as_str())
+                                    params
+                                        .get("textDocument")
+                                        .and_then(|t| t.get("text"))
+                                        .and_then(|t| t.as_str())
                                 } else {
-                                    params.get("contentChanges")
+                                    // Full sync: last change carries full document text.
+                                    params
+                                        .get("contentChanges")
                                         .and_then(|c| c.as_array())
-                                        .and_then(|c| c.first())
+                                        .and_then(|c| c.last())
                                         .and_then(|c| c.get("text"))
                                         .and_then(|t| t.as_str())
                                 };
 
                                 if let (Some(uri), Some(text)) = (uri, text) {
-                                    let mut diagnostics = vec![];
-                                    let mut lexer = crate::lexer::Lexer::new(text);
-                                    if let Ok(tokens) = lexer.tokenize() {
-                                        let mut parser = crate::parser::Parser::new(tokens);
-                                        match parser.parse_program() {
-                                            Ok(prog) => {
-                                                if let Err(e) = crate::typecheck::TypeChecker::check_program(&prog) {
-                                                    diagnostics.push(Self::parse_diagnostic(&e.to_string()));
-                                                }
-                                            }
-                                            Err(e) => {
-                                                diagnostics.push(Self::parse_diagnostic(&e.to_string()));
-                                            }
-                                        }
-                                    } else {
-                                        diagnostics.push(Self::parse_diagnostic("parse error at 1:1: Invalid token"));
-                                    }
-
+                                    let diagnostics = Self::diagnose_source(text);
                                     let resp = serde_json::json!({
                                         "jsonrpc": "2.0",
                                         "method": "textDocument/publishDiagnostics",
@@ -104,15 +87,7 @@ impl LspDaemon {
                                             "diagnostics": diagnostics
                                         }
                                     });
-                                    let resp_str = resp.to_string();
-                                    use std::io::Write;
-                                    let _ = write!(
-                                        stdout,
-                                        "Content-Length: {}\r\n\r\n{}",
-                                        resp_str.len(),
-                                        resp_str
-                                    );
-                                    let _ = stdout.flush();
+                                    let _ = Self::write_message(&mut stdout, &resp);
                                 }
                             }
                         }
@@ -123,29 +98,112 @@ impl LspDaemon {
         Ok(())
     }
 
-    fn parse_diagnostic(msg: &str) -> serde_json::Value {
-        let mut l = 1;
-        let mut c = 1;
-        if let Some(idx) = msg.find(" at ") {
-            let rest = &msg[idx + 4..];
-            let coords: String = rest.chars().take_while(|ch| ch.is_ascii_digit() || *ch == ':').collect();
-            let parts: Vec<&str> = coords.split(':').collect();
-            if parts.len() >= 2 {
-                if let (Ok(parsed_l), Ok(parsed_c)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
-                    l = parsed_l;
-                    c = parsed_c;
+    fn write_message(stdout: &mut impl std::io::Write, resp: &serde_json::Value) -> Result<()> {
+        let resp_str = resp.to_string();
+        write!(
+            stdout,
+            "Content-Length: {}\r\n\r\n{}",
+            resp_str.len(),
+            resp_str
+        )?;
+        stdout.flush()?;
+        Ok(())
+    }
+
+    /// Run lex → parse → caps → typecheck; collect LSP diagnostics.
+    fn diagnose_source(text: &str) -> Vec<serde_json::Value> {
+        let mut diagnostics = vec![];
+        let mut lexer = crate::lexer::Lexer::new(text);
+        match lexer.tokenize() {
+            Ok(tokens) => {
+                let mut parser = crate::parser::Parser::new(tokens);
+                match parser.parse_program() {
+                    Ok(prog) => {
+                        if let Err(e) =
+                            crate::capabilities::CapabilityChecker::check_program(&prog)
+                        {
+                            diagnostics.push(Self::parse_diagnostic(&e.to_string()));
+                        }
+                        if let Err(e) = crate::typecheck::TypeChecker::check_program(&prog) {
+                            diagnostics.push(Self::parse_diagnostic(&e.to_string()));
+                        }
+                    }
+                    Err(e) => {
+                        diagnostics.push(Self::parse_diagnostic(&e.to_string()));
+                    }
                 }
             }
+            Err(e) => {
+                diagnostics.push(Self::parse_diagnostic(&e.to_string()));
+            }
         }
-        let line = l.saturating_sub(1);
-        let char = c.saturating_sub(1);
+        diagnostics
+    }
+
+    /// Map compiler 1-indexed locations to LSP 0-indexed range.
+    fn parse_diagnostic(msg: &str) -> serde_json::Value {
+        let (line_1, col_1) = parse_loc(msg);
+        let (line, character) = to_lsp_position(line_1, col_1);
+        // end character: exclusive; advance one UTF-16 unit when possible (ASCII-safe).
+        let end_character = character.saturating_add(1);
         serde_json::json!({
             "severity": 1,
             "message": msg,
             "range": {
-                "start": { "line": line, "character": char },
-                "end": { "line": line, "character": char + 1 }
+                "start": { "line": line, "character": character },
+                "end": { "line": line, "character": end_character }
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LspDaemon;
+
+    #[test]
+    fn parse_diagnostic_type_error_zero_index() {
+        let d = LspDaemon::parse_diagnostic("Type error at 4:26: undefined variable 'foo'");
+        assert_eq!(d["range"]["start"]["line"], 3);
+        assert_eq!(d["range"]["start"]["character"], 25);
+        assert_eq!(d["range"]["end"]["character"], 26);
+    }
+
+    #[test]
+    fn parse_diagnostic_capability_zero_index() {
+        let msg = "Security Capability Violation: Function 'rogue_fetch' calls sealed effectful builtin 'fetch' which requires a &NetCap parameter, but none was declared at line 2, col 52. Default-deny.";
+        let d = LspDaemon::parse_diagnostic(msg);
+        assert_eq!(d["range"]["start"]["line"], 1);
+        assert_eq!(d["range"]["start"]["character"], 51);
+    }
+
+    #[test]
+    fn parse_diagnostic_defaults_zero_zero() {
+        let d = LspDaemon::parse_diagnostic("totally unstructured");
+        // source (1,1) → LSP (0,0)
+        assert_eq!(d["range"]["start"]["line"], 0);
+        assert_eq!(d["range"]["start"]["character"], 0);
+    }
+
+    #[test]
+    fn diagnose_source_flags_type_error() {
+        let diags = LspDaemon::diagnose_source("pub fn main() { println(1 + \"a\"); }\n");
+        assert!(!diags.is_empty(), "expected type diagnostic");
+    }
+
+    #[test]
+    fn diagnose_source_flags_cap_error() {
+        let diags = LspDaemon::diagnose_source(
+            "pub fn main() { let _ = fetch(\"https://x\"); }\n",
+        );
+        assert!(
+            diags.iter().any(|d| d["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Capability")
+                || d["message"].as_str().unwrap_or("").contains("fetch")),
+            "expected cap diagnostic: {:?}",
+            diags
+        );
     }
 }

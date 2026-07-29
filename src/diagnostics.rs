@@ -1,6 +1,119 @@
 use serde::Serialize;
 use std::path::Path;
 
+/// Extract `line:col` from messages emitted by the parser, typechecker,
+/// and capability checker. Returns **1-indexed** line and column.
+///
+/// Recognises these formats in priority order:
+/// 1. `at LINE:COL`            — parser, typechecker (`Type error at 4:26: …`)
+/// 2. `at line LINE, col COL`  — capability checker (`… at line 2, col 52.`)
+/// 3. `line N`                 — fallback, column defaults to 1
+///
+/// Defaults to `(1, 1)` when no location is found (never returns 0 as source coords).
+pub fn parse_loc(msg: &str) -> (usize, usize) {
+    // Format 1: ` at LINE:COL ` (must not match ` at line ` first — order matters)
+    if let Some(idx) = msg.find(" at ") {
+        let rest = &msg[idx + 4..];
+        // Skip if this is the capability form starting with "line "
+        if !rest.starts_with("line ") {
+            let coords: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == ':')
+                .collect();
+            let parts: Vec<&str> = coords.split(':').collect();
+            if parts.len() >= 2 {
+                if let (Ok(l), Ok(c)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
+                    if l >= 1 && c >= 1 {
+                        return (l, c);
+                    }
+                }
+            }
+        }
+    }
+    // Format 2: ` at line LINE, col COL `
+    if let Some(idx) = msg.find(" at line ") {
+        let after_line = &msg[idx + " at line ".len()..];
+        let line_str: String = after_line
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(l) = line_str.parse::<usize>() {
+            if let Some(comma_idx) = after_line.find(" col ") {
+                let after_col = &after_line[comma_idx + " col ".len()..];
+                let col_str: String = after_col
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                if let Ok(c) = col_str.parse::<usize>() {
+                    return (l.max(1), c.max(1));
+                }
+            }
+            return (l.max(1), 1);
+        }
+    }
+    // Format 3: `line N`
+    if let Some(idx) = msg.find("line ") {
+        let rest = &msg[idx + 5..];
+        let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(l) = num.parse::<usize>() {
+            return (l.max(1), 1);
+        }
+    }
+    (1, 1)
+}
+
+/// Convert 1-indexed source `(line, col)` to LSP 0-indexed `(line, character)`.
+/// Never underflows: line 1 → 0, col 1 → 0.
+pub fn to_lsp_position(line_1: usize, col_1: usize) -> (usize, usize) {
+    (
+        line_1.saturating_sub(1),
+        col_1.saturating_sub(1),
+    )
+}
+
+#[cfg(test)]
+mod parse_loc_tests {
+    use super::{parse_loc, to_lsp_position};
+
+    #[test]
+    fn extracts_at_line_col_format() {
+        assert_eq!(
+            parse_loc("Type error at 4:26: undefined variable 'foo'"),
+            (4, 26)
+        );
+    }
+
+    #[test]
+    fn extracts_capability_at_line_comma_col_format() {
+        let msg = "Security Capability Violation: Function 'rogue_fetch' calls sealed effectful builtin 'fetch' which requires a &NetCap parameter, but none was declared at line 2, col 52. Default-deny: grant the capability token explicitly.";
+        assert_eq!(parse_loc(msg), (2, 52));
+    }
+
+    #[test]
+    fn extracts_fallback_line_format() {
+        assert_eq!(parse_loc("Expected token at line 7"), (7, 1));
+    }
+
+    #[test]
+    fn defaults_to_one_one_when_no_match() {
+        assert_eq!(parse_loc("totally unstructured error message"), (1, 1));
+    }
+
+    #[test]
+    fn lsp_zero_index_mapping_no_underflow() {
+        assert_eq!(to_lsp_position(1, 1), (0, 0));
+        assert_eq!(to_lsp_position(4, 26), (3, 25));
+        assert_eq!(to_lsp_position(0, 0), (0, 0)); // defensive
+    }
+
+    #[test]
+    fn does_not_confuse_at_line_with_at_coords() {
+        // " at line 2" must not be parsed as line=0 from empty coords before "line"
+        let msg = "error at line 3, col 9: boom";
+        assert_eq!(parse_loc(msg), (3, 9));
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct AiDiagnostic {
     pub error_type: String,
