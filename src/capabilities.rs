@@ -421,6 +421,21 @@ impl CapabilityChecker {
                             }
                         }
                     }
+                    if let Statement::Assign {
+                        name: assign_name,
+                        value,
+                        ..
+                    } = stmt
+                    {
+                        if assign_name == name {
+                            if let Expression::Variable(val_name, _) = value {
+                                return func
+                                    .params
+                                    .iter()
+                                    .any(|p| p.name == *val_name && kind.matches_type(&p.param_type));
+                            }
+                        }
+                    }
                 }
                 false
             }
@@ -504,12 +519,13 @@ mod tests {
     }
 
     #[test]
-    fn allows_let_aliased_capability_handle() {
+    fn allows_assign_re_aliased_capability_handle() {
         let prog = parse_program(
             r#"
             pub fn main(fs: &FsCap) {
-                let fs_alias = fs;
-                fs_alias.write_file("note.txt", "hello");
+                let mut fs_var = fs;
+                fs_var = fs;
+                fs_var.write_file("note.txt", "hello");
             }
             "#,
         );

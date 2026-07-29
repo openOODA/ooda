@@ -452,6 +452,7 @@ impl TypeChecker {
         expected_ret: Option<&Ty>,
     ) -> Result<Ty> {
         let mut last = Ty::Void;
+        let mut refinements: HashMap<String, (i64, i64)> = HashMap::new();
         for stmt in &block.stmts {
             match stmt {
                 Statement::Let {
@@ -479,6 +480,7 @@ impl TypeChecker {
                                 if let Some((min_s, max_s)) = rest.split_once("..") {
                                     let min_v: i64 = min_s.parse().unwrap_or(i64::MIN);
                                     let max_v: i64 = max_s.parse().unwrap_or(i64::MAX);
+                                    refinements.insert(name.clone(), (min_v, max_v));
                                     if let Expression::Literal(Literal::Int(val), l_span) = init {
                                         if *val < min_v || *val > max_v {
                                             return Err(anyhow!(
@@ -530,6 +532,21 @@ impl TypeChecker {
                             name,
                             name
                         ));
+                    }
+                    if let Some(&(min_v, max_v)) = refinements.get(name) {
+                        if let Expression::Literal(Literal::Int(val), l_span) = value {
+                            if *val < min_v || *val > max_v {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: RefinementTypeViolation: Value {} out of refinement bounds [{}..{}] for assignment to '{}'",
+                                    l_span.line,
+                                    l_span.col,
+                                    val,
+                                    min_v,
+                                    max_v,
+                                    name
+                                ));
+                            }
+                        }
                     }
                     let vty = self.infer_expr(value, env)?;
                     let want = env.get(name).cloned().unwrap_or(Ty::Unknown);
@@ -1522,5 +1539,22 @@ mod tests {
         "#;
         // Must typecheck: fetch returns Result so .is_err is valid
         assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_refinement_assignment() {
+        let src = r#"
+            pub fn main() {
+                let mut port: Int[1..65535] = 8080;
+                port = 70000;
+                println(port);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("70000"),
+            "expected assignment refinement error, got: {}",
+            err
+        );
     }
 }
