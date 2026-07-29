@@ -207,6 +207,70 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn ooda_wasm_list_eq() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_whost_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("list_eq.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut a = list_new();
+    a = list_push(a, 10);
+    a = list_push(a, 20);
+
+    let mut b = list_new();
+    b = list_push(b, 10);
+    b = list_push(b, 20);
+
+    let mut c = list_new();
+    c = list_push(c, 10);
+    c = list_push(c, 21);
+
+    if a == b {
+        println(1);
+    } else {
+        println(0);
+    }
+
+    if a == c {
+        println(1);
+    } else {
+        println(0);
+    }
+
+    if a != c {
+        println(1);
+    } else {
+        println(0);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn ooda");
+    assert!(
+        out.status.success(),
+        "wasm build failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat_path = path.with_extension("wat");
+    let wat = std::fs::read_to_string(&wat_path).expect("read wat");
+    let lines = run_wat(&wat).expect("host run ooda WAT");
+    assert_eq!(
+        lines,
+        vec!["1".to_string(), "0".to_string(), "1".to_string()],
+        "list output got {:?}",
+        lines
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// for-list desugars to while + nested `let x = list_get`; nested locals must declare.
 #[test]
 fn ooda_wasm_for_list_sum_runs_on_host() {
@@ -389,10 +453,9 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// List ==/!= is **header pointer identity**, not content ($streq).
-/// Two distinct list_new() headers with the same pushed values must compare unequal.
+/// List ==/!= is **deep equality** of content.
 #[test]
-fn ooda_wasm_list_pointer_eq_not_streq() {
+fn ooda_wasm_list_deep_eq_not_streq() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_wlisteq_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -425,25 +488,17 @@ pub fn main() {
         .expect("spawn");
     assert!(
         out.status.success(),
-        "wasm list eq: {}",
+        "build failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
-    assert!(
-        wat.contains("i32.eq") || wat.contains("i32.ne"),
-        "list == must use i32 pointer eq, not only streq:\n{}",
-        wat
-    );
-    // Must not call streq for the list comparisons (string eq still may appear elsewhere).
-    // Count: if we only have list ==/!=, streq should not appear for those ops.
-    // Safer: host semantics — identity a==a true, a==b false for distinct headers.
-    let lines = run_wat(&wat).expect("host");
+    assert!(!wat.contains("call $streq"), "must not use streq for lists");
+    let lines = run_wat(&wat).unwrap();
     assert_eq!(
         lines,
-        vec!["1".to_string(), "0".to_string()],
-        "pointer identity: a==a → 1, a==b → 0 for distinct list_new; got {:?} wat:\n{}",
-        lines,
-        wat
+        vec!["1".to_string(), "1".to_string()],
+        "a==a is true, a==b is true (deep eq); got {:?}",
+        lines
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

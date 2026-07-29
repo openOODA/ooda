@@ -167,6 +167,29 @@ impl WasmCodeGen {
     (local.get $list)
     return
   )
+  (func $list_eq (param $a i32) (param $b i32) (result i32)
+    (local $len_a i32) (local $len_b i32) (local $data_a i32) (local $data_b i32) (local $i i32)
+    (if (i32.eq (local.get $a) (local.get $b)) (then (return (i32.const 1))))
+    (local.set $len_a (i32.load (local.get $a)))
+    (local.set $len_b (i32.load (local.get $b)))
+    (if (i32.ne (local.get $len_a) (local.get $len_b)) (then (return (i32.const 0))))
+    (local.set $data_a (i32.load offset=8 (local.get $a)))
+    (local.set $data_b (i32.load offset=8 (local.get $b)))
+    (local.set $i (i32.const 0))
+    (loop $cmp_loop
+      (if (i32.eq (local.get $i) (local.get $len_a)) (then (return (i32.const 1))))
+      (if (i64.ne
+            (i64.load (i32.add (local.get $data_a) (i32.mul (local.get $i) (i32.const 8))))
+            (i64.load (i32.add (local.get $data_b) (i32.mul (local.get $i) (i32.const 8))))
+          )
+          (then (return (i32.const 0)))
+      )
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $cmp_loop)
+    )
+    (i32.const 0)
+    return
+  )
 "#
     }
 
@@ -631,7 +654,7 @@ impl WasmCodeGen {
                         if either_str {
                             wat.push_str("    call $streq\n");
                         } else if either_list {
-                            wat.push_str("    i32.eq\n");
+                            wat.push_str("    call $list_eq\n");
                         } else {
                             wat.push_str(&format!("    {}.eq\n", ty));
                         }
@@ -642,7 +665,8 @@ impl WasmCodeGen {
                             wat.push_str("    call $streq\n");
                             wat.push_str("    i32.eqz\n");
                         } else if either_list {
-                            wat.push_str("    i32.ne\n");
+                            wat.push_str("    call $list_eq\n");
+                            wat.push_str("    i32.eqz\n");
                         } else {
                             wat.push_str(&format!("    {}.ne\n", ty));
                         }
