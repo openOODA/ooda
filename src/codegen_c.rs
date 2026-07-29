@@ -934,6 +934,13 @@ impl Gen {
                 ));
                 Ok((code, t, "OoStr".into()))
             }
+            "contains" | "str_contains" => {
+                code.push_str(&format!(
+                    "  int {} = (strstr({}.data ? {}.data : \"\", {}.data ? {}.data : \"\") != NULL);\n",
+                    t, cargs[0], cargs[0], cargs[1], cargs[1]
+                ));
+                Ok((code, t, "int".into()))
+            }
             "char_is_digit" => {
                 code.push_str(&format!(
                     "  int {} = oo_char_is_digit({});\n",
