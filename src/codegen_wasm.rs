@@ -128,7 +128,11 @@ impl WasmCodeGen {
                 ));
             }
             if needs_list_rt {
+                // Base list RT always when lists used; $list_eq only if called (W↓).
                 wat.push_str(Self::list_runtime_wat());
+                if funcs_wat.contains("call $list_eq") {
+                    wat.push_str(Self::list_eq_runtime_wat());
+                }
             }
         }
 
@@ -139,6 +143,7 @@ impl WasmCodeGen {
     }
 
     /// List[Int] bump-heap runtime (only emitted when the program uses lists).
+    /// Deep equality (`$list_eq`) is separate — see `list_eq_runtime_wat`.
     fn list_runtime_wat() -> &'static str {
         r#"
   (func $list_new (result i32)
@@ -197,6 +202,12 @@ impl WasmCodeGen {
     (local.get $list)
     return
   )
+"#
+    }
+
+    /// Deep List[Int] equality — only when `call $list_eq` appears (W↓).
+    fn list_eq_runtime_wat() -> &'static str {
+        r#"
   (func $list_eq (param $a i32) (param $b i32) (result i32)
     (local $len_a i32) (local $len_b i32) (local $data_a i32) (local $data_b i32) (local $i i32)
     (if (i32.eq (local.get $a) (local.get $b)) (then (return (i32.const 1))))

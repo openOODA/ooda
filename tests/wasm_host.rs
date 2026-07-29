@@ -364,6 +364,16 @@ fn ooda_wasm_list_eq_fixture_runs_on_host() {
     );
     let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
     assert!(wat.contains("call $list_eq"), "list_eq missing:\n{}", wat);
+    assert!(
+        wat.contains("(func $list_eq"),
+        "list_eq RT must emit when == used:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("\"streq\"") && !wat.contains("str_contains"),
+        "list_eq is not string eq:\n{}",
+        wat
+    );
     let lines = run_wat(&wat).expect("host");
     assert_eq!(lines, vec!["1".to_string(), "0".to_string()], "got {:?}", lines);
 }
@@ -427,6 +437,11 @@ fn ooda_wasm_list_sum_fixture_runs_on_host() {
     assert!(
         !wat.contains("println_str") && !wat.contains("\"streq\"") && !wat.contains("str_contains"),
         "list_sum is Int-only; no string host imports:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("(func $list_eq"),
+        "list_sum never compares lists; $list_eq RT must not inject:\n{}",
         wat
     );
     let lines = run_wat(&wat).expect("host");
