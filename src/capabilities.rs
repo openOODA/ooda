@@ -688,6 +688,27 @@ mod tests {
     }
 
     #[test]
+    fn denies_wrong_kind_handle_for_write_file() {
+        // NetCap is live but wrong kind for Fs sealed write_file.
+        let prog = parse_program(
+            r#"
+            pub fn mix(net: &NetCap, fs: &FsCap) {
+                let r = write_file(net, "/tmp/x", "y");
+            }
+        "#,
+        );
+        let err = CapabilityChecker::check_program(&prog).unwrap_err().to_string();
+        assert!(
+            err.contains("object-capability")
+                || err.contains("live")
+                || err.contains("FsCap")
+                || err.contains("write_file"),
+            "wrong-kind handle must fail: {}",
+            err
+        );
+    }
+
+    #[test]
     fn unknown_name_is_not_ambient_io() {
         // network_read is not a sealed effectful builtin — cannot invent I/O by renaming.
         let prog = parse_program(

@@ -217,6 +217,96 @@ fn ooda_em_is_measured_not_theater() {
 }
 
 #[test]
+fn ooda_em_fails_nonzero_when_check_fails() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_em_fail_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("bad.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn rogue() {
+    let r = fetch("https://evil.example");
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["em", path.to_str().unwrap()])
+        .output()
+        .expect("spawn em");
+    assert!(!out.status.success(), "em must fail non-zero when check fails");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("measured") || stdout.contains("check_failed"), "stdout: {}", stdout);
+    assert!(!stdout.contains("82.4"), "no theater: {}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unfinished_cli_lsp_pkg_replay_exit_nonzero() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    for args in [
+        vec!["lsp"],
+        vec!["pkg", "--install", "nope"],
+        vec!["replay", "x.oo", "t"],
+    ] {
+        let out = std::process::Command::new(bin)
+            .args(&args)
+            .output()
+            .expect("spawn");
+        assert!(
+            !out.status.success(),
+            "unfinished {:?} must exit non-zero",
+            args
+        );
+        let err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            err.contains("not implemented") || err.contains("refused"),
+            "honest message for {:?}: {}",
+            args,
+            err
+        );
+    }
+}
+
+#[test]
+fn ooda_migrate_json_reports_let_mut_fix() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_mig_json_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let x = 1;
+    x = 2;
+    println(x);
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["migrate", path.to_str().unwrap(), "--edition", "2026", "--json"])
+        .output()
+        .expect("spawn migrate --json");
+    assert!(out.status.success(), "migrate --json should succeed: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+        panic!("not JSON: {}\n{}", e, stdout)
+    });
+    assert_eq!(v["let_mut_fixes"].as_u64(), Some(1), "stdout: {}", stdout);
+    assert_eq!(v["changed"].as_bool(), Some(true));
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert!(after.contains("let mut x"), "file rewritten: {}", after);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ooda_em_json_is_measured_report_not_theater() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/em_demo.oo");
