@@ -260,6 +260,39 @@ int oo_str_contains(OoStr hay, OoStr needle) {
   /* null-terminated copies for strstr; OoStr data is always 0-terminated by constructors */
   return strstr(hay.data, needle.data) != NULL;
 }
+OoStr oo_int_to_str(long long n) {
+  OoStr r;
+  r.data = (char *)malloc(32);
+  if (!r.data) abort();
+  r.len = snprintf(r.data, 32, "%lld", n);
+  return r;
+}
+
+OoStr oo_str_trim(OoStr s) {
+  long long start = 0;
+  while (start < s.len && isspace((unsigned char)s.data[start])) start++;
+  long long end = s.len;
+  while (end > start && isspace((unsigned char)s.data[end - 1])) end--;
+  OoStr r;
+  r.len = end - start;
+  r.data = (char *)malloc((size_t)r.len + 1);
+  if (!r.data) abort();
+  memcpy(r.data, s.data + start, (size_t)r.len);
+  r.data[r.len] = 0;
+  return r;
+}
+
+OoStr oo_str_to_lowercase(OoStr s) {
+  OoStr r;
+  r.len = s.len;
+  r.data = (char *)malloc((size_t)r.len + 1);
+  if (!r.data) abort();
+  for (long long i = 0; i < s.len; i++) {
+    r.data[i] = (char)tolower((unsigned char)s.data[i]);
+  }
+  r.data[r.len] = 0;
+  return r;
+}
 
 /* ----- Host FFI wrappers (symbols from libooda.a) ----- */
 extern char *ooda_host_ast_dump(const char *path);

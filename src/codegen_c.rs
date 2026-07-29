@@ -199,7 +199,8 @@ impl Gen {
         s.push_str("OoStr oo_slist_get(OoSList,long long); long long oo_slist_len(OoSList);\n");
         s.push_str("OoResS oo_read_file(OoStr); OoResV oo_write_file(OoStr,OoStr); int oo_path_exists(OoStr); long long oo_file_size(OoStr); OoResS oo_env_get(OoStr);\n");
         s.push_str("void oo_print_str(OoStr); void oo_print_int(long long); void oo_print_bool(int); void oo_println(void);\n");
-        s.push_str("int oo_str_eq(OoStr,OoStr);\n");
+        s.push_str("int oo_str_eq(OoStr,OoStr); int oo_str_contains(OoStr,OoStr);\n");
+        s.push_str("OoStr oo_int_to_str(long long); OoStr oo_str_trim(OoStr); OoStr oo_str_to_lowercase(OoStr);\n");
         /* Host FFI (libooda.a) — exact stage-0 dumps + real CHS build */
         s.push_str("char *ooda_host_ast_dump(const char *path);\n");
         s.push_str("char *ooda_host_check(const char *path);\n");
@@ -812,6 +813,20 @@ impl Gen {
                     }
                     return Ok((code, t, "int".into()));
                 }
+                if field == "trim" {
+                    let (c, v, _) = self.emit_expr(&args[0], env)?;
+                    let t = self.fresh("tr");
+                    let mut code = c;
+                    code.push_str(&format!("  OoStr {} = oo_str_trim({});\n", t, v));
+                    return Ok((code, t, "OoStr".into()));
+                }
+                if field == "to_lowercase" {
+                    let (c, v, _) = self.emit_expr(&args[0], env)?;
+                    let t = self.fresh("lc");
+                    let mut code = c;
+                    code.push_str(&format!("  OoStr {} = oo_str_to_lowercase({});\n", t, v));
+                    return Ok((code, t, "OoStr".into()));
+                }
                 // struct field
                 let (c, v, ty) = self.emit_expr(&args[0], env)?;
                 let t = self.fresh("fld");
@@ -1022,6 +1037,18 @@ impl Gen {
                 let key = cargs.last().unwrap();
                 code.push_str(&format!("  OoResS {} = oo_env_get({});\n", t, key));
                 Ok((code, t, "OoResS".into()))
+            }
+            "to_string" => {
+                code.push_str(&format!("  OoStr {} = oo_int_to_str({});\n", t, cargs[0]));
+                Ok((code, t, "OoStr".into()))
+            }
+            "trim" => {
+                code.push_str(&format!("  OoStr {} = oo_str_trim({});\n", t, cargs[0]));
+                Ok((code, t, "OoStr".into()))
+            }
+            "to_lowercase" => {
+                code.push_str(&format!("  OoStr {} = oo_str_to_lowercase({});\n", t, cargs[0]));
+                Ok((code, t, "OoStr".into()))
             }
             "host_ast_dump" => {
                 code.push_str(&format!(

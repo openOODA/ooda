@@ -1841,3 +1841,43 @@ pub fn main() {
     assert!(stdout.contains("ok"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn build_c_lowers_string_methods() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_c_strmeth_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let n = 42;
+    let s = n.to_string();
+    let s2 = "  HELLO  ".trim();
+    let s3 = s2.to_lowercase();
+    if s == "42" { println("ok1"); }
+    if s2 == "HELLO" { println("ok2"); }
+    if s3 == "hello" { println("ok3"); }
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "C must lower string methods: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("ok1"), "stdout={}", stdout);
+    assert!(stdout.contains("ok2"), "stdout={}", stdout);
+    assert!(stdout.contains("ok3"), "stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
