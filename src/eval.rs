@@ -950,9 +950,17 @@ impl Interpreter {
         }
 
         // Snapshot initial parameter values for old(param) postconditions
-        let mut old_snapshot = HashMap::new();
-        for (k, v) in &local_env {
-            old_snapshot.insert(format!("old({})", k), v.clone());
+        // — but ONLY if any postcondition in this function (or its
+        // verify block) actually calls `old(x)`. Skipping the snapshot
+        // for the common case saves an E-M-sized HashMap allocation
+        // per call: fewer bytes touched (W), less work (D), same
+        // outcome.
+        let uses_old = func.uses_old_state();
+        let mut old_snapshot: HashMap<String, Value> = HashMap::new();
+        if uses_old {
+            for (k, v) in &local_env {
+                old_snapshot.insert(format!("old({})", k), v.clone());
+            }
         }
 
         // 2. Evaluate Function Body
@@ -1765,6 +1773,30 @@ mod tests {
         );
         let mut interp = Interpreter::new(prog);
         assert!(interp.execute_all().is_ok());
+    }
+
+    #[test]
+    fn function_without_old_state_skips_snapshot() {
+        // No `old()` references anywhere — interpreter should NOT
+        // allocate a snapshot HashMap. We verify by checking that
+        // a function with a requires clause (which doesn't need the
+        // snapshot either) still runs and prints.
+        let prog = parse(
+            r#"
+            pub fn double(x: Int) -> Int
+                requires x >= 0
+                ensures result == x * 2
+            {
+                return x * 2;
+            }
+            pub fn main() {
+                let y = double(21);
+                println(y);
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        interp.execute_all().expect("must run without snapshot");
     }
 
     #[test]

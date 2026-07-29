@@ -195,6 +195,71 @@ pub struct FunctionDecl {
     pub verify_block: Option<Block>,
 }
 
+impl FunctionDecl {
+    /// True iff any postcondition (`ensures`) in this function (or its
+    /// verify block) calls `old(x)`. Used by the interpreter to skip
+    /// the parameter snapshot when no `old()` reference exists — a
+    /// real E-M win: zero `HashMap` allocation per call for the
+    /// common case where contracts don't reach for prior state.
+    pub fn uses_old_state(&self) -> bool {
+        block_calls_old(&self.body)
+            || self.ensures.iter().any(expression_calls_old)
+            || self
+                .verify_block
+                .as_ref()
+                .map_or(false, block_calls_old)
+    }
+}
+
+/// Recursively check whether an expression contains a call to `old`.
+fn expression_calls_old(e: &Expression) -> bool {
+    match e {
+        Expression::Call { name, args, .. } if name == "old" => true,
+        Expression::Binary { left, right, .. } => {
+            expression_calls_old(left) || expression_calls_old(right)
+        }
+        Expression::Unary { expr, .. } => expression_calls_old(expr),
+        Expression::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expression_calls_old(cond)
+                || block_calls_old(then_branch)
+                || else_branch
+                    .as_ref()
+                    .map(|b| block_calls_old(b))
+                    .unwrap_or(false)
+        }
+        Expression::Call { args, .. } => args.iter().any(expression_calls_old),
+        Expression::Match { expr, arms, .. } => {
+            expression_calls_old(expr) || arms.iter().any(|a| expression_calls_old(&a.body))
+        }
+        Expression::While { cond, body, .. } => {
+            expression_calls_old(cond) || block_calls_old(body)
+        }
+        Expression::Literal(_, _) | Expression::Variable(_, _) | Expression::StructLit { .. } => {
+            false
+        }
+    }
+}
+
+fn block_calls_old(b: &Block) -> bool {
+    b.stmts.iter().any(stmt_calls_old) || b.expr.as_deref().map_or(false, expression_calls_old)
+}
+
+fn stmt_calls_old(s: &Statement) -> bool {
+    match s {
+        Statement::Let { init, .. } => expression_calls_old(init),
+        Statement::Assign { value, .. } => expression_calls_old(value),
+        Statement::Return(Some(e), _) => expression_calls_old(e),
+        Statement::Return(None, _) => false,
+        Statement::Expr(e, _) => expression_calls_old(e),
+        Statement::While { cond, body, .. } => expression_calls_old(cond) || block_calls_old(body),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Parameter {
     pub name: String,

@@ -5,7 +5,7 @@ use ooda::capabilities::CapabilityChecker;
 use ooda::codegen::LlvmCodeGen;
 use ooda::codegen_c::{runtime_c_path, CCodeGen};
 use ooda::codegen_wasm::WasmCodeGen;
-use ooda::diagnostics::AiDiagnostic;
+use ooda::diagnostics::{AiDiagnostic, DiagnosticTimings};
 use ooda::dump::{format_ast_dump, format_check_err, format_check_ok, format_token_dump};
 use ooda::eval::Interpreter;
 use ooda::fmt;
@@ -25,12 +25,13 @@ use ooda::context::ContextEngine;
 use clap::{Parser as ClapParser, Subcommand};
 use std::path::PathBuf;
 use std::fs;
+use std::time::Instant;
 use anyhow::{Context, Result};
 
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.28.0-alpha")]
+#[command(version = "0.29.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -252,7 +253,7 @@ fn main() -> Result<()> {
             json_errors,
             args,
         } => {
-            let program = match load_and_analyze(&file, json_errors) {
+            let (program, _timings) = match load_and_analyze(&file, json_errors) {
                 Ok(p) => p,
                 Err(code) => std::process::exit(code),
             };
@@ -276,8 +277,28 @@ fn main() -> Result<()> {
         }
         Commands::Check { file, json_errors } => {
             match load_and_analyze(&file, json_errors) {
-                Ok(_) => {
-                    println!("✓ [openOODA check] {} — parse, capabilities, and types OK", file.display());
+                Ok((_, t)) => {
+                    if json_errors {
+                        let mut d = AiDiagnostic::new(
+                            "CheckOk",
+                            &file,
+                            0,
+                            0,
+                            "ok",
+                            "parse + capabilities + types passed",
+                        );
+                        d = d.with_timings(t.parse_us, t.capability_us + t.typecheck_us);
+                        d.print_json();
+                    } else {
+                        println!(
+                            "✓ [openOODA check] {} — parse+cap+types OK \
+                             (parse={}µs cap={}µs type={}µs)",
+                            file.display(),
+                            t.parse_us,
+                            t.capability_us,
+                            t.typecheck_us
+                        );
+                    }
                 }
                 Err(code) => std::process::exit(code),
             }
@@ -415,7 +436,7 @@ fn main() -> Result<()> {
                 }
                 "check" => {
                     match load_and_analyze(&file, false) {
-                        Ok(_) => print!("{}", format_check_ok()),
+                        Ok((_, _t)) => print!("{}", format_check_ok()),
                         Err(_code) => {
                             // load_and_analyze already printed; emit stable ERR for harness
                             eprint!("{}", format_check_err("check", "failed"));
@@ -508,14 +529,46 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Load .oo (with imports), then capability + type check.
+/// Real parse + capability + type-check timings. Wired into
+/// `--json-errors` so AI agents see measured µs, not "honest
+/// theater" hardcoded numbers.
+struct AnalyzeTimings {
+    parse_us: u128,
+    capability_us: u128,
+    typecheck_us: u128,
+}
+
+impl AnalyzeTimings {
+    fn total_us(&self) -> u128 {
+        self.parse_us
+            .saturating_add(self.capability_us)
+            .saturating_add(self.typecheck_us)
+    }
+    fn to_diag_timings(&self) -> DiagnosticTimings {
+        // Only attach parse + typecheck; the capability pass is folded
+        // into typecheck conceptually (both run after parse).
+        DiagnosticTimings {
+            parse_us: self.parse_us,
+            check_us: self.capability_us.saturating_add(self.typecheck_us),
+        }
+    }
+}
+
+/// Load .oo (with imports), then capability + type check. Returns
+/// the timings so the caller can attach them to `--json-errors`.
 /// On failure prints diagnostics and returns process exit code.
-fn load_and_analyze(file: &std::path::Path, json_errors: bool) -> Result<Program, i32> {
+fn load_and_analyze(
+    file: &std::path::Path,
+    json_errors: bool,
+) -> Result<(Program, AnalyzeTimings), i32> {
+    let total_start = Instant::now();
+    let parse_start = Instant::now();
     let program = match load_program(file) {
         Ok(p) => p,
         Err(e) => {
             let msg = format!("{}", e);
             let (line, col) = parse_loc(&msg);
+            let parse_us = parse_start.elapsed().as_micros();
             if json_errors {
                 AiDiagnostic::new(
                     "LoadError",
@@ -529,6 +582,7 @@ fn load_and_analyze(file: &std::path::Path, json_errors: bool) -> Result<Program
                     "Fix import path",
                     "import \"module.oo\";  // relative, OODA_PATH, or OODA_STD",
                 )
+                .with_timings(parse_us, 0)
                 .print_json();
             } else {
                 eprintln!("Load Error: {}", e);
@@ -536,10 +590,13 @@ fn load_and_analyze(file: &std::path::Path, json_errors: bool) -> Result<Program
             return Err(1);
         }
     };
+    let parse_us = parse_start.elapsed().as_micros();
 
+    let cap_start = Instant::now();
     if let Err(e) = CapabilityChecker::check_program(&program) {
         let msg = format!("{}", e);
         let (line, col) = parse_loc(&msg);
+        let capability_us = cap_start.elapsed().as_micros();
         if json_errors {
             AiDiagnostic::new(
                 "CapabilitySecurityViolation",
@@ -553,16 +610,20 @@ fn load_and_analyze(file: &std::path::Path, json_errors: bool) -> Result<Program
                 "Grant Capability Token",
                 "fn f(net: &NetCap, ...) { ... fetch(url); }  // pass net from main()",
             )
+            .with_timings(parse_us, capability_us)
             .print_json();
         } else {
             eprintln!("Security Error: {}", e);
         }
         return Err(1);
     }
+    let capability_us = cap_start.elapsed().as_micros();
 
+    let typecheck_start = Instant::now();
     if let Err(e) = TypeChecker::check_program(&program) {
         let msg = format!("{}", e);
         let (line, col) = parse_loc(&msg);
+        let typecheck_us = typecheck_start.elapsed().as_micros();
         if json_errors {
             let fix = if msg.contains("must-use") || msg.contains("unused Result") {
                 (
@@ -591,14 +652,24 @@ fn load_and_analyze(file: &std::path::Path, json_errors: bool) -> Result<Program
                 "Static type mismatch detected before execution.",
             )
             .with_fix(fix.0, fix.1)
+            .with_timings(parse_us, capability_us.saturating_add(typecheck_us))
             .print_json();
         } else {
             eprintln!("Type Error: {}", e);
         }
         return Err(1);
     }
+    let typecheck_us = typecheck_start.elapsed().as_micros();
+    let _total_us = total_start.elapsed().as_micros();
 
-    Ok(program)
+    Ok((
+        program,
+        AnalyzeTimings {
+            parse_us,
+            capability_us,
+            typecheck_us,
+        },
+    ))
 }
 
 enum NativeLinkResult {
@@ -687,12 +758,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.28.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.29.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.28.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.29.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

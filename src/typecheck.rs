@@ -728,7 +728,42 @@ impl TypeChecker {
                     BinOp::DotDot | BinOp::DotDotEq => Ok(Ty::Unknown),
                 }
             }
-            Expression::Call { name, args, .. } => {
+            Expression::Call { name, args, span, .. } => {
+                // `old(x)` references a parameter snapshot. The first arg
+                // must be a Variable that exists in the enclosing
+                // function's parameter list (the `env` here is the
+                // function-body scope at the point of the ensures
+                // expression). This gives a clearer error than the
+                // generic "undefined variable" path.
+                if name == "old" {
+                    let arg = args.first().ok_or_else(|| {
+                        anyhow!(
+                            "Type error at {}:{}: `old(...)` requires a parameter name argument",
+                            expr.span().line,
+                            expr.span().col
+                        )
+                    })?;
+                    if let Expression::Variable(vname, _) = arg {
+                        if !env.contains_key(vname) {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: `old({})` references no parameter; \
+                                 `old` snapshots parameter values — pass a real parameter name",
+                                expr.span().line,
+                                expr.span().col,
+                                vname
+                            ));
+                        }
+                    } else {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: `old` first argument must be a parameter name (Variable), \
+                                 got a non-Variable expression",
+                            expr.span().line,
+                            expr.span().col
+                        ));
+                    }
+                    return Ok(Ty::Unknown);
+                }
+
                 // Methods: .len, .trim, etc.
                 if name.starts_with('.') {
                     let recv = args
@@ -1069,6 +1104,44 @@ mod tests {
             }
         "#;
         assert!(check(src).is_err());
+    }
+
+    #[test]
+    fn old_must_reference_a_parameter() {
+        // `old(undefined_var)` is undefined — should fail with a
+        // specific old() error.
+        let src = r#"
+            pub fn bad(x: Int) -> Int
+                ensures result == old(undefined_var) + 1
+            {
+                return x + 1;
+            }
+            pub fn main() { println(bad(1)); }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("`old(undefined_var)`"),
+            "expected specific old() error, got: {}",
+            err
+        );
+        assert!(
+            err.contains("references no parameter"),
+            "expected 'no parameter' hint, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn old_with_real_parameter_typechecks() {
+        let src = r#"
+            pub fn increment(x: Int) -> Int
+                ensures result == old(x) + 1
+            {
+                return x + 1;
+            }
+            pub fn main() { println(increment(1)); }
+        "#;
+        assert!(check(src).is_ok(), "expected ok, got: {:?}", check(src).err());
     }
 
     #[test]
