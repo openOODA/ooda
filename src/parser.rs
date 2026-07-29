@@ -404,6 +404,9 @@ impl Parser {
 
     fn parse_let_stmt(&mut self) -> Result<Statement> {
         self.consume(Token::Let)?;
+        // Span of the `let` keyword (not the trailing `;`) so migrators and
+        // diagnostics can locate the binding site.
+        let let_span = self.last_span();
         let mutable = if self.peek() == &Token::Mut {
             self.advance();
             true
@@ -432,7 +435,7 @@ impl Parser {
             mutable,
             type_annotation,
             init,
-            span: self.last_span(),
+            span: let_span,
         })
     }
 

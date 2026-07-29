@@ -1,27 +1,17 @@
 // ===================================================================
-// openOODA edition migrator (v0.29.0-alpha, first real implementation).
+// openOODA edition migrator (edition 2026)
 //
-// Implements a single high-leverage codemod:
-//
-//   v0.10 → v0.18: exhaustive Result/Option match
-//   -----------------------------------------------------------------
-//   The v0.18 release made match on Result/Option require BOTH variant
-//   arms (or a wildcard). Code written against the v0.10 "loose match"
-//   rules (e.g. `match rs { Ok(v) => ... }` with no Err arm) no longer
-//   typechecks. `ooda migrate --edition 2026` finds every such match
-//   expression and inserts a wildcard arm `_ => process_exit(1)` that
-//   makes the typecheck pass while leaving a loud runtime signal at
-//   the previously-unhandled variant. The user can then replace the
-//   wildcard with a proper arm.
-//
-//   The wildcard is a STOPGAP. It fails loudly. That's the design
-//   intent — we want users to notice the migration and write a real
-//   Err handler.
+// Codemods:
+// 1) v0.10 → v0.18: exhaustive Result/Option match
+//    Insert `_ => process_exit(1)` on non-exhaustive matches.
+// 2) v0.10 → v0.20: let-mut for assigned bindings
+//    Immutable `let x` that is later assigned becomes `let mut x`.
 // ===================================================================
 use crate::ast::*;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use anyhow::{anyhow, bail, Result};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -59,17 +49,23 @@ fn migrate_path_inner(path: &std::path::Path, target_edition: &str) -> Result<()
         .tokenize()
         .map_err(|e| anyhow!("migrate: lexer error: {}", e))?;
     let mut parser = Parser::new(tokens);
-    let mut program = parser
+    let program = parser
         .parse_program()
         .map_err(|e| anyhow!("migrate: parser error: {}", e))?;
 
     // Walk the AST collecting byte ranges that need rewrites.
-    // Each rewrite is (insert_pos, replacement_text). We use a single
-    // ordered pass and apply in reverse to keep offsets stable.
+    // Each rewrite is (pos, end, replacement): replace [pos, end).
     let mut rewrites: Vec<(usize, usize, String)> = Vec::new();
+    let mut match_count = 0usize;
+    let mut mut_count = 0usize;
     for item in &program.items {
         if let Item::Function(f) = item {
+            let before = rewrites.len();
             collect_match_rewrites(&f.body, &code, &mut rewrites);
+            match_count += rewrites.len() - before;
+            let before = rewrites.len();
+            collect_let_mut_rewrites(&f.body, &code, &mut rewrites);
+            mut_count += rewrites.len() - before;
         }
     }
 
@@ -82,10 +78,7 @@ fn migrate_path_inner(path: &std::path::Path, target_edition: &str) -> Result<()
         return Ok(());
     }
 
-    // Apply in reverse byte order so earlier byte offsets stay
-    // valid. Each rewrite is (pos, end, replacement): we replace
-    // bytes [pos, end) with `replacement`. This lets us both
-    // overwrite an existing `,` and insert new text cleanly.
+    // Apply in reverse byte order so earlier offsets stay valid.
     rewrites.sort_by(|a, b| b.0.cmp(&a.0));
     let mut new_code = code.clone();
     for (pos, end, text) in &rewrites {
@@ -94,13 +87,230 @@ fn migrate_path_inner(path: &std::path::Path, target_edition: &str) -> Result<()
     fs::write(path, &new_code)?;
 
     println!(
-        "🔧 [openOODA migrate] Inserted {} wildcard arm(s) in {} (target: edition {}). \
-         Replace each `_ => process_exit(1)` with a real handler.",
-        rewrites.len(),
+        "🔧 [openOODA migrate] {} (edition {}): {} match wildcard arm(s), {} let→let mut fix(es). \
+         Replace each `_ => process_exit(1)` with a real handler when present.",
         path.display(),
-        target_edition
+        target_edition,
+        match_count,
+        mut_count
     );
     Ok(())
+}
+
+/// Codemod #2: `let x` that is later assigned → `let mut x`.
+fn collect_let_mut_rewrites(
+    block: &Block,
+    source: &str,
+    rewrites: &mut Vec<(usize, usize, String)>,
+) {
+    let mut assigned: HashSet<String> = HashSet::new();
+    collect_assigned_names(block, &mut assigned);
+    collect_immutable_lets_needing_mut(block, source, &assigned, rewrites);
+}
+
+fn collect_assigned_names(block: &Block, assigned: &mut HashSet<String>) {
+    for stmt in &block.stmts {
+        match stmt {
+            Statement::Assign { name, value, .. } => {
+                assigned.insert(name.clone());
+                collect_assigned_in_expr(value, assigned);
+            }
+            Statement::Let { init, .. } => collect_assigned_in_expr(init, assigned),
+            Statement::Return(Some(e), _) | Statement::Expr(e, _) => {
+                collect_assigned_in_expr(e, assigned)
+            }
+            Statement::Return(None, _) => {}
+            Statement::While { cond, body, .. } => {
+                collect_assigned_in_expr(cond, assigned);
+                collect_assigned_names(body, assigned);
+            }
+        }
+    }
+    if let Some(expr) = &block.expr {
+        collect_assigned_in_expr(expr, assigned);
+    }
+}
+
+fn collect_assigned_in_expr(expr: &Expression, assigned: &mut HashSet<String>) {
+    match expr {
+        Expression::Literal(_, _) | Expression::Variable(_, _) => {}
+        Expression::Binary { left, right, .. } => {
+            collect_assigned_in_expr(left, assigned);
+            collect_assigned_in_expr(right, assigned);
+        }
+        Expression::Call { args, .. } => {
+            for a in args {
+                collect_assigned_in_expr(a, assigned);
+            }
+        }
+        Expression::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_assigned_in_expr(cond, assigned);
+            collect_assigned_names(then_branch, assigned);
+            if let Some(eb) = else_branch {
+                collect_assigned_names(eb, assigned);
+            }
+        }
+        Expression::Unary { expr, .. } => collect_assigned_in_expr(expr, assigned),
+        Expression::While { cond, body, .. } => {
+            collect_assigned_in_expr(cond, assigned);
+            collect_assigned_names(body, assigned);
+        }
+        Expression::Match { expr, arms, .. } => {
+            collect_assigned_in_expr(expr, assigned);
+            for arm in arms {
+                collect_assigned_in_expr(&arm.body, assigned);
+            }
+        }
+        Expression::StructLit { fields, .. } => {
+            for (_, e) in fields {
+                collect_assigned_in_expr(e, assigned);
+            }
+        }
+    }
+}
+
+fn collect_immutable_lets_needing_mut(
+    block: &Block,
+    source: &str,
+    assigned: &HashSet<String>,
+    rewrites: &mut Vec<(usize, usize, String)>,
+) {
+    for stmt in &block.stmts {
+        match stmt {
+            Statement::Let {
+                name,
+                mutable,
+                span,
+                init,
+                ..
+            } => {
+                if !*mutable && assigned.contains(name) {
+                    if let Some(pos) = find_let_kw_byte(source, span.line, span.col) {
+                        let rest = &source[pos..];
+                        if rest.starts_with("let ") && !rest.starts_with("let mut ") {
+                            let insert_at = pos + 4; // after "let "
+                            rewrites.push((insert_at, insert_at, "mut ".to_string()));
+                        }
+                    }
+                }
+                collect_immutable_lets_in_expr(init, source, assigned, rewrites);
+            }
+            Statement::Assign { value, .. } => {
+                collect_immutable_lets_in_expr(value, source, assigned, rewrites)
+            }
+            Statement::Return(Some(e), _) | Statement::Expr(e, _) => {
+                collect_immutable_lets_in_expr(e, source, assigned, rewrites)
+            }
+            Statement::Return(None, _) => {}
+            Statement::While { cond, body, .. } => {
+                collect_immutable_lets_in_expr(cond, source, assigned, rewrites);
+                collect_immutable_lets_needing_mut(body, source, assigned, rewrites);
+            }
+        }
+    }
+    if let Some(expr) = &block.expr {
+        collect_immutable_lets_in_expr(expr, source, assigned, rewrites);
+    }
+}
+
+fn collect_immutable_lets_in_expr(
+    expr: &Expression,
+    source: &str,
+    assigned: &HashSet<String>,
+    rewrites: &mut Vec<(usize, usize, String)>,
+) {
+    match expr {
+        Expression::Literal(_, _) | Expression::Variable(_, _) => {}
+        Expression::Binary { left, right, .. } => {
+            collect_immutable_lets_in_expr(left, source, assigned, rewrites);
+            collect_immutable_lets_in_expr(right, source, assigned, rewrites);
+        }
+        Expression::Call { args, .. } => {
+            for a in args {
+                collect_immutable_lets_in_expr(a, source, assigned, rewrites);
+            }
+        }
+        Expression::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_immutable_lets_in_expr(cond, source, assigned, rewrites);
+            collect_immutable_lets_needing_mut(then_branch, source, assigned, rewrites);
+            if let Some(eb) = else_branch {
+                collect_immutable_lets_needing_mut(eb, source, assigned, rewrites);
+            }
+        }
+        Expression::Unary { expr, .. } => {
+            collect_immutable_lets_in_expr(expr, source, assigned, rewrites)
+        }
+        Expression::While { cond, body, .. } => {
+            collect_immutable_lets_in_expr(cond, source, assigned, rewrites);
+            collect_immutable_lets_needing_mut(body, source, assigned, rewrites);
+        }
+        Expression::Match { expr, arms, .. } => {
+            collect_immutable_lets_in_expr(expr, source, assigned, rewrites);
+            for arm in arms {
+                collect_immutable_lets_in_expr(&arm.body, source, assigned, rewrites);
+            }
+        }
+        Expression::StructLit { fields, .. } => {
+            for (_, e) in fields {
+                collect_immutable_lets_in_expr(e, source, assigned, rewrites);
+            }
+        }
+    }
+}
+
+/// Convert 1-indexed line/col span to a byte offset in `source`.
+fn span_to_byte(source: &str, line: usize, col: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut idx = 0usize;
+    for _ in 0..line.saturating_sub(1) {
+        while idx < bytes.len() && bytes[idx] != b'\n' {
+            idx += 1;
+        }
+        if idx < bytes.len() {
+            idx += 1;
+        }
+    }
+    idx += col.saturating_sub(1);
+    if idx >= bytes.len() {
+        None
+    } else {
+        Some(idx)
+    }
+}
+
+/// Locate the `let ` keyword for a Let binding. Prefer the recorded span
+/// (now the `let` token); fall back to a short scan on the same line for
+/// older ASTs that pointed at `;`.
+fn find_let_kw_byte(source: &str, line: usize, col: usize) -> Option<usize> {
+    if let Some(pos) = span_to_byte(source, line, col) {
+        if source[pos..].starts_with("let ") {
+            return Some(pos);
+        }
+        // Scan backward within ~64 bytes for `let `.
+        let start = pos.saturating_sub(64);
+        if let Some(rel) = source[start..=pos].rfind("let ") {
+            return Some(start + rel);
+        }
+        // Scan forward on the same line.
+        let line_end = source[pos..]
+            .find('\n')
+            .map(|i| pos + i)
+            .unwrap_or(source.len());
+        if let Some(rel) = source[pos..line_end].find("let ") {
+            return Some(pos + rel);
+        }
+    }
+    None
 }
 
 /// Walk a block collecting rewrites for non-exhaustive match
@@ -450,6 +660,64 @@ pub fn main() {
         let res = migrate_path_inner(&path, "1999");
         assert!(res.is_err());
         assert!(format!("{}", res.unwrap_err()).contains("only supports"));
+    }
+
+    /// Codemod #2: immutable `let x` later assigned → `let mut x`.
+    #[test]
+    fn migrates_let_to_let_mut_when_assigned() {
+        let src = r#"
+pub fn main() {
+    let x = 1;
+    x = 2;
+    println(x);
+}
+"#;
+        let path = temp_oo("mig_let_mut.oo", src);
+        migrate_path_inner(&path, "2026").expect("migrate");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("let mut x = 1"),
+            "expected let→let mut rewrite, got:\n{}",
+            after
+        );
+        assert!(
+            !after.contains("let x = 1"),
+            "immutable let should be gone:\n{}",
+            after
+        );
+
+        // Already-mut bindings must not double-insert.
+        let mut_src = r#"
+pub fn main() {
+    let mut y = 1;
+    y = 2;
+    println(y);
+}
+"#;
+        let path2 = temp_oo("mig_let_mut_already.oo", mut_src);
+        migrate_path_inner(&path2, "2026").expect("migrate");
+        let after2 = std::fs::read_to_string(&path2).unwrap();
+        assert_eq!(after2, mut_src, "already-mut should be unchanged");
+        assert!(
+            !after2.contains("let mut mut "),
+            "must not double-insert mut:\n{}",
+            after2
+        );
+    }
+
+    #[test]
+    fn immutable_let_without_assign_unchanged() {
+        let src = r#"
+pub fn main() {
+    let z = 41;
+    println(z + 1);
+}
+"#;
+        let path = temp_oo("mig_let_no_assign.oo", src);
+        migrate_path_inner(&path, "2026").expect("migrate");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, src, "unassigned let must stay immutable");
     }
 }
 
