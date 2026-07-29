@@ -1459,3 +1459,121 @@ pub fn main() {
     assert!(stdout.contains("ok"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn json_errors_undefined_var_is_patch_applicable() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_uv_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("u.oo");
+    std::fs::write(&path, "pub fn main() {\n    println(missing);\n}\n").unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).expect(&stderr);
+    assert_eq!(v["suggested_fix"]["applicability"].as_str(), Some("patch"));
+    let diff = v["suggested_fix"]["diff"].as_str().unwrap_or("");
+    assert!(diff.contains("undefined_var") && diff.contains("missing"), "{}", diff);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn question_mark_void_fn_fails_check() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_qv_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("q.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn f() -> Result[Int, String] { return Ok(1); }
+pub fn main() {
+    let x = f()?;
+    println(x);
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "void main cannot use ?");
+    let err = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(err.contains("`?`") || err.contains("Result"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn question_mark_err_propagates_not_add() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_qe_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("q.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn fail() -> Result[Int, String] { return Err("nope"); }
+pub fn g() -> Result[Int, String] {
+    let x = fail()?;
+    return Ok(x + 1);
+}
+pub fn main() {
+    match g() {
+        Ok(v) => println(v),
+        Err(e) => println(e),
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["run", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "should print nope not crash: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("nope"), "stdout={}", stdout);
+    assert!(!stdout.contains("Invalid binary"), "must not try Err+1");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn build_c_refuses_try_operator() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_try_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("t.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn f() -> Result[Int, String] { return Ok(1); }
+pub fn g() -> Result[Int, String] {
+    let x = f()?;
+    return Ok(x);
+}
+pub fn main() {
+    match g() {
+        Ok(v) => println(v),
+        Err(e) => println(e),
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "C must refuse ?");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(err.contains("try-operator") || err.contains("`?`"), "{}", err);
+    let _ = std::fs::remove_dir_all(&dir);
+}

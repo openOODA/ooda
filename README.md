@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.64.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.65.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.64.0-alpha
+ooda --version   # 0.65.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.64.0-alpha (CHS M0–M5)
+## What's real in v0.65.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -47,7 +47,7 @@ import "lib.oo";       // relative / OODA_PATH
 | Nested block scopes | Real: `let` inside if/while does **not** leak; match-arm pattern shadows restore; outer `let mut` assign in match+if persists |
 | Type aliases | Real: unify for arith/return; `Int[lo..hi]` on params **and** let/return (const TC + runtime) |
 | Caps + sealed effects | Static **and runtime** object-cap: free sealed ops need live handle Value; ambient-only denied |
-| `?` try-operator | Real: unwraps `Result[T,E]` → `T` in typecheck + runtime |
+| `?` try-operator | Real: unwraps Result; early-return on Err; only in Result-returning fns; build refuses outside interp |
 | Bool match | Real: `true`/`false` patterns + exhaustiveness |
 | `.contains` | Real on String (interp + CHS C) |
 | Field assign | Real: `p.x = v` on `let mut` structs (interp + CHS C) |

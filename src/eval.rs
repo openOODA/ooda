@@ -1138,6 +1138,10 @@ impl Interpreter {
             match stmt {
                 Statement::Let { name, init, .. } => {
                     let val = self.eval_expr(init, env)?;
+                    // `?` may set pending_return (Err early-exit).
+                    if self.pending_return.is_some() {
+                        return Ok(self.pending_return.clone().unwrap_or(Value::Void));
+                    }
                     if !let_shadows.iter().any(|(n, _)| n == name) {
                         let_shadows.push((name.clone(), env.get(name).cloned()));
                     }
@@ -1148,6 +1152,9 @@ impl Interpreter {
                         return Err(anyhow!("Runtime error: assign to undefined variable '{}'", name));
                     }
                     let val = self.eval_expr(value, env)?;
+                    if self.pending_return.is_some() {
+                        return Ok(self.pending_return.clone().unwrap_or(Value::Void));
+                    }
                     env.insert(name.clone(), val);
                 }
                 Statement::FieldAssign {
@@ -1162,6 +1169,9 @@ impl Interpreter {
                         ));
                     };
                     let val = self.eval_expr(value, env)?;
+                    if self.pending_return.is_some() {
+                        return Ok(self.pending_return.clone().unwrap_or(Value::Void));
+                    }
                     let entry = env.get_mut(obj_name).ok_or_else(|| {
                         anyhow!("Runtime error: undefined variable '{}'", obj_name)
                     })?;
@@ -1195,7 +1205,7 @@ impl Interpreter {
                 Statement::Expr(expr, _) => {
                     self.eval_expr(expr, env)?;
                     if self.pending_return.is_some() {
-                        break;
+                        return Ok(self.pending_return.clone().unwrap_or(Value::Void));
                     }
                 }
                 Statement::While { cond, body, .. } => {
@@ -1268,9 +1278,16 @@ impl Interpreter {
 
                 if *propagate_err {
                     match res {
-                        Value::Err(e) => return Ok(Value::Err(e)),
+                        // Early-return Err from the enclosing function (try semantics).
+                        Value::Err(e) => {
+                            self.pending_return = Some(Value::Err(e.clone()));
+                            Ok(Value::Err(e))
+                        }
                         Value::Ok(v) => Ok(*v),
-                        other => Ok(other),
+                        other => Err(anyhow!(
+                            "Runtime error: `?` requires Result, found {:?}",
+                            other
+                        )),
                     }
                 } else {
                     Ok(res)
@@ -2315,5 +2332,29 @@ mod tests {
             .call_function("main", vec![], &mut HashMap::new())
             .expect("run");
         assert_eq!(v, Value::Int(7));
+    }
+
+    #[test]
+    fn question_mark_early_return_err() {
+        let prog = parse(
+            r#"
+            pub fn fail() -> Result[Int, String] { return Err("nope"); }
+            pub fn g() -> Result[Int, String] {
+                let x = fail()?;
+                return Ok(x + 1);
+            }
+            pub fn main() -> String {
+                match g() {
+                    Ok(v) => "ok",
+                    Err(e) => e,
+                }
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("run");
+        assert_eq!(v, Value::String("nope".into()));
     }
 }

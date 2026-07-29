@@ -241,6 +241,8 @@ pub struct TypeChecker {
     alias_refinements: HashMap<String, (i64, i64)>,
     /// Active block's const list lengths (set by check_block for list_get OOB).
     active_list_lens: std::cell::RefCell<HashMap<String, i64>>,
+    /// Enclosing function return type (for `?` legality).
+    current_return: std::cell::RefCell<Option<Ty>>,
 }
 
 /// Parse `Int[lo..hi]` refinement bounds from a type annotation.
@@ -288,6 +290,7 @@ impl TypeChecker {
             type_aliases: HashMap::new(),
             alias_refinements: HashMap::new(),
             active_list_lens: std::cell::RefCell::new(HashMap::new()),
+            current_return: std::cell::RefCell::new(None),
         };
 
         // Collect type aliases first (named structs for StructLit).
@@ -552,6 +555,7 @@ impl TypeChecker {
         let expected_ret = Ty::from_ast(&func.return_type);
         let empty_refinements = HashMap::new();
         let ret_bounds = self.bounds_from_type_ann(&func.return_type);
+        *self.current_return.borrow_mut() = Some(expected_ret.clone());
         let body_ty = self.check_block(
             &func.body,
             &mut env,
@@ -560,7 +564,9 @@ impl TypeChecker {
             Some(&expected_ret),
             &empty_refinements,
             ret_bounds,
-        )?;
+        );
+        *self.current_return.borrow_mut() = None;
+        let body_ty = body_ty?;
 
         let expected = Ty::from_ast(&func.return_type);
         // Fail-closed: non-Void functions must produce a value on every path.
@@ -1281,18 +1287,46 @@ impl TypeChecker {
                 propagate_err,
                 ..
             } => {
-                // Apply `?`: Result[T, E] → T (must not leave Result wrapped).
+                // Apply `?`: Result[T, E] → T. Only legal in Result-returning functions.
                 let apply_try = |ty: Ty| -> Result<Ty> {
                     if !*propagate_err {
                         return Ok(ty);
                     }
-                    match ty {
-                        Ty::Result(ok, _) => Ok(*ok),
-                        other => Err(anyhow!(
+                    let Ty::Result(ok, err) = ty else {
+                        return Err(anyhow!(
                             "Type error at {}:{}: `?` requires Result, found {}",
                             span.line,
                             span.col,
+                            ty.display()
+                        ));
+                    };
+                    let encl = self.current_return.borrow().clone();
+                    match encl {
+                        Some(Ty::Result(_, e_err)) => {
+                            if !self.unify_or_hole(&err, &e_err)
+                                && !matches!(*err, Ty::Unknown)
+                                && !matches!(*e_err, Ty::Unknown)
+                            {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: `?` error type {} does not match function Err type {}",
+                                    span.line,
+                                    span.col,
+                                    err.display(),
+                                    e_err.display()
+                                ));
+                            }
+                            Ok(*ok)
+                        }
+                        Some(other) => Err(anyhow!(
+                            "Type error at {}:{}: `?` only allowed in functions returning Result, found return type {}",
+                            span.line,
+                            span.col,
                             other.display()
+                        )),
+                        None => Err(anyhow!(
+                            "Type error at {}:{}: `?` only allowed inside a function body",
+                            span.line,
+                            span.col
                         )),
                     }
                 };
@@ -2257,6 +2291,61 @@ fn stmt_span(stmt: &Statement) -> crate::ast::Span {
         | Statement::Expr(_, span)
         | Statement::While { span, .. } => *span,
     }
+}
+
+
+/// Names of functions that use `?` (try) — not lowered outside the interpreter yet.
+pub fn program_uses_try_operator(program: &Program) -> bool {
+    fn expr_has_try(e: &Expression) -> bool {
+        match e {
+            Expression::Call { propagate_err, args, .. } => {
+                *propagate_err || args.iter().any(expr_has_try)
+            }
+            Expression::Binary { left, right, .. } => expr_has_try(left) || expr_has_try(right),
+            Expression::Unary { expr, .. } => expr_has_try(expr),
+            Expression::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                expr_has_try(cond)
+                    || block_has_try(then_branch)
+                    || else_branch.as_ref().map(|b| block_has_try(b)).unwrap_or(false)
+            }
+            Expression::While { cond, body, .. } => expr_has_try(cond) || block_has_try(body),
+            Expression::Match { expr, arms, .. } => {
+                expr_has_try(expr) || arms.iter().any(|a| expr_has_try(&a.body))
+            }
+            Expression::StructLit { fields, .. } => fields.iter().any(|(_, e)| expr_has_try(e)),
+            Expression::Literal(_, _) | Expression::Variable(_, _) => false,
+        }
+    }
+    fn block_has_try(b: &Block) -> bool {
+        b.stmts.iter().any(|s| match s {
+            Statement::Let { init, .. } => expr_has_try(init),
+            Statement::Assign { value, .. } => expr_has_try(value),
+            Statement::FieldAssign { object, value, .. } => {
+                expr_has_try(object) || expr_has_try(value)
+            }
+            Statement::Return(Some(e), _) | Statement::Expr(e, _) => expr_has_try(e),
+            Statement::Return(None, _) => false,
+            Statement::While { cond, body, .. } => expr_has_try(cond) || block_has_try(body),
+        }) || b.expr.as_ref().map(|e| expr_has_try(e)).unwrap_or(false)
+    }
+    for item in &program.items {
+        if let Item::Function(f) = item {
+            if block_has_try(&f.body) {
+                return true;
+            }
+            if let Some(v) = &f.verify_block {
+                if block_has_try(v) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -3758,5 +3847,40 @@ mod tests {
             }
         "#;
         assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn question_mark_in_void_fn_fails() {
+        let src = r#"
+            pub fn f() -> Result[Int, String] { return Ok(1); }
+            pub fn main() {
+                let x = f()?;
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("`?` only allowed") || err.contains("Result"),
+            "void main cannot use ?: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn question_mark_err_type_must_match() {
+        let src = r#"
+            pub fn f() -> Result[Int, String] { return Err("e"); }
+            pub fn g() -> Result[Int, Int] {
+                let x = f()?;
+                return Ok(x);
+            }
+            pub fn main() {}
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("error type") || err.contains("`?`"),
+            "Err types must match: {}",
+            err
+        );
     }
 }

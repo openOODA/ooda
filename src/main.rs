@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.64.0-alpha")]
+#[command(version = "0.65.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -451,6 +451,17 @@ fn main() -> Result<()> {
                         contract_fns.join(", ")
                     );
                 }
+            }
+            // Dual-engine honesty: `?` early-return is interpreter-only today.
+            if matches!(
+                target_l.as_str(),
+                "c" | "chs" | "native" | "wasm" | "llvm"
+            ) && ooda::typecheck::program_uses_try_operator(&program)
+            {
+                anyhow::bail!(
+                    "build --target {}: try-operator `?` is not lowered outside the interpreter yet.                      Use `ooda run` for Result propagation, or expand `?` into explicit match.",
+                    target_l
+                );
             }
             // Dual-engine honesty: sealed I/O has no runtime cap tokens in C/LLVM/WASM yet.
             // Refuse to emit open native binaries that drop the interpreter's default-deny gate.
@@ -1131,6 +1142,26 @@ fn load_and_analyze(
                     ),
                     true,
                 )
+            } else if msg.contains("undefined variable") {
+                let vname = msg
+                    .split("undefined variable '")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+                    .unwrap_or("x");
+                (
+                    "Define or bind variable".into(),
+                    format!(
+                        "{{\"codemod\":\"undefined_var\",\"name\":\"{}\",\"hint\":\"add `let {} = …` before use, or fix the name\"}}",
+                        vname, vname
+                    ),
+                    true,
+                )
+            } else if msg.contains("`?` only allowed") || msg.contains("`?` requires Result") {
+                (
+                    "Fix try-operator usage".into(),
+                    r#"{"codemod":"try_op","hint":"`?` only on Result values inside functions that return Result[T,E] with matching E"}"#.into(),
+                    true,
+                )
             } else {
                 (
                     "Fix types".into(),
@@ -1256,12 +1287,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.64.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.65.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.64.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.65.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
