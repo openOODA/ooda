@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.40.0-alpha")]
+#[command(version = "0.41.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -803,20 +803,34 @@ fn load_and_analyze(
         let (line, col) = parse_loc(&msg);
         let typecheck_us = typecheck_start.elapsed().as_micros();
         if json_errors {
-            let (fix_desc, fix_diff): (String, String) = if msg.contains("must-use")
+            // Prefer machine-applicable ooda-patch JSON for high-frequency AI auto-fix cases.
+            let (fix_desc, fix_diff, is_patch): (String, String, bool) = if msg.contains("must-use")
                 || msg.contains("unused Result")
             {
                 (
-                    "Handle Result/Option".into(),
-                    "let r = f(); match r { Ok(v) => ..., Err(e) => ... }".into(),
+                    "Handle Result/Option with match".into(),
+                    r#"{"target_function":"<fn>","new_body":"let r = <expr>;\nmatch r {\n  Ok(v) => { /* use v */ },\n  Err(e) => { /* handle e */ }\n}"}"#.into(),
+                    true,
                 )
             } else if msg.contains("non-exhaustive match") {
                 (
-                    "Cover all variants".into(),
-                    "match r { Ok(v) => ..., Err(e) => ... }  // or `_ => ...`".into(),
+                    "Cover all match variants".into(),
+                    r#"{"target_function":"<fn>","new_body":"match r {\n  Ok(v) => …,\n  Err(e) => …\n  // or add `_ => process_exit(1)` then replace\n}"}"#.into(),
+                    true,
                 )
-            } else if msg.contains("immutable") {
-                ("Use let mut".into(), "let mut x = ...; x = new_value;".into())
+            } else if msg.contains("immutable") || msg.contains("let mut") {
+                let vname = msg
+                    .split('\'')
+                    .nth(1)
+                    .unwrap_or("x");
+                (
+                    "Use let mut for assigned binding".into(),
+                    format!(
+                        "{{\"codemod\":\"let_mut\",\"binding\":\"{}\",\"hint\":\"ooda migrate --edition 2026 rewrites assigned immutable let → let mut\"}}",
+                        vname
+                    ),
+                    true,
+                )
             } else if msg.contains("undefined function") {
                 let fname = msg
                     .split("undefined function '")
@@ -826,9 +840,10 @@ fn load_and_analyze(
                 (
                     "Define or import function".into(),
                     format!(
-                        "pub fn {}(...) -> ... {{\n    // implement or fix the call site\n}}",
-                        fname
+                        "{{\"target_function\":\"{}\",\"new_body\":\"// implement {}\\nreturn 0;\"}}",
+                        fname, fname
                     ),
+                    true,
                 )
             } else if msg.contains("unknown method") {
                 let mname = msg
@@ -842,14 +857,16 @@ fn load_and_analyze(
                         "// '{}' is not a known method on this type — use a real method or struct field",
                         mname
                     ),
+                    false,
                 )
             } else {
                 (
                     "Fix types".into(),
                     "Ensure operands and annotations agree (Int/Float/String/Bool/caps).".into(),
+                    false,
                 )
             };
-            AiDiagnostic::new(
+            let d = AiDiagnostic::new(
                 "TypeError",
                 file,
                 line,
@@ -857,9 +874,12 @@ fn load_and_analyze(
                 msg,
                 "Static type mismatch detected before execution.",
             )
-            .with_fix(fix_desc, fix_diff)
-            .with_timings(parse_us, capability_us.saturating_add(typecheck_us))
-            .print_json();
+            .with_timings(parse_us, capability_us.saturating_add(typecheck_us));
+            if is_patch {
+                d.with_patch_fix(fix_desc, fix_diff).print_json();
+            } else {
+                d.with_fix(fix_desc, fix_diff).print_json();
+            }
         } else {
             eprintln!("Type Error: {}", e);
         }
@@ -964,12 +984,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.40.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.41.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.40.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.41.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
@@ -1085,6 +1105,21 @@ mod version_consistency_tests {
         }
         // In monorepo checkouts this must fire; bare ooda clone alone is ok to skip.
         let _ = saw_any;
+    }
+
+    /// Docs brand README (if monorepo sibling present) must not lag the pin.
+    #[test]
+    fn monorepo_docs_readme_pin_if_present() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/README.md");
+        if !path.is_file() {
+            return;
+        }
+        let body = std::fs::read_to_string(&path).expect("docs README");
+        assert!(
+            body.contains(CANONICAL_VERSION),
+            "docs/README.md must mention {} when monorepo sibling present",
+            CANONICAL_VERSION
+        );
     }
 
 }
