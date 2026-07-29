@@ -389,6 +389,65 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// List ==/!= is **header pointer identity**, not content ($streq).
+/// Two distinct list_new() headers with the same pushed values must compare unequal.
+#[test]
+fn ooda_wasm_list_pointer_eq_not_streq() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wlisteq_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("listeq.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut a: List[Int] = list_new();
+    a = a.push(1);
+    let mut b: List[Int] = list_new();
+    b = b.push(1);
+    if a == a {
+        println(1);
+    } else {
+        println(0);
+    }
+    if a == b {
+        println(1);
+    } else {
+        println(0);
+    }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm list eq: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("i32.eq") || wat.contains("i32.ne"),
+        "list == must use i32 pointer eq, not only streq:\n{}",
+        wat
+    );
+    // Must not call streq for the list comparisons (string eq still may appear elsewhere).
+    // Count: if we only have list ==/!=, streq should not appear for those ops.
+    // Safer: host semantics — identity a==a true, a==b false for distinct headers.
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(
+        lines,
+        vec!["1".to_string(), "0".to_string()],
+        "pointer identity: a==a → 1, a==b → 0 for distinct list_new; got {:?} wat:\n{}",
+        lines,
+        wat
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Method forms `.push` / `.len` lower to free list_* on List[Int].
 #[test]
 fn ooda_wasm_list_methods_push_len_run_on_host() {

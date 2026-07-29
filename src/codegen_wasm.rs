@@ -625,18 +625,24 @@ impl WasmCodeGen {
                     BinOp::Div if ty == "i64" => wat.push_str("    i64.div_s\n"),
                     BinOp::Div => wat.push_str("    f64.div\n"),
                     // Comparisons yield i32 in WebAssembly; extend to i64 Bool model.
+                    // String (semantic i32): content via $streq. List: header pointer i32.eq/ne.
+                    // Never run streq on list pointers (distinct headers must compare unequal).
                     BinOp::Eq => {
-                        if ty == "i32" {
+                        if either_str {
                             wat.push_str("    call $streq\n");
+                        } else if either_list {
+                            wat.push_str("    i32.eq\n");
                         } else {
                             wat.push_str(&format!("    {}.eq\n", ty));
                         }
                         wat.push_str("    i64.extend_i32_u\n");
                     }
                     BinOp::Neq => {
-                        if ty == "i32" {
+                        if either_str {
                             wat.push_str("    call $streq\n");
                             wat.push_str("    i32.eqz\n");
+                        } else if either_list {
+                            wat.push_str("    i32.ne\n");
                         } else {
                             wat.push_str(&format!("    {}.ne\n", ty));
                         }

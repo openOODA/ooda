@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.99.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.100.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.99.0-alpha
+ooda --version   # 0.100.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.99.0-alpha (CHS M0–M5)
+## What's real in v0.100.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
