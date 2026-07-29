@@ -392,54 +392,140 @@ impl CapabilityChecker {
         Ok(())
     }
 
-    /// Cap handle is either a parameter of the right type, or a variable known to be aliased to that param.
+    /// Cap handle is a parameter of the right type, or a variable that aliases one
+    /// via `let` / assign — including aliases inside nested `if`/`while`/`match`.
     fn expr_is_cap_handle(expr: &Expression, kind: CapKind, func: &FunctionDecl) -> bool {
         match expr {
             Expression::Variable(name, _) => {
-                // 1. Direct parameter check
-                if func
-                    .params
-                    .iter()
-                    .any(|p| p.name == *name && kind.matches_type(&p.param_type))
-                {
-                    return true;
-                }
-                // 2. Let-alias check: trace `let alias = cap_param;`
-                for stmt in &func.body.stmts {
-                    if let Statement::Let {
-                        name: let_name,
-                        init,
-                        ..
-                    } = stmt
-                    {
-                        if let_name == name {
-                            if let Expression::Variable(init_name, _) = init {
-                                return func
-                                    .params
-                                    .iter()
-                                    .any(|p| p.name == *init_name && kind.matches_type(&p.param_type));
-                            }
-                        }
-                    }
-                    if let Statement::Assign {
-                        name: assign_name,
-                        value,
-                        ..
-                    } = stmt
-                    {
-                        if assign_name == name {
-                            if let Expression::Variable(val_name, _) = value {
-                                return func
-                                    .params
-                                    .iter()
-                                    .any(|p| p.name == *val_name && kind.matches_type(&p.param_type));
-                            }
-                        }
-                    }
-                }
-                false
+                Self::cap_handle_names(func, kind).contains(name)
             }
             _ => false,
+        }
+    }
+
+    /// Fixed-point set of names that are live capability handles of `kind` in `func`.
+    fn cap_handle_names(func: &FunctionDecl, kind: CapKind) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        let mut handles = HashSet::new();
+        for p in &func.params {
+            if kind.matches_type(&p.param_type) {
+                handles.insert(p.name.clone());
+            }
+        }
+        // Fixed-point so chains (`let a = fs; let b = a;`) and nested blocks converge.
+        for _ in 0..64 {
+            let before = handles.len();
+            Self::collect_cap_aliases_in_block(&func.body, &mut handles);
+            if handles.len() == before {
+                break;
+            }
+        }
+        handles
+    }
+
+    fn collect_cap_aliases_in_block(
+        block: &Block,
+        handles: &mut std::collections::HashSet<String>,
+    ) {
+        for stmt in &block.stmts {
+            match stmt {
+                Statement::Let { name, init, .. } => {
+                    if let Expression::Variable(init_name, _) = init {
+                        if handles.contains(init_name) {
+                            handles.insert(name.clone());
+                        }
+                    }
+                    Self::collect_cap_aliases_in_expr(init, handles);
+                }
+                Statement::Assign { name, value, .. } => {
+                    if let Expression::Variable(val_name, _) = value {
+                        if handles.contains(val_name) {
+                            handles.insert(name.clone());
+                        }
+                    }
+                    Self::collect_cap_aliases_in_expr(value, handles);
+                }
+                Statement::Return(Some(e), _) | Statement::Expr(e, _) => {
+                    Self::collect_cap_aliases_in_expr(e, handles);
+                }
+                Statement::While { cond, body, .. } => {
+                    Self::collect_cap_aliases_in_expr(cond, handles);
+                    Self::collect_cap_aliases_in_block(body, handles);
+                }
+                Statement::Return(None, _) => {}
+            }
+        }
+        if let Some(expr) = &block.expr {
+            Self::collect_cap_aliases_in_expr(expr, handles);
+        }
+    }
+
+    fn collect_cap_aliases_in_expr(
+        expr: &Expression,
+        handles: &mut std::collections::HashSet<String>,
+    ) {
+        match expr {
+            Expression::Literal(_, _) | Expression::Variable(_, _) => {}
+            Expression::Binary { left, right, .. } => {
+                Self::collect_cap_aliases_in_expr(left, handles);
+                Self::collect_cap_aliases_in_expr(right, handles);
+            }
+            Expression::Unary { expr, .. } => Self::collect_cap_aliases_in_expr(expr, handles),
+            Expression::Call { args, .. } => {
+                for a in args {
+                    Self::collect_cap_aliases_in_expr(a, handles);
+                }
+            }
+            Expression::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::collect_cap_aliases_in_expr(cond, handles);
+                Self::collect_cap_aliases_in_block(then_branch, handles);
+                if let Some(eb) = else_branch {
+                    Self::collect_cap_aliases_in_block(eb, handles);
+                }
+            }
+            Expression::While { cond, body, .. } => {
+                Self::collect_cap_aliases_in_expr(cond, handles);
+                Self::collect_cap_aliases_in_block(body, handles);
+            }
+            Expression::Match { expr, arms, .. } => {
+                // Pattern-trace: `match Some(cap) { Some(h) => … }` — bind `h` as handle.
+                let scrutinee_handle = match expr.as_ref() {
+                    Expression::Variable(v, _) if handles.contains(v) => Some(v.clone()),
+                    Expression::Call { name, args, .. }
+                        if (name == "Some" || name == "Ok") && args.len() == 1 =>
+                    {
+                        if let Expression::Variable(v, _) = &args[0] {
+                            if handles.contains(v) {
+                                Some(v.clone())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                Self::collect_cap_aliases_in_expr(expr, handles);
+                for arm in arms {
+                    if let (Some(_), Pattern::Variant { arg: Some(bind), .. }) =
+                        (&scrutinee_handle, &arm.pattern)
+                    {
+                        handles.insert(bind.clone());
+                    }
+                    Self::collect_cap_aliases_in_expr(&arm.body, handles);
+                }
+            }
+            Expression::StructLit { fields, .. } => {
+                for (_, e) in fields {
+                    Self::collect_cap_aliases_in_expr(e, handles);
+                }
+            }
         }
     }
 }
@@ -516,6 +602,11 @@ mod tests {
             }
         "#,
         );
+        assert!(
+            CapabilityChecker::check_program(&prog).is_ok(),
+            "receiver fs param must be accepted: {:?}",
+            CapabilityChecker::check_program(&prog).err()
+        );
     }
 
     #[test]
@@ -530,5 +621,43 @@ mod tests {
             "#,
         );
         assert!(CapabilityChecker::check_program(&prog).is_ok());
+    }
+
+    #[test]
+    fn allows_nested_if_let_aliased_capability_handle() {
+        let prog = parse_program(
+            r#"
+            pub fn main(fs: &FsCap) {
+                if true {
+                    let fs2 = fs;
+                    fs2.write_file("note.txt", "hello");
+                }
+            }
+            "#,
+        );
+        assert!(
+            CapabilityChecker::check_program(&prog).is_ok(),
+            "nested let-alias of FsCap must be accepted: {:?}",
+            CapabilityChecker::check_program(&prog).err()
+        );
+    }
+
+    #[test]
+    fn allows_match_some_pattern_capability_handle() {
+        let prog = parse_program(
+            r#"
+            pub fn main(fs: &FsCap) {
+                match Some(fs) {
+                    Some(h) => h.write_file("note.txt", "hello"),
+                    None => process_exit(1),
+                }
+            }
+            "#,
+        );
+        assert!(
+            CapabilityChecker::check_program(&prog).is_ok(),
+            "match Some(cap) pattern bind must be a handle: {:?}",
+            CapabilityChecker::check_program(&prog).err()
+        );
     }
 }

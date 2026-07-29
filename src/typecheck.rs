@@ -372,8 +372,15 @@ impl TypeChecker {
         }
 
         let expected_ret = Ty::from_ast(&func.return_type);
-        let body_ty =
-            self.check_block(&func.body, &mut env, &mut mutable, &func.name, Some(&expected_ret))?;
+        let empty_refinements = HashMap::new();
+        let body_ty = self.check_block(
+            &func.body,
+            &mut env,
+            &mut mutable,
+            &func.name,
+            Some(&expected_ret),
+            &empty_refinements,
+        )?;
 
         // Static refinement bounds check for return statements against function return_type
         if let Type::Custom(ref s) = func.return_type {
@@ -431,18 +438,22 @@ impl TypeChecker {
         if let Some(verify) = &func.verify_block {
             let mut venv = HashMap::new();
             let mut vmut = HashMap::new();
+            let empty = HashMap::new();
             self.check_block(
                 verify,
                 &mut venv,
                 &mut vmut,
                 &format!("verify {}", func.name),
                 None,
+                &empty,
             )?;
         }
 
         Ok(())
     }
 
+    /// Typecheck a block. `parent_refinements` carries `Int[lo..hi]` bounds from
+    /// enclosing scopes so nested `if`/`while` still enforce assignment bounds.
     fn check_block(
         &self,
         block: &Block,
@@ -450,9 +461,10 @@ impl TypeChecker {
         mutable: &mut HashMap<String, bool>,
         ctx: &str,
         expected_ret: Option<&Ty>,
+        parent_refinements: &HashMap<String, (i64, i64)>,
     ) -> Result<Ty> {
         let mut last = Ty::Void;
-        let mut refinements: HashMap<String, (i64, i64)> = HashMap::new();
+        let mut refinements: HashMap<String, (i64, i64)> = parent_refinements.clone();
         for stmt in &block.stmts {
             match stmt {
                 Statement::Let {
@@ -602,9 +614,23 @@ impl TypeChecker {
                                     ct.display()
                                 ));
                             }
-                            self.check_block(then_branch, env, mutable, "if-then", expected_ret)?;
+                            self.check_block(
+                                then_branch,
+                                env,
+                                mutable,
+                                "if-then",
+                                expected_ret,
+                                &refinements,
+                            )?;
                             if let Some(eb) = else_branch {
-                                self.check_block(eb, env, mutable, "if-else", expected_ret)?;
+                                self.check_block(
+                                    eb,
+                                    env,
+                                    mutable,
+                                    "if-else",
+                                    expected_ret,
+                                    &refinements,
+                                )?;
                             }
                             last = Ty::Void;
                         }
@@ -622,7 +648,14 @@ impl TypeChecker {
                                     ct.display()
                                 ));
                             }
-                            self.check_block(body, env, mutable, "while-expr-stmt", expected_ret)?;
+                            self.check_block(
+                                body,
+                                env,
+                                mutable,
+                                "while-expr-stmt",
+                                expected_ret,
+                                &refinements,
+                            )?;
                             last = Ty::Void;
                         }
                         _ => {
@@ -650,7 +683,14 @@ impl TypeChecker {
                             ct.display()
                         ));
                     }
-                    self.check_block(body, env, mutable, "while-body", expected_ret)?;
+                    self.check_block(
+                        body,
+                        env,
+                        mutable,
+                        "while-body",
+                        expected_ret,
+                        &refinements,
+                    )?;
                     last = Ty::Void;
                 }
             }
@@ -673,9 +713,23 @@ impl TypeChecker {
                             ct.display()
                         ));
                     }
-                    self.check_block(then_branch, env, mutable, "if-then-tail", expected_ret)?;
+                    self.check_block(
+                        then_branch,
+                        env,
+                        mutable,
+                        "if-then-tail",
+                        expected_ret,
+                        &refinements,
+                    )?;
                     if let Some(eb) = else_branch {
-                        self.check_block(eb, env, mutable, "if-else-tail", expected_ret)?;
+                        self.check_block(
+                            eb,
+                            env,
+                            mutable,
+                            "if-else-tail",
+                            expected_ret,
+                            &refinements,
+                        )?;
                     }
                     last = Ty::Void;
                 }
@@ -992,11 +1046,28 @@ impl TypeChecker {
                 }
                 let mut env_then = env.clone();
                 let mut mut_then = HashMap::new();
-                let t1 = self.check_block(then_branch, &mut env_then, &mut mut_then, "if-then", None)?;
+                // Expression-level if has no parent refinement map here; empty is correct
+                // (statement-level if inherits via check_block's refinements param).
+                let empty_ref = HashMap::new();
+                let t1 = self.check_block(
+                    then_branch,
+                    &mut env_then,
+                    &mut mut_then,
+                    "if-then",
+                    None,
+                    &empty_ref,
+                )?;
                 if let Some(else_b) = else_branch {
                     let mut env_else = env.clone();
                     let mut mut_else = HashMap::new();
-                    let t2 = self.check_block(else_b, &mut env_else, &mut mut_else, "if-else", None)?;
+                    let t2 = self.check_block(
+                        else_b,
+                        &mut env_else,
+                        &mut mut_else,
+                        "if-else",
+                        None,
+                        &empty_ref,
+                    )?;
                     if Ty::unifyable(&t1, &t2) {
                         Ok(t1)
                     } else if matches!(t1, Ty::Unknown) || matches!(t2, Ty::Unknown) {
@@ -1059,7 +1130,8 @@ impl TypeChecker {
                     ));
                 }
                 let mut m = HashMap::new();
-                self.check_block(body, &mut env.clone(), &mut m, "while-expr", None)?;
+                let empty_ref = HashMap::new();
+                self.check_block(body, &mut env.clone(), &mut m, "while-expr", None, &empty_ref)?;
                 Ok(Ty::Void)
             }
             Expression::StructLit { name, fields, span } => {
@@ -1554,6 +1626,44 @@ mod tests {
         assert!(
             err.contains("RefinementTypeViolation") && err.contains("70000"),
             "expected assignment refinement error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_refinement_assignment_in_nested_if() {
+        let src = r#"
+            pub fn main() {
+                let mut port: Int[1..65535] = 8080;
+                if true {
+                    port = 70000;
+                }
+                println(port);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("70000"),
+            "nested if must still enforce refinement bounds, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_refinement_assignment_in_while() {
+        let src = r#"
+            pub fn main() {
+                let mut port: Int[1..65535] = 8080;
+                while false {
+                    port = 0;
+                }
+                println(port);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("0"),
+            "while body must still enforce refinement bounds, got: {}",
             err
         );
     }
