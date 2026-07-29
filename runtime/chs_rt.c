@@ -257,15 +257,18 @@ int oo_str_eq(OoStr a, OoStr b) {
 int oo_str_contains(OoStr hay, OoStr needle) {
   if (needle.len == 0) return 1;
   if (needle.len > hay.len) return 0;
-  /* null-terminated copies for strstr; OoStr data is always 0-terminated by constructors */
-  return strstr(hay.data, needle.data) != NULL;
+  /* Length-bounded search so zero-copy slices (no interior NUL) stay correct. */
+  for (long long i = 0; i + needle.len <= hay.len; i++) {
+    if (memcmp(hay.data + i, needle.data, (size_t)needle.len) == 0) return 1;
+  }
+  return 0;
 }
 OoStr oo_int_to_str(long long n) {
-  OoStr r;
-  r.data = (char *)malloc(32);
-  if (!r.data) abort();
-  r.len = snprintf(r.data, 32, "%lld", n);
-  return r;
+  /* Fixed stack buffer then one owned heap copy of exact printed length. */
+  char buf[32];
+  int nwritten = snprintf(buf, sizeof(buf), "%lld", n);
+  if (nwritten < 0) abort();
+  return oo_str_lit(buf);
 }
 
 OoStr oo_str_trim(OoStr s) {
@@ -273,16 +276,26 @@ OoStr oo_str_trim(OoStr s) {
   while (start < s.len && isspace((unsigned char)s.data[start])) start++;
   long long end = s.len;
   while (end > start && isspace((unsigned char)s.data[end - 1])) end--;
+  /* Zero-copy view into s (chs_rt does not free OoStr buffers). W ↓ for slices. */
   OoStr r;
+  r.data = s.data + start;
   r.len = end - start;
-  r.data = (char *)malloc((size_t)r.len + 1);
-  if (!r.data) abort();
-  memcpy(r.data, s.data + start, (size_t)r.len);
-  r.data[r.len] = 0;
   return r;
 }
 
 OoStr oo_str_to_lowercase(OoStr s) {
+  /* Fast path: already lowercase ASCII — return same view (no alloc). */
+  int needs = 0;
+  for (long long i = 0; i < s.len; i++) {
+    unsigned char c = (unsigned char)s.data[i];
+    if (c >= 'A' && c <= 'Z') {
+      needs = 1;
+      break;
+    }
+  }
+  if (!needs) {
+    return s;
+  }
   OoStr r;
   r.len = s.len;
   r.data = (char *)malloc((size_t)r.len + 1);

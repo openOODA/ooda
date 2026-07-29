@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.70.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.71.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.70.0-alpha
+ooda --version   # 0.71.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.70.0-alpha (CHS M0–M5)
+## What's real in v0.71.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -50,7 +50,8 @@ import "lib.oo";       // relative / OODA_PATH
 | `?` try-operator | Real: unwraps Result; early-return on Err; only in Result-returning fns; build refuses outside interp |
 | Bool match | Real: `true`/`false` patterns + exhaustiveness |
 | `.contains` | Real on String (interp + CHS C) |
-| Field assign | Real: `p.x = v` on `let mut` structs (interp + CHS C) |
+| Field assign | Real: `p.x = v` and nested `o.inner.n = v` on `let mut` roots (interp + CHS C) |
+| Sealed method receiver types | Real: `.path_exists`/`.file_size` need `FsCap`; `.env_get`→`EnvCap`; `.sys_exec`→`SysCap`; `.get`→`NetCap` |
 | list_get const OOB | Real: const negative / known list_new+push length chains fail at typecheck |
 | Nested/tail return refine | Real: const `return` inside if/while + tail expr enforces `Int[lo..hi]` / aliases |
 | `Int[lo..hi]` refinement | Real on let/assign/return/params **including via type aliases**; const typecheck + runtime |

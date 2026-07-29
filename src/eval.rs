@@ -1107,6 +1107,80 @@ impl Interpreter {
         Ok(return_val)
     }
 
+    /// Assign `val` to `object.field`, where `object` is a Variable or a nested
+    /// `.field` Call chain (e.g. `p.inner` desugared). Mutates the root record in env.
+    fn assign_field_path(
+        env: &mut HashMap<String, Value>,
+        object: &Expression,
+        field: &str,
+        val: Value,
+    ) -> Result<()> {
+        // Flatten path: root var + intermediate field names + final field.
+        let mut chain: Vec<String> = Vec::new();
+        let mut cur = object;
+        loop {
+            match cur {
+                Expression::Variable(name, _) => {
+                    chain.insert(0, name.clone());
+                    break;
+                }
+                Expression::Call { name, args, .. }
+                    if name.starts_with('.') && args.len() == 1 =>
+                {
+                    chain.insert(0, name[1..].to_string());
+                    cur = &args[0];
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "Runtime error: field assign requires a variable or field path receiver"
+                    ));
+                }
+            }
+        }
+        chain.push(field.to_string());
+        // chain = [root, f1, f2, ..., final_field]
+        if chain.len() < 2 {
+            return Err(anyhow!("Runtime error: empty field assign path"));
+        }
+        let root = chain[0].clone();
+        let entry = env.get_mut(&root).ok_or_else(|| {
+            anyhow!("Runtime error: undefined variable '{}'", root)
+        })?;
+        let mut cursor: &mut Value = entry;
+        for seg in &chain[1..chain.len() - 1] {
+            match cursor {
+                Value::Record { fields, .. } => {
+                    cursor = fields.get_mut(seg).ok_or_else(|| {
+                        anyhow!("Runtime error: struct has no field '{}'", seg)
+                    })?;
+                }
+                other => {
+                    return Err(anyhow!(
+                        "Runtime error: field assign path through non-struct {:?}",
+                        other
+                    ));
+                }
+            }
+        }
+        let last = chain.last().unwrap();
+        match cursor {
+            Value::Record { fields, .. } => {
+                if !fields.contains_key(last) {
+                    return Err(anyhow!(
+                        "Runtime error: struct has no field '{}'",
+                        last
+                    ));
+                }
+                fields.insert(last.clone(), val);
+                Ok(())
+            }
+            other => Err(anyhow!(
+                "Runtime error: field assign on non-struct value {:?}",
+                other
+            )),
+        }
+    }
+
     fn eval_block(&mut self, block: &Block, env: &mut HashMap<String, Value>) -> Result<Value> {
         // Scope: restore `let` bindings introduced in this block so nested
         // if/while cannot pollute outer frames. Assignments to outer names stick.
@@ -1163,35 +1237,11 @@ impl Interpreter {
                     value,
                     ..
                 } => {
-                    let Expression::Variable(obj_name, _) = object else {
-                        return Err(anyhow!(
-                            "Runtime error: field assign requires variable receiver"
-                        ));
-                    };
                     let val = self.eval_expr(value, env)?;
                     if self.pending_return.is_some() {
                         return Ok(self.pending_return.clone().unwrap_or(Value::Void));
                     }
-                    let entry = env.get_mut(obj_name).ok_or_else(|| {
-                        anyhow!("Runtime error: undefined variable '{}'", obj_name)
-                    })?;
-                    match entry {
-                        Value::Record { fields, .. } => {
-                            if !fields.contains_key(field) {
-                                return Err(anyhow!(
-                                    "Runtime error: struct has no field '{}'",
-                                    field
-                                ));
-                            }
-                            fields.insert(field.clone(), val);
-                        }
-                        other => {
-                            return Err(anyhow!(
-                                "Runtime error: field assign on non-struct value {:?}",
-                                other
-                            ));
-                        }
-                    }
+                    Self::assign_field_path(env, object, field, val)?;
                 }
                 Statement::Return(Some(expr), _) => {
                     let v = self.eval_expr(expr, env)?;
@@ -2294,6 +2344,26 @@ mod tests {
         let mut interp = Interpreter::new(prog);
         let v = interp.call_function("main", vec![], &mut HashMap::new()).expect("run");
         assert_eq!(v, Value::Int(7));
+    }
+
+    #[test]
+    fn nested_field_assign_runtime() {
+        let prog = parse(
+            r#"
+            type Inner = struct { n: Int };
+            type Outer = struct { inner: Inner };
+            pub fn main() -> Int {
+                let mut o = Outer { inner: Inner { n: 1 } };
+                o.inner.n = 9;
+                return o.inner.n;
+            }
+            "#,
+        );
+        let mut interp = Interpreter::new(prog);
+        let v = interp
+            .call_function("main", vec![], &mut HashMap::new())
+            .expect("nested field assign");
+        assert_eq!(v, Value::Int(9));
     }
 
     #[test]

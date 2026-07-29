@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.70.0-alpha")]
+#[command(version = "0.71.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -908,9 +908,32 @@ fn load_and_analyze(
                     true,
                 )
             } else if msg.contains("missing return") {
+                // Message shape: "declares return type {T} but body has type Void (missing return value)"
+                let ret_ty = msg
+                    .split("declares return type ")
+                    .nth(1)
+                    .and_then(|s| s.split(" but body").next())
+                    .unwrap_or("Int")
+                    .trim();
+                let stub = match ret_ty {
+                    "Int" | "Float" => "return 0;",
+                    "Bool" => "return false;",
+                    "String" => "return \"\";",
+                    "Void" => "return;",
+                    t if t.starts_with("Option") => "return None;",
+                    t if t.starts_with("Result") => {
+                        "return Err(\"TODO: missing return\");"
+                    }
+                    _ => "return 0; /* TODO: match declared return type */",
+                };
                 (
-                    "Add return value on every path".into(),
-                    format!(r#"{{"codemod":"return_default","target_line":{},"new_code":"return 0;"}}"#, line),
+                    format!("Add return value on every path (declared {})", ret_ty),
+                    format!(
+                        r#"{{"codemod":"missing_return","declared_return":"{}","target_line":{},"new_code":"{}"}}"#,
+                        ret_ty.replace('"', "\\\""),
+                        line,
+                        stub.replace('"', "\\\"")
+                    ),
                     true,
                 )
             } else if msg.contains("unreachable code after return") {
@@ -1287,9 +1310,9 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.70.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.71.0-alpha";
     // For comparing against Cargo.toml which lacks the 'v'
-    const CANONICAL_VERSION_NO_V: &str = "0.70.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.71.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

@@ -311,6 +311,17 @@ pub fn main() {
         "missing return should be patch-applicable: {}",
         stderr
     );
+    let diff = v["suggested_fix"]["diff"].as_str().unwrap_or("");
+    assert!(
+        diff.contains("missing_return") && diff.contains("declared_return"),
+        "missing_return codemod must name declared return type: {}",
+        diff
+    );
+    assert!(
+        diff.contains("Int") && diff.contains("return 0"),
+        "Int missing return stub: {}",
+        diff
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1879,5 +1890,41 @@ pub fn main() {
     assert!(stdout.contains("ok1"), "stdout={}", stdout);
     assert!(stdout.contains("ok2"), "stdout={}", stdout);
     assert!(stdout.contains("ok3"), "stdout={}", stdout);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn build_c_lowers_nested_field_assign() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_c_nestfld_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+type Inner = struct { n: Int };
+type Outer = struct { inner: Inner };
+pub fn main() {
+    let mut o = Outer { inner: Inner { n: 1 } };
+    o.inner.n = 42;
+    println(o.inner.n);
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "C nested field assign: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("42"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }

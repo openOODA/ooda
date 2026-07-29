@@ -635,6 +635,76 @@ impl TypeChecker {
         }
     }
 
+    /// Resolve `p` or `p.a.b` (desugared `.field` Call chain) to root binding name
+    /// and the type of the parent struct that owns the final assigned field.
+    fn field_assign_parent_ty(
+        &self,
+        object: &Expression,
+        env: &HashMap<String, Ty>,
+        span: Span,
+    ) -> Result<(String, Ty)> {
+        match object {
+            Expression::Variable(name, _) => {
+                let ty = env.get(name).cloned().ok_or_else(|| {
+                    anyhow!(
+                        "Type error at {}:{}: undefined variable '{}'",
+                        span.line,
+                        span.col,
+                        name
+                    )
+                })?;
+                Ok((name.clone(), ty))
+            }
+            Expression::Call { name, args, .. }
+                if name.starts_with('.') && args.len() == 1 =>
+            {
+                let field_name = &name[1..];
+                let (root, parent_ty) =
+                    self.field_assign_parent_ty(&args[0], env, span)?;
+                let fields = match &parent_ty {
+                    Ty::Struct { fields, .. } => fields,
+                    Ty::Custom(n) => match self.type_aliases.get(n) {
+                        Some(Ty::Struct { fields, .. }) => fields,
+                        _ => {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: field access on non-struct type {} in assign path",
+                                span.line,
+                                span.col,
+                                parent_ty.display()
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: field access on non-struct type {} in assign path",
+                            span.line,
+                            span.col,
+                            other.display()
+                        ));
+                    }
+                };
+                let child = fields
+                    .iter()
+                    .find(|(n, _)| n == field_name)
+                    .map(|(_, t)| t.clone())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "Type error at {}:{}: struct has no field '{}'",
+                            span.line,
+                            span.col,
+                            field_name
+                        )
+                    })?;
+                Ok((root, child))
+            }
+            _ => Err(anyhow!(
+                "Type error at {}:{}: field assign requires a variable or field path (e.g. p.x or p.inner.n)",
+                span.line,
+                span.col
+            )),
+        }
+    }
+
     /// Typecheck a block. `parent_refinements` carries `Int[lo..hi]` bounds from
     /// enclosing scopes so nested `if`/`while` still enforce assignment bounds.
     fn check_block(
@@ -797,29 +867,20 @@ impl TypeChecker {
                     value,
                     span,
                 } => {
-                    let obj_ty = self.infer_expr(object, env)?;
-                    // Mutability: only `let mut` root Variable may be field-assigned.
-                    match object {
-                        Expression::Variable(name, _) => {
-                            if !mutable.get(name).copied().unwrap_or(false) {
-                                return Err(anyhow!(
-                                    "Type error at {}:{}: cannot assign to field of immutable binding '{}'; use `let mut {}`",
-                                    span.line,
-                                    span.col,
-                                    name,
-                                    name
-                                ));
-                            }
-                        }
-                        _ => {
-                            return Err(anyhow!(
-                                "Type error at {}:{}: field assign requires a simple variable receiver (e.g. p.x = …)",
-                                span.line,
-                                span.col
-                            ));
-                        }
+                    // Allow `p.x = v` and nested `p.inner.n = v` (object may be
+                    // a chain of desugared `.field` Calls ending at a Variable).
+                    let (root_name, parent_ty) =
+                        self.field_assign_parent_ty(object, env, *span)?;
+                    if !mutable.get(&root_name).copied().unwrap_or(false) {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: cannot assign to field of immutable binding '{}'; use `let mut {}`",
+                            span.line,
+                            span.col,
+                            root_name,
+                            root_name
+                        ));
                     }
-                    let fields = match &obj_ty {
+                    let fields = match &parent_ty {
                         Ty::Struct { fields, .. } => fields.clone(),
                         Ty::Custom(n) => match self.type_aliases.get(n) {
                             Some(Ty::Struct { fields, .. }) => fields.clone(),
@@ -828,7 +889,7 @@ impl TypeChecker {
                                     "Type error at {}:{}: field assign on non-struct type {}",
                                     span.line,
                                     span.col,
-                                    obj_ty.display()
+                                    parent_ty.display()
                                 ));
                             }
                         },
@@ -1491,17 +1552,127 @@ impl TypeChecker {
                             }
                             Ok(Ty::String)
                         }
-                        ".sys_exec" | ".file_size" => Ok(Ty::Int),
-                        ".trim" | ".to_lowercase" | ".to_string" => Ok(Ty::String),
-                        ".contains" | ".path_exists" | ".is_ok" | ".is_err" | ".is_some" | ".is_none" => Ok(Ty::Bool),
-                        ".get" | ".read_file" | ".env_get" => Ok(Ty::Result(
-                            Box::new(Ty::String),
-                            Box::new(Ty::String),
-                        )),
-                        ".write_file" => Ok(Ty::Result(
-                            Box::new(Ty::Void),
-                            Box::new(Ty::String),
-                        )),
+                        ".sys_exec" => {
+                            if !matches!(recv_ty, Ty::SysCap) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: .sys_exec requires SysCap receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    recv_ty.display()
+                                ));
+                            }
+                            Ok(Ty::Int)
+                        }
+                        ".file_size" | ".path_exists" => {
+                            if !matches!(recv_ty, Ty::FsCap) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: {} requires FsCap receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    name,
+                                    recv_ty.display()
+                                ));
+                            }
+                            if name == ".file_size" {
+                                Ok(Ty::Int)
+                            } else {
+                                Ok(Ty::Bool)
+                            }
+                        }
+                        ".trim" | ".to_lowercase" => {
+                            if !matches!(recv_ty, Ty::String) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: {} requires String receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    name,
+                                    recv_ty.display()
+                                ));
+                            }
+                            Ok(Ty::String)
+                        }
+                        ".to_string" => Ok(Ty::String),
+                        ".contains" => {
+                            if !matches!(recv_ty, Ty::String) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: .contains requires String receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    recv_ty.display()
+                                ));
+                            }
+                            Ok(Ty::Bool)
+                        }
+                        ".is_ok" | ".is_err" => {
+                            if !matches!(recv_ty, Ty::Result(_, _) | Ty::Unknown) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: {} requires Result receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    name,
+                                    recv_ty.display()
+                                ));
+                            }
+                            Ok(Ty::Bool)
+                        }
+                        ".is_some" | ".is_none" => {
+                            if !matches!(recv_ty, Ty::Option(_) | Ty::Unknown) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: {} requires Option receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    name,
+                                    recv_ty.display()
+                                ));
+                            }
+                            Ok(Ty::Bool)
+                        }
+                        ".get" => {
+                            if !matches!(recv_ty, Ty::NetCap) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: .get requires NetCap receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    recv_ty.display()
+                                ));
+                            }
+                            Ok(Ty::Result(Box::new(Ty::String), Box::new(Ty::String)))
+                        }
+                        ".read_file" | ".env_get" => {
+                            let need = if name == ".read_file" {
+                                Ty::FsCap
+                            } else {
+                                Ty::EnvCap
+                            };
+                            if recv_ty != need {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: {} requires {} receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    name,
+                                    need.display(),
+                                    recv_ty.display()
+                                ));
+                            }
+                            Ok(Ty::Result(
+                                Box::new(Ty::String),
+                                Box::new(Ty::String),
+                            ))
+                        }
+                        ".write_file" => {
+                            if !matches!(recv_ty, Ty::FsCap) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: .write_file requires FsCap receiver, found {}",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    recv_ty.display()
+                                ));
+                            }
+                            Ok(Ty::Result(
+                                Box::new(Ty::Void),
+                                Box::new(Ty::String),
+                            ))
+                        }
                         ".push" => {
                             // recv.push(elem)
                             match &recv_ty {
@@ -3755,6 +3926,36 @@ mod tests {
         "#;
         let err = check(src).unwrap_err().to_string();
         assert!(err.contains("negative") || err.contains("out of bounds"), "{}", err);
+    }
+
+    #[test]
+    fn nested_field_assign_typechecks() {
+        let src = r#"
+            type Inner = struct { n: Int };
+            type Outer = struct { inner: Inner };
+            pub fn main() -> Int {
+                let mut o = Outer { inner: Inner { n: 1 } };
+                o.inner.n = 3;
+                return o.inner.n;
+            }
+        "#;
+        assert!(check(src).is_ok(), "{:?}", check(src).err());
+    }
+
+    #[test]
+    fn path_exists_method_requires_fscap_receiver_type() {
+        let src = r#"
+            pub fn main(net: &NetCap) {
+                let b = net.path_exists("/tmp");
+                println(b);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("FsCap") || err.contains(".path_exists"),
+            "must require FsCap receiver: {}",
+            err
+        );
     }
 
     #[test]
