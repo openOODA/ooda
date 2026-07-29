@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.38.0-alpha")]
+#[command(version = "0.39.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -315,7 +315,37 @@ fn main() -> Result<()> {
                 Err(code) => std::process::exit(code),
             }
         }
-        Commands::Bench { file, em: _ } => {
+        Commands::Bench { file, em } => {
+            if em {
+                // Honest: run measured E-M clocks before the empirical suite.
+                let source_bytes = fs::read_to_string(&file)
+                    .map(|s| s.len())
+                    .unwrap_or(0);
+                let parse_start = Instant::now();
+                let program = load_program(&file).ok();
+                let parse_us = parse_start.elapsed().as_micros();
+                let (capability_us, typecheck_us, failed) = if let Some(ref prog) = program {
+                    let cap_start = Instant::now();
+                    let cap_ok = CapabilityChecker::check_program(prog).is_ok();
+                    let capability_us = cap_start.elapsed().as_micros();
+                    let ty_start = Instant::now();
+                    let ty_ok = TypeChecker::check_program(prog).is_ok();
+                    let typecheck_us = ty_start.elapsed().as_micros();
+                    (capability_us, typecheck_us, !cap_ok || !ty_ok)
+                } else {
+                    (0, 0, true)
+                };
+                let report = ooda::em::EmReport::from_measured(
+                    file.display().to_string(),
+                    source_bytes,
+                    parse_us,
+                    capability_us,
+                    typecheck_us,
+                    failed,
+                );
+                println!("{}", report.display_summary());
+                println!();
+            }
             bench::run_empirical_verification_suite(&file)?;
         }
         Commands::Em { file } => {
@@ -362,7 +392,13 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Build { file, release: _, emit_llvm, target } => {
+        Commands::Build { file, release, emit_llvm, target } => {
+            if release {
+                anyhow::bail!(
+                    "build --release is not implemented in this alpha (refused to pretend optimization). \
+                     Omit --release, or use `ooda run` for interpreted execution."
+                );
+            }
             let program = load_program(&file)
                 .with_context(|| format!("Failed to load '{}'", file.display()))?;
             CapabilityChecker::check_program(&program)?;
@@ -392,6 +428,23 @@ fn main() -> Result<()> {
                          from functions that must be compiled.",
                         target_l,
                         contract_fns.join(", ")
+                    );
+                }
+            }
+            // Dual-engine honesty: sealed I/O has no runtime cap tokens in C/LLVM/WASM yet.
+            // Refuse to emit open native binaries that drop the interpreter's default-deny gate.
+            if matches!(
+                target_l.as_str(),
+                "c" | "chs" | "native" | "wasm" | "llvm"
+            ) {
+                let sealed = ooda::capabilities::collect_sealed_effect_names(&program);
+                if !sealed.is_empty() {
+                    anyhow::bail!(
+                        "build --target {}: sealed effectful builtins are not lowered with runtime \
+                         capability tokens outside the interpreter yet (found: {}). \
+                         Use `ooda run` for cap-gated I/O, or remove sealed calls from compiled code.",
+                        target_l,
+                        sealed.join(", ")
                     );
                 }
             }
@@ -456,12 +509,13 @@ fn main() -> Result<()> {
                 out_ll.display()
             );
 
-            match try_native_link(&out_ll, &out_bin) {
+            let linked = match try_native_link(&out_ll, &out_bin) {
                 NativeLinkResult::Ok => {
                     println!(
                         "🚀 [openOODA Native Build] Native executable: {}",
                         out_bin.display()
                     );
+                    true
                 }
                 NativeLinkResult::ToolFailed { tool, detail } => {
                     eprintln!(
@@ -470,17 +524,30 @@ fn main() -> Result<()> {
                         out_ll.display(),
                         detail
                     );
+                    false
                 }
                 NativeLinkResult::NoTool => {
-                    println!(
-                        "💡 [openOODA Native Build] No clang in PATH; IR only at {}. Use --target c with gcc, or install clang.",
+                    eprintln!(
+                        "💡 [openOODA Native Build] No clang in PATH; IR only at {}.",
                         out_ll.display()
                     );
+                    false
                 }
-            }
+            };
 
             if emit_llvm {
                 println!("\n--- Generated LLVM IR ---\n{}", llvm_ir);
+            }
+
+            // Fail-closed: IR-only is not a successful native build (exit non-zero).
+            // Use --emit-llvm to keep the IR artifact visible; still fails without a binary
+            // so CI cannot green-pass on "wrote .ll".
+            if !linked {
+                anyhow::bail!(
+                    "native build did not produce an executable (IR at {}). \
+                     Install clang, or use `ooda build --target c` with gcc, or `ooda run`.",
+                    out_ll.display()
+                );
             }
         }
         Commands::Dump { kind, file } => {
@@ -687,27 +754,19 @@ fn load_and_analyze(
                 .nth(1)
                 .and_then(|s| s.split('\'').next())
                 .unwrap_or("f");
-            let effect = if msg.contains("'fetch'") || msg.contains("fetch") {
-                "fetch(url)"
-            } else if msg.contains("read_file") {
-                "read_file(path)"
-            } else {
-                "/* sealed effect */"
-            };
-            let cap_ty = if msg.contains("NetCap") {
-                "&NetCap"
-            } else if msg.contains("FsCap") {
-                "&FsCap"
+            let (cap_ty, effect_call) = if msg.contains("FsCap") || msg.contains("read_file") || msg.contains("write_file") {
+                ("&FsCap", "write_file(cap, path, content)")
             } else if msg.contains("SysCap") {
-                "&SysCap"
+                ("&SysCap", "sys_exec(cap, cmd)")
             } else if msg.contains("EnvCap") {
-                "&EnvCap"
+                ("&EnvCap", "env_get(cap, key)")
             } else {
-                "&NetCap"
+                ("&NetCap", "fetch(cap, url)")
             };
-            let diff = format!(
-                "pub fn {}(cap: {}, ...) {{\n    // grant capability on the enclosing function\n    let _ = {};\n}}",
-                fn_name, cap_ty, effect
+            // Machine-applicable ooda patch JSON: add cap param (agents apply via `ooda patch`).
+            let patch_json = format!(
+                "{{\"target_function\":\"{}\",\"new_params\":\"cap: {}, ...existing\",\"new_body\":\"// object-cap: pass live handle into sealed calls\\n// e.g. {}\"}}",
+                fn_name, cap_ty, effect_call
             );
             AiDiagnostic::new(
                 "CapabilitySecurityViolation",
@@ -715,9 +774,9 @@ fn load_and_analyze(
                 line,
                 col,
                 msg.clone(),
-                "Function attempts I/O without receiving explicit capability token handle.",
+                "Function attempts I/O without a live capability handle argument (object-capability).",
             )
-            .with_fix("Grant Capability Token", diff)
+            .with_patch_fix("Grant + thread capability handle", patch_json)
             .with_timings(parse_us, capability_us)
             .print_json();
         } else {
@@ -894,12 +953,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.38.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.39.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.38.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.39.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

@@ -1570,7 +1570,7 @@ mod tests {
         let prog = parse(
             r#"
             pub fn ok(net: &NetCap) -> Result[String, String] {
-                return fetch("https://127.0.0.1:1/");
+                return fetch(net, "https://127.0.0.1:1/");
             }
             pub fn main() {}
             "#,
@@ -1580,7 +1580,10 @@ mod tests {
         let res = interp
             .call_function(
                 "fetch",
-                vec![Value::String("https://127.0.0.1:1/".into())],
+                vec![
+                    Value::Capability("NetCap".into()),
+                    Value::String("https://127.0.0.1:1/".into()),
+                ],
                 &mut HashMap::new(),
             )
             .expect("fetch with NetCap must be allowed");

@@ -203,6 +203,87 @@ pub fn lookup_effect(name: &str) -> Option<&'static EffectBuiltin> {
     EFFECT_BUILTINS.iter().find(|e| e.name == name)
 }
 
+/// Collect sealed effectful builtin names used in a program (for dual-engine refuse).
+pub fn collect_sealed_effect_names(program: &Program) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut found = BTreeSet::new();
+    for item in &program.items {
+        if let Item::Function(f) = item {
+            collect_sealed_in_block(&f.body, &mut found);
+            if let Some(v) = &f.verify_block {
+                collect_sealed_in_block(v, &mut found);
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+fn collect_sealed_in_block(block: &Block, found: &mut std::collections::BTreeSet<String>) {
+    for stmt in &block.stmts {
+        match stmt {
+            Statement::Let { init, .. } => collect_sealed_in_expr(init, found),
+            Statement::Assign { value, .. } => collect_sealed_in_expr(value, found),
+            Statement::Return(Some(e), _) | Statement::Expr(e, _) => {
+                collect_sealed_in_expr(e, found)
+            }
+            Statement::While { cond, body, .. } => {
+                collect_sealed_in_expr(cond, found);
+                collect_sealed_in_block(body, found);
+            }
+            Statement::Return(None, _) => {}
+        }
+    }
+    if let Some(e) = &block.expr {
+        collect_sealed_in_expr(e, found);
+    }
+}
+
+fn collect_sealed_in_expr(expr: &Expression, found: &mut std::collections::BTreeSet<String>) {
+    match expr {
+        Expression::Call { name, args, .. } => {
+            if lookup_effect(name).is_some() {
+                found.insert(name.clone());
+            }
+            for a in args {
+                collect_sealed_in_expr(a, found);
+            }
+        }
+        Expression::Binary { left, right, .. } => {
+            collect_sealed_in_expr(left, found);
+            collect_sealed_in_expr(right, found);
+        }
+        Expression::Unary { expr, .. } => collect_sealed_in_expr(expr, found),
+        Expression::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_sealed_in_expr(cond, found);
+            collect_sealed_in_block(then_branch, found);
+            if let Some(eb) = else_branch {
+                collect_sealed_in_block(eb, found);
+            }
+        }
+        Expression::While { cond, body, .. } => {
+            collect_sealed_in_expr(cond, found);
+            collect_sealed_in_block(body, found);
+        }
+        Expression::Match { expr, arms, .. } => {
+            collect_sealed_in_expr(expr, found);
+            for arm in arms {
+                collect_sealed_in_expr(&arm.body, found);
+            }
+        }
+        Expression::StructLit { fields, .. } => {
+            for (_, e) in fields {
+                collect_sealed_in_expr(e, found);
+            }
+        }
+        Expression::Literal(_, _) | Expression::Variable(_, _) => {}
+    }
+}
+
 pub struct CapabilityChecker;
 
 impl CapabilityChecker {
@@ -282,7 +363,7 @@ impl CapabilityChecker {
                             span.col
                         ));
                     }
-                    // Method style: receiver (args[0]) must be the declared cap parameter.
+                    // Method style: receiver (args[0]) must be a live cap handle.
                     if effect.receiver_is_cap {
                         let span = expr.span();
                         match args.first() {
@@ -306,6 +387,25 @@ impl CapabilityChecker {
                                     span.col
                                 ));
                             }
+                        }
+                    } else {
+                        // Object-capability: free sealed ops must take a live handle
+                        // argument (ambient param alone is not enough).
+                        // e.g. fetch(net, url) / write_file(fs, path, content)
+                        let span = expr.span();
+                        let has_handle_arg = args
+                            .iter()
+                            .any(|a| Self::expr_is_cap_handle(a, effect.requires, func));
+                        if !has_handle_arg {
+                            return Err(anyhow!(
+                                "Security Capability Violation: Function '{}' calls sealed '{}' at line {}, col {} without passing a live {} handle argument (object-capability: ambient grant alone is not enough — use `{}(cap, …)` or a method-style receiver).",
+                                func.name,
+                                name,
+                                span.line,
+                                span.col,
+                                effect.requires.type_name(),
+                                name
+                            ));
                         }
                     }
                 }
@@ -558,11 +658,33 @@ mod tests {
         let prog = parse_program(
             r#"
             pub fn ok(net: &NetCap, url: String) {
+                let res = fetch(net, url);
+            }
+        "#,
+        );
+        assert!(
+            CapabilityChecker::check_program(&prog).is_ok(),
+            "{:?}",
+            CapabilityChecker::check_program(&prog).err()
+        );
+    }
+
+    #[test]
+    fn denies_ambient_only_fetch_without_handle_arg() {
+        // Object-cap: declaring &NetCap is not enough — must pass the handle.
+        let prog = parse_program(
+            r#"
+            pub fn ambient(net: &NetCap, url: String) {
                 let res = fetch(url);
             }
         "#,
         );
-        assert!(CapabilityChecker::check_program(&prog).is_ok());
+        let err = CapabilityChecker::check_program(&prog).unwrap_err().to_string();
+        assert!(
+            err.contains("object-capability") || err.contains("live"),
+            "ambient-only fetch must fail: {}",
+            err
+        );
     }
 
     #[test]

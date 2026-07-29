@@ -27,6 +27,9 @@ pub struct DiagnosticTimings {
 pub struct SuggestedFix {
     pub description: String,
     pub diff: String,
+    /// `patch` = machine-applicable ooda patch JSON; `advisory` = human guidance only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applicability: Option<String>,
 }
 
 impl AiDiagnostic {
@@ -54,6 +57,21 @@ impl AiDiagnostic {
         self.suggested_fix = Some(SuggestedFix {
             description: description.into(),
             diff: diff.into(),
+            applicability: Some("advisory".into()),
+        });
+        self
+    }
+
+    /// Machine-applicable fix: `diff` is ooda-patch JSON (or applyable source rewrite).
+    pub fn with_patch_fix(
+        mut self,
+        description: impl Into<String>,
+        diff: impl Into<String>,
+    ) -> Self {
+        self.suggested_fix = Some(SuggestedFix {
+            description: description.into(),
+            diff: diff.into(),
+            applicability: Some("patch".into()),
         });
         self
     }

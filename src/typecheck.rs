@@ -63,20 +63,25 @@ impl Ty {
                 "FsCap" => Ty::FsCap,
                 "EnvCap" => Ty::EnvCap,
                 "SysCap" => Ty::SysCap,
+                // Int[lo..hi] is still Int for unify; bounds enforced separately.
+                other if other.starts_with("Int[") && other.ends_with(']') => Ty::Int,
                 other => Ty::Custom(other.to_string()),
             },
         }
     }
 
     fn is_numeric(&self) -> bool {
-        matches!(self, Ty::Int | Ty::Float | Ty::Unknown)
+        matches!(self, Ty::Int | Ty::Float)
     }
 
+    /// Fail-closed unify: `Unknown` only unifies with `Unknown` (inference hole,
+    /// not a wildcard). `Custom` only matches same name or a named struct alias.
     fn unifyable(a: &Ty, b: &Ty) -> bool {
         if a == b {
             return true;
         }
-        if matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown) {
+        // Unknown is not a soft-accept wildcard (was fail-open theater).
+        if matches!(a, Ty::Unknown) && matches!(b, Ty::Unknown) {
             return true;
         }
         // Allow () (Void) capability tokens in verify blocks
@@ -85,13 +90,14 @@ impl Ty {
         {
             return true;
         }
-        // Allow Result[T,E] vs looser Unknown-containing forms
         match (a, b) {
+            // ADT constructors (Ok/Err/Some) still use Unknown payloads until full
+            // polymorphism exists — allow Unknown only *inside* Result/Option/List.
             (Ty::Result(a1, a2), Ty::Result(b1, b2)) => {
-                Ty::unifyable(a1, b1) && Ty::unifyable(a2, b2)
+                Ty::unifyable_or_unknown_hole(a1, b1) && Ty::unifyable_or_unknown_hole(a2, b2)
             }
-            (Ty::Option(a1), Ty::Option(b1)) => Ty::unifyable(a1, b1),
-            (Ty::List(a1), Ty::List(b1)) => Ty::unifyable(a1, b1),
+            (Ty::Option(a1), Ty::Option(b1)) => Ty::unifyable_or_unknown_hole(a1, b1),
+            (Ty::List(a1), Ty::List(b1)) => Ty::unifyable_or_unknown_hole(a1, b1),
             (Ty::Struct { fields: fa, .. }, Ty::Struct { fields: fb, .. }) => {
                 if fa.len() != fb.len() {
                     return false;
@@ -103,8 +109,39 @@ impl Ty {
             // Named struct alias vs Custom("Token") from annotations
             (Ty::Struct { name: Some(n), .. }, Ty::Custom(c))
             | (Ty::Custom(c), Ty::Struct { name: Some(n), .. }) => n == c,
-            (Ty::Custom(_), _) | (_, Ty::Custom(_)) => true,
+            (Ty::Custom(a), Ty::Custom(b)) => a == b,
             _ => false,
+        }
+    }
+
+    /// Like unifyable, but Unknown on either side is a polymorphic hole (Ok/Err/Some).
+    fn unifyable_or_unknown_hole(a: &Ty, b: &Ty) -> bool {
+        matches!(a, Ty::Unknown) || matches!(b, Ty::Unknown) || Ty::unifyable(a, b)
+    }
+
+    /// Evaluate simple integer constant expressions for refinement checks.
+    fn const_int(expr: &Expression) -> Option<i64> {
+        match expr {
+            Expression::Literal(Literal::Int(n), _) => Some(*n),
+            Expression::Unary {
+                op: UnaryOp::Neg,
+                expr,
+                ..
+            } => Ty::const_int(expr).map(|n| n.saturating_neg()),
+            Expression::Binary {
+                op, left, right, ..
+            } => {
+                let l = Ty::const_int(left)?;
+                let r = Ty::const_int(right)?;
+                match op {
+                    BinOp::Add => Some(l.saturating_add(r)),
+                    BinOp::Sub => Some(l.saturating_sub(r)),
+                    BinOp::Mul => Some(l.saturating_mul(r)),
+                    BinOp::Div if r != 0 => Some(l / r),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -389,17 +426,20 @@ impl TypeChecker {
                     let min_v: i64 = min_s.parse().unwrap_or(i64::MIN);
                     let max_v: i64 = max_s.parse().unwrap_or(i64::MAX);
                     for stmt in &func.body.stmts {
-                        if let Statement::Return(Some(Expression::Literal(Literal::Int(val), l_span)), _) = stmt {
-                            if *val < min_v || *val > max_v {
-                                return Err(anyhow!(
-                                    "Type error at {}:{}: RefinementTypeViolation: Returned value {} out of refinement bounds [{}..{}] for return type of function '{}'",
-                                    l_span.line,
-                                    l_span.col,
-                                    val,
-                                    min_v,
-                                    max_v,
-                                    func.name
-                                ));
+                        if let Statement::Return(Some(expr), _) = stmt {
+                            if let Some(val) = Ty::const_int(expr) {
+                                if val < min_v || val > max_v {
+                                    let sp = expr.span();
+                                    return Err(anyhow!(
+                                        "Type error at {}:{}: RefinementTypeViolation: Returned value {} out of refinement bounds [{}..{}] for return type of function '{}'",
+                                        sp.line,
+                                        sp.col,
+                                        val,
+                                        min_v,
+                                        max_v,
+                                        func.name
+                                    ));
+                                }
                             }
                         }
                     }
@@ -493,12 +533,13 @@ impl TypeChecker {
                                     let min_v: i64 = min_s.parse().unwrap_or(i64::MIN);
                                     let max_v: i64 = max_s.parse().unwrap_or(i64::MAX);
                                     refinements.insert(name.clone(), (min_v, max_v));
-                                    if let Expression::Literal(Literal::Int(val), l_span) = init {
-                                        if *val < min_v || *val > max_v {
+                                    if let Some(val) = Ty::const_int(init) {
+                                        if val < min_v || val > max_v {
+                                            let sp = init.span();
                                             return Err(anyhow!(
                                                 "Type error at {}:{}: RefinementTypeViolation: Value {} out of refinement bounds [{}..{}] for '{}'",
-                                                l_span.line,
-                                                l_span.col,
+                                                sp.line,
+                                                sp.col,
                                                 val,
                                                 min_v,
                                                 max_v,
@@ -546,12 +587,13 @@ impl TypeChecker {
                         ));
                     }
                     if let Some(&(min_v, max_v)) = refinements.get(name) {
-                        if let Expression::Literal(Literal::Int(val), l_span) = value {
-                            if *val < min_v || *val > max_v {
+                        if let Some(val) = Ty::const_int(value) {
+                            if val < min_v || val > max_v {
+                                let sp = value.span();
                                 return Err(anyhow!(
                                     "Type error at {}:{}: RefinementTypeViolation: Value {} out of refinement bounds [{}..{}] for assignment to '{}'",
-                                    l_span.line,
-                                    l_span.col,
+                                    sp.line,
+                                    sp.col,
                                     val,
                                     min_v,
                                     max_v,
@@ -765,26 +807,29 @@ impl TypeChecker {
                             if Ty::unifyable(&lt, &Ty::String) && Ty::unifyable(&rt, &Ty::String) {
                                 return Ok(Ty::String);
                             }
-                            // Allow String + numeric via coercion only if both string-like later
-                            if matches!(lt, Ty::String) || matches!(rt, Ty::String) {
-                                // String concat requires both String in DESIGN; be strict when both known
-                                if !matches!(lt, Ty::Unknown | Ty::String)
-                                    || !matches!(rt, Ty::Unknown | Ty::String)
-                                {
-                                    if matches!(lt, Ty::String) && matches!(rt, Ty::Int | Ty::Float)
-                                        || matches!(rt, Ty::String)
-                                            && matches!(lt, Ty::Int | Ty::Float)
-                                    {
-                                        return Err(anyhow!(
-                                            "Type error at {}:{}: cannot concatenate {} and {} with '+'; convert with .to_string() first",
-                                            expr.span().line,
-                                            expr.span().col,
-                                            lt.display(),
-                                            rt.display()
-                                        ));
-                                    }
-                                }
+                            if matches!(lt, Ty::String) && matches!(rt, Ty::Int | Ty::Float)
+                                || matches!(rt, Ty::String) && matches!(lt, Ty::Int | Ty::Float)
+                            {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: cannot concatenate {} and {} with '+'; convert with .to_string() first",
+                                    expr.span().line,
+                                    expr.span().col,
+                                    lt.display(),
+                                    rt.display()
+                                ));
                             }
+                            return Err(anyhow!(
+                                "Type error at {}:{}: cannot apply '+' to {} and {}",
+                                expr.span().line,
+                                expr.span().col,
+                                lt.display(),
+                                rt.display()
+                            ));
+                        }
+                        // numeric add — fall through to shared numeric handling below
+                        if false {
+                            // placeholder removed; keep structure for following blocks
+                            unreachable!();
                         }
                         if lt.is_numeric() && rt.is_numeric() {
                             if matches!(lt, Ty::Float) || matches!(rt, Ty::Float) {
@@ -792,16 +837,13 @@ impl TypeChecker {
                             }
                             return Ok(Ty::Int);
                         }
-                        if matches!(lt, Ty::Unknown) || matches!(rt, Ty::Unknown) {
-                            return Ok(Ty::Unknown);
-                        }
-                        Err(anyhow!(
-                            "Type error at {}:{}: operator '+' not defined for {} and {}",
+                        return Err(anyhow!(
+                            "Type error at {}:{}: arithmetic '+' requires numeric or String operands, found {} and {}",
                             expr.span().line,
                             expr.span().col,
                             lt.display(),
                             rt.display()
-                        ))
+                        ));
                     }
                     BinOp::Sub | BinOp::Mul | BinOp::Div => {
                         if lt.is_numeric() && rt.is_numeric() {
@@ -810,13 +852,11 @@ impl TypeChecker {
                             } else {
                                 Ok(Ty::Int)
                             }
-                        } else if matches!(lt, Ty::Unknown) || matches!(rt, Ty::Unknown) {
-                            Ok(Ty::Unknown)
                         } else {
                             Err(anyhow!(
                                 "Type error at {}:{}: arithmetic operator requires numeric operands, found {} and {}",
-                            expr.span().line,
-                            expr.span().col,
+                                expr.span().line,
+                                expr.span().col,
                                 lt.display(),
                                 rt.display()
                             ))
@@ -824,37 +864,32 @@ impl TypeChecker {
                     }
                     BinOp::Eq | BinOp::Neq => Ok(Ty::Bool),
                     BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte => {
-                        if lt.is_numeric() && rt.is_numeric()
-                            || matches!(lt, Ty::Unknown)
-                            || matches!(rt, Ty::Unknown)
-                        {
+                        if lt.is_numeric() && rt.is_numeric() {
                             Ok(Ty::Bool)
                         } else {
                             Err(anyhow!(
                                 "Type error at {}:{}: comparison requires numeric operands, found {} and {}",
-                            expr.span().line,
-                            expr.span().col,
+                                expr.span().line,
+                                expr.span().col,
                                 lt.display(),
                                 rt.display()
                             ))
                         }
                     }
                     BinOp::And | BinOp::Or => {
-                        if (Ty::unifyable(&lt, &Ty::Bool) || matches!(lt, Ty::Unknown))
-                            && (Ty::unifyable(&rt, &Ty::Bool) || matches!(rt, Ty::Unknown))
-                        {
+                        if Ty::unifyable(&lt, &Ty::Bool) && Ty::unifyable(&rt, &Ty::Bool) {
                             Ok(Ty::Bool)
                         } else {
                             Err(anyhow!(
                                 "Type error at {}:{}: logical operator requires Bool operands, found {} and {}",
-                            expr.span().line,
-                            expr.span().col,
+                                expr.span().line,
+                                expr.span().col,
                                 lt.display(),
                                 rt.display()
                             ))
                         }
                     }
-                    BinOp::DotDot | BinOp::DotDotEq => Ok(Ty::Unknown),
+                    BinOp::DotDot | BinOp::DotDotEq => Ok(Ty::Int), // range sugar; not a full range type yet
                 }
             }
             Expression::Call { name, args, span, .. } => {
@@ -873,24 +908,23 @@ impl TypeChecker {
                         )
                     })?;
                     if let Expression::Variable(vname, _) = arg {
-                        if !env.contains_key(vname) {
-                            return Err(anyhow!(
-                                "Type error at {}:{}: `old({})` references no parameter; \
-                                 `old` snapshots parameter values — pass a real parameter name",
-                                expr.span().line,
-                                expr.span().col,
-                                vname
-                            ));
+                        if let Some(ty) = env.get(vname) {
+                            return Ok(ty.clone());
                         }
-                    } else {
                         return Err(anyhow!(
-                            "Type error at {}:{}: `old` first argument must be a parameter name (Variable), \
-                                 got a non-Variable expression",
+                            "Type error at {}:{}: `old({})` references no parameter; \
+                             `old` snapshots parameter values — pass a real parameter name",
                             expr.span().line,
-                            expr.span().col
+                            expr.span().col,
+                            vname
                         ));
                     }
-                    return Ok(Ty::Unknown);
+                    return Err(anyhow!(
+                        "Type error at {}:{}: `old` first argument must be a parameter name (Variable), \
+                             got a non-Variable expression",
+                        expr.span().line,
+                        expr.span().col
+                    ));
                 }
 
                 // Methods: .len, .trim, etc.
@@ -904,10 +938,7 @@ impl TypeChecker {
                     }
                     return match name.as_str() {
                         ".len" => {
-                            if matches!(
-                                recv_ty,
-                                Ty::String | Ty::List(_) | Ty::Unknown
-                            ) {
+                            if matches!(recv_ty, Ty::String | Ty::List(_)) {
                                 Ok(Ty::Int)
                             } else {
                                 Err(anyhow!(
@@ -999,12 +1030,11 @@ impl TypeChecker {
                 }
 
                 if let Some((params, ret)) = self.functions.get(name) {
-                    if !params.is_empty()
-                        && params.len() == arg_tys.len()
-                        && !params.iter().all(|p| matches!(p, Ty::Unknown))
-                    {
+                    if !params.is_empty() && params.len() == arg_tys.len() {
                         for (i, (pt, at)) in params.iter().zip(arg_tys.iter()).enumerate() {
-                            if !Ty::unifyable(pt, at) {
+                            // Unknown in builtin signatures is a polymorphic hole, not a wildcard
+                            // for user annotations (those still fail-closed via unifyable).
+                            if !Ty::unifyable_or_unknown_hole(pt, at) {
                                 return Err(anyhow!(
                                     "Type error at {}:{}: function '{}' argument {} expects {}, found {}",
                                     expr.span().line,
@@ -1602,7 +1632,7 @@ mod tests {
     fn fetch_is_typed_as_result() {
         let src = r#"
             pub fn ok(net: &NetCap) {
-                let r = fetch("https://example.invalid");
+                let r = fetch(net, "https://example.invalid");
                 assert_eq!(r.is_err(), true);
             }
             pub fn main(net: &NetCap) {
@@ -1664,6 +1694,37 @@ mod tests {
         assert!(
             err.contains("RefinementTypeViolation") && err.contains("0"),
             "while body must still enforce refinement bounds, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_const_expr_out_of_refinement_bounds() {
+        let src = r#"
+            pub fn main() {
+                let port: Int[1..10] = 5 + 6;
+                println(port);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("RefinementTypeViolation") && err.contains("11"),
+            "const-folded init must enforce refinement, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_int_as_string_return_fail_closed() {
+        let src = r#"
+            pub fn bad(x: Int) -> String {
+                return x;
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("return type") || err.contains("does not match"),
+            "Int must not soft-accept as String, got: {}",
             err
         );
     }
