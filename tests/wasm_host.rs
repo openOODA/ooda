@@ -458,3 +458,41 @@ fn ooda_wasm_no_list_runtime_without_lists() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// String-only programs need memory but must not inject list_* RT (W↓).
+#[test]
+fn ooda_wasm_string_only_no_list_runtime() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_wstronly_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("str.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    println("ab".len());
+    println("ab".char_at(0));
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "string-only wasm: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("(memory"), "strings need memory:\n{}", wat);
+    assert!(
+        !wat.contains("$list_new") && !wat.contains("$list_len"),
+        "list RT must not inject for string-only:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(lines, vec!["2".to_string(), "97".to_string()]);
+    let _ = std::fs::remove_dir_all(&dir);
+}

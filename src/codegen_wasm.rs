@@ -238,19 +238,19 @@ impl WasmCodeGen {
     fn expr_needs_list(expr: &Expression) -> bool {
         match expr {
             Expression::Call { name, args, .. } => {
-                if matches!(
-                    name.as_str(),
-                    "list_new" | "list_push" | "list_get" | "list_len" | ".push" | ".len"
-                ) {
-                    // .len on strings is not list RT — still OK to inject if any .push/.len present
-                    // only when list methods; free list_* always need RT.
-                    if name == ".len" {
-                        // Conservative: if program has .len, may need list RT; pure string .len
-                        // still refuses at emit without RT waste if no list_* elsewhere.
-                        // Detect receiver shape is not available without env; include RT.
-                        return true;
+                match name.as_str() {
+                    "list_new" | "list_push" | "list_get" | "list_len" | ".push" => return true,
+                    ".len" => {
+                        // String-literal `.len` is pure WAT (no list RT). Variable `.len`
+                        // may be List[Int] → need list_len runtime.
+                        match args.first() {
+                            Some(Expression::Literal(Literal::String(_), _)) => {}
+                            Some(_) => return true,
+                            None => {}
+                        }
                     }
-                    return true;
+                    ".char_at" => {} // string-only pure WAT
+                    _ => {}
                 }
                 args.iter().any(Self::expr_needs_list)
             }
