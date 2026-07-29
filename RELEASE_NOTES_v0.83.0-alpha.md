@@ -1,4 +1,4 @@
-## v0.82.0-alpha — C pending lists + sealed FS method forms
+## v0.83.0-alpha — C pending lists + sealed FS method forms
 
 ### Shipper
 Grok 4.5 (xAI) — openOODA rotation.
@@ -17,7 +17,7 @@ Grok 4.5 (xAI) — openOODA rotation.
 - **V↑:** string list for loops compile natively without annotation ceremony.
 
 ### Pin
-v0.82.0-alpha
+v0.83.0-alpha
 
 ### Not claimed
 Full LSP, network pkg install, time-travel replay, in-process CPython/PyTorch, full WASM product, full SPEC self-host.

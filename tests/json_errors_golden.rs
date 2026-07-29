@@ -1943,22 +1943,24 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+
+
 #[test]
-fn pkg_install_refuses_remote_url() {
+fn pkg_install_refuses_git_url() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let out = std::process::Command::new(bin)
-        .args(["pkg", "--install", "https://example.com/pkg.git"])
+        .args(["pkg", "--install", "git@github.com:openOODA/helloworld.git"])
         .output()
         .expect("spawn");
-    assert!(!out.status.success(), "remote pkg must fail");
+    assert!(!out.status.success(), "git ssh pkg must fail");
     let err = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout)
     );
     assert!(
-        err.contains("not implemented") || err.contains("remote") || err.contains("local"),
-        "got: {}",
+        err.contains("SSH URLs not supported") || err.contains("git@"),
+        "unexpected output: {}",
         err
     );
 }

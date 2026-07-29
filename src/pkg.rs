@@ -31,26 +31,76 @@ impl PackageManager {
         Ok(())
     }
 
-    /// Pin a **local** path into `ooda.lock` by content/metadata hash.
-    /// Does **not** download packages, copy trees, or resolve versions.
+    /// Pin a path (local or remote) into `ooda.lock` by content/metadata hash.
+    /// Uses `curl` and `tar` for remote URLs to avoid heavy rust dependencies (E-M constraint).
     pub fn install(repo: &str) -> Result<()> {
-        if repo.starts_with("http://")
-            || repo.starts_with("https://")
-            || repo.starts_with("git@")
-            || repo.contains("://")
-        {
-            bail!(
-                "ooda pkg --install: remote URLs are not implemented in this alpha \
-                 (refused to fake a download of '{}'). Pass an existing local path only.",
-                repo
-            );
+        let is_remote = repo.starts_with("http://") || repo.starts_with("https://");
+
+        if repo.starts_with("git@") {
+            bail!("ooda pkg --install: git@ SSH URLs not supported. Use https:// tarballs.");
         }
-        let p = std::path::Path::new(repo);
+
+        let p_owned;
+        if is_remote {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(repo.as_bytes());
+            let hash = format!("{:x}", hasher.finalize());
+            
+            let cache_dir = std::env::var("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+                .join(".cache")
+                .join("ooda")
+                .join("pkg")
+                .join(&hash);
+
+            if !cache_dir.exists() {
+                fs::create_dir_all(&cache_dir)?;
+                let tarball = cache_dir.join("pkg.tar.gz");
+                let extract_dir = cache_dir.join("tree");
+                fs::create_dir_all(&extract_dir)?;
+
+                println!("Downloading {}...", repo);
+                let status = std::process::Command::new("curl")
+                    .args(["-fsSL", repo, "-o", tarball.to_str().unwrap()])
+                    .status()?;
+                if !status.success() {
+                    bail!("Failed to download package from {}", repo);
+                }
+
+                let extract_status = std::process::Command::new("tar")
+                    .args(["-xzf", tarball.to_str().unwrap(), "-C", extract_dir.to_str().unwrap()])
+                    .status()?;
+                if !extract_status.success() {
+                    bail!("Failed to extract package from {}", repo);
+                }
+            }
+            
+            let extract_dir = cache_dir.join("tree");
+            // If the tarball contains a single root folder, we use that folder.
+            let mut pkg_root = extract_dir.clone();
+            if let Ok(entries) = fs::read_dir(&extract_dir) {
+                let entries: Vec<_> = entries.filter_map(Result::ok).collect();
+                if entries.len() == 1 {
+                    if let Ok(file_type) = entries[0].file_type() {
+                        if file_type.is_dir() {
+                            pkg_root = entries[0].path();
+                        }
+                    }
+                }
+            }
+            
+            p_owned = pkg_root;
+        } else {
+            p_owned = std::path::PathBuf::from(repo);
+        }
+
+        let p = &p_owned;
         if !p.exists() {
             bail!(
-                "ooda pkg --install: local path '{}' not found. \
-                 Only existing local paths can be pinned (no network install).",
-                repo
+                "ooda pkg --install: local path '{}' not found.",
+                p.display()
             );
         }
 
