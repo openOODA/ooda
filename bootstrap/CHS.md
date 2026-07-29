@@ -2,7 +2,8 @@
 
 **Status:** Frozen for bootstrap (M1+). Stage-0 host + C backend native emit.  
 **Constitution:** `DESIGN.md` unchanged.  
-**Self-host:** CHS frontend fixed-point green via `scripts/fixed_point.sh` (native `oodac` + token digests + smoke C).
+**Self-host:** CHS frontend fixed-point green via `scripts/fixed_point.sh` (native `oodac` + token digests + smoke C).  
+**Beta goal:** eliminate stage-0 Rust entirely — zero `.rs` in tree before first beta tag. See [`BETA.md`](BETA.md).
 
 ## Dual-engine / multi-backend done-definition
 

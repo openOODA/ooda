@@ -5,7 +5,8 @@ OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-nati
 
 > **DESIGN.md** is the north star (unchanged by alpha releases).  
 > Userland is **`.oo`**. **CHS self-host frontend** is green (`oodac` native + fixed-point referee).  
-> Full SPEC product self-host is **not** claimed.
+> Full SPEC product self-host is **not** claimed on alpha.  
+> **Beta goal:** **zero `.rs` files** in the product tree (self-hosted; no Cargo/Rust host) — see [`bootstrap/BETA.md`](bootstrap/BETA.md).
 
 ---
 
@@ -56,7 +57,9 @@ import "lib.oo";       // relative / OODA_PATH
 
 LSP, pkg install, migrate, replay, full WASM product, PyTorch, `for` sugar, full SPEC self-host (only **CHS frontend** fixed-point is claimed).
 
-See `bootstrap/CHS.md`.
+Stage-0 is still **Rust** (`src/**/*.rs`). That is intentional on alpha. **Beta exit criterion:** no `.rs` left — [`bootstrap/BETA.md`](bootstrap/BETA.md).
+
+See `bootstrap/CHS.md` (CHS freeze) and `bootstrap/BETA.md` (zero-Rust beta gate).
 
 ---
 
