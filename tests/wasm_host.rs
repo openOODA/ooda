@@ -5,7 +5,23 @@
 //! claimed as full WASM product. `wasmtime` is a **dev-dependency** only.
 use anyhow::{bail, Result};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use wasmtime::*;
+
+static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Unique temp dir per test (pid alone races under cargo --test-threads>1).
+fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+    let n = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "{}_{}_{}",
+        prefix,
+        std::process::id(),
+        n
+    ));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
 
 #[derive(Default)]
 struct HostOut {
@@ -150,8 +166,7 @@ fn host_streq_and_println_str_assert_output() {
 #[test]
 fn ooda_wasm_string_eq_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_whost_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_whost");
     let path = dir.join("eq.oo");
     std::fs::write(
         &path,
@@ -196,8 +211,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_list_int_subset() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_whost_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_whost");
     let path = dir.join("list.oo");
     std::fs::write(
         &path,
@@ -238,8 +252,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_list_eq() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_whost_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_whost");
     let path = dir.join("list_eq.oo");
     std::fs::write(
         &path,
@@ -303,8 +316,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_for_list_sum_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wforlist_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wforlist");
     let path = dir.join("forlist.oo");
     std::fs::write(
         &path,
@@ -342,8 +354,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_refuses_list_string_push() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wlstr_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wlstr");
     let path = dir.join("bad.oo");
     std::fs::write(
         &path,
@@ -403,12 +414,43 @@ fn ooda_wasm_string_walk_fixture_runs_on_host() {
     );
 }
 
+/// `.str_slice` copies bytes onto bump heap; println_str shows result.
+#[test]
+fn ooda_wasm_str_slice_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wslice");
+    let path = dir.join("slice.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    println("hello".str_slice(1, 4));
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "str_slice wasm: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("(global $heap"), "heap required for slice:\n{}", wat);
+    assert!(!wat.contains("$list_new"), "slice alone must not force list RT:\n{}", wat);
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(lines, vec!["ell".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// String `.contains` via host `str_contains` (real ooda→WAT→host path).
 #[test]
 fn ooda_wasm_string_contains_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wcont_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wcont");
     let path = dir.join("cont.oo");
     std::fs::write(
         &path,
@@ -457,8 +499,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_string_char_at_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wcat_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wcat");
     let path = dir.join("cat.oo");
     std::fs::write(
         &path,
@@ -496,8 +537,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_string_len_method_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wslen_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wslen");
     let path = dir.join("slen.oo");
     std::fs::write(
         &path,
@@ -535,8 +575,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_empty_list_deep_eq() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wemptyeq_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wemptyeq");
     let path = dir.join("empty.oo");
     std::fs::write(
         &path,
@@ -582,8 +621,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_list_deep_eq_not_streq() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wlisteq_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wlisteq");
     let path = dir.join("listeq.oo");
     std::fs::write(
         &path,
@@ -639,8 +677,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_list_methods_push_len_run_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wmeth_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wmeth");
     let path = dir.join("meth.oo");
     std::fs::write(
         &path,
@@ -682,8 +719,7 @@ pub fn main() {
 #[test]
 fn ooda_wasm_no_list_runtime_without_lists() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wnolist_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wnolist");
     let path = dir.join("pure.oo");
     std::fs::write(&path, "pub fn main() { println(1 + 2); }\n").unwrap();
     let out = Command::new(bin)
@@ -709,8 +745,7 @@ fn ooda_wasm_no_list_runtime_without_lists() {
 #[test]
 fn ooda_wasm_string_only_no_list_runtime() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let dir = std::env::temp_dir().join(format!("ooda_wstronly_{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&dir);
+    let dir = unique_temp_dir("ooda_wstronly");
     let path = dir.join("str.oo");
     std::fs::write(
         &path,

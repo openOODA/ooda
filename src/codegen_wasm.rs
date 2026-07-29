@@ -69,6 +69,7 @@ impl WasmCodeGen {
         );
         let aliases = program.collect_type_aliases();
         let needs_list_rt = Self::program_needs_list_runtime(program);
+        let needs_str_slice = Self::program_needs_str_slice(program);
         let mut funcs_wat = String::new();
         for item in &program.items {
             if let Item::Function(func) = item {
@@ -79,7 +80,8 @@ impl WasmCodeGen {
         }
 
         let string_count = WASM_STRINGS.with(|s| s.borrow().len());
-        let needs_memory = needs_list_rt || string_count > 0;
+        let needs_memory = needs_list_rt || string_count > 0 || needs_str_slice;
+        let needs_heap = needs_list_rt || needs_str_slice;
         if needs_memory {
             wat.push_str("  (memory 1)\n");
             wat.push_str("  (export \"memory\" (memory 0))\n");
@@ -95,12 +97,14 @@ impl WasmCodeGen {
                     offset += s.len() + 1;
                 }
             });
-            if needs_list_rt {
+            if needs_heap {
                 let heap_start = (offset + 15) & !15;
                 wat.push_str(&format!(
                     "  (global $heap (mut i32) (i32.const {}))\n",
                     heap_start
                 ));
+            }
+            if needs_list_rt {
                 wat.push_str(Self::list_runtime_wat());
             }
         }
@@ -213,6 +217,86 @@ impl WasmCodeGen {
             }
         }
         false
+    }
+
+    fn program_needs_str_slice(program: &Program) -> bool {
+        for item in &program.items {
+            if let Item::Function(f) = item {
+                if Self::block_needs_str_slice(&f.body) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn block_needs_str_slice(block: &Block) -> bool {
+        for stmt in &block.stmts {
+            if Self::stmt_needs_str_slice(stmt) {
+                return true;
+            }
+        }
+        block
+            .expr
+            .as_ref()
+            .map(|e| Self::expr_needs_str_slice(e))
+            .unwrap_or(false)
+    }
+
+    fn stmt_needs_str_slice(stmt: &Statement) -> bool {
+        match stmt {
+            Statement::Let { init, .. } => Self::expr_needs_str_slice(init),
+            Statement::Assign { value, .. } | Statement::Return(Some(value), _) => {
+                Self::expr_needs_str_slice(value)
+            }
+            Statement::Expr(e, _) => Self::expr_needs_str_slice(e),
+            Statement::While { cond, body, .. } => {
+                Self::expr_needs_str_slice(cond) || Self::block_needs_str_slice(body)
+            }
+            Statement::FieldAssign { object, value, .. } => {
+                Self::expr_needs_str_slice(object) || Self::expr_needs_str_slice(value)
+            }
+            Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => false,
+        }
+    }
+
+    fn expr_needs_str_slice(expr: &Expression) -> bool {
+        match expr {
+            Expression::Call { name, args, .. } => {
+                if name == ".str_slice" {
+                    return true;
+                }
+                args.iter().any(Self::expr_needs_str_slice)
+            }
+            Expression::Binary { left, right, .. } => {
+                Self::expr_needs_str_slice(left) || Self::expr_needs_str_slice(right)
+            }
+            Expression::Unary { expr, .. } => Self::expr_needs_str_slice(expr),
+            Expression::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                Self::expr_needs_str_slice(cond)
+                    || Self::block_needs_str_slice(then_branch)
+                    || else_branch
+                        .as_ref()
+                        .map(|b| Self::block_needs_str_slice(b))
+                        .unwrap_or(false)
+            }
+            Expression::While { cond, body, .. } => {
+                Self::expr_needs_str_slice(cond) || Self::block_needs_str_slice(body)
+            }
+            Expression::Match { expr, arms, .. } => {
+                Self::expr_needs_str_slice(expr)
+                    || arms.iter().any(|a| Self::expr_needs_str_slice(&a.body))
+            }
+            Expression::StructLit { fields, .. } => {
+                fields.iter().any(|(_, e)| Self::expr_needs_str_slice(e))
+            }
+            Expression::Literal(_, _) | Expression::Variable(_, _) => false,
+        }
     }
 
     fn type_is_list(t: &Type) -> bool {
@@ -329,6 +413,77 @@ impl WasmCodeGen {
             "f64" => "f64",
             _ => "i64",
         }
+    }
+
+    /// Copy s[start..end) to bump heap; leave new string pointer (i32) on stack.
+    fn emit_str_slice(
+        recv: &Expression,
+        start: &Expression,
+        end: &Expression,
+        locals: &BTreeMap<String, &'static str>,
+    ) -> Result<String> {
+        for k in ["__slice_src", "__slice_dst", "__slice_i", "__slice_n"] {
+            if !locals.contains_key(k) {
+                bail!("internal: .str_slice missing scratch local {}", k);
+            }
+        }
+        static SLICE_LAB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let id = SLICE_LAB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut wat = String::new();
+        // src ptr
+        wat.push_str(&Self::emit_expr(recv, locals)?);
+        wat.push_str("    local.set $__slice_src\n");
+        // n = end - start (as i32)
+        wat.push_str(&Self::emit_expr(end, locals)?);
+        wat.push_str(&Self::emit_expr(start, locals)?);
+        wat.push_str("    i64.sub\n");
+        wat.push_str("    i32.wrap_i64\n");
+        wat.push_str("    local.set $__slice_n\n");
+        // dst = heap; heap += n+1
+        wat.push_str("    global.get $heap\n");
+        wat.push_str("    local.set $__slice_dst\n");
+        wat.push_str("    global.get $heap\n");
+        wat.push_str("    local.get $__slice_n\n");
+        wat.push_str("    i32.const 1\n");
+        wat.push_str("    i32.add\n");
+        wat.push_str("    i32.add\n");
+        wat.push_str("    global.set $heap\n");
+        // i = 0
+        wat.push_str("    i32.const 0\n");
+        wat.push_str("    local.set $__slice_i\n");
+        wat.push_str(&format!("    block $slice_done_{}\n", id));
+        wat.push_str(&format!("      loop $slice_loop_{}\n", id));
+        wat.push_str("        local.get $__slice_i\n");
+        wat.push_str("        local.get $__slice_n\n");
+        wat.push_str("        i32.ge_u\n");
+        wat.push_str(&format!("        br_if $slice_done_{}\n", id));
+        // dst[i] = src[start+i]
+        wat.push_str("        local.get $__slice_dst\n");
+        wat.push_str("        local.get $__slice_i\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        local.get $__slice_src\n");
+        wat.push_str(&Self::emit_expr(start, locals)?);
+        wat.push_str("        i32.wrap_i64\n");
+        wat.push_str("        local.get $__slice_i\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        i32.load8_u\n");
+        wat.push_str("        i32.store8\n");
+        wat.push_str("        local.get $__slice_i\n");
+        wat.push_str("        i32.const 1\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        local.set $__slice_i\n");
+        wat.push_str(&format!("        br $slice_loop_{}\n", id));
+        wat.push_str("      end\n");
+        wat.push_str("    end\n");
+        // NUL terminate
+        wat.push_str("    local.get $__slice_dst\n");
+        wat.push_str("    local.get $__slice_n\n");
+        wat.push_str("    i32.add\n");
+        wat.push_str("    i32.const 0\n");
+        wat.push_str("    i32.store8\n");
+        wat.push_str("    local.get $__slice_dst\n");
+        Ok(wat)
     }
 
     /// Emit pure-WAT byte length of a NUL-terminated string (leave i64 on stack).
@@ -727,8 +882,13 @@ impl WasmCodeGen {
                 }
             }
             Expression::Call { name, args, .. } => {
-                // List methods on List[Int] → list_*; String .len/.char_at/.contains → WAT/host.
-                if name == ".push" || name == ".len" || name == ".char_at" || name == ".contains" {
+                // List methods on List[Int] → list_*; String methods → WAT/host.
+                if name == ".push"
+                    || name == ".len"
+                    || name == ".char_at"
+                    || name == ".contains"
+                    || name == ".str_slice"
+                {
                     if args.is_empty() {
                         bail!("WASM method '{}' requires a receiver", name);
                     }
@@ -789,7 +949,7 @@ impl WasmCodeGen {
                         wat.push_str("    i32.add\n");
                         wat.push_str("    i32.load8_u\n");
                         wat.push_str("    i64.extend_i32_u\n");
-                    } else {
+                    } else if name == ".contains" {
                         // .contains(needle) on String → host str_contains → Bool i64
                         if recv_ty != "i32" {
                             bail!(
@@ -808,6 +968,25 @@ impl WasmCodeGen {
                         wat.push_str(&Self::emit_expr(&args[1], locals)?);
                         wat.push_str("    call $str_contains\n");
                         wat.push_str("    i64.extend_i32_u\n");
+                    } else {
+                        // .str_slice(start, end) exclusive end → new NUL string on $heap
+                        if recv_ty != "i32" {
+                            bail!(
+                                "WASM .str_slice requires String receiver (got {}); use `ooda run`.",
+                                recv_ty
+                            );
+                        }
+                        if args.len() != 3 {
+                            bail!("WASM .str_slice expects receiver + start + end Ints");
+                        }
+                        if Self::infer_expr_type(&args[1], locals) != "i64"
+                            || Self::infer_expr_type(&args[2], locals) != "i64"
+                        {
+                            bail!("WASM .str_slice start/end must be Int");
+                        }
+                        wat.push_str(&Self::emit_str_slice(
+                            &args[0], &args[1], &args[2], locals,
+                        )?);
                     }
                 } else if name.starts_with('.') {
                     bail!(
@@ -945,6 +1124,8 @@ impl WasmCodeGen {
                     || name == ".contains"
                 {
                     "i64"
+                } else if name == ".str_slice" {
+                    "i32" // new string pointer
                 } else {
                     let _ = args;
                     "i64"
@@ -1019,6 +1200,12 @@ impl WasmCodeGen {
                             locals.insert("__strlen_i".into(), "i64");
                         }
                     }
+                }
+                if name == ".str_slice" {
+                    locals.insert("__slice_src".into(), "i32");
+                    locals.insert("__slice_dst".into(), "i32");
+                    locals.insert("__slice_i".into(), "i32");
+                    locals.insert("__slice_n".into(), "i32");
                 }
             }
             Expression::If {
