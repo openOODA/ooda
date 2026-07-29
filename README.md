@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.44.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.45.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -26,7 +26,7 @@ cargo build --release
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.44.0-alpha
+ooda --version   # 0.45.0-alpha
 ```
 
 ```ooda
@@ -36,7 +36,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.44.0-alpha (CHS M0–M5)
+## What's real in v0.45.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -44,7 +44,7 @@ import "lib.oo";       // relative / OODA_PATH
 | Option / Result / must-use / let mut | Real |
 | Caps + sealed effects | Static **and runtime** object-cap: free sealed ops need live handle Value; ambient-only denied |
 | `Int[lo..hi]` refinement | Real on let/assign/return including nested blocks + simple const-fold (`5+6`) |
-| Types fail-closed | `Unknown` is not a wildcard; `Int`≠`String`; ADT holes only inside Result/Option/List |
+| Types fail-closed | `Unknown` not wildcard; match arm unify; same-type numeric only (no Int+Float green trap); assert_eq types |
 | Net GET (`fetch` / `http_get` / `.get`) | Real HTTPS via curl under threaded `&NetCap` |
 | AI diagnostics (`--json-errors`) | Real JSON + measured timings; cap fixes as ooda-patch JSON (`applicability`) |
 | Measured `ooda em` / `em --json` / `bench --em` | Real clocks only (W, µs, V); JSON EmReport for agents — no fake Boyd Ps |

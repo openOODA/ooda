@@ -826,19 +826,15 @@ impl TypeChecker {
                                 rt.display()
                             ));
                         }
-                        // numeric add — fall through to shared numeric handling below
-                        if false {
-                            // placeholder removed; keep structure for following blocks
-                            unreachable!();
-                        }
-                        if lt.is_numeric() && rt.is_numeric() {
-                            if matches!(lt, Ty::Float) || matches!(rt, Ty::Float) {
-                                return Ok(Ty::Float);
-                            }
+                        // Same-type numeric only — reject Int+Float (was typecheck-green, runtime trap).
+                        if matches!((&lt, &rt), (Ty::Int, Ty::Int)) {
                             return Ok(Ty::Int);
                         }
+                        if matches!((&lt, &rt), (Ty::Float, Ty::Float)) {
+                            return Ok(Ty::Float);
+                        }
                         return Err(anyhow!(
-                            "Type error at {}:{}: arithmetic '+' requires numeric or String operands, found {} and {}",
+                            "Type error at {}:{}: arithmetic '+' requires matching numeric types (both Int or both Float) or String operands, found {} and {}",
                             expr.span().line,
                             expr.span().col,
                             lt.display(),
@@ -846,15 +842,14 @@ impl TypeChecker {
                         ));
                     }
                     BinOp::Sub | BinOp::Mul | BinOp::Div => {
-                        if lt.is_numeric() && rt.is_numeric() {
-                            if matches!(lt, Ty::Float) || matches!(rt, Ty::Float) {
-                                Ok(Ty::Float)
-                            } else {
-                                Ok(Ty::Int)
-                            }
+                        // Same-type numeric only (Int+Float used to typecheck then trap at runtime).
+                        if matches!((&lt, &rt), (Ty::Int, Ty::Int)) {
+                            Ok(Ty::Int)
+                        } else if matches!((&lt, &rt), (Ty::Float, Ty::Float)) {
+                            Ok(Ty::Float)
                         } else {
                             Err(anyhow!(
-                                "Type error at {}:{}: arithmetic operator requires numeric operands, found {} and {}",
+                                "Type error at {}:{}: arithmetic operator requires matching numeric types (both Int or both Float), found {} and {}",
                                 expr.span().line,
                                 expr.span().col,
                                 lt.display(),
@@ -877,11 +872,11 @@ impl TypeChecker {
                         }
                     }
                     BinOp::Lt | BinOp::Lte | BinOp::Gt | BinOp::Gte => {
-                        if lt.is_numeric() && rt.is_numeric() {
+                        if matches!((&lt, &rt), (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float)) {
                             Ok(Ty::Bool)
                         } else {
                             Err(anyhow!(
-                                "Type error at {}:{}: comparison requires numeric operands, found {} and {}",
+                                "Type error at {}:{}: comparison requires matching numeric types (both Int or both Float), found {} and {}",
                                 expr.span().line,
                                 expr.span().col,
                                 lt.display(),
@@ -1042,22 +1037,64 @@ impl TypeChecker {
                     arg_tys.push(self.infer_expr(a, env)?);
                 }
 
+                // assert_eq(a, b): require comparable types (no soft Unknown-only).
+                if name == "assert_eq" {
+                    if arg_tys.len() != 2 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: assert_eq expects 2 arguments, found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    let (a, b) = (&arg_tys[0], &arg_tys[1]);
+                    if !Ty::unifyable(a, b)
+                        && !(matches!((a, b), (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float)))
+                    {
+                        // Both Unknown (polymorphic hole) is ok for incomplete inference.
+                        if !(matches!(a, Ty::Unknown) && matches!(b, Ty::Unknown)) {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: assert_eq arguments must have matching types, found {} and {}",
+                                expr.span().line,
+                                expr.span().col,
+                                a.display(),
+                                b.display()
+                            ));
+                        }
+                    }
+                    return Ok(Ty::Void);
+                }
+
                 if let Some((params, ret)) = self.functions.get(name) {
-                    if !params.is_empty() && params.len() == arg_tys.len() {
-                        for (i, (pt, at)) in params.iter().zip(arg_tys.iter()).enumerate() {
-                            // Unknown in builtin signatures is a polymorphic hole, not a wildcard
-                            // for user annotations (those still fail-closed via unifyable).
-                            if !Ty::unifyable_or_unknown_hole(pt, at) {
-                                return Err(anyhow!(
-                                    "Type error at {}:{}: function '{}' argument {} expects {}, found {}",
-                                    expr.span().line,
-                                    expr.span().col,
-                                    name,
-                                    i,
-                                    pt.display(),
-                                    at.display()
-                                ));
-                            }
+                    // println is varargs. Sealed builtins registered with all-Unknown
+                    // formals accept optional leading capability tokens (object-cap).
+                    let is_println = name == "println";
+                    let loose_builtin_arity =
+                        !params.is_empty() && params.iter().all(|p| matches!(p, Ty::Unknown));
+                    if !is_println && !loose_builtin_arity && params.len() != arg_tys.len() {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function '{}' expects {} argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            name,
+                            params.len(),
+                            arg_tys.len()
+                        ));
+                    }
+                    let n = params.len().min(arg_tys.len());
+                    for (i, (pt, at)) in params.iter().zip(arg_tys.iter()).take(n).enumerate() {
+                        // Unknown in builtin signatures is a polymorphic hole, not a wildcard
+                        // for user annotations (those still fail-closed via unifyable).
+                        if !Ty::unifyable_or_unknown_hole(pt, at) {
+                            return Err(anyhow!(
+                                "Type error at {}:{}: function '{}' argument {} expects {}, found {}",
+                                expr.span().line,
+                                expr.span().col,
+                                name,
+                                i,
+                                pt.display(),
+                                at.display()
+                            ));
                         }
                     }
                     return Ok(ret.clone());
@@ -1233,7 +1270,7 @@ impl TypeChecker {
             }
             Expression::Match { expr, arms, span, .. } => {
                 let scrutinee_ty = self.infer_expr(expr, env)?;
-                let mut result = Ty::Unknown;
+                let mut result: Option<Ty> = None;
                 let mut has_ok = false;
                 let mut has_err = false;
                 let mut has_some = false;
@@ -1264,7 +1301,28 @@ impl TypeChecker {
                         Pattern::Literal(_) => {}
                     }
                     let t = self.infer_expr(&arm.body, &arm_env)?;
-                    result = t;
+                    match &result {
+                        None => result = Some(t),
+                        Some(prev) => {
+                            // Unknown holes from Ok/Some constructors may unify with concrete arms.
+                            if !Ty::unifyable_or_unknown_hole(prev, &t)
+                                && !(matches!(prev, Ty::Void) || matches!(t, Ty::Void))
+                            {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: match arms have incompatible types {} vs {}",
+                                    span.line,
+                                    span.col,
+                                    prev.display(),
+                                    t.display()
+                                ));
+                            }
+                            // Prefer concrete type over Unknown/Void when possible.
+                            if matches!(prev, Ty::Unknown | Ty::Void) && !matches!(t, Ty::Unknown | Ty::Void)
+                            {
+                                result = Some(t);
+                            }
+                        }
+                    }
                 }
 
                 // DESIGN: exhaustive matching for Result/Option (no silent fall-through).
@@ -1287,7 +1345,7 @@ impl TypeChecker {
                         _ => {}
                     }
                 }
-                Ok(result)
+                Ok(result.unwrap_or(Ty::Void))
             }
         }
     }
@@ -1755,6 +1813,148 @@ mod tests {
             err.contains("cannot compare") || err.contains("equality"),
             "String == Int must fail, got: {}",
             err
+        );
+    }
+
+    #[test]
+    fn rejects_call_arity_too_few() {
+        let src = r#"
+            pub fn add(a: Int, b: Int) -> Int {
+                return a + b;
+            }
+            pub fn main() {
+                let x = add(1);
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("expects 2 argument") || err.contains("found 1"),
+            "arity too few must fail closed, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_call_arity_too_many() {
+        let src = r#"
+            pub fn add(a: Int, b: Int) -> Int {
+                return a + b;
+            }
+            pub fn main() {
+                let x = add(1, 2, 3);
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("expects 2 argument") || err.contains("found 3"),
+            "arity too many must fail closed, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_zero_param_call_with_args() {
+        let src = r#"
+            pub fn conf() -> Int {
+                return 1;
+            }
+            pub fn main() {
+                let x = conf(99);
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("expects 0 argument") || err.contains("found 1"),
+            "zero-param fn with args must fail, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn println_varargs_still_typechecks() {
+        let src = r#"
+            pub fn main() {
+                println("a", 1);
+                println(1);
+                println();
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "println is varargs: {:?}",
+            check(src).err()
+        );
+    }
+
+    #[test]
+    fn rejects_int_plus_float_mixed_arith() {
+        let src = r#"
+            pub fn main() {
+                let x = 1 + 2.0;
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("matching numeric")
+                || err.contains("Float")
+                || err.contains("Int"),
+            "Int+Float must fail at typecheck (was runtime trap), got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_match_arms_int_vs_string() {
+        let src = r#"
+            pub fn main() {
+                let r: Result[Int, String] = Ok(1);
+                let x = match r {
+                    Ok(v) => v,
+                    Err(e) => e,
+                };
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("incompatible types") || err.contains("match arms"),
+            "Ok(Int) vs Err(String) arms must fail, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_assert_eq_mismatched_types() {
+        let src = r#"
+            pub fn main() {
+                assert_eq(1, "x");
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("assert_eq")
+                && (err.contains("matching") || err.contains("String") || err.contains("Int")),
+            "assert_eq(Int, String) must fail, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn fetch_with_cap_arg_still_typechecks() {
+        let src = r#"
+            pub fn ok(net: &NetCap) {
+                let r = fetch(net, "https://example.invalid");
+                assert_eq(r.is_err(), true);
+            }
+        "#;
+        assert!(
+            check(src).is_ok(),
+            "fetch(net, url) must typecheck: {:?}",
+            check(src).err()
         );
     }
 }

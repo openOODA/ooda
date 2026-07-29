@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.44.0-alpha")]
+#[command(version = "0.45.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -330,25 +330,29 @@ fn main() -> Result<()> {
                 let parse_start = Instant::now();
                 let program = load_program(&file).ok();
                 let parse_us = parse_start.elapsed().as_micros();
-                let (capability_us, typecheck_us, failed) = if let Some(ref prog) = program {
+                let report = if let Some(ref prog) = program {
                     let cap_start = Instant::now();
                     let cap_ok = CapabilityChecker::check_program(prog).is_ok();
                     let capability_us = cap_start.elapsed().as_micros();
                     let ty_start = Instant::now();
                     let ty_ok = TypeChecker::check_program(prog).is_ok();
                     let typecheck_us = ty_start.elapsed().as_micros();
-                    (capability_us, typecheck_us, !cap_ok || !ty_ok)
+                    ooda::em::EmReport::from_measured(
+                        file.display().to_string(),
+                        source_bytes,
+                        parse_us,
+                        capability_us,
+                        typecheck_us,
+                        !cap_ok,
+                        !ty_ok,
+                    )
                 } else {
-                    (0, 0, true)
+                    ooda::em::EmReport::from_measured_load_failed(
+                        file.display().to_string(),
+                        source_bytes,
+                        parse_us,
+                    )
                 };
-                let report = ooda::em::EmReport::from_measured(
-                    file.display().to_string(),
-                    source_bytes,
-                    parse_us,
-                    capability_us,
-                    typecheck_us,
-                    failed,
-                );
                 println!("{}", report.display_summary());
                 println!();
             }
@@ -364,13 +368,10 @@ fn main() -> Result<()> {
                 Ok(p) => p,
                 Err(e) => {
                     let parse_us = parse_start.elapsed().as_micros();
-                    let report = ooda::em::EmReport::from_measured(
+                    let report = ooda::em::EmReport::from_measured_load_failed(
                         file.display().to_string(),
                         source_bytes,
                         parse_us,
-                        0,
-                        0,
-                        true,
                     );
                     if json {
                         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -388,21 +389,21 @@ fn main() -> Result<()> {
             let ty_start = Instant::now();
             let ty_ok = TypeChecker::check_program(&program).is_ok();
             let typecheck_us = ty_start.elapsed().as_micros();
-            let failed = !cap_ok || !ty_ok;
             let report = ooda::em::EmReport::from_measured(
                 file.display().to_string(),
                 source_bytes,
                 parse_us,
                 capability_us,
                 typecheck_us,
-                failed,
+                !cap_ok,
+                !ty_ok,
             );
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!("{}", report.display_summary());
             }
-            if failed {
+            if report.check_failed {
                 std::process::exit(1);
             }
         }
@@ -855,6 +856,68 @@ fn load_and_analyze(
                     ),
                     true,
                 )
+            } else if msg.contains("argument(s), found") {
+                // Arity: function 'f' expects N argument(s), found M
+                let fname = msg
+                    .split("function '")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+                    .unwrap_or("f");
+                let expected = msg
+                    .split("expects ")
+                    .nth(1)
+                    .and_then(|s| s.split(' ').next())
+                    .unwrap_or("?");
+                let found = msg
+                    .split("found ")
+                    .nth(1)
+                    .map(|s| {
+                        s.chars()
+                            .take_while(|c| c.is_ascii_digit())
+                            .collect::<String>()
+                    })
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "?".into());
+                (
+                    "Fix call argument count".into(),
+                    format!(
+                        "{{\"codemod\":\"arg_count\",\"function\":\"{}\",\"expected_arity\":{},\"found_arity\":{},\"hint\":\"supply exactly the declared parameters (or change the callee signature)\"}}",
+                        fname, expected, found
+                    ),
+                    true,
+                )
+            } else if msg.contains("argument ") && msg.contains("expects ") && msg.contains("found ") {
+                // Arg type: function 'f' argument N expects T, found U
+                let fname = msg
+                    .split("function '")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+                    .unwrap_or("f");
+                let arg_index = msg
+                    .split("argument ")
+                    .nth(1)
+                    .and_then(|s| s.split(' ').next())
+                    .unwrap_or("0");
+                let expected = msg
+                    .split("expects ")
+                    .nth(1)
+                    .and_then(|s| s.split(',').next())
+                    .unwrap_or("?")
+                    .trim()
+                    .to_string();
+                let found = msg
+                    .split("found ")
+                    .nth(1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_else(|| "?".into());
+                (
+                    "Fix call argument type".into(),
+                    format!(
+                        "{{\"codemod\":\"arg_type\",\"function\":\"{}\",\"arg_index\":{},\"expected\":\"{}\",\"found\":\"{}\",\"hint\":\"pass a value of the expected type or change the callee param\"}}",
+                        fname, arg_index, expected, found
+                    ),
+                    true,
+                )
             } else if msg.contains("unknown method") {
                 let mname = msg
                     .split("unknown method '")
@@ -994,12 +1057,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.44.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.45.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.44.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.45.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
