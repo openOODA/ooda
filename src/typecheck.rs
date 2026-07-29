@@ -354,21 +354,41 @@ impl TypeChecker {
             "None".into(),
             (vec![], Ty::Option(Box::new(Ty::Unknown))),
         );
-        // Sealed effects: loose args, concrete Result returns (fail-closed product surface)
+        // Sealed effects (object-cap): first formal is the live handle; remaining
+        // are operation args. Arity is enforced for user fns; these use concrete
+        // counts so wrong call shape fails closed (no soft 1-arg theater).
         let res_s = Ty::Result(Box::new(Ty::String), Box::new(Ty::String));
         let res_v = Ty::Result(Box::new(Ty::Void), Box::new(Ty::String));
-        for name in ["fetch", "downloadData", "http_get", "net_get", "read_file", "fs_read", "env_get"]
-        {
+        for name in ["fetch", "downloadData", "http_get", "net_get", "net_connect"] {
+            // (cap, url) or ambient-shaped still checked at cap pass
             tc.functions
-                .insert(name.into(), (vec![Ty::Unknown], res_s.clone()));
+                .insert(name.into(), (vec![Ty::Unknown, Ty::Unknown], res_s.clone()));
         }
-        for name in ["write_file", "fs_write", "env_set"] {
+        for name in ["read_file", "fs_read"] {
             tc.functions
-                .insert(name.into(), (vec![Ty::Unknown], res_v.clone()));
+                .insert(name.into(), (vec![Ty::Unknown, Ty::Unknown], res_s.clone()));
+        }
+        for name in ["env_get"] {
+            tc.functions
+                .insert(name.into(), (vec![Ty::Unknown, Ty::Unknown], res_s.clone()));
+        }
+        for name in ["write_file", "fs_write"] {
+            // (cap, path, content)
+            tc.functions.insert(
+                name.into(),
+                (vec![Ty::Unknown, Ty::Unknown, Ty::Unknown], res_v.clone()),
+            );
+        }
+        for name in ["env_set"] {
+            tc.functions.insert(
+                name.into(),
+                (vec![Ty::Unknown, Ty::Unknown, Ty::Unknown], res_v.clone()),
+            );
         }
         for name in ["sys_exec", "exec", "spawn_process"] {
+            // (cap, cmd) typical object-cap shape
             tc.functions
-                .insert(name.into(), (vec![Ty::Unknown], res_s.clone()));
+                .insert(name.into(), (vec![Ty::Unknown, Ty::Unknown], res_s.clone()));
         }
 
         for item in &program.items {
@@ -1037,11 +1057,52 @@ impl TypeChecker {
                     arg_tys.push(self.infer_expr(a, env)?);
                 }
 
+                // ADT constructors: payload-driven Result/Option (cuts match-arm Unknown vs Int).
+                if name == "Ok" {
+                    if arg_tys.len() != 1 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'Ok' expects 1 argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    return Ok(Ty::Result(
+                        Box::new(arg_tys[0].clone()),
+                        Box::new(Ty::Unknown),
+                    ));
+                }
+                if name == "Err" {
+                    if arg_tys.len() != 1 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'Err' expects 1 argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    return Ok(Ty::Result(
+                        Box::new(Ty::Unknown),
+                        Box::new(arg_tys[0].clone()),
+                    ));
+                }
+                if name == "Some" {
+                    if arg_tys.len() != 1 {
+                        return Err(anyhow!(
+                            "Type error at {}:{}: function 'Some' expects 1 argument(s), found {}",
+                            expr.span().line,
+                            expr.span().col,
+                            arg_tys.len()
+                        ));
+                    }
+                    return Ok(Ty::Option(Box::new(arg_tys[0].clone())));
+                }
+
                 // assert_eq(a, b): require comparable types (no soft Unknown-only).
                 if name == "assert_eq" {
                     if arg_tys.len() != 2 {
                         return Err(anyhow!(
-                            "Type error at {}:{}: assert_eq expects 2 arguments, found {}",
+                            "Type error at {}:{}: function 'assert_eq' expects 2 argument(s), found {}",
                             expr.span().line,
                             expr.span().col,
                             arg_tys.len()
@@ -1049,29 +1110,23 @@ impl TypeChecker {
                     }
                     let (a, b) = (&arg_tys[0], &arg_tys[1]);
                     if !Ty::unifyable(a, b)
-                        && !(matches!((a, b), (Ty::Int, Ty::Int) | (Ty::Float, Ty::Float)))
+                        && !(matches!(a, Ty::Unknown) && matches!(b, Ty::Unknown))
                     {
-                        // Both Unknown (polymorphic hole) is ok for incomplete inference.
-                        if !(matches!(a, Ty::Unknown) && matches!(b, Ty::Unknown)) {
-                            return Err(anyhow!(
-                                "Type error at {}:{}: assert_eq arguments must have matching types, found {} and {}",
-                                expr.span().line,
-                                expr.span().col,
-                                a.display(),
-                                b.display()
-                            ));
-                        }
+                        return Err(anyhow!(
+                            "Type error at {}:{}: assert_eq arguments must have matching types, found {} and {}",
+                            expr.span().line,
+                            expr.span().col,
+                            a.display(),
+                            b.display()
+                        ));
                     }
                     return Ok(Ty::Void);
                 }
 
                 if let Some((params, ret)) = self.functions.get(name) {
-                    // println is varargs. Sealed builtins registered with all-Unknown
-                    // formals accept optional leading capability tokens (object-cap).
+                    // println is varargs at runtime (prints every arg).
                     let is_println = name == "println";
-                    let loose_builtin_arity =
-                        !params.is_empty() && params.iter().all(|p| matches!(p, Ty::Unknown));
-                    if !is_println && !loose_builtin_arity && params.len() != arg_tys.len() {
+                    if !is_println && params.len() != arg_tys.len() {
                         return Err(anyhow!(
                             "Type error at {}:{}: function '{}' expects {} argument(s), found {}",
                             expr.span().line,
