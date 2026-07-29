@@ -973,8 +973,21 @@ impl TypeChecker {
                     let t2 = self.check_block(else_b, &mut env_else, &mut mut_else, "if-else", None)?;
                     if Ty::unifyable(&t1, &t2) {
                         Ok(t1)
-                    } else {
+                    } else if matches!(t1, Ty::Unknown) || matches!(t2, Ty::Unknown) {
                         Ok(Ty::Unknown)
+                    } else if matches!(t1, Ty::Void) {
+                        // Statement-like then-arm (e.g. nested if-as-stmt in else branch)
+                        Ok(t2)
+                    } else if matches!(t2, Ty::Void) {
+                        Ok(t1)
+                    } else {
+                        Err(anyhow!(
+                            "Type error at {}:{}: if/else branches have incompatible types {} vs {}",
+                            expr.span().line,
+                            expr.span().col,
+                            t1.display(),
+                            t2.display()
+                        ))
                     }
                 } else {
                     Ok(t1)
@@ -1398,6 +1411,22 @@ mod tests {
         assert!(
             err.contains("RefinementTypeViolation") && err.contains("70000"),
             "expected refinement return error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn rejects_if_else_branch_type_mismatch() {
+        let src = r#"
+            pub fn main() {
+                let x = if true { 1 } else { "nope" };
+                println(x);
+            }
+        "#;
+        let err = check(src).unwrap_err().to_string();
+        assert!(
+            err.contains("incompatible types") || err.contains("if/else"),
+            "got: {}",
             err
         );
     }

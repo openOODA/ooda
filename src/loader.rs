@@ -100,12 +100,27 @@ fn resolve_import(from_dir: &Path, rel: &str) -> Result<PathBuf> {
                 }
             }
         }
-        // /home/jeryd/openooda-std direct
-        let local_std = PathBuf::from("/home/jeryd/openooda-std");
-        if local_std.is_dir() {
-            v.push(local_std.join(rel_path));
-            if let Some(name) = rel_path.file_name() {
-                v.push(local_std.join(name));
+        // Sibling std layouts: openooda-std, std (monorepo Projects/openOODA/std)
+        for std_name in ["openooda-std", "std"] {
+            if let Some(parent) = std::env::current_dir()
+                .ok()
+                .and_then(|c| c.parent().map(|p| p.join(std_name)))
+            {
+                if parent.is_dir() {
+                    v.push(parent.join(rel_path));
+                    if let Some(name) = rel_path.file_name() {
+                        v.push(parent.join(name));
+                    }
+                }
+            }
+            if let Ok(home) = std::env::var("HOME") {
+                let p = PathBuf::from(home).join("Projects/openOODA").join(std_name);
+                if p.is_dir() {
+                    v.push(p.join(rel_path));
+                    if let Some(name) = rel_path.file_name() {
+                        v.push(p.join(name));
+                    }
+                }
             }
         }
         v

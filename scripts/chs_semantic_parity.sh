@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ===================================================================
 # CHS dual-engine semantic parity: `ooda run` vs `ooda build --target c`
-# Compares normalized stdout digests. Fail closed on diverge.
+# Compares normalized stdout digests. Fail closed on missing examples.
 # ===================================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,13 +14,14 @@ if [[ ! -x "$OODA" ]]; then
 fi
 
 normalize() {
-  # Keep pure numeric lines only (drop 🧪 / 🚀 banners)
+  # Pure numeric lines only (drop 🧪 / 🚀 banners)
   grep -E '^[0-9]+$' "$1" 2>/dev/null | tr '\n' ',' | sed 's/,$//' || true
 }
 
+# Contract-free CHS programs only (C backend does not lower requires/ensures).
 EXAMPLES=(
   "examples/while_count.oo"
-  "examples/int_main.oo"
+  "examples/chs_list_string.oo"
   "examples/chs_hello.oo"
 )
 
@@ -28,7 +29,8 @@ fail=0
 for rel in "${EXAMPLES[@]}"; do
   src="$ROOT/$rel"
   if [[ ! -f "$src" ]]; then
-    echo "SKIP missing $rel"
+    echo "FAIL missing listed example: $rel (fail-closed)"
+    fail=$((fail + 1))
     continue
   fi
   base="$(basename "$rel" .oo)"

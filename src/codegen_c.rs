@@ -92,12 +92,14 @@ impl CCodeGen {
 
 /// Locate `libooda.a` from cargo target dir (release preferred).
 fn find_ooda_staticlib_dir() -> Option<std::path::PathBuf> {
-    let candidates = [
+    let mut candidates = vec![
         std::path::PathBuf::from("target/release"),
         std::path::PathBuf::from("target/debug"),
-        std::path::PathBuf::from("/home/jeryd/openooda/target/release"),
-        std::path::PathBuf::from("/home/jeryd/openooda/target/debug"),
     ];
+    // Crate-relative targets (works regardless of host home path)
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    candidates.push(manifest.join("target/release"));
+    candidates.push(manifest.join("target/debug"));
     for c in candidates {
         if c.join("libooda.a").exists() {
             return Some(c);
@@ -1081,10 +1083,10 @@ impl Gen {
 }
 
 pub fn runtime_c_path() -> PathBuf {
-    // Prefer adjacent runtime from crate root
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let candidates = [
         PathBuf::from("runtime/chs_rt.c"),
-        PathBuf::from("/home/jeryd/openooda/runtime/chs_rt.c"),
+        manifest.join("runtime/chs_rt.c"),
     ];
     for c in candidates {
         if c.exists() {

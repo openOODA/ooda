@@ -73,6 +73,77 @@ fn json_errors_golden_capability_violation() {
 }
 
 #[test]
+fn json_errors_undefined_function_names_symbol() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_undef_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("undef.oo");
+    std::fs::write(
+        &path,
+        "pub fn main() {\n    let x = totally_missing_fn(1);\n    println(x);\n}\n",
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["check", path.to_str().unwrap(), "--json-errors"])
+        .output()
+        .expect("spawn ooda check");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let v: serde_json::Value = serde_json::from_str(stderr.trim()).expect(&stderr);
+    assert_eq!(v["error_type"].as_str(), Some("TypeError"));
+    let diff = v["suggested_fix"]["diff"].as_str().unwrap_or("");
+    assert!(
+        diff.contains("totally_missing_fn"),
+        "fix should name the symbol: {}",
+        diff
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn build_c_refuses_requires_contracts() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = std::env::temp_dir().join(format!("ooda_c_req_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("req.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn add(a: Int, b: Int) -> Int
+    requires a >= 0
+{
+    return a + b;
+}
+pub fn main() {
+    println(add(1, 2));
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn build");
+    assert!(
+        !out.status.success(),
+        "C build must refuse requires/ensures: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        err.contains("contracts") || err.contains("requires"),
+        "honest message required: {}",
+        err
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn ooda_em_is_measured_not_theater() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let example = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hello.oo");

@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.32.0-alpha")]
+#[command(version = "0.33.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -369,6 +369,28 @@ fn main() -> Result<()> {
             TypeChecker::check_program(&program)?;
 
             let target_l = target.to_lowercase();
+            // Fail-closed: C/native backends do not lower requires/ensures yet.
+            // Interpreter (`ooda run` / `ooda test`) still evaluates contracts.
+            if target_l == "c" || target_l == "native" || target_l == "chs" || target_l == "wasm" {
+                let mut contract_fns = Vec::new();
+                for item in &program.items {
+                    if let ooda::ast::Item::Function(f) = item {
+                        if !f.requires.is_empty() || !f.ensures.is_empty() {
+                            contract_fns.push(f.name.clone());
+                        }
+                    }
+                }
+                if !contract_fns.is_empty() && (target_l == "c" || target_l == "chs" || target_l == "native") {
+                    anyhow::bail!(
+                        "build --target {}: contracts (requires/ensures) are not lowered in the C/native backend yet \
+                         (found on: {}). Use `ooda run` / `ooda test` for contract enforcement, or remove contracts \
+                         from functions that must be compiled natively.",
+                        target_l,
+                        contract_fns.join(", ")
+                    );
+                }
+            }
+
             if target_l == "wasm" {
                 let wat = WasmCodeGen::emit_wat(&program)?;
                 let out_wat = file.with_extension("wat");
@@ -706,22 +728,50 @@ fn load_and_analyze(
         let (line, col) = parse_loc(&msg);
         let typecheck_us = typecheck_start.elapsed().as_micros();
         if json_errors {
-            let fix = if msg.contains("must-use") || msg.contains("unused Result") {
+            let (fix_desc, fix_diff): (String, String) = if msg.contains("must-use")
+                || msg.contains("unused Result")
+            {
                 (
-                    "Handle Result/Option",
-                    "let r = f(); match r { Ok(v) => ..., Err(e) => ... }",
+                    "Handle Result/Option".into(),
+                    "let r = f(); match r { Ok(v) => ..., Err(e) => ... }".into(),
                 )
             } else if msg.contains("non-exhaustive match") {
                 (
-                    "Cover all variants",
-                    "match r { Ok(v) => ..., Err(e) => ... }  // or `_ => ...`",
+                    "Cover all variants".into(),
+                    "match r { Ok(v) => ..., Err(e) => ... }  // or `_ => ...`".into(),
                 )
             } else if msg.contains("immutable") {
-                ("Use let mut", "let mut x = ...; x = new_value;")
+                ("Use let mut".into(), "let mut x = ...; x = new_value;".into())
+            } else if msg.contains("undefined function") {
+                let fname = msg
+                    .split("undefined function '")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+                    .unwrap_or("name");
+                (
+                    "Define or import function".into(),
+                    format!(
+                        "pub fn {}(...) -> ... {{\n    // implement or fix the call site\n}}",
+                        fname
+                    ),
+                )
+            } else if msg.contains("unknown method") {
+                let mname = msg
+                    .split("unknown method '")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+                    .unwrap_or(".method");
+                (
+                    "Fix method / field access".into(),
+                    format!(
+                        "// '{}' is not a known method on this type — use a real method or struct field",
+                        mname
+                    ),
+                )
             } else {
                 (
-                    "Fix types",
-                    "Ensure operands and annotations agree (Int/Float/String/Bool/caps).",
+                    "Fix types".into(),
+                    "Ensure operands and annotations agree (Int/Float/String/Bool/caps).".into(),
                 )
             };
             AiDiagnostic::new(
@@ -732,7 +782,7 @@ fn load_and_analyze(
                 msg,
                 "Static type mismatch detected before execution.",
             )
-            .with_fix(fix.0, fix.1)
+            .with_fix(fix_desc, fix_diff)
             .with_timings(parse_us, capability_us.saturating_add(typecheck_us))
             .print_json();
         } else {
@@ -839,12 +889,12 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.32.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.33.0-alpha";
     /// clap's `#[command(version = ...)]` carries no `v` prefix
     /// (Cargo's `version = "..."` also doesn't). Strip it before
     /// comparing to the canonical form so the test fails loudly if
     /// either side is renamed.
-    const CANONICAL_VERSION_NO_V: &str = "0.32.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.33.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");
