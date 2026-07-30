@@ -1269,6 +1269,72 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R1: mut assign pure-lit RHS must match mut var type (stage-0 parity).
+#[test]
+fn oodac_typecheck_rejects_mut_assign_type() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/fail/mut_assign_type.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn oodac");
+    assert!(!out.status.success(), "mut assign type mismatch must fail");
+    let c = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        c.contains("cannot assign") || c.contains("String") || c.contains("ERR"),
+        "got {}",
+        c
+    );
+}
+
+/// R1: unary `!` on Int lit must fail-closed (stage-0 parity).
+#[test]
+fn oodac_typecheck_rejects_unary_bang_int() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/fail/unary_bang_int.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn oodac");
+    assert!(!out.status.success(), "unary !1 must fail");
+    let c = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        c.contains("Bool") || c.contains("unary") || c.contains("ERR"),
+        "got {}",
+        c
+    );
+}
+
+/// R1: well-typed mut reassign remains OK.
+#[test]
+fn oodac_typecheck_mut_assign_ok() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/pass/mut_assign_ok.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn oodac");
+    assert!(
+        out.status.success(),
+        "mut assign ok: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// R1: match Ok(v)/Err(e) pattern binds must not false-undefined.
 #[test]
 fn oodac_typecheck_rejects_arg_type_mismatch() {
