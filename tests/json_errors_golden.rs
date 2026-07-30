@@ -1337,15 +1337,36 @@ pub fn main() {
         cat_wat
     );
 
-    // List[String] push still refuse on WASM (no silent string-list product claim).
-    let bad = dir.join("bad.oo");
+    // List[String] now lowers; sealed caps still refuse on WASM.
+    let ok_list = dir.join("lstr.oo");
     std::fs::write(
-        &bad,
+        &ok_list,
         r#"
 pub fn main() {
     let mut xs: List[String] = list_new();
     xs = xs.push("a");
     println(xs.len());
+}
+"#,
+    )
+    .unwrap();
+    let out_ok = std::process::Command::new(bin)
+        .args(["build", "--target", "wasm", ok_list.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out_ok.status.success(),
+        "List[String] must lower on WASM: {}",
+        String::from_utf8_lossy(&out_ok.stderr)
+    );
+
+    let bad = dir.join("bad.oo");
+    std::fs::write(
+        &bad,
+        r#"
+pub fn main(fs: &FsCap) {
+    let s = fs.read_file("x");
+    println(s);
 }
 "#,
     )
@@ -1356,7 +1377,7 @@ pub fn main() {
         .expect("spawn");
     assert!(
         !out2.status.success(),
-        "List[String] must fail-closed on WASM"
+        "sealed FsCap must fail-closed on WASM"
     );
     let err = format!(
         "{}{}",
@@ -1364,10 +1385,10 @@ pub fn main() {
         String::from_utf8_lossy(&out2.stdout)
     );
     assert!(
-        err.contains("List[String]")
-            || err.contains("String")
-            || err.contains("refuse")
-            || err.contains("Int"),
+        err.contains("sealed")
+            || err.contains("read_file")
+            || err.contains("capability")
+            || err.contains("FsCap"),
         "err={}",
         err
     );

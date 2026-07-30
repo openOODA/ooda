@@ -6,10 +6,11 @@
 // content `==`/`!=` via host `env.streq`, and **List[Int]** only
 // (`list_new` / `list_push` / `list_get` / `list_len` + bump heap).
 //
-// Fail-closed (non-zero): Match, capability I/O, List[String]/non-Int lists,
+// Fail-closed (non-zero): Match, capability I/O, non-Int/String lists,
 // struct, string *numeric* arithmetic (sub/mul/div). String `+` concatenates
-// on the bump heap (gated). List methods `.push`/`.len` lower to free `list_*`
-// (not general method dispatch).
+// on the bump heap (gated). List[Int] and List[String] on bump heap; String
+// list `==` uses `$list_str_eq` (streq content, not pointer). List methods
+// `.push`/`.len` lower to free `list_*` (not general method dispatch).
 //
 // String model: distinct UTF-8 literals interned as NUL-terminated bytes;
 // values are i32 offsets. List model: header {len,cap,data} + i64 elements
@@ -75,7 +76,9 @@ impl WasmCodeGen {
             t == "call $println" || t.starts_with("call $println ")
         });
         let needs_println_str = funcs_wat.contains("call $println_str");
-        let needs_streq = funcs_wat.contains("call $streq");
+        // `$list_str_eq` RT calls `$streq` — import when either body or eq RT needs it.
+        let needs_list_str_eq = funcs_wat.contains("call $list_str_eq");
+        let needs_streq = funcs_wat.contains("call $streq") || needs_list_str_eq;
         let needs_str_contains = funcs_wat.contains("call $str_contains");
         // Heap only when bodies actually bump-allocate (list RT / str_slice / str_concat).
         let body_uses_heap = funcs_wat.contains("global.get $heap");
@@ -133,10 +136,13 @@ impl WasmCodeGen {
                 ));
             }
             if needs_list_rt {
-                // Base list RT always when lists used; $list_eq only if called (W↓).
+                // Base list RT always when lists used; eq helpers only if called (W↓).
                 wat.push_str(Self::list_runtime_wat());
                 if funcs_wat.contains("call $list_eq") {
                     wat.push_str(Self::list_eq_runtime_wat());
+                }
+                if needs_list_str_eq {
+                    wat.push_str(Self::list_str_eq_runtime_wat());
                 }
             }
         }
@@ -230,6 +236,33 @@ impl WasmCodeGen {
           )
           (then (return (i32.const 0)))
       )
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $cmp_loop)
+    )
+    (i32.const 0)
+    return
+  )
+"#
+    }
+
+    /// List[String] content equality via host `$streq` per element (not i64 pointer eq).
+    /// Only injected when `call $list_str_eq` appears (W↓). Aligns with interpreter String PartialEq.
+    fn list_str_eq_runtime_wat() -> &'static str {
+        r#"
+  (func $list_str_eq (param $a i32) (param $b i32) (result i32)
+    (local $len_a i32) (local $len_b i32) (local $data_a i32) (local $data_b i32) (local $i i32) (local $pa i32) (local $pb i32)
+    (if (i32.eq (local.get $a) (local.get $b)) (then (return (i32.const 1))))
+    (local.set $len_a (i32.load (local.get $a)))
+    (local.set $len_b (i32.load (local.get $b)))
+    (if (i32.ne (local.get $len_a) (local.get $len_b)) (then (return (i32.const 0))))
+    (local.set $data_a (i32.load offset=8 (local.get $a)))
+    (local.set $data_b (i32.load offset=8 (local.get $b)))
+    (local.set $i (i32.const 0))
+    (loop $cmp_loop
+      (if (i32.eq (local.get $i) (local.get $len_a)) (then (return (i32.const 1))))
+      (local.set $pa (i32.wrap_i64 (i64.load (i32.add (local.get $data_a) (i32.mul (local.get $i) (i32.const 8))))))
+      (local.set $pb (i32.wrap_i64 (i64.load (i32.add (local.get $data_b) (i32.mul (local.get $i) (i32.const 8))))))
+      (if (i32.eqz (call $streq (local.get $pa) (local.get $pb))) (then (return (i32.const 0))))
       (local.set $i (i32.add (local.get $i) (i32.const 1)))
       (br $cmp_loop)
     )
@@ -878,8 +911,16 @@ impl WasmCodeGen {
                 if either_list {
                     match op {
                         BinOp::Eq | BinOp::Neq => {
-                            if lhs_ty != "list" || rhs_ty != "list" {
-                                bail!("WASM backend does not mix List with non-List in ==/!=");
+                            // Homogeneous only: Int lists use $list_eq (i64 content);
+                            // String lists use $list_str_eq (streq per element — not pointer eq).
+                            let both_int = lhs_ty == "list" && rhs_ty == "list";
+                            let both_str = lhs_ty == "list_str" && rhs_ty == "list_str";
+                            if !both_int && !both_str {
+                                bail!(
+                                    "WASM backend does not mix List kinds in ==/!= (got {} vs {}); use `ooda run`.",
+                                    lhs_ty,
+                                    rhs_ty
+                                );
                             }
                         }
                         _ => bail!(
@@ -921,13 +962,17 @@ impl WasmCodeGen {
                     BinOp::Div if ty == "i64" => wat.push_str("    i64.div_s\n"),
                     BinOp::Div => wat.push_str("    f64.div\n"),
                     // Comparisons yield i32 in WebAssembly; extend to i64 Bool model.
-                    // String: $streq content. List: $list_eq deep elementwise Int equality
-                    // (aligns with interpreter Value::List PartialEq). Never $streq on lists.
+                    // String: $streq content. List[Int]: $list_eq i64 elements.
+                    // List[String]: $list_str_eq (streq each element — matches interpreter content eq).
                     BinOp::Eq => {
                         if either_str {
                             wat.push_str("    call $streq\n");
                         } else if either_list {
-                            wat.push_str("    call $list_eq\n");
+                            if lhs_ty == "list_str" {
+                                wat.push_str("    call $list_str_eq\n");
+                            } else {
+                                wat.push_str("    call $list_eq\n");
+                            }
                         } else {
                             wat.push_str(&format!("    {}.eq\n", ty));
                         }
@@ -938,7 +983,11 @@ impl WasmCodeGen {
                             wat.push_str("    call $streq\n");
                             wat.push_str("    i32.eqz\n");
                         } else if either_list {
-                            wat.push_str("    call $list_eq\n");
+                            if lhs_ty == "list_str" {
+                                wat.push_str("    call $list_str_eq\n");
+                            } else {
+                                wat.push_str("    call $list_eq\n");
+                            }
                             wat.push_str("    i32.eqz\n");
                         } else {
                             wat.push_str(&format!("    {}.ne\n", ty));
@@ -1018,26 +1067,33 @@ impl WasmCodeGen {
                         let elem_ty = Self::infer_expr_type(&args[1], locals);
                         wat.push_str(&Self::emit_expr(&args[0], locals)?);
                         wat.push_str(&Self::emit_expr(&args[1], locals)?);
-                        if recv_ty == "list_str" && elem_ty == "i32" {
+                        // list_str always stores i32 string ptrs as i64 slots; untyped `list`
+                        // that typecheck refined to String also extends (dual-engine honesty).
+                        if (recv_ty == "list_str" || recv_ty == "list") && elem_ty == "i32" {
                             wat.push_str("    i64.extend_i32_u\n");
                         } else if recv_ty == "list" && elem_ty == "i64" {
-                            // Ok
+                            // List[Int]
                         } else {
-                            bail!("WASM .push type mismatch for list element");
+                            bail!(
+                                "WASM .push type mismatch (recv {}, elem {}); List[Int] needs Int, List[String] needs String.",
+                                recv_ty,
+                                elem_ty
+                            );
                         }
                         wat.push_str("    call $list_push\n");
                     } else if name == ".len" {
                         if args.len() != 1 {
                             bail!("WASM .len expects only a receiver");
                         }
-                        if recv_ty == "list" {
+                        // List[Int] and List[String] share header layout — same $list_len (zero-cost).
+                        if recv_ty == "list" || recv_ty == "list_str" {
                             wat.push_str(&Self::emit_expr(&args[0], locals)?);
                             wat.push_str("    call $list_len\n");
                         } else if recv_ty == "i32" {
                             wat.push_str(&Self::emit_string_len(&args[0], locals)?);
                         } else {
                             bail!(
-                                "WASM .len requires List[Int] or String receiver (got {}); use `ooda run`.",
+                                "WASM .len requires List[Int], List[String], or String receiver (got {}); use `ooda run`.",
                                 recv_ty
                             );
                         }
@@ -1126,31 +1182,37 @@ impl WasmCodeGen {
                         }
                     }
                 } else {
-                    let mut is_list_str = false;
+                    let mut push_extend_str = false;
+                    let mut get_wrap_str = false;
                     if name == "list_push" && args.len() >= 2 {
                         let recv_ty = Self::infer_expr_type(&args[0], locals);
                         let elem_ty = Self::infer_expr_type(&args[1], locals);
-                        if recv_ty == "list_str" && elem_ty == "i32" {
-                            is_list_str = true;
+                        if (recv_ty == "list_str" || recv_ty == "list") && elem_ty == "i32" {
+                            push_extend_str = true;
                         } else if recv_ty == "list" && elem_ty == "i64" {
-                            // ok
+                            // List[Int]
                         } else {
-                            bail!("WASM list_push type mismatch");
+                            bail!(
+                                "WASM list_push type mismatch (recv {}, elem {}); \
+                                 List[Int] needs Int elements, List[String] needs String.",
+                                recv_ty,
+                                elem_ty
+                            );
                         }
-                    } else if name == "list_get" && args.len() >= 1 {
+                    } else if name == "list_get" && !args.is_empty() {
                         let recv_ty = Self::infer_expr_type(&args[0], locals);
                         if recv_ty == "list_str" {
-                            is_list_str = true;
+                            get_wrap_str = true;
                         }
                     }
                     for (i, arg) in args.iter().enumerate() {
                         wat.push_str(&Self::emit_expr(arg, locals)?);
-                        if name == "list_push" && is_list_str && i == 1 {
+                        if name == "list_push" && push_extend_str && i == 1 {
                             wat.push_str("    i64.extend_i32_u\n");
                         }
                     }
                     wat.push_str(&format!("    call ${}\n", name));
-                    if name == "list_get" && is_list_str {
+                    if name == "list_get" && get_wrap_str {
                         wat.push_str("    i32.wrap_i64\n");
                     }
                 }
@@ -1250,14 +1312,15 @@ impl WasmCodeGen {
                 } else if name == "list_get" {
                     if let Some(arg0) = args.first() {
                         let ty = Self::infer_expr_type(arg0, locals);
-                        if ty == "list_str" { return "i32"; }
+                        if ty == "list_str" {
+                            return "i32";
+                        }
                     }
                     "i64"
-                } else if name == "list_len"
-                    || name == ".len"
-                    || name == ".char_at"
-                    || name == ".contains"
-                {
+                } else if name == "list_len" || name == ".char_at" || name == ".contains" {
+                    "i64"
+                } else if name == ".len" {
+                    // List .len → i64; String .len → i64 (same numeric width).
                     "i64"
                 } else if name == ".str_slice" {
                     "i32" // new string pointer
@@ -1300,7 +1363,22 @@ impl WasmCodeGen {
                 locals.insert(name.clone(), ty);
                 Self::collect_locals_in_expr(init, locals);
             }
-            Statement::Assign { value, .. } | Statement::Return(Some(value), _) => {
+            Statement::Assign { name, value, .. } => {
+                Self::collect_locals_in_expr(value, locals);
+                // Refine untyped list → list_str when assigned from push of String (matches typecheck).
+                if let Expression::Call {
+                    name: cname, args, ..
+                } = value
+                {
+                    if (cname == "list_push" || cname == ".push") && args.len() >= 2 {
+                        let elem_ty = Self::infer_expr_type(&args[1], locals);
+                        if elem_ty == "i32" {
+                            locals.insert(name.clone(), "list_str");
+                        }
+                    }
+                }
+            }
+            Statement::Return(Some(value), _) => {
                 Self::collect_locals_in_expr(value, locals);
             }
             Statement::Expr(e, _) => Self::collect_locals_in_expr(e, locals),

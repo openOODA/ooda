@@ -21,3 +21,4 @@ surface; historical demos remain recoverable from git history
 | `break_loop.oo` | while break/continue (interp + C + WASM + LLVM) |
 | `for_range.oo` | for lo..hi desugar (interp + C + WASM + LLVM) |
 | `str_concat.oo` | String + WASM bump-heap concat host e2e |
+| `list_string.oo` | List[String] push/len/get/for/content-eq WASM host e2e |

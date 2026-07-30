@@ -448,18 +448,22 @@ fn ooda_wasm_list_sum_fixture_runs_on_host() {
     assert_eq!(lines, vec!["6".to_string()], "got {:?}", lines);
 }
 
+/// Annotated List[String]: .len / list_get / println_str under host.
 #[test]
-fn ooda_wasm_accepts_list_string_push() {
+fn ooda_wasm_list_string_push_len_get_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = unique_temp_dir("ooda_wlstr");
-    let path = dir.join("bad.oo");
+    let path = dir.join("lstr.oo");
     std::fs::write(
         &path,
         r#"
 pub fn main() {
-    let mut xs = list_new();
-    xs = list_push(xs, "nope");
-    println(list_len(xs));
+    let mut xs: List[String] = list_new();
+    xs = xs.push("hi");
+    xs = xs.push("yo");
+    println(xs.len());
+    println(list_get(xs, 0));
+    println(list_get(xs, 1));
 }
 "#,
     )
@@ -469,20 +473,140 @@ pub fn main() {
         .output()
         .expect("spawn");
     assert!(
-        !out.status.success(),
-        "List[String] via string push must fail-closed"
+        out.status.success(),
+        "List[String] wasm: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    let err = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout)
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("call $list_len") && wat.contains("call $list_get"),
+        "list RT:\n{}",
+        wat
     );
     assert!(
-        err.contains("list_push") || err.contains("List[Int]") || err.contains("Int elements"),
-        "err={}",
-        err
+        wat.contains("call $println_str"),
+        "string elements via println_str:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(
+        lines,
+        vec![
+            "2".to_string(),
+            "hi".to_string(),
+            "yo".to_string()
+        ],
+        "got {:?}",
+        lines
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// List[String] == is content equality (concat vs literal), not i64 pointer identity.
+#[test]
+fn ooda_wasm_list_string_eq_content_not_pointer() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wlstreq");
+    let path = dir.join("eq.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut a: List[String] = list_new();
+    a = a.push("hi" + "yo");
+    let mut b: List[String] = list_new();
+    b = b.push("hiyo");
+    if a == b { println(1); } else { println(0); }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "list_str eq wasm: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("call $list_str_eq"),
+        "must use content eq RT:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("call $list_eq"),
+        "must not use Int list_eq for String lists:\n{}",
+        wat
+    );
+    assert!(
+        wat.contains("\"streq\"") || wat.contains("call $streq"),
+        "list_str_eq needs streq:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(lines, vec!["1".to_string()], "content eq; got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Int list_eq programs must not pull `$list_str_eq` / streq (W↓).
+#[test]
+fn ooda_wasm_list_int_eq_no_list_str_eq_rt() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_eq.oo");
+    assert!(path.is_file());
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("(func $list_eq"),
+        "Int list needs list_eq:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("list_str_eq") && !wat.contains("\"streq\""),
+        "Int list_eq must not inject string eq RT:\n{}",
+        wat
+    );
+}
+
+/// Fixture fixtures/list_string.oo full surface under host.
+#[test]
+fn ooda_wasm_list_string_fixture_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_string.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm list_string: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("call $list_str_eq") || wat.contains("call $list_len"));
+    let lines = run_wat(&wat).expect("host");
+    // len=2, get hi, get yo, for hi, for yo, eq→1
+    assert_eq!(
+        lines,
+        vec![
+            "2".to_string(),
+            "hi".to_string(),
+            "yo".to_string(),
+            "hi".to_string(),
+            "yo".to_string(),
+            "1".to_string(),
+        ],
+        "got {:?}",
+        lines
+    );
 }
 
 /// Fixture `string_walk.oo`: while + .len + .char_at under host.
