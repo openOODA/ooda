@@ -1269,6 +1269,42 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R1 expand: oodac must fail-closed on pure lit Int+String (was silent OK).
+#[test]
+fn oodac_typecheck_slice_rejects_int_string_binop() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/fail/binop_int_string.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args([
+            "run",
+            oodac.to_str().unwrap(),
+            "--",
+            "check",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn oodac");
+    assert!(
+        !out.status.success(),
+        "oodac must reject Int+String: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("ERR") && combined.to_lowercase().contains("type"),
+        "expected ERR type, got: {}",
+        combined
+    );
+}
+
 /// R1: oodac check (real .oo) must fail-closed on annotated-let type mismatch
 /// (stage-0 previously rejected; oodac used to print OK — honesty bug).
 #[test]

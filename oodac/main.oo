@@ -2666,8 +2666,20 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
                         if p < n && field_at(list_get(toks, p), 0) == "EQ" {
                             p = p + 1;
                             if p < n {
-                                let ik = field_at(list_get(toks, p), 0);
-                                let init_ty = lit_token_type(ik);
+                                // Pure lit / lit-binop-lit chain (R1 expand).
+                                let init_ty = infer_pure_lit_expr_type(toks, p);
+                                if init_ty == "ERR_BINOP" {
+                                    println(
+                                        "ERR\ttype\tType error at "
+                                            + vline
+                                            + ":"
+                                            + vcol
+                                            + ": incompatible operand types in initializer for '"
+                                            + vname
+                                            + "'"
+                                    );
+                                    process_exit(1);
+                                }
                                 if init_ty != "" {
                                     if !types_compatible(ann, init_ty) {
                                         println(
@@ -2717,6 +2729,29 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
             }
             i = i + 1;
         } else {
+            // Free pure lit binop: `1 + "a"` as expr stmt — fail-closed (was silent OK).
+            let lty = lit_token_type(k);
+            if lty != "" {
+                if i + 2 < n {
+                    let opk = field_at(list_get(toks, i + 1), 0);
+                    if is_type_binop(opk) {
+                        let rty = lit_token_type(field_at(list_get(toks, i + 2), 0));
+                        if rty != "" {
+                            let comb = combine_binop_types(opk, lty, rty);
+                            if comb == "ERR_BINOP" {
+                                println(
+                                    "ERR\ttype\tType error at "
+                                        + line
+                                        + ":"
+                                        + col
+                                        + ": incompatible operand types for binary operator"
+                                );
+                                process_exit(1);
+                            }
+                        }
+                    }
+                }
+            }
             i = i + 1;
         }
     }
@@ -2755,4 +2790,91 @@ pub fn types_compatible(ann: String, got: String) -> Bool {
         return true;
     }
     return false;
+}
+
+// Binary operators that constrain operand types in the R1 lit slice.
+pub fn is_type_binop(kind: String) -> Bool {
+    if kind == "PLUS" { return true; }
+    if kind == "MINUS" { return true; }
+    if kind == "STAR" { return true; }
+    if kind == "SLASH" { return true; }
+    if kind == "EQEQ" { return true; }
+    if kind == "NEQ" { return true; }
+    if kind == "LT" { return true; }
+    if kind == "GT" { return true; }
+    if kind == "LTE" { return true; }
+    if kind == "GTE" { return true; }
+    return false;
+}
+
+// Combine left/right pure lit types under op. "ERR_BINOP" = hard fail.
+// String + String → String (concat). Other mixed arith → ERR.
+pub fn combine_binop_types(op: String, left: String, right: String) -> String {
+    if op == "PLUS" {
+        if left == "String" && right == "String" {
+            return "String";
+        }
+        if left == "Int" && right == "Int" {
+            return "Int";
+        }
+        if left == "Float" && right == "Float" {
+            return "Float";
+        }
+        // Int+String / String+Int / Bool+… — refuse (matches stage-0 honesty)
+        return "ERR_BINOP";
+    }
+    if op == "MINUS" || op == "STAR" || op == "SLASH" {
+        if left == "Int" && right == "Int" {
+            return "Int";
+        }
+        if left == "Float" && right == "Float" {
+            return "Float";
+        }
+        return "ERR_BINOP";
+    }
+    // Comparisons: same type → Bool; mismatch → ERR
+    if left == right {
+        return "Bool";
+    }
+    return "ERR_BINOP";
+}
+
+// Infer type of a pure literal expression chain starting at pos0.
+// Returns "" if non-pure (vars/calls), "ERR_BINOP" if known-bad mix,
+// or Int/String/Bool/Float for successful pure chains.
+pub fn infer_pure_lit_expr_type(toks: List[String], pos0: Int) -> String {
+    let n = list_len(toks);
+    if pos0 >= n {
+        return "";
+    }
+    let mut pos = pos0;
+    let mut cur = lit_token_type(field_at(list_get(toks, pos), 0));
+    if cur == "" {
+        return "";
+    }
+    pos = pos + 1;
+    let mut cont = true;
+    while cont {
+        if pos + 1 >= n {
+            cont = false;
+        } else {
+            let opk = field_at(list_get(toks, pos), 0);
+            if !is_type_binop(opk) {
+                cont = false;
+            } else {
+                let rty = lit_token_type(field_at(list_get(toks, pos + 1), 0));
+                if rty == "" {
+                    // non-pure right — abandon (incomplete TC, no false fail)
+                    return "";
+                }
+                let comb = combine_binop_types(opk, cur, rty);
+                if comb == "ERR_BINOP" {
+                    return "ERR_BINOP";
+                }
+                cur = comb;
+                pos = pos + 2;
+            }
+        }
+    }
+    return cur;
 }

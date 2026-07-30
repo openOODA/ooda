@@ -1345,18 +1345,7 @@ impl WasmCodeGen {
                 let ret_ty = arms.first().map(|a| Self::infer_expr_type(&a.body, locals)).unwrap_or("i64");
                 let ret_storage = Self::wat_storage_ty(ret_ty);
                 
-                // Generate unique loop labels for this match
-                let match_idx = WASM_LOOP_STACK.with(|s| {
-                    let idx = s.borrow().len();
-                    // We don't push to LOOP_STACK because match doesn't intercept `break/continue`
-                    idx
-                });
-                // Using a random-ish ID based on something available. 
-                // We don't have an easy ID generator, let's use arms.len() + something.
-                // Actually, just use a timestamp-like or a static counter.
-                // Wait! We can just use `tmp_idx` from a static?
-                // For simplicity, since it's recursive, we don't strictly need unique if we don't nest matches?
-                // We might nest matches! We should generate a unique label.
+                // Unique label from source span (no heap loop-stack for match).
                 let lbl = format!("match_{}_{}", expr.span().line, expr.span().col);
                 
                 // We need a scratch local for the condition value. We can just push it and compare?
