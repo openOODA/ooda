@@ -1274,6 +1274,17 @@ pub fn main() {
 #[test]
 
 #[test]
+
+#[test]
+fn oodac_typecheck_match_pattern_bind_ok() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootstrap/corpus/typecheck/pass/match_bind_ok.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output().unwrap();
+    assert!(out.status.success(), "match bind should OK: {}", String::from_utf8_lossy(&out.stdout));
+}
 fn oodac_typecheck_slice_rejects_call_arity() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
