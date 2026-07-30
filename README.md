@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.117.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.118.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.117.0-alpha (CHS M0–M5)
+## What's real in v0.118.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -70,7 +70,7 @@ import "lib.oo";       // relative / OODA_PATH
 | **CHS:** `List`, string walk, structs, real FS, argv | Real on interpreter |
 | **CHS C backend** (`ooda build --target c`) | Real — gcc + `runtime/chs_rt.c` (no clang required) |
 | **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
-| **oodac** (`oodac/main.oo`) | Real lex/parse/cap-check + **R1 typecheck slice** (annotated let, return lits, pure lit binops fail-closed in `.oo`); build hybrid. Not full typecheck/eval self-host |
+| **oodac** (`oodac/main.oo`) | Real lex/parse/cap-check + **R1 typecheck slice** (annotated let, return lits, pure lit binops + undefined-var fail-closed in `.oo`); build hybrid. Not full typecheck/eval self-host |
 | **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
 | `break` / `continue` | Real in while/for (interp + CHS C + WASM + LLVM integer subset); while-body tail `if`/break not silently dropped; outside loop fails typecheck |
 | `for x in list` / `lo..hi` | Real: desugars to while+list_get (interp + C); unannotated lists refine element type on assign; **C defers list kind until first push** (int vs string) |
@@ -81,7 +81,7 @@ import "lib.oo";       // relative / OODA_PATH
 ## Not implemented (fail non-zero)
 
 Full LSP (no completion/hover/rename), full package registry, time-travel replay, in-process CPython/PyTorch, **full WASM product** (still subset + sealed refuse), full SPEC self-host / **zero `.rs` beta**.  
-oodac typecheck is a **literal/annotation/pure-binop slice only** — not full `src/typecheck.rs` parity.  
+oodac typecheck is a **literal/annotation/pure-binop/undefined-var slice only** — not full `src/typecheck.rs` parity.  
 `ooda migrate` is **not** a full edition engine — only the two codemods above.
 
 
