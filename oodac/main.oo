@@ -2684,12 +2684,77 @@ pub fn is_sealed_sys(name: String) -> Bool {
 // Unknown inits (vars/calls) are skipped — incomplete TC stays fail-open only
 // where we lack information, never claims full typecheck.
 
+// Resolve annotation through `type Alias = Base` table ("\tAlias:Base\t").
+// Unknown / multi-hop incomplete → returns ann unchanged after one hop max.
+pub fn resolve_type_alias(aliases: String, ann: String) -> String {
+    // Inline lookup (same format as env_lookup_type) to avoid any call-order edge.
+    let key = "\t" + ann + ":";
+    if !aliases.contains(key) {
+        return ann;
+    }
+    let tn = chars_len(aliases);
+    let kn = chars_len(key);
+    let mut pos = 0;
+    while pos + kn <= tn {
+        let mut m = true;
+        let mut j = 0;
+        while j < kn {
+            if char_at(aliases, pos + j) != char_at(key, j) {
+                m = false;
+                j = kn;
+            } else {
+                j = j + 1;
+            }
+        }
+        if m {
+            let mut out = "";
+            let mut p = pos + kn;
+            while p < tn {
+                let c = char_at(aliases, p);
+                if c == "\t" {
+                    return out;
+                }
+                out = out + c;
+                p = p + 1;
+            }
+            return out;
+        }
+        pos = pos + 1;
+    }
+    return ann;
+}
+
 pub fn typecheck_ann_and_return_lits(toks: List[String]) {
     let n = list_len(toks);
     let mut i = 0;
     let mut expected_ret = "";
     let mut brace_depth = 0;
     let mut in_fn = false;
+    // R1: `type T = Int;` alias table for annotation checks.
+    let mut aliases = "\t";
+    // Pass 0: collect type aliases (top-level token stream).
+    let mut ai = 0;
+    while ai < n {
+        let ak = field_at(list_get(toks, ai), 0);
+        if ak == "KW_TYPE" {
+            if ai + 1 < n {
+                if field_at(list_get(toks, ai + 1), 0) == "IDENT" {
+                    let aname = field_at(list_get(toks, ai + 1), 3);
+                    if ai + 2 < n {
+                        if field_at(list_get(toks, ai + 2), 0) == "EQ" {
+                            if ai + 3 < n {
+                                if field_at(list_get(toks, ai + 3), 0) == "IDENT" {
+                                    let base = field_at(list_get(toks, ai + 3), 3);
+                                    aliases = aliases + aname + ":" + base + "\t";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1;
+    }
     while i < n {
         let k = field_at(list_get(toks, i), 0);
         let line = field_at(list_get(toks, i), 1);
@@ -2762,7 +2827,8 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
                 if p < n && field_at(list_get(toks, p), 0) == "COLON" {
                     p = p + 1;
                     if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
-                        let ann = field_at(list_get(toks, p), 3);
+                        let ann_raw = field_at(list_get(toks, p), 3);
+                        let ann = resolve_type_alias(aliases, ann_raw);
                         p = p + 1;
                         if p < n && field_at(list_get(toks, p), 0) == "EQ" {
                             p = p + 1;
@@ -2803,7 +2869,7 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
                                                 + ": let '"
                                                 + vname
                                                 + "' annotated as "
-                                                + ann
+                                                + ann_raw
                                                 + " but initializer has type "
                                                 + init_ty
                                         );
