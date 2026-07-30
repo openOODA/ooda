@@ -1269,46 +1269,92 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// R1: oodac must fail-closed on const integer division by zero.
-#[test]
-#[test]
-
-#[test]
-
+/// R1: match Ok(v)/Err(e) pattern binds must not false-undefined.
 #[test]
 fn oodac_typecheck_match_pattern_bind_ok() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootstrap/corpus/typecheck/pass/match_bind_ok.oo");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/pass/match_bind_ok.oo");
     let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
     let out = std::process::Command::new(bin)
-        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
-        .output().unwrap();
-    assert!(out.status.success(), "match bind should OK: {}", String::from_utf8_lossy(&out.stdout));
+        .args([
+            "run",
+            oodac.to_str().unwrap(),
+            "--",
+            "check",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn oodac");
+    assert!(
+        out.status.success(),
+        "match bind should OK: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
+
+/// R1: call arity + immut assign fail-closed via real oodac check.
+#[test]
 fn oodac_typecheck_slice_rejects_call_arity() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
     for name in ["call_arity_few.oo", "call_arity_many.oo", "immut_assign.oo"] {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootstrap/corpus/typecheck/fail").join(name);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("bootstrap/corpus/typecheck/fail")
+            .join(name);
+        assert!(path.is_file(), "missing {}", path.display());
         let out = std::process::Command::new(bin)
-            .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
-            .output().unwrap();
-        assert!(!out.status.success(), "{} must fail", name);
+            .args([
+                "run",
+                oodac.to_str().unwrap(),
+                "--",
+                "check",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .expect("spawn oodac");
+        assert!(
+            !out.status.success(),
+            "{} must fail: {}",
+            name,
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
 }
+
+/// R1: float literal /0.0 fail-closed.
+#[test]
 fn oodac_typecheck_slice_rejects_float_div_by_zero() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("bootstrap/corpus/typecheck/fail/float_div_by_zero.oo");
+    assert!(path.is_file(), "missing {}", path.display());
     let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
     let out = std::process::Command::new(bin)
-        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
-        .output().unwrap();
-    assert!(!out.status.success());
-    let c = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(c.to_lowercase().contains("zero") || c.contains("ERR"), "{}", c);
+        .args([
+            "run",
+            oodac.to_str().unwrap(),
+            "--",
+            "check",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn oodac");
+    assert!(!out.status.success(), "oodac must reject float /0");
+    let c = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        c.to_lowercase().contains("zero") || c.contains("ERR"),
+        "got: {}",
+        c
+    );
 }
 
+/// R1: const integer /0 fail-closed.
+#[test]
 fn oodac_typecheck_slice_rejects_div_by_zero() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1316,12 +1362,26 @@ fn oodac_typecheck_slice_rejects_div_by_zero() {
     assert!(path.is_file(), "missing {}", path.display());
     let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
     let out = std::process::Command::new(bin)
-        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .args([
+            "run",
+            oodac.to_str().unwrap(),
+            "--",
+            "check",
+            path.to_str().unwrap(),
+        ])
         .output()
         .expect("spawn oodac");
     assert!(!out.status.success(), "oodac must reject /0");
-    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(combined.to_lowercase().contains("zero") || combined.to_lowercase().contains("type"), "got: {}", combined);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.to_lowercase().contains("zero") || combined.to_lowercase().contains("type"),
+        "got: {}",
+        combined
+    );
 }
 
 /// R1 expand: oodac must fail-closed on undefined variables (was silent OK).
