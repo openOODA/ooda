@@ -3251,3 +3251,29 @@ fn break_outside_loop_fails_check() {
     assert!(err.contains("break") || err.contains("loop"), "{}", err);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// CHS frontend parity: stage-0 vs oodac tokens/check on corpus (scripts/chs_parity.sh).
+#[test]
+fn chs_parity_script_passes() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("scripts/chs_parity.sh");
+    assert!(script.is_file(), "missing {}", script.display());
+    let ooda = env!("CARGO_BIN_EXE_ooda");
+    let out = std::process::Command::new("bash")
+        .arg(script.to_str().unwrap())
+        .env("OODA", ooda)
+        .current_dir(root)
+        .output()
+        .expect("spawn chs_parity");
+    let c = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "chs_parity failed:\n{}",
+        c
+    );
+    assert!(c.contains("PASSED") || c.contains("OK"), "output:\n{}", c);
+}

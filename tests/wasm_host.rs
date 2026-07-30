@@ -348,11 +348,15 @@ fn ooda_wasm_string_ops_fixture_runs_on_host() {
 }
 
 /// Fixture fixtures/list_eq.oo deep equality under host.
+/// Unique temp copy — parallel builds to fixtures/*.wat race (D↑ flaky green/red).
 #[test]
 fn ooda_wasm_list_eq_fixture_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_eq.oo");
-    assert!(path.is_file(), "missing {}", path.display());
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_eq.oo");
+    assert!(src.is_file(), "missing {}", src.display());
+    let dir = unique_temp_dir("ooda_wlist_eq");
+    let path = dir.join("list_eq.oo");
+    std::fs::copy(&src, &path).expect("copy fixture");
     let out = Command::new(bin)
         .args(["build", "--target", "wasm", path.to_str().unwrap()])
         .output()
@@ -376,6 +380,7 @@ fn ooda_wasm_list_eq_fixture_runs_on_host() {
     );
     let lines = run_wat(&wat).expect("host");
     assert_eq!(lines, vec!["1".to_string(), "0".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// for-list desugars to while + nested `let x = list_get`; nested locals must declare.
@@ -552,11 +557,15 @@ pub fn main() {
 }
 
 /// Int list_eq programs must not pull `$list_str_eq` / streq (W↓).
+/// Build into a unique temp path — shared fixtures/*.wat races under --test-threads>1.
 #[test]
 fn ooda_wasm_list_int_eq_no_list_str_eq_rt() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_eq.oo");
-    assert!(path.is_file());
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_eq.oo");
+    assert!(src.is_file());
+    let dir = unique_temp_dir("ooda_wlint_eq");
+    let path = dir.join("list_eq.oo");
+    std::fs::copy(&src, &path).expect("copy fixture");
     let out = Command::new(bin)
         .args(["build", "--target", "wasm", path.to_str().unwrap()])
         .output()
@@ -573,6 +582,7 @@ fn ooda_wasm_list_int_eq_no_list_str_eq_rt() {
         "Int list_eq must not inject string eq RT:\n{}",
         wat
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Fixture fixtures/list_string.oo full surface under host.
