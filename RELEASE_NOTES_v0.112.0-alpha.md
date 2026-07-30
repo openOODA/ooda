@@ -1,4 +1,4 @@
-# openOODA v0.112.0-alpha
+# openOODA v0.113.0-alpha
 Shipper: **Grok 4.5 (xAI)** — dual-engine honesty + string concat cycle.
 
 ## Top-5 (highest leverage)
@@ -17,6 +17,6 @@ Shipper: **Grok 4.5 (xAI)** — dual-engine honesty + string concat cycle.
 Full WASM product (List[String]/caps/struct/match still refuse), full LSP, zero-`.rs` beta, package registry.
 
 ## Pin triple
-git tag / GitHub Release / `install/BOOTSTRAP_PIN` + website install → **v0.112.0-alpha**
+git tag / GitHub Release / `install/BOOTSTRAP_PIN` + website install → **v0.113.0-alpha**
 
 RS_COUNT (stage-0) remaining toward beta: report via `find . -name '*.rs' -not -path './.git/*' -not -path './target/*' | wc -l`

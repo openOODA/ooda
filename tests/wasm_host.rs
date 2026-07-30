@@ -449,7 +449,7 @@ fn ooda_wasm_list_sum_fixture_runs_on_host() {
 }
 
 #[test]
-fn ooda_wasm_refuses_list_string_push() {
+fn ooda_wasm_accepts_list_string_push() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = unique_temp_dir("ooda_wlstr");
     let path = dir.join("bad.oo");

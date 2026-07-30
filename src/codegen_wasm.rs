@@ -258,6 +258,11 @@ impl WasmCodeGen {
         false
     }
 
+    
+    fn is_type_string(t: &Type) -> bool {
+        matches!(t, Type::String) || matches!(t, Type::Custom(s) if s == "String")
+    }
+
     fn type_is_list(t: &Type) -> bool {
         matches!(t, Type::List(_))
     }
@@ -390,12 +395,12 @@ impl WasmCodeGen {
             .unwrap_or(false)
     }
 
-    fn require_list_int(inner: &Type, ctx: &str) -> Result<()> {
+    fn require_list_supported(inner: &Type, ctx: &str) -> Result<()> {
         match inner {
-            Type::Int => Ok(()),
-            Type::Custom(s) if s == "Int" || s == "_" => Ok(()), // unrefined / pending
+            Type::Int | Type::String => Ok(()),
+            Type::Custom(s) if s == "Int" || s == "String" || s == "_" => Ok(()), // unrefined / pending
             other => bail!(
-                "WASM backend only supports List[Int] (not {:?}) in '{}'. Use `ooda run` for List[String] etc.",
+                "WASM backend only supports List[Int]/List[String] (not {:?}) in '{}'.",
                 other,
                 ctx
             ),
@@ -405,7 +410,7 @@ impl WasmCodeGen {
     /// Map semantic local tags (`list` vs string `i32`) to WAT storage types.
     fn wat_storage_ty(sem: &str) -> &'static str {
         match sem {
-            "list" | "i32" => "i32",
+            "list" | "list_str" | "i32" => "i32",
             "f64" => "f64",
             _ => "i64",
         }
@@ -637,7 +642,7 @@ impl WasmCodeGen {
                     func.name
                 ),
                 Type::List(inner) => {
-                    Self::require_list_int(inner.as_ref(), &func.name)?;
+                    Self::require_list_supported(inner.as_ref(), &func.name)?;
                 }
                 Type::Struct { .. } => bail!(
                     "WASM backend does not yet support struct in '{}'. Use `ooda run`.",
@@ -648,7 +653,7 @@ impl WasmCodeGen {
             }
         }
         if let Type::List(inner) = &func.return_type {
-            Self::require_list_int(inner.as_ref(), &func.name)?;
+            Self::require_list_supported(inner.as_ref(), &func.name)?;
         }
         // String returns are allowed (i32 data offset — not a full string object).
 
@@ -661,8 +666,12 @@ impl WasmCodeGen {
                 Type::Float => "f64",
                 Type::Void => "i64",
                 Type::List(inner) => {
-                    Self::require_list_int(inner.as_ref(), "param")?;
-                    "list" // semantic tag; WAT storage is i32 pointer
+                    Self::require_list_supported(inner.as_ref(), "param")?;
+                    if Self::is_type_string(inner.as_ref()) {
+                        "list_str"
+                    } else {
+                        "list" // semantic tag; WAT storage is i32 pointer
+                    }
                 }
                 _ => bail!("unsupported param type in WASM: {:?}", t),
             })
@@ -822,7 +831,7 @@ impl WasmCodeGen {
                 let lhs_ty = Self::infer_expr_type(left, locals);
                 let rhs_ty = Self::infer_expr_type(right, locals);
                 let either_str = lhs_ty == "i32" || rhs_ty == "i32";
-                let either_list = lhs_ty == "list" || rhs_ty == "list";
+                let either_list = lhs_ty == "list" || rhs_ty == "list" || lhs_ty == "list_str" || rhs_ty == "list_str";
                 // String/list pointers are not numbers: refuse arithmetic / ordering.
                 // String Eq/Neq → $streq (content). List Eq/Neq → $list_eq (deep Int content).
                 if either_str {
@@ -1000,24 +1009,22 @@ impl WasmCodeGen {
                     }
                     let recv_ty = Self::infer_expr_type(&args[0], locals);
                     if name == ".push" {
-                        if recv_ty != "list" {
-                            bail!(
-                                "WASM .push requires List[Int] receiver (got {}); use `ooda run`.",
-                                recv_ty
-                            );
+                        if recv_ty != "list" && recv_ty != "list_str" {
+                            bail!("WASM .push requires List receiver");
                         }
                         if args.len() != 2 {
-                            bail!("WASM .push expects receiver + one Int element");
+                            bail!("WASM .push expects receiver + one element");
                         }
                         let elem_ty = Self::infer_expr_type(&args[1], locals);
-                        if elem_ty != "i64" {
-                            bail!(
-                                "WASM .push only supports Int elements (got {}); List[String] refuse.",
-                                elem_ty
-                            );
-                        }
                         wat.push_str(&Self::emit_expr(&args[0], locals)?);
                         wat.push_str(&Self::emit_expr(&args[1], locals)?);
+                        if recv_ty == "list_str" && elem_ty == "i32" {
+                            wat.push_str("    i64.extend_i32_u\n");
+                        } else if recv_ty == "list" && elem_ty == "i64" {
+                            // Ok
+                        } else {
+                            bail!("WASM .push type mismatch for list element");
+                        }
                         wat.push_str("    call $list_push\n");
                     } else if name == ".len" {
                         if args.len() != 1 {
@@ -1119,20 +1126,33 @@ impl WasmCodeGen {
                         }
                     }
                 } else {
+                    let mut is_list_str = false;
                     if name == "list_push" && args.len() >= 2 {
+                        let recv_ty = Self::infer_expr_type(&args[0], locals);
                         let elem_ty = Self::infer_expr_type(&args[1], locals);
-                        if elem_ty != "i64" {
-                            bail!(
-                                "WASM list_push only supports Int elements (got {}); \
-                                 List[String]/non-Int refuse. Use `ooda run`.",
-                                elem_ty
-                            );
+                        if recv_ty == "list_str" && elem_ty == "i32" {
+                            is_list_str = true;
+                        } else if recv_ty == "list" && elem_ty == "i64" {
+                            // ok
+                        } else {
+                            bail!("WASM list_push type mismatch");
+                        }
+                    } else if name == "list_get" && args.len() >= 1 {
+                        let recv_ty = Self::infer_expr_type(&args[0], locals);
+                        if recv_ty == "list_str" {
+                            is_list_str = true;
                         }
                     }
-                    for arg in args {
+                    for (i, arg) in args.iter().enumerate() {
                         wat.push_str(&Self::emit_expr(arg, locals)?);
+                        if name == "list_push" && is_list_str && i == 1 {
+                            wat.push_str("    i64.extend_i32_u\n");
+                        }
                     }
                     wat.push_str(&format!("    call ${}\n", name));
+                    if name == "list_get" && is_list_str {
+                        wat.push_str("    i32.wrap_i64\n");
+                    }
                 }
             }
             Expression::If {
@@ -1222,9 +1242,18 @@ impl WasmCodeGen {
             }
             Expression::Call { name, args, .. } => {
                 if name == "list_new" || name == "list_push" || name == ".push" {
+                    if let Some(arg0) = args.first() {
+                        let ty = Self::infer_expr_type(arg0, locals);
+                        if ty == "list_str" { return "list_str"; }
+                    }
                     "list"
-                } else if name == "list_get"
-                    || name == "list_len"
+                } else if name == "list_get" {
+                    if let Some(arg0) = args.first() {
+                        let ty = Self::infer_expr_type(arg0, locals);
+                        if ty == "list_str" { return "i32"; }
+                    }
+                    "i64"
+                } else if name == "list_len"
                     || name == ".len"
                     || name == ".char_at"
                     || name == ".contains"
@@ -1263,8 +1292,8 @@ impl WasmCodeGen {
                 type_annotation,
                 ..
             } => {
-                let ty = if let Some(Type::List(_)) = type_annotation {
-                    "list"
+                let ty = if let Some(Type::List(inner)) = type_annotation {
+                    if Self::is_type_string(inner.as_ref()) { "list_str" } else { "list" }
                 } else {
                     Self::infer_expr_type(init, locals)
                 };
