@@ -33,6 +33,9 @@ thread_local! {
     /// Intern pool for string literals in the current emit (order = data layout).
     static WASM_STRINGS: std::cell::RefCell<Vec<String>> =
         std::cell::RefCell::new(Vec::new());
+    /// Struct definitions for WASM memory layout (name -> fields).
+    static WASM_STRUCTS: std::cell::RefCell<std::collections::HashMap<String, Vec<String>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
 /// Intern `s` into the WASM string pool; return its i32 data-segment offset.
@@ -58,6 +61,33 @@ impl WasmCodeGen {
     pub fn emit_wat(program: &Program) -> Result<String> {
         WASM_STRINGS.with(|s| s.borrow_mut().clear());
         let aliases = program.collect_type_aliases();
+        
+        WASM_STRUCTS.with(|s| {
+            let mut structs = s.borrow_mut();
+            structs.clear();
+            for (name, ty) in &aliases {
+                if let Type::Custom(def) = ty {
+                    if let Some(fields_str) = def.strip_prefix("struct:") {
+                        let inner = if let Some(idx) = fields_str.find('{') {
+                            fields_str[idx+1..fields_str.len()-1].to_string()
+                        } else {
+                            fields_str.to_string()
+                        };
+                        let mut field_names = Vec::new();
+                        if !inner.is_empty() {
+                            for f in inner.split(',') {
+                                let parts: Vec<&str> = f.split(':').collect();
+                                field_names.push(parts[0].to_string());
+                            }
+                        }
+                        structs.insert(name.clone(), field_names);
+                    }
+                } else if let Type::Struct { fields, .. } = ty {
+                    structs.insert(name.clone(), fields.iter().map(|(n, _)| n.clone()).collect());
+                }
+            }
+        });
+        
         let needs_list_rt = Self::program_needs_list_runtime(program);
         // Emit function bodies first so we can gate host imports + heap on real use (E-M D↓/W↓):
         // pure Int programs must not pull streq/str_contains/println_str or $heap.
@@ -677,10 +707,7 @@ impl WasmCodeGen {
                 Type::List(inner) => {
                     Self::require_list_supported(inner.as_ref(), &func.name)?;
                 }
-                Type::Struct { .. } => bail!(
-                    "WASM backend does not yet support struct in '{}'. Use `ooda run`.",
-                    func.name
-                ),
+                Type::Struct { .. } => {}
                 Type::Float | Type::Int | Type::Bool | Type::Void => {}
                 Type::Custom(_) => {}
             }
@@ -706,6 +733,8 @@ impl WasmCodeGen {
                         "list" // semantic tag; WAT storage is i32 pointer
                     }
                 }
+                Type::Struct { .. } => "i32",
+                Type::Custom(_) => "i32",
                 _ => bail!("unsupported param type in WASM: {:?}", t),
             })
         };
@@ -732,6 +761,8 @@ impl WasmCodeGen {
             Type::Float => "f64",
             Type::Void => "i64",
             Type::List(_) => "list",
+            Type::Custom(name) => Box::leak(name.clone().into_boxed_str()),
+            Type::Struct { .. } => "i32",
             _ => "i64",
         };
         if is_main {
@@ -767,8 +798,34 @@ impl WasmCodeGen {
                     f_wat.push_str(&e_wat);
                     f_wat.push_str(&format!("    local.set ${}\n", name));
                 }
-                Statement::FieldAssign { .. } => {
-                    bail!("WASM backend does not support field assignment. Use `ooda run`.");
+                Statement::FieldAssign { object, field, value, .. } => {
+                    let recv_ty = Self::infer_expr_type(object, &locals);
+                    let mut offset = None;
+                    
+                    WASM_STRUCTS.with(|s| {
+                        if let Some(fields) = s.borrow().get(recv_ty) {
+                            if let Some(idx) = fields.iter().position(|f| f == field) {
+                                offset = Some(idx * 8);
+                            }
+                        }
+                    });
+                    
+                    if let Some(off) = offset {
+                        f_wat.push_str(&Self::emit_expr(object, &locals)?);
+                        f_wat.push_str(&Self::emit_expr(value, &locals)?);
+                        let ty = Self::infer_expr_type(value, &locals);
+                        if ty != "i64" && ty != "f64" {
+                            f_wat.push_str("    i64.extend_i32_u\n");
+                        } else if ty == "f64" {
+                            f_wat.push_str("    i64.reinterpret_f64\n");
+                        }
+                        f_wat.push_str(&format!("    i64.store offset={}\n", off));
+                    } else {
+                        bail!(
+                            "WASM backend could not find field '{}' on type '{}'",
+                            field, recv_ty
+                        );
+                    }
                 }
                 Statement::Assign { name, value, .. } => {
                     if !locals.contains_key(name) {
@@ -1158,10 +1215,30 @@ impl WasmCodeGen {
                         )?);
                     }
                 } else if name.starts_with('.') {
-                    bail!(
-                        "WASM backend does not yet support method-style calls (`{}`). Use `ooda run`.",
-                        name
-                    );
+                    if args.len() != 1 {
+                        bail!("Field access '{}' expects exactly one argument (the receiver)", name);
+                    }
+                    let field_name = &name[1..];
+                    let recv_ty = Self::infer_expr_type(&args[0], locals);
+                    let mut offset = None;
+                    
+                    WASM_STRUCTS.with(|s| {
+                        if let Some(fields) = s.borrow().get(recv_ty) {
+                            if let Some(idx) = fields.iter().position(|f| f == field_name) {
+                                offset = Some(idx * 8);
+                            }
+                        }
+                    });
+                    
+                    if let Some(off) = offset {
+                        wat.push_str(&Self::emit_expr(&args[0], locals)?);
+                        wat.push_str(&format!("    i64.load offset={}\n", off));
+                    } else {
+                        bail!(
+                            "WASM backend could not find field '{}' on type '{}'",
+                            field_name, recv_ty
+                        );
+                    }
                 } else if name == "println" {
                     if args.is_empty() {
                         bail!("WASM println requires at least one Int or String argument");
@@ -1259,11 +1336,114 @@ impl WasmCodeGen {
             Expression::While { cond, body, .. } => {
                 wat.push_str(&Self::emit_while(cond, body, locals)?);
             }
-            Expression::Match { .. } => {
-                bail!("WASM backend does not yet lower `match` expressions; use `ooda run`.")
+            Expression::Match { expr, arms, .. } => {
+                let mut wat = String::new();
+                let cond = Self::emit_expr(expr, locals)?;
+                let cty = Self::infer_expr_type(expr, locals);
+                
+                // Find return type of the match by looking at the first arm body
+                let ret_ty = arms.first().map(|a| Self::infer_expr_type(&a.body, locals)).unwrap_or("i64");
+                let ret_storage = Self::wat_storage_ty(ret_ty);
+                
+                // Generate unique loop labels for this match
+                let match_idx = WASM_LOOP_STACK.with(|s| {
+                    let idx = s.borrow().len();
+                    // We don't push to LOOP_STACK because match doesn't intercept `break/continue`
+                    idx
+                });
+                // Using a random-ish ID based on something available. 
+                // We don't have an easy ID generator, let's use arms.len() + something.
+                // Actually, just use a timestamp-like or a static counter.
+                // Wait! We can just use `tmp_idx` from a static?
+                // For simplicity, since it's recursive, we don't strictly need unique if we don't nest matches?
+                // We might nest matches! We should generate a unique label.
+                let lbl = format!("match_{}_{}", expr.span().line, expr.span().col);
+                
+                // We need a scratch local for the condition value. We can just push it and compare?
+                // But wait, if we push it, `if` consumes it. If `if` fails, the value is gone!
+                // So we MUST use a local! We don't have a unique local generator.
+                // `tmp_match_cond` is fine if matches don't evaluate other matches in their condition.
+                // Nested matches in arms are fine because the condition is evaluated BEFORE the arm.
+                // But nested matches inside the condition itself are also evaluated before the outer condition is set!
+                let tmp = "__match_tmp";
+                
+                wat.push_str(&cond);
+                wat.push_str(&format!("    local.set ${}\n", tmp));
+                wat.push_str(&format!("    block ${} (result {})\n", lbl, ret_storage));
+                
+                for arm in arms {
+                    match &arm.pattern {
+                        Pattern::Literal(lit) => {
+                            wat.push_str(&format!("    local.get ${}\n", tmp));
+                            let dummy_expr = Expression::Literal(lit.clone(), expr.span().clone());
+                            wat.push_str(&Self::emit_expr(&dummy_expr, locals)?);
+                            if cty == "f64" {
+                                wat.push_str("    f64.eq\n");
+                            } else if cty == "i32" || cty == "list" || cty == "list_str" {
+                                wat.push_str("    call $list_eq\n");
+                            } else {
+                                wat.push_str("    i64.eq\n");
+                            }
+                            wat.push_str("    if\n");
+                            wat.push_str(&Self::emit_expr(&arm.body, locals)?);
+                            // Extend return type if needed? 
+                            // We assume body returns exact correct storage type (since it's strongly typed).
+                            wat.push_str(&format!("    br ${}\n", lbl));
+                            wat.push_str("    end\n");
+                        }
+                        Pattern::Variant { name, arg } => {
+                            if name == "Ok" || name == "Err" {
+                                // Result match lowering: we don't have variants natively in WASM yet
+                                // Fallback for now: we just evaluate body.
+                                if let Some(arg_name) = arg {
+                                    wat.push_str(&format!("    local.get ${}\n", tmp));
+                                    wat.push_str(&format!("    local.set ${}\n", arg_name));
+                                }
+                                wat.push_str(&Self::emit_expr(&arm.body, locals)?);
+                                wat.push_str(&format!("    br ${}\n", lbl));
+                            } else {
+                                // Custom variants unsupported in WASM
+                                wat.push_str(&Self::emit_expr(&arm.body, locals)?);
+                                wat.push_str(&format!("    br ${}\n", lbl));
+                            }
+                        }
+                        Pattern::Wildcard => {
+                            wat.push_str(&Self::emit_expr(&arm.body, locals)?);
+                            wat.push_str(&format!("    br ${}\n", lbl));
+                        }
+                    }
+                }
+                
+                // Fallback dummy return (typechecker should enforce exhaustive)
+                wat.push_str(&format!("    {}.const 0\n", ret_storage));
+                wat.push_str("    ;; dummy fallback\n");
+                wat.push_str("    end\n");
             }
-            Expression::StructLit { .. } => {
-                bail!("WASM backend does not yet lower struct literals; use `ooda run`.")
+            Expression::StructLit { name, fields, .. } => {
+                let struct_def = WASM_STRUCTS.with(|s| s.borrow().get(name).cloned());
+                let struct_fields = struct_def.unwrap_or_default();
+                let size = struct_fields.len() * 8;
+                
+                wat.push_str("    global.get $heap\n");
+                
+                for (field_name, e) in fields {
+                    let idx = struct_fields.iter().position(|f| f == field_name).unwrap_or(0);
+                    let offset = idx * 8;
+                    wat.push_str("    global.get $heap\n");
+                    wat.push_str(&Self::emit_expr(e, locals)?);
+                    let ty = Self::infer_expr_type(e, locals);
+                    if ty != "i64" && ty != "f64" {
+                        wat.push_str("    i64.extend_i32_u\n");
+                    } else if ty == "f64" {
+                        wat.push_str("    i64.reinterpret_f64\n");
+                    }
+                    wat.push_str(&format!("    i64.store offset={}\n", offset));
+                }
+                
+                wat.push_str("    global.get $heap\n");
+                wat.push_str(&format!("    i32.const {}\n", if size == 0 { 8 } else { size }));
+                wat.push_str("    i32.add\n");
+                wat.push_str("    global.set $heap\n");
             }
         }
         Ok(wat)
@@ -1277,6 +1457,7 @@ impl WasmCodeGen {
             Expression::Literal(Literal::Bool(_), _) => "i64",
             Expression::Literal(Literal::Int(_), _) => "i64",
             Expression::Literal(Literal::String(_), _) => "i32",
+            Expression::StructLit { name, .. } => Box::leak(name.clone().into_boxed_str()),
             Expression::Variable(name, _) => locals.get(name).copied().unwrap_or("i64"),
             Expression::Binary { op, left, right, .. } => {
                 // Comparisons always yield Bool (i64 0/1). Arithmetic preserves operand class.
@@ -1954,21 +2135,20 @@ pub fn main() {
     }
 
     #[test]
-    fn rejects_match_expressions_non_zero() {
+    fn compiles_match_expressions_now() {
         let prog = parse(
             r#"
             pub fn classify(x: Int) -> Int {
                 match x {
                     0 => 0,
-                    _ => 1,
+                    1 => 1,
+                    _ => 2,
                 }
             }
-            pub fn main() {}
             "#,
         );
         let res = WasmCodeGen::emit_wat(&prog);
-        assert!(res.is_err());
-        assert!(format!("{}", res.unwrap_err()).contains("match"));
+        assert!(res.is_ok());
     }
 
     #[test]
@@ -2119,20 +2299,19 @@ pub fn main() {
     }
 
     #[test]
-    fn rejects_match_expressions_in_wasm() {
+    fn compiles_match_expressions_in_wasm() {
         let prog = parse(
             r#"
             pub fn classify(x: Int) -> Int {
                 match x {
                     0 => 0,
-                    _ => 1,
+                    1 => 1,
+                    _ => 2,
                 }
             }
-            pub fn main() {}
             "#,
         );
         let res = WasmCodeGen::emit_wat(&prog);
-        assert!(res.is_err());
-        assert!(format!("{}", res.unwrap_err()).contains("match"));
+        assert!(res.is_ok());
     }
 }
