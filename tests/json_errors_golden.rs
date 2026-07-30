@@ -1269,6 +1269,43 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R1: oodac check (real .oo) must fail-closed on annotated-let type mismatch
+/// (stage-0 previously rejected; oodac used to print OK — honesty bug).
+#[test]
+fn oodac_typecheck_slice_rejects_let_ann_mismatch() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/fail/let_ann_mismatch.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args([
+            "run",
+            oodac.to_str().unwrap(),
+            "--",
+            "check",
+            path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("spawn oodac");
+    assert!(
+        !out.status.success(),
+        "oodac must fail-closed on type mismatch: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("ERR") && combined.to_lowercase().contains("type"),
+        "expected ERR type, got: {}",
+        combined
+    );
+}
+
 /// String literals → data segment + println_str; String `+` is bump-heap concat;
 /// non-Add string arithmetic still fails closed (no silent pointer math).
 #[test]
