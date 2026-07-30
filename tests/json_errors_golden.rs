@@ -1269,6 +1269,24 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R1: `for i in 0..3` must not false-undefined `for`/`in`.
+#[test]
+fn oodac_typecheck_for_range_names_ok() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/pass/for_range_names.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "for range: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// R1: `type T = Int; let x: T = 1` must OK (alias resolve).
 #[test]
 fn oodac_typecheck_type_alias_ann_ok() {
