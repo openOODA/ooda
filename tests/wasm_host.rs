@@ -936,6 +936,72 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Dual-engine: if/else both arms lower; host sees else path.
+#[test]
+fn ooda_wasm_if_else_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_welse");
+    let path = dir.join("else.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut x = 0;
+    if false {
+        x = 1;
+    } else {
+        x = 2;
+    }
+    println(x);
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    let lines = run_wat(&wat).expect("host if/else");
+    assert_eq!(lines, vec!["2".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Dual-engine: nested if in else.
+#[test]
+fn ooda_wasm_nested_if_else_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wnestif");
+    let path = dir.join("nest.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut x = 0;
+    if false {
+        x = 1;
+    } else {
+        if true {
+            x = 3;
+        }
+    }
+    println(x);
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    let lines = run_wat(&wat).expect("host nested if");
+    assert_eq!(lines, vec!["3".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Dual-engine: float mul lowers to f64.mul and truncates to println (host).
 #[test]
 fn ooda_wasm_float_mul_runs_on_host() {
