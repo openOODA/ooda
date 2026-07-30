@@ -936,6 +936,29 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Dual-engine: float div truncates toward zero for println host.
+#[test]
+fn ooda_wasm_float_div_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wfdiv");
+    let path = dir.join("fdiv.oo");
+    std::fs::write(
+        &path,
+        "pub fn main() {\n    let x = 7.0 / 2.0;\n    println(x);\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("f64.div") || wat.contains("f64.const"));
+    let lines = run_wat(&wat).expect("host float div");
+    assert_eq!(lines, vec!["3".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Dual-engine: if/else both arms lower; host sees else path.
 #[test]
 fn ooda_wasm_if_else_runs_on_host() {
