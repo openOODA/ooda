@@ -1269,6 +1269,38 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R1: `let x = 1; f(x)` when f expects String.
+#[test]
+fn oodac_typecheck_rejects_call_arg_var_mismatch() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/fail/call_arg_var_mismatch.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success());
+}
+
+/// R1: `let x = 1; f(x)` OK when f expects Int.
+#[test]
+fn oodac_typecheck_call_arg_var_ok() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/pass/call_arg_var_ok.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "call arg var: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
 /// R1: `return x` with x pure-lit Int vs String ret.
 #[test]
 fn oodac_typecheck_rejects_return_var_mismatch() {
