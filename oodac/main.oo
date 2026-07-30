@@ -2510,6 +2510,12 @@ pub fn run_check_from_src(src: String) {
     typecheck_mut_assign_types(toks);
     // R1: unary `!` on non-Bool pure lit (e.g. `!1`) fail-closed.
     typecheck_unary_bang_lit(toks);
+    // R1: unary `-` requires numeric pure lit (not String/Bool).
+    typecheck_unary_minus_lit(toks);
+    // R1: ordering compares require numeric matching types (not String/String).
+    typecheck_cmp_numeric_lits(toks);
+    // R1: `if`/`while` pure-lit condition must be Bool.
+    typecheck_if_while_lit_cond(toks);
     typecheck_missing_return(toks);
     typecheck_must_use_result(toks);
     typecheck_call_arg_lits(toks);
@@ -2994,6 +3000,10 @@ pub fn is_known_name(name: String) -> Bool {
     if name == "chs_build" { return true; }
     if name == "to_string" { return true; }
     if name == "len" { return true; }
+    // Control keywords lexed as IDENT in R1 — not variables.
+    if name == "break" { return true; }
+    if name == "continue" { return true; }
+    if name == "return" { return true; }
     if name == "Int" { return true; }
     if name == "String" { return true; }
     if name == "Bool" { return true; }
@@ -4097,6 +4107,169 @@ pub fn typecheck_unary_bang_lit(toks: List[String]) {
                                 + oty
                         );
                         process_exit(1);
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// Value-ending tokens: binary MINUS context (not unary).
+pub fn is_value_token_kind(kind: String) -> Bool {
+    if lit_token_type(kind) != "" {
+        return true;
+    }
+    if kind == "IDENT" {
+        return true;
+    }
+    if kind == "RPAREN" {
+        return true;
+    }
+    if kind == "RBRACK" {
+        return true;
+    }
+    return false;
+}
+
+// Fail-closed: unary `-` on String/Bool pure lit (stage-0: Expected number after '-').
+pub fn typecheck_unary_minus_lit(toks: List[String]) {
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        let k = field_at(list_get(toks, i), 0);
+        if k == "MINUS" {
+            let line = field_at(list_get(toks, i), 1);
+            let col = field_at(list_get(toks, i), 2);
+            let mut unary = true;
+            if i > 0 {
+                let pk = field_at(list_get(toks, i - 1), 0);
+                if is_value_token_kind(pk) {
+                    unary = false;
+                }
+            }
+            if unary {
+                if i + 1 < n {
+                    let ok = field_at(list_get(toks, i + 1), 0);
+                    let oty = lit_token_type(ok);
+                    if oty != "" {
+                        if oty != "Int" {
+                            if oty != "Float" {
+                                println(
+                                    "ERR\ttype\tType error at "
+                                        + line
+                                        + ":"
+                                        + col
+                                        + ": unary '-' requires number, found "
+                                        + oty
+                                );
+                                process_exit(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// Ordering compares on pure lit pairs must be numeric (stage-0 parity for "a" < "b").
+// EQEQ/NEQ still allow same-type (including String) via combine_binop_types.
+pub fn typecheck_cmp_numeric_lits(toks: List[String]) {
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        let k = field_at(list_get(toks, i), 0);
+        let mut is_ord = false;
+        if k == "LT" {
+            is_ord = true;
+        } else if k == "GT" {
+            is_ord = true;
+        } else if k == "LTE" {
+            is_ord = true;
+        } else if k == "GTE" {
+            is_ord = true;
+        }
+        if is_ord {
+            if i > 0 {
+                if i + 1 < n {
+                    let lty = lit_token_type(field_at(list_get(toks, i - 1), 0));
+                    let rty = lit_token_type(field_at(list_get(toks, i + 1), 0));
+                    if lty != "" {
+                        if rty != "" {
+                            let line = field_at(list_get(toks, i), 1);
+                            let col = field_at(list_get(toks, i), 2);
+                            let mut ok = false;
+                            if lty == "Int" {
+                                if rty == "Int" {
+                                    ok = true;
+                                }
+                            }
+                            if lty == "Float" {
+                                if rty == "Float" {
+                                    ok = true;
+                                }
+                            }
+                            if !ok {
+                                println(
+                                    "ERR\ttype\tType error at "
+                                        + line
+                                        + ":"
+                                        + col
+                                        + ": comparison requires matching numeric types (both Int or both Float), found "
+                                        + lty
+                                        + " and "
+                                        + rty
+                                );
+                                process_exit(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// `if 1 {` / `while true {` pure single-lit conditions: must be Bool.
+pub fn typecheck_if_while_lit_cond(toks: List[String]) {
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        let k = field_at(list_get(toks, i), 0);
+        let mut is_cond = false;
+        if k == "KW_IF" {
+            is_cond = true;
+        } else if k == "KW_WHILE" {
+            is_cond = true;
+        }
+        if is_cond {
+            if i + 2 < n {
+                let cty = lit_token_type(field_at(list_get(toks, i + 1), 0));
+                if cty != "" {
+                    if field_at(list_get(toks, i + 2), 0) == "LBRACE" {
+                        if cty != "Bool" {
+                            let line = field_at(list_get(toks, i), 1);
+                            let col = field_at(list_get(toks, i), 2);
+                            let what = "if";
+                            let mut w = what;
+                            if k == "KW_WHILE" {
+                                w = "while";
+                            }
+                            println(
+                                "ERR\ttype\tType error at "
+                                    + line
+                                    + ":"
+                                    + col
+                                    + ": '"
+                                    + w
+                                    + "' condition must be Bool, found "
+                                    + cty
+                            );
+                            process_exit(1);
+                        }
                     }
                 }
             }
