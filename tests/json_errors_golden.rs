@@ -1271,6 +1271,20 @@ pub fn main() {
 
 /// R1: match Ok(v)/Err(e) pattern binds must not false-undefined.
 #[test]
+fn oodac_typecheck_rejects_must_use_ok() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/fail/must_use_ok.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output().unwrap();
+    assert!(!out.status.success());
+    let c=format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(c.contains("must-use")||c.contains("unused")||c.contains("ERR"), "{}", c);
+}
+
+#[test]
 fn oodac_typecheck_rejects_missing_return() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
