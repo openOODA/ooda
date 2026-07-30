@@ -1269,6 +1269,23 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R1: oodac must fail-closed on const integer division by zero.
+#[test]
+fn oodac_typecheck_slice_rejects_div_by_zero() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/fail/div_by_zero.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn oodac");
+    assert!(!out.status.success(), "oodac must reject /0");
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(combined.to_lowercase().contains("zero") || combined.to_lowercase().contains("type"), "got: {}", combined);
+}
+
 /// R1 expand: oodac must fail-closed on undefined variables (was silent OK).
 #[test]
 fn oodac_typecheck_slice_rejects_undefined_var() {
