@@ -1269,6 +1269,34 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// R1: mut assign from typed var mismatch.
+#[test]
+fn oodac_typecheck_rejects_mut_assign_var() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/fail/mut_assign_var.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success());
+}
+
+/// R1: mut assign from matching typed var OK.
+#[test]
+fn oodac_typecheck_mut_assign_var_ok() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("bootstrap/corpus/typecheck/pass/mut_assign_var_ok.oo");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    let out = std::process::Command::new(bin)
+        .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+}
+
 /// R1: `let x = 1; f(x)` when f expects String.
 #[test]
 fn oodac_typecheck_rejects_call_arg_var_mismatch() {
