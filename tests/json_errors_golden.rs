@@ -1272,6 +1272,19 @@ pub fn main() {
 /// R1: oodac must fail-closed on const integer division by zero.
 #[test]
 #[test]
+
+#[test]
+fn oodac_typecheck_slice_rejects_call_arity() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let oodac = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("oodac/main.oo");
+    for name in ["call_arity_few.oo", "call_arity_many.oo", "immut_assign.oo"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("bootstrap/corpus/typecheck/fail").join(name);
+        let out = std::process::Command::new(bin)
+            .args(["run", oodac.to_str().unwrap(), "--", "check", path.to_str().unwrap()])
+            .output().unwrap();
+        assert!(!out.status.success(), "{} must fail", name);
+    }
+}
 fn oodac_typecheck_slice_rejects_float_div_by_zero() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
