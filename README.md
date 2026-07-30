@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.111.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.112.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -28,7 +28,7 @@ Historical demos remain in git history under the old `examples/` path.
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.111.0-alpha
+ooda --version   # 0.112.0-alpha
 ```
 
 ```ooda
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.111.0-alpha (CHS M0–M5)
+## What's real in v0.112.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -60,7 +60,7 @@ import "lib.oo";       // relative / OODA_PATH
 | AI diagnostics (`--json-errors`) | Real JSON + measured timings; patch codemods including `refinement_bounds` |
 | Measured `ooda em` / `em --json` / `bench --em` | Real clocks only (W, µs, V); JSON EmReport for agents — no fake Boyd Ps |
 | String methods | Real on interpreter + CHS C (`.char_at` / `.str_slice`); LLVM subset refuses strings fail-closed |
-| WASM strings + List[Int] | Real: `.len`/`.char_at`/`.contains`/`.str_slice`; List[Int] free+method + deep `==`. Lazy list RT; heap for slice. Refuse List[String]/caps. Fixtures string_walk + list_eq + string_ops. Dev wasmtime smoke |
+| WASM strings + List[Int] | Real: `.len`/`.char_at`/`.contains`/`.str_slice`; String `+` bump-heap concat (no host strcat); List[Int] free+method + deep `==`. Lazy list/eq RT; heap only when used. Refuse List[String]/caps. Fixtures string_walk + list_eq + string_ops + str_concat. Dev wasmtime smoke |
 | Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM (method forms included as of v0.69); pure compute subset may lower; IR-only link fails non-zero |
 | `EnvCap` `.env_get` | Real on **interpreter**; C build refuses (sealed) |
 | Network `pkg install` | Partial: local pin; https `*.tar.gz` via curl+tar; `.minisig`/`.sig` fail-closed when present (need pubkey/gpg; `OODA_PKG_ALLOW_UNSIGNED=1` escape); `.sha256` optional/`OODA_PKG_REQUIRE_SHA256=1` |
@@ -72,7 +72,7 @@ import "lib.oo";       // relative / OODA_PATH
 | **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
 | **oodac** (`oodac/main.oo`) lex/parse/check/smoke-build | Real (interp + native) |
 | **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
-| `break` / `continue` | Real in while/for (interp + CHS C + WASM); LLVM refuse; outside loop fails typecheck |
+| `break` / `continue` | Real in while/for (interp + CHS C + WASM + LLVM integer subset); while-body tail `if`/break not silently dropped; outside loop fails typecheck |
 | `for x in list` / `lo..hi` | Real: desugars to while+list_get (interp + C); unannotated lists refine element type on assign; **C defers list kind until first push** (int vs string) |
 | `ooda build --release` | Real on CHS C path: gcc `-O3 -flto` |
 | LLVM Int/Bool/Float + while | Real (clang to link when present) |

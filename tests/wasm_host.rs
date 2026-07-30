@@ -942,6 +942,104 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fixture fixtures/break_loop.oo — while tail if + break/continue (dual-engine honesty).
+#[test]
+fn ooda_wasm_break_loop_fixture_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/break_loop.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm break_loop: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("br $break_") || wat.contains("br $break"),
+        "break must lower:\n{}",
+        wat
+    );
+    assert!(
+        wat.contains("br $continue_") || wat.contains("br $continue"),
+        "continue must lower:\n{}",
+        wat
+    );
+    // Pure Int: no string host / list RT (W↓).
+    assert!(
+        !wat.contains("println_str") && !wat.contains("$list_new"),
+        "break_loop is Int-only:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    // i=1..7 skip 3, stop before 8: 1+2+4+5+6+7 = 25
+    assert_eq!(lines, vec!["25".to_string()], "got {:?}", lines);
+}
+
+/// Fixture fixtures/for_range.oo — for lo..hi desugar (no list RT).
+#[test]
+fn ooda_wasm_for_range_fixture_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/for_range.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm for_range: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        !wat.contains("$list_new") && !wat.contains("$list_get"),
+        "for-range is while desugar, not list RT:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    // 0+1+2+3+4 = 10
+    assert_eq!(lines, vec!["10".to_string()], "got {:?}", lines);
+}
+
+/// Fixture fixtures/str_concat.oo — pure-WAT bump-heap String + (no host strcat).
+#[test]
+fn ooda_wasm_str_concat_fixture_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/str_concat.oo");
+    assert!(path.is_file(), "missing {}", path.display());
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "wasm str_concat: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("global.get $heap") && wat.contains("global.set $heap"),
+        "concat needs bump heap:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("str_concat") && !wat.contains("strcat"),
+        "no host strcat import:\n{}",
+        wat
+    );
+    assert!(
+        !wat.contains("$list_new"),
+        "string concat must not pull list RT:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(lines, vec!["hiyo".to_string()], "got {:?}", lines);
+}
+
 /// Variable String `.len` must not pull dead `$list_*` runtime (skeptic gap).
 #[test]
 fn ooda_wasm_var_string_len_no_list_runtime() {

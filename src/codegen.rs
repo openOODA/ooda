@@ -2,13 +2,22 @@
 // openOODA Integer-Subset LLVM IR Backend
 //
 // Honest dual-engine path: emits type-consistent LLVM IR for a documented
-// integer subset (Int arithmetic, Bool compares, println of Int, main).
-// Programs outside the subset are rejected with a clear error rather than
-// emitting broken IR. Output is structurally validated before write.
+// integer subset (Int arithmetic, Bool compares, println of Int, main,
+// while + break/continue + if side-effects). Programs outside the subset
+// are rejected with a clear error rather than emitting broken IR.
+// Locals use stack `alloca` (W↓ — no heap for scalar Int/Bool/Float).
+// Output is structurally validated before write.
 // ===================================================================
 use crate::ast::*;
 use anyhow::{anyhow, bail, Result};
+use std::cell::RefCell;
 use std::process::Command;
+
+// Nested while (break, continue) labels for the current LLVM emit.
+// break → end label; continue → head label. Stack-allocated label names only.
+thread_local! {
+    static LLVM_LOOP_STACK: RefCell<Vec<(String, String)>> = RefCell::new(Vec::new());
+}
 
 pub struct LlvmCodeGen;
 
@@ -298,10 +307,25 @@ impl LlvmCodeGen {
                     }
                     returned = true;
                 }
-                Statement::Break(_) | Statement::Continue(_) => {
-                    bail!(
-                        "LLVM integer-subset backend does not support break/continue. Use `ooda run` or `ooda build --target c`."
-                    );
+                Statement::Break(_) => {
+                    let end = LLVM_LOOP_STACK.with(|s| {
+                        s.borrow()
+                            .last()
+                            .map(|(b, _)| b.clone())
+                    })
+                    .ok_or_else(|| anyhow!("LLVM: break outside loop"))?;
+                    f_ir.push_str(&format!("  br label %{}\n", end));
+                    returned = true; // path ends (do not fall through)
+                }
+                Statement::Continue(_) => {
+                    let head = LLVM_LOOP_STACK.with(|s| {
+                        s.borrow()
+                            .last()
+                            .map(|(_, c)| c.clone())
+                    })
+                    .ok_or_else(|| anyhow!("LLVM: continue outside loop"))?;
+                    f_ir.push_str(&format!("  br label %{}\n", head));
+                    returned = true;
                 }
                 Statement::Return(None, _) => {
                     if is_main {
@@ -485,53 +509,60 @@ impl LlvmCodeGen {
                     Ok((res, code, reg, "i64"))
                 }
             }
-            Expression::If { cond, then_branch, else_branch, .. } => {
-                let (c_val, c_code, mut r_curr, _) = Self::emit_expr(cond, reg, locals)?;
+            Expression::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                // Full branch lowering (println / assign / break / continue / return).
+                // Prior alpha only lowered Return and silently dropped side effects (D↑ honesty bug).
+                let (c_val, c_code, mut r_curr, cty) = Self::emit_expr(cond, reg, locals)?;
                 code.push_str(&c_code);
-                
+
                 let then_label = format!("then_{}", r_curr);
                 let else_label = format!("else_{}", r_curr);
                 let merge_label = format!("merge_{}", r_curr);
                 r_curr += 1;
 
-                code.push_str(&format!("  br i1 {}, label %{}, label %{}\n", c_val, then_label, else_label));
+                let c_i1 = if cty == "i1" {
+                    c_val
+                } else {
+                    let t = format!("%r{}", r_curr);
+                    r_curr += 1;
+                    code.push_str(&format!("  {} = icmp ne i64 {}, 0\n", t, c_val));
+                    t
+                };
+                code.push_str(&format!(
+                    "  br i1 {}, label %{}, label %{}\n",
+                    c_i1, then_label, else_label
+                ));
 
                 code.push_str(&format!("\n{}:\n", then_label));
-                for stmt in &then_branch.stmts {
-                    match stmt {
-                        Statement::Return(Some(ex), _) => {
-                            let (val, scode, rnext, _) = Self::emit_expr(ex, r_curr, locals)?;
-                            r_curr = rnext;
-                            code.push_str(&scode);
-                            code.push_str(&format!("  ret i64 {}\n", val));
-                        }
-                        _ => {}
-                    }
-                }
-                if !code.ends_with("ret i64\n") && !code.contains("ret ") {
+                let (then_code, r1, then_term) =
+                    Self::emit_block_stmts(then_branch, r_curr, locals)?;
+                r_curr = r1;
+                code.push_str(&then_code);
+                if !then_term {
                     code.push_str(&format!("  br label %{}\n", merge_label));
                 }
 
                 code.push_str(&format!("\n{}:\n", else_label));
                 if let Some(eb) = else_branch {
-                    for stmt in &eb.stmts {
-                        match stmt {
-                            Statement::Return(Some(ex), _) => {
-                                let (val, scode, rnext, _) = Self::emit_expr(ex, r_curr, locals)?;
-                                r_curr = rnext;
-                                code.push_str(&scode);
-                                code.push_str(&format!("  ret i64 {}\n", val));
-                            }
-                            _ => {}
-                        }
+                    let (else_code, r2, else_term) =
+                        Self::emit_block_stmts(eb, r_curr, locals)?;
+                    r_curr = r2;
+                    code.push_str(&else_code);
+                    if !else_term {
+                        code.push_str(&format!("  br label %{}\n", merge_label));
                     }
-                }
-                if !code.ends_with("ret i64\n") && !code.contains("ret ") {
+                } else {
                     code.push_str(&format!("  br label %{}\n", merge_label));
                 }
 
                 code.push_str(&format!("\n{}:\n", merge_label));
-                Ok(("%r0".to_string(), code, r_curr, "i64"))
+                // Statement-context if leaves a dummy 0 (caller may drop).
+                Ok(("0".to_string(), code, r_curr, "i64"))
             }
             Expression::Unary { op, expr, .. } => {
                 let (v, vc, r1, vty) = Self::emit_expr(expr, reg, locals)?;
@@ -581,6 +612,119 @@ impl LlvmCodeGen {
         }
     }
 
+    /// Emit statements in a block (+ optional tail expr). Returns (ir, next_reg, terminated).
+    /// `terminated` means every path left via ret/break/continue (no fallthrough).
+    fn emit_block_stmts(
+        block: &Block,
+        mut reg: usize,
+        locals: &std::collections::HashMap<String, &'static str>,
+    ) -> Result<(String, usize, bool)> {
+        let mut code = String::new();
+        let mut terminated = false;
+        for stmt in &block.stmts {
+            if terminated {
+                break;
+            }
+            let (sc, r, term) = Self::emit_one_stmt(stmt, reg, locals)?;
+            reg = r;
+            code.push_str(&sc);
+            terminated = term;
+        }
+        if !terminated {
+            if let Some(tail) = &block.expr {
+                let (sc, r, term) = Self::emit_one_stmt(
+                    &Statement::Expr((**tail).clone(), Span { line: 0, col: 0 }),
+                    reg,
+                    locals,
+                )?;
+                reg = r;
+                code.push_str(&sc);
+                terminated = term;
+            }
+        }
+        Ok((code, reg, terminated))
+    }
+
+    /// Lower one statement. `terminated` = control does not fall through.
+    fn emit_one_stmt(
+        stmt: &Statement,
+        mut reg: usize,
+        locals: &std::collections::HashMap<String, &'static str>,
+    ) -> Result<(String, usize, bool)> {
+        let mut code = String::new();
+        match stmt {
+            Statement::Assign { name, value, .. } => {
+                let (val, vcode, r2, vty) = Self::emit_expr(value, reg, locals)?;
+                reg = r2;
+                code.push_str(&vcode);
+                let pty = locals.get(name).copied().unwrap_or(vty);
+                code.push_str(&format!("  store {} {}, {}* %var_{}\n", pty, val, pty, name));
+                Ok((code, reg, false))
+            }
+            Statement::Let { name, init, .. } => {
+                let (val, vcode, r2, vty) = Self::emit_expr(init, reg, locals)?;
+                reg = r2;
+                code.push_str(&vcode);
+                if locals.contains_key(name) {
+                    code.push_str(&format!("  store {} {}, {}* %var_{}\n", vty, val, vty, name));
+                } else {
+                    // Nested let in while/if: stack alloca (W↓ vs heap).
+                    code.push_str(&format!("  %var_{} = alloca {}\n", name, vty));
+                    code.push_str(&format!("  store {} {}, {}* %var_{}\n", vty, val, vty, name));
+                    // Note: cannot insert into immutable locals map here; pre-collected names preferred.
+                }
+                Ok((code, reg, false))
+            }
+            Statement::Expr(expr, _) => {
+                let (_v, ecode, r2, _) = Self::emit_expr(expr, reg, locals)?;
+                reg = r2;
+                code.push_str(&ecode);
+                Ok((code, reg, false))
+            }
+            Statement::Return(Some(ex), _) => {
+                let (val, scode, rnext, vty) = Self::emit_expr(ex, reg, locals)?;
+                reg = rnext;
+                code.push_str(&scode);
+                if vty == "i64" {
+                    code.push_str(&format!("  ret i64 {}\n", val));
+                } else if vty == "i1" {
+                    let z = format!("%r{}", reg);
+                    reg += 1;
+                    code.push_str(&format!("  {} = zext i1 {} to i64\n", z, val));
+                    code.push_str(&format!("  ret i64 {}\n", z));
+                } else {
+                    code.push_str(&format!("  ret i64 0\n"));
+                }
+                Ok((code, reg, true))
+            }
+            Statement::Return(None, _) => {
+                code.push_str("  ret i64 0\n");
+                Ok((code, reg, true))
+            }
+            Statement::Break(_) => {
+                let end = LLVM_LOOP_STACK.with(|s| s.borrow().last().map(|(b, _)| b.clone()))
+                    .ok_or_else(|| anyhow!("LLVM: break outside loop"))?;
+                code.push_str(&format!("  br label %{}\n", end));
+                Ok((code, reg, true))
+            }
+            Statement::Continue(_) => {
+                let head = LLVM_LOOP_STACK.with(|s| s.borrow().last().map(|(_, c)| c.clone()))
+                    .ok_or_else(|| anyhow!("LLVM: continue outside loop"))?;
+                code.push_str(&format!("  br label %{}\n", head));
+                Ok((code, reg, true))
+            }
+            Statement::While { cond, body, .. } => {
+                let (wcode, r) = Self::emit_while(cond, body, reg, locals)?;
+                Ok((wcode, r, false))
+            }
+            Statement::FieldAssign { .. } => {
+                bail!(
+                    "LLVM integer-subset backend does not support field assignment. Use `ooda run` or `ooda build --target c`."
+                )
+            }
+        }
+    }
+
     fn emit_while(
         cond: &Expression,
         body: &Block,
@@ -593,6 +737,9 @@ impl LlvmCodeGen {
         let head = format!("while_head_{}", id);
         let body_l = format!("while_body_{}", id);
         let end = format!("while_end_{}", id);
+
+        // break → end, continue → head (stack labels; zero heap W).
+        LLVM_LOOP_STACK.with(|s| s.borrow_mut().push((end.clone(), head.clone())));
 
         code.push_str(&format!("  br label %{}\n", head));
         code.push_str(&format!("\n{}:\n", head));
@@ -609,35 +756,17 @@ impl LlvmCodeGen {
         };
         code.push_str(&format!("  br i1 {}, label %{}, label %{}\n", c_i1, body_l, end));
         code.push_str(&format!("\n{}:\n", body_l));
-        // Only lower simple assign/let/expr in while body for the integer subset.
-        for stmt in &body.stmts {
-            match stmt {
-                Statement::Assign { name, value, .. } => {
-                    let (val, vcode, r2, vty) = Self::emit_expr(value, reg, locals)?;
-                    reg = r2;
-                    code.push_str(&vcode);
-                    let pty = locals.get(name).copied().unwrap_or(vty);
-                    code.push_str(&format!("  store {} {}, {}* %var_{}\n", pty, val, pty, name));
-                }
-                Statement::Let { name, init, .. } => {
-                    let (val, vcode, r2, vty) = Self::emit_expr(init, reg, locals)?;
-                    reg = r2;
-                    code.push_str(&vcode);
-                    // Assume pre-allocated if already in locals; otherwise skip complex lets.
-                    if locals.contains_key(name) {
-                        code.push_str(&format!("  store {} {}, {}* %var_{}\n", vty, val, vty, name));
-                    }
-                }
-                Statement::Expr(expr, _) => {
-                    let (_v, ecode, r2, _) = Self::emit_expr(expr, reg, locals)?;
-                    reg = r2;
-                    code.push_str(&ecode);
-                }
-                _ => {}
-            }
+        // stmts + body.expr tail (idiomatic if/break without trailing `;`).
+        let (body_code, r2, body_term) = Self::emit_block_stmts(body, reg, locals)?;
+        reg = r2;
+        code.push_str(&body_code);
+        if !body_term {
+            code.push_str(&format!("  br label %{}\n", head));
         }
-        code.push_str(&format!("  br label %{}\n", head));
         code.push_str(&format!("\n{}:\n", end));
+        LLVM_LOOP_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
         Ok((code, reg))
     }
 
@@ -855,5 +984,60 @@ mod tests {
             "LLVM must refuse .char_at: {}",
             err
         );
+    }
+
+    #[test]
+    fn while_tail_if_break_lowers_to_br_end() {
+        // Idiomatic last-if-without-`;` must not be silently dropped (dual-engine honesty).
+        let ir = emit(
+            r#"
+            pub fn main() {
+                let mut i = 0;
+                while i < 10 {
+                    i = i + 1;
+                    if i == 3 { break; }
+                }
+                println(i);
+            }
+        "#,
+        )
+        .expect("emit break");
+        assert!(
+            ir.contains("br label %while_end_"),
+            "break must branch to while_end:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("then_") && ir.contains("else_"),
+            "tail if must lower:\n{}",
+            ir
+        );
+        LlvmCodeGen::validate_ir(&ir).expect("validate");
+    }
+
+    #[test]
+    fn if_println_side_effect_not_silently_dropped() {
+        let ir = emit(
+            r#"
+            pub fn main() {
+                let i = 2;
+                if i == 2 {
+                    println(i);
+                } else {
+                    println(0);
+                }
+            }
+        "#,
+        )
+        .expect("emit if println");
+        let printf_count = ir.matches("@printf").count();
+        // declare + two call sites (then and else)
+        assert!(
+            printf_count >= 3,
+            "both branches must call printf; got {} @printf:\n{}",
+            printf_count,
+            ir
+        );
+        LlvmCodeGen::validate_ir(&ir).expect("validate");
     }
 }

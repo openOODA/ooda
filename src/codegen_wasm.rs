@@ -7,12 +7,13 @@
 // (`list_new` / `list_push` / `list_get` / `list_len` + bump heap).
 //
 // Fail-closed (non-zero): Match, capability I/O, List[String]/non-Int lists,
-// struct, string methods, string concat/arithmetic. List methods `.push`/`.len`
-// lower to free `list_*` (not general method dispatch).
+// struct, string *numeric* arithmetic (sub/mul/div). String `+` concatenates
+// on the bump heap (gated). List methods `.push`/`.len` lower to free `list_*`
+// (not general method dispatch).
 //
 // String model: distinct UTF-8 literals interned as NUL-terminated bytes;
 // values are i32 offsets. List model: header {len,cap,data} + i64 elements
-// on a bump heap (`$heap` global). List runtime is injected only when used (W↓).
+// on a bump heap (`$heap` global). List / str_slice / str_concat heap only when used (W↓).
 //
 // Locals: nested `let` inside while/if (e.g. for-list desugar) are collected
 // into the function's local table so wasmtime type-checks.
@@ -57,9 +58,8 @@ impl WasmCodeGen {
         WASM_STRINGS.with(|s| s.borrow_mut().clear());
         let aliases = program.collect_type_aliases();
         let needs_list_rt = Self::program_needs_list_runtime(program);
-        let needs_str_slice = Self::program_needs_str_slice(program);
-        // Emit function bodies first so we can gate host imports on real use (E-M D↓/W↓):
-        // pure Int programs must not pull streq/str_contains/println_str.
+        // Emit function bodies first so we can gate host imports + heap on real use (E-M D↓/W↓):
+        // pure Int programs must not pull streq/str_contains/println_str or $heap.
         let mut funcs_wat = String::new();
         for item in &program.items {
             if let Item::Function(func) = item {
@@ -77,6 +77,8 @@ impl WasmCodeGen {
         let needs_println_str = funcs_wat.contains("call $println_str");
         let needs_streq = funcs_wat.contains("call $streq");
         let needs_str_contains = funcs_wat.contains("call $str_contains");
+        // Heap only when bodies actually bump-allocate (list RT / str_slice / str_concat).
+        let body_uses_heap = funcs_wat.contains("global.get $heap");
 
         let mut wat = String::new();
         wat.push_str(";; ===================================================================\n");
@@ -103,8 +105,11 @@ impl WasmCodeGen {
         }
 
         let string_count = WASM_STRINGS.with(|s| s.borrow().len());
-        let needs_memory = needs_list_rt || string_count > 0 || needs_str_slice;
-        let needs_heap = needs_list_rt || needs_str_slice;
+        let needs_heap = needs_list_rt || body_uses_heap;
+        let needs_memory = needs_list_rt
+            || string_count > 0
+            || needs_heap
+            || funcs_wat.contains("i32.load8_u");
         if needs_memory {
             wat.push_str("  (memory 1)\n");
             wat.push_str("  (export \"memory\" (memory 0))\n");
@@ -251,86 +256,6 @@ impl WasmCodeGen {
             }
         }
         false
-    }
-
-    fn program_needs_str_slice(program: &Program) -> bool {
-        for item in &program.items {
-            if let Item::Function(f) = item {
-                if Self::block_needs_str_slice(&f.body) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn block_needs_str_slice(block: &Block) -> bool {
-        for stmt in &block.stmts {
-            if Self::stmt_needs_str_slice(stmt) {
-                return true;
-            }
-        }
-        block
-            .expr
-            .as_ref()
-            .map(|e| Self::expr_needs_str_slice(e))
-            .unwrap_or(false)
-    }
-
-    fn stmt_needs_str_slice(stmt: &Statement) -> bool {
-        match stmt {
-            Statement::Let { init, .. } => Self::expr_needs_str_slice(init),
-            Statement::Assign { value, .. } | Statement::Return(Some(value), _) => {
-                Self::expr_needs_str_slice(value)
-            }
-            Statement::Expr(e, _) => Self::expr_needs_str_slice(e),
-            Statement::While { cond, body, .. } => {
-                Self::expr_needs_str_slice(cond) || Self::block_needs_str_slice(body)
-            }
-            Statement::FieldAssign { object, value, .. } => {
-                Self::expr_needs_str_slice(object) || Self::expr_needs_str_slice(value)
-            }
-            Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => false,
-        }
-    }
-
-    fn expr_needs_str_slice(expr: &Expression) -> bool {
-        match expr {
-            Expression::Call { name, args, .. } => {
-                if name == ".str_slice" {
-                    return true;
-                }
-                args.iter().any(Self::expr_needs_str_slice)
-            }
-            Expression::Binary { left, right, .. } => {
-                Self::expr_needs_str_slice(left) || Self::expr_needs_str_slice(right)
-            }
-            Expression::Unary { expr, .. } => Self::expr_needs_str_slice(expr),
-            Expression::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                Self::expr_needs_str_slice(cond)
-                    || Self::block_needs_str_slice(then_branch)
-                    || else_branch
-                        .as_ref()
-                        .map(|b| Self::block_needs_str_slice(b))
-                        .unwrap_or(false)
-            }
-            Expression::While { cond, body, .. } => {
-                Self::expr_needs_str_slice(cond) || Self::block_needs_str_slice(body)
-            }
-            Expression::Match { expr, arms, .. } => {
-                Self::expr_needs_str_slice(expr)
-                    || arms.iter().any(|a| Self::expr_needs_str_slice(&a.body))
-            }
-            Expression::StructLit { fields, .. } => {
-                fields.iter().any(|(_, e)| Self::expr_needs_str_slice(e))
-            }
-            Expression::Literal(_, _) | Expression::Variable(_, _) => false,
-        }
     }
 
     fn type_is_list(t: &Type) -> bool {
@@ -484,6 +409,103 @@ impl WasmCodeGen {
             "f64" => "f64",
             _ => "i64",
         }
+    }
+
+    /// Concatenate two NUL-terminated strings onto the bump heap; leave i32 ptr on stack.
+    /// Scratch locals: `__cat_a`, `__cat_b`, `__cat_dst`, `__cat_i` (declared by collect).
+    fn emit_str_concat(
+        left: &Expression,
+        right: &Expression,
+        locals: &BTreeMap<String, &'static str>,
+    ) -> Result<String> {
+        for k in ["__cat_a", "__cat_b", "__cat_dst", "__cat_i"] {
+            if !locals.contains_key(k) {
+                bail!("internal: string concat missing scratch local {}", k);
+            }
+        }
+        static CAT_LAB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let id = CAT_LAB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut wat = String::new();
+        // a, b pointers
+        wat.push_str(&Self::emit_expr(left, locals)?);
+        wat.push_str("    local.set $__cat_a\n");
+        wat.push_str(&Self::emit_expr(right, locals)?);
+        wat.push_str("    local.set $__cat_b\n");
+        // dst = heap
+        wat.push_str("    global.get $heap\n");
+        wat.push_str("    local.set $__cat_dst\n");
+        // copy a into dst (until NUL), leave __cat_i = len_a
+        wat.push_str("    i32.const 0\n");
+        wat.push_str("    local.set $__cat_i\n");
+        wat.push_str(&format!("    block $cat_a_done_{}\n", id));
+        wat.push_str(&format!("      loop $cat_a_loop_{}\n", id));
+        wat.push_str("        local.get $__cat_a\n");
+        wat.push_str("        local.get $__cat_i\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        i32.load8_u\n");
+        wat.push_str("        i32.eqz\n");
+        wat.push_str(&format!("        br_if $cat_a_done_{}\n", id));
+        wat.push_str("        local.get $__cat_dst\n");
+        wat.push_str("        local.get $__cat_i\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        local.get $__cat_a\n");
+        wat.push_str("        local.get $__cat_i\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        i32.load8_u\n");
+        wat.push_str("        i32.store8\n");
+        wat.push_str("        local.get $__cat_i\n");
+        wat.push_str("        i32.const 1\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        local.set $__cat_i\n");
+        wat.push_str(&format!("        br $cat_a_loop_{}\n", id));
+        wat.push_str("      end\n");
+        wat.push_str("    end\n");
+        // copy b after a (until NUL); __cat_i advances
+        wat.push_str("    i32.const 0\n");
+        // reuse __cat_a as b-index (stack-local reuse, no extra W)
+        wat.push_str("    local.set $__cat_a\n");
+        wat.push_str(&format!("    block $cat_b_done_{}\n", id));
+        wat.push_str(&format!("      loop $cat_b_loop_{}\n", id));
+        wat.push_str("        local.get $__cat_b\n");
+        wat.push_str("        local.get $__cat_a\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        i32.load8_u\n");
+        wat.push_str("        i32.eqz\n");
+        wat.push_str(&format!("        br_if $cat_b_done_{}\n", id));
+        wat.push_str("        local.get $__cat_dst\n");
+        wat.push_str("        local.get $__cat_i\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        local.get $__cat_b\n");
+        wat.push_str("        local.get $__cat_a\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        i32.load8_u\n");
+        wat.push_str("        i32.store8\n");
+        wat.push_str("        local.get $__cat_i\n");
+        wat.push_str("        i32.const 1\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        local.set $__cat_i\n");
+        wat.push_str("        local.get $__cat_a\n");
+        wat.push_str("        i32.const 1\n");
+        wat.push_str("        i32.add\n");
+        wat.push_str("        local.set $__cat_a\n");
+        wat.push_str(&format!("        br $cat_b_loop_{}\n", id));
+        wat.push_str("      end\n");
+        wat.push_str("    end\n");
+        // NUL terminate
+        wat.push_str("    local.get $__cat_dst\n");
+        wat.push_str("    local.get $__cat_i\n");
+        wat.push_str("    i32.add\n");
+        wat.push_str("    i32.const 0\n");
+        wat.push_str("    i32.store8\n");
+        // heap += total_len + 1
+        wat.push_str("    local.get $__cat_dst\n");
+        wat.push_str("    local.get $__cat_i\n");
+        wat.push_str("    i32.add\n");
+        wat.push_str("    i32.const 1\n");
+        wat.push_str("    i32.add\n");
+        wat.push_str("    global.set $heap\n");
+        wat.push_str("    local.get $__cat_dst\n");
+        Ok(wat)
     }
 
     /// Copy s[start..end) to bump heap; leave new string pointer (i32) on stack.
@@ -805,11 +827,29 @@ impl WasmCodeGen {
                 // String Eq/Neq → $streq (content). List Eq/Neq → $list_eq (deep Int content).
                 if either_str {
                     match op {
-                        BinOp::Eq | BinOp::Neq => {}
-                        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                        BinOp::Eq | BinOp::Neq => {
+                            if lhs_ty != "i32" || rhs_ty != "i32" {
+                                bail!(
+                                    "WASM backend does not mix String pointers with numeric types in binary ops; use `ooda run`."
+                                );
+                            }
+                        }
+                        BinOp::Add => {
+                            // String + String → bump-heap concat (pure WAT). No silent pointer math.
+                            if lhs_ty != "i32" || rhs_ty != "i32" {
+                                bail!(
+                                    "WASM string concat requires String + String (got {} + {}); use `ooda run`.",
+                                    lhs_ty,
+                                    rhs_ty
+                                );
+                            }
+                            wat.push_str(&Self::emit_str_concat(left, right, locals)?);
+                            return Ok(wat);
+                        }
+                        BinOp::Sub | BinOp::Mul | BinOp::Div => {
                             bail!(
                                 "WASM backend does not lower string arithmetic (`{:?}`); \
-                                 use `ooda run` for concat / numeric conversion (no silent pointer math).",
+                                 use `ooda run` for numeric conversion (no silent pointer math).",
                                 op
                             );
                         }
@@ -824,11 +864,6 @@ impl WasmCodeGen {
                         BinOp::DotDot | BinOp::DotDotEq => {
                             bail!("WASM backend does not yet lower range operators (`..`, `..=`). Use `ooda run`.")
                         }
-                    }
-                    if lhs_ty != "i32" || rhs_ty != "i32" {
-                        bail!(
-                            "WASM backend does not mix String pointers with numeric types in binary ops; use `ooda run`."
-                        );
                     }
                 }
                 if either_list {
@@ -1254,9 +1289,20 @@ impl WasmCodeGen {
 
     fn collect_locals_in_expr(expr: &Expression, locals: &mut BTreeMap<String, &'static str>) {
         match expr {
-            Expression::Binary { left, right, .. } => {
+            Expression::Binary { op, left, right, .. } => {
                 Self::collect_locals_in_expr(left, locals);
                 Self::collect_locals_in_expr(right, locals);
+                // String + String concat needs fixed scratch locals (pure-WAT bump heap).
+                if matches!(op, BinOp::Add) {
+                    let lt = Self::infer_expr_type(left, locals);
+                    let rt = Self::infer_expr_type(right, locals);
+                    if lt == "i32" && rt == "i32" {
+                        locals.insert("__cat_a".into(), "i32");
+                        locals.insert("__cat_b".into(), "i32");
+                        locals.insert("__cat_dst".into(), "i32");
+                        locals.insert("__cat_i".into(), "i32");
+                    }
+                }
             }
             Expression::Unary { expr, .. } => Self::collect_locals_in_expr(expr, locals),
             Expression::Call { name, args, .. } => {
@@ -1338,6 +1384,18 @@ impl WasmCodeGen {
         wat.push_str(&format!("        br_if ${}\n", br_lab));
         for stmt in &body.stmts {
             wat.push_str(&Self::emit_stmt_wat(stmt, locals)?);
+        }
+        // Parser treats a final expression without `;` as `body.expr` (e.g. idiomatic
+        // `if cond { break; }` as while tail). Dropping it silently miscompiled control
+        // flow — dual-engine honesty: lower tail as a statement (drop residual value).
+        if let Some(tail) = &body.expr {
+            wat.push_str(&Self::emit_expr(tail, locals)?);
+            match &**tail {
+                Expression::Call { name, .. } if name == "println" => {}
+                _ => {
+                    wat.push_str("        drop\n");
+                }
+            }
         }
         wat.push_str(&format!("        br ${}\n", cont_lab));
         wat.push_str("      end\n");
@@ -1674,7 +1732,7 @@ pub fn main() {
     }
 
     #[test]
-    fn refuses_string_concat_no_pointer_math() {
+    fn lowers_string_concat_on_bump_heap() {
         let prog = parse(
             r#"
 pub fn main() {
@@ -1685,11 +1743,71 @@ pub fn main() {
 }
 "#,
         );
+        let wat = WasmCodeGen::emit_wat(&prog).expect("emit string concat");
+        assert!(
+            wat.contains("global.get $heap") && wat.contains("global.set $heap"),
+            "concat must bump heap:\n{}",
+            wat
+        );
+        assert!(
+            wat.contains("i32.store8") && wat.contains("i32.load8_u"),
+            "concat must copy bytes:\n{}",
+            wat
+        );
+        // No host concat import — pure WAT (zero host D for this path).
+        assert!(
+            !wat.contains("str_concat") && !wat.contains("strcat"),
+            "must not invent host strcat:\n{}",
+            wat
+        );
+        assert!(wat.contains("call $println_str"), "println result string:\n{}", wat);
+    }
+
+    #[test]
+    fn while_tail_if_break_is_not_silently_dropped() {
+        // Idiomatic OODA: last stmt without `;` becomes body.expr — must still lower.
+        let prog = parse(
+            r#"
+pub fn main() {
+    let mut i = 0;
+    while i < 10 {
+        i = i + 1;
+        if i == 3 { break; }
+    }
+    println(i);
+}
+"#,
+        );
+        let wat = WasmCodeGen::emit_wat(&prog).expect("emit while tail break");
+        assert!(
+            wat.contains("br $break_") || wat.contains("br $break"),
+            "break in while tail if must lower:\n{}",
+            wat
+        );
+        assert!(
+            wat.contains("(if (result"),
+            "tail if must lower:\n{}",
+            wat
+        );
+    }
+
+    #[test]
+    fn refuses_string_sub_no_pointer_math() {
+        let prog = parse(
+            r#"
+pub fn main() {
+    let a = "a";
+    let b = "b";
+    let c = a - b;
+    println(c);
+}
+"#,
+        );
         let err = WasmCodeGen::emit_wat(&prog).unwrap_err();
         let msg = format!("{}", err);
         assert!(
             msg.contains("string arithmetic") || msg.contains("pointer"),
-            "expected refuse string +, got: {}",
+            "expected refuse string -, got: {}",
             msg
         );
     }

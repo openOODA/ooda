@@ -1269,7 +1269,8 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// String literals → data segment + println_str; dual-engine still refuses concat.
+/// String literals → data segment + println_str; String `+` is bump-heap concat;
+/// non-Add string arithmetic still fails closed (no silent pointer math).
 #[test]
 fn build_wasm_string_literal_println_and_refuses_concat() {
     let bin = env!("CARGO_BIN_EXE_ooda");
@@ -1306,9 +1307,10 @@ pub fn main() {
         wat
     );
 
-    let bad = dir.join("bad.oo");
+    // String + is real concat (bump heap).
+    let concat = dir.join("concat.oo");
     std::fs::write(
-        &bad,
+        &concat,
         r#"
 pub fn main() {
     let a = "a";
@@ -1319,13 +1321,42 @@ pub fn main() {
 "#,
     )
     .unwrap();
+    let out_cat = std::process::Command::new(bin)
+        .args(["build", "--target", "wasm", concat.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out_cat.status.success(),
+        "string concat must lower on WASM: {}",
+        String::from_utf8_lossy(&out_cat.stderr)
+    );
+    let cat_wat = std::fs::read_to_string(concat.with_extension("wat")).expect("wat");
+    assert!(
+        cat_wat.contains("global.get $heap"),
+        "concat needs heap:\n{}",
+        cat_wat
+    );
+
+    // List[String] push still refuse on WASM (no silent string-list product claim).
+    let bad = dir.join("bad.oo");
+    std::fs::write(
+        &bad,
+        r#"
+pub fn main() {
+    let mut xs: List[String] = list_new();
+    xs = xs.push("a");
+    println(xs.len());
+}
+"#,
+    )
+    .unwrap();
     let out2 = std::process::Command::new(bin)
         .args(["build", "--target", "wasm", bad.to_str().unwrap()])
         .output()
         .expect("spawn");
     assert!(
         !out2.status.success(),
-        "string concat must fail-closed on WASM (no pointer math)"
+        "List[String] must fail-closed on WASM"
     );
     let err = format!(
         "{}{}",
@@ -1333,7 +1364,10 @@ pub fn main() {
         String::from_utf8_lossy(&out2.stdout)
     );
     assert!(
-        err.contains("string arithmetic") || err.contains("pointer"),
+        err.contains("List[String]")
+            || err.contains("String")
+            || err.contains("refuse")
+            || err.contains("Int"),
         "err={}",
         err
     );

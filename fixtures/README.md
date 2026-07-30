@@ -16,3 +16,8 @@ surface; historical demos remain recoverable from git history
 | `chs_fs_roundtrip.oo` | dual-engine refuse goldens |
 | `unauthorized_io.oo` | capability JSON golden |
 | `em_demo.oo` | `ooda em` measured report golden |
+| `list_eq.oo` / `list_sum.oo` | WASM List[Int] host e2e |
+| `string_ops.oo` / `string_walk.oo` | WASM string methods host e2e |
+| `break_loop.oo` | while break/continue (interp + C + WASM + LLVM) |
+| `for_range.oo` | for lo..hi desugar (interp + C + WASM + LLVM) |
+| `str_concat.oo` | String + WASM bump-heap concat host e2e |
