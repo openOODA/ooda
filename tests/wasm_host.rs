@@ -936,6 +936,61 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Dual-engine: float mul lowers to f64.mul and truncates to println (host).
+#[test]
+fn ooda_wasm_float_mul_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wfmul");
+    let path = dir.join("fmul.oo");
+    std::fs::write(
+        &path,
+        "pub fn main() {\n    let x = 2.0 * 3.0;\n    println(x);\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(
+        out.status.success(),
+        "float mul wasm: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(
+        wat.contains("f64.mul") || wat.contains("f64.const"),
+        "expected f64 ops:\n{}",
+        wat
+    );
+    let lines = run_wat(&wat).expect("host float mul");
+    // Alpha truncates f64 → i64 for println host import.
+    assert_eq!(lines, vec!["6".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Dual-engine: float add on host via trunc println.
+#[test]
+fn ooda_wasm_float_add_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wfadd");
+    let path = dir.join("fadd.oo");
+    std::fs::write(
+        &path,
+        "pub fn main() {\n    let x = 1.5 + 2.5;\n    println(x);\n}\n",
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    assert!(wat.contains("f64.add") || wat.contains("f64.const"));
+    let lines = run_wat(&wat).expect("host float add");
+    assert_eq!(lines, vec!["4".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Pure int program must not pull list runtime (W↓).
 #[test]
 fn ooda_wasm_no_list_runtime_without_lists() {
