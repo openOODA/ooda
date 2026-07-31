@@ -423,11 +423,15 @@ pub fn main() {
 }
 
 /// Fixture fixtures/list_sum.oo — method .push + for-list; println-only host (no string imports).
+/// Unique temp path — shared fixtures/*.wat races under parallel cargo (D↑ flaky).
 #[test]
 fn ooda_wasm_list_sum_fixture_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_sum.oo");
-    assert!(path.is_file(), "missing {}", path.display());
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/list_sum.oo");
+    assert!(src.is_file(), "missing {}", src.display());
+    let dir = unique_temp_dir("ooda_wlist_sum");
+    let path = dir.join("list_sum.oo");
+    std::fs::copy(&src, &path).expect("copy fixture");
     let out = Command::new(bin)
         .args(["build", "--target", "wasm", path.to_str().unwrap()])
         .output()
@@ -451,6 +455,7 @@ fn ooda_wasm_list_sum_fixture_runs_on_host() {
     );
     let lines = run_wat(&wat).expect("host");
     assert_eq!(lines, vec!["6".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Annotated List[String]: .len / list_get / println_str under host.
