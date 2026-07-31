@@ -2499,6 +2499,8 @@ pub fn run_check_from_src(src: String) {
     // R1: g() + lit / g() && lit when return known.
     typecheck_call_binop_lits(toks);
     typecheck_call_logic_lits(toks);
+    // R1: field/method on known receivers (x.foo, x.len() on Int) fail-closed.
+    typecheck_field_method(toks);
     println("OK");
 }
 
@@ -5560,7 +5562,23 @@ pub fn build_pure_lit_env(toks: List[String]) -> String {
                         if field_at(list_get(toks, p), 0) == "EQ" {
                             p = p + 1;
                             if p < n {
-                                let ity = infer_typed_expr_type(toks, p, lit_env);
+                                let mut ity = infer_typed_expr_type(toks, p, lit_env);
+                                if ity == "" {
+                                    if field_at(list_get(toks, p), 0) == "IDENT" {
+                                        if p + 2 < n {
+                                            if field_at(list_get(toks, p + 1), 0) == "LPAREN" {
+                                                if field_at(list_get(toks, p + 2), 0) == "RPAREN" {
+                                                    let ret_table = build_fn_ret_table(toks);
+                                                    let cname = field_at(list_get(toks, p), 3);
+                                                    let got = resolve_type_alias(ret_table, cname);
+                                                    if got != cname {
+                                                        ity = resolve_type_alias(aliases, got);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 if ity != "" {
                                     if ity != "ERR_DIV0" {
                                         if ity != "ERR_BINOP" {
@@ -5581,6 +5599,179 @@ pub fn build_pure_lit_env(toks: List[String]) -> String {
         i = i + 1;
     }
     return lit_env;
+}
+
+// True if type name is List[...] or List.
+pub fn is_list_type_name(ty: String) -> Bool {
+    if ty == "List" {
+        return true;
+    }
+    // prefix List[
+    if chars_len(ty) >= 5 {
+        if char_at(ty, 0) == "L" {
+            if char_at(ty, 1) == "i" {
+                if char_at(ty, 2) == "s" {
+                    if char_at(ty, 3) == "t" {
+                        if char_at(ty, 4) == "[" {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Fail-closed: known receiver + field/method that stage-0 rejects.
+// Patterns: x.foo, x.len(), g().foo (zero-arg call receiver).
+pub fn typecheck_field_method(toks: List[String]) {
+    let n = list_len(toks);
+    let lit_env = build_pure_lit_env(toks);
+    let ret_table = build_fn_ret_table(toks);
+    let mut i = 0;
+    while i < n {
+        if field_at(list_get(toks, i), 0) == "DOT" {
+            if i + 1 < n {
+                if field_at(list_get(toks, i + 1), 0) == "IDENT" {
+                    let mname = field_at(list_get(toks, i + 1), 3);
+                    let line = field_at(list_get(toks, i), 1);
+                    let col = field_at(list_get(toks, i), 2);
+                    let mut is_call = false;
+                    if i + 2 < n {
+                        if field_at(list_get(toks, i + 2), 0) == "LPAREN" {
+                            is_call = true;
+                        }
+                    }
+                    // Receiver type
+                    let mut rty = "";
+                    if i > 0 {
+                        let pk = field_at(list_get(toks, i - 1), 0);
+                        // lit receiver: 1.foo rare
+                        let lit = lit_token_type(pk);
+                        if lit != "" {
+                            rty = lit;
+                        }
+                        if rty == "" {
+                            if pk == "IDENT" {
+                                let rn = field_at(list_get(toks, i - 1), 3);
+                                let got = resolve_type_alias(lit_env, rn);
+                                if got != rn {
+                                    rty = got;
+                                }
+                            }
+                        }
+                        // g().foo — RPAREN before DOT
+                        if rty == "" {
+                            if pk == "RPAREN" {
+                                if i >= 3 {
+                                    if field_at(list_get(toks, i - 3), 0) == "IDENT" {
+                                        if field_at(list_get(toks, i - 2), 0) == "LPAREN" {
+                                            let cname = field_at(list_get(toks, i - 3), 3);
+                                            let got = resolve_type_alias(ret_table, cname);
+                                            if got != cname {
+                                                rty = got;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if rty != "" {
+                        if is_call {
+                            // Methods: .len on String/List; string walk methods on String only.
+                            if mname == "len" {
+                                if rty != "String" {
+                                    if !is_list_type_name(rty) {
+                                        println(
+                                            "ERR\ttype\tType error at "
+                                                + line
+                                                + ":"
+                                                + col
+                                                + ": .len() requires String or List receiver, found "
+                                                + rty
+                                        );
+                                        process_exit(1);
+                                    }
+                                }
+                            } else if mname == "contains" || mname == "char_at" || mname == "str_slice" {
+                                if rty != "String" {
+                                    println(
+                                        "ERR\ttype\tType error at "
+                                            + line
+                                            + ":"
+                                            + col
+                                            + ": unknown method '."
+                                            + mname
+                                            + "' on "
+                                            + rty
+                                    );
+                                    process_exit(1);
+                                }
+                            } else if mname == "push" {
+                                if !is_list_type_name(rty) {
+                                    println(
+                                        "ERR\ttype\tType error at "
+                                            + line
+                                            + ":"
+                                            + col
+                                            + ": unknown method '.push' on "
+                                            + rty
+                                    );
+                                    process_exit(1);
+                                }
+                            } else {
+                                // Unknown method on known primitive — fail-closed.
+                                if rty == "Int" || rty == "Bool" || rty == "Float" || rty == "String" {
+                                    println(
+                                        "ERR\ttype\tType error at "
+                                            + line
+                                            + ":"
+                                            + col
+                                            + ": unknown method '."
+                                            + mname
+                                            + "' on "
+                                            + rty
+                                    );
+                                    process_exit(1);
+                                }
+                            }
+                        } else {
+                            // Field access on primitives is never valid in R1.
+                            if rty == "Int" || rty == "Bool" || rty == "Float" || rty == "String" {
+                                println(
+                                    "ERR\ttype\tType error at "
+                                        + line
+                                        + ":"
+                                        + col
+                                        + ": unknown method '."
+                                        + mname
+                                        + "' on "
+                                        + rty
+                                );
+                                process_exit(1);
+                            }
+                            if is_list_type_name(rty) {
+                                println(
+                                    "ERR\ttype\tType error at "
+                                        + line
+                                        + ":"
+                                        + col
+                                        + ": unknown method '."
+                                        + mname
+                                        + "' on "
+                                        + rty
+                                );
+                                process_exit(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
 }
 
 pub fn typecheck_if_while_lit_cond(toks: List[String]) {
