@@ -1307,14 +1307,22 @@ impl WasmCodeGen {
                 wat.push_str(&Self::emit_expr(expr, locals)?);
                 match op {
                     UnaryOp::Not => {
-                        // `!` on Int → eqz. On Float → compare ≠ 0.0 via f64.const 0.0; f64.ne.
+                        // `!` on Int → eqz (i32). On Float → f64.ne (i32).
+                        // Bools are stored as i64 0/1; extend so `let x = !false` typechecks in WAT.
                         match inner_ty {
-                            "i64" => wat.push_str("    i64.eqz\n"),
+                            "i64" => {
+                                wat.push_str("    i64.eqz\n");
+                                wat.push_str("    i64.extend_i32_u\n");
+                            }
                             "f64" => {
                                 wat.push_str("    f64.const 0.0\n");
                                 wat.push_str("    f64.ne\n");
+                                wat.push_str("    i64.extend_i32_u\n");
                             }
-                            _ => wat.push_str("    i64.eqz\n"),
+                            _ => {
+                                wat.push_str("    i64.eqz\n");
+                                wat.push_str("    i64.extend_i32_u\n");
+                            }
                         }
                     }
                     UnaryOp::Neg => match inner_ty {

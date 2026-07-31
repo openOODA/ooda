@@ -946,6 +946,60 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Dual-engine: Bool `||` under host.
+#[test]
+fn ooda_wasm_bool_or_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wbor");
+    let path = dir.join("bor.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let x = false || true;
+    if x { println(1); } else { println(0); }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    let lines = run_wat(&wat).expect("host or");
+    assert_eq!(lines, vec!["1".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Dual-engine: unary `!` under host.
+#[test]
+fn ooda_wasm_bool_not_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wbnot");
+    let path = dir.join("bnot.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let x = !false;
+    if x { println(1); } else { println(0); }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    let lines = run_wat(&wat).expect("host not");
+    assert_eq!(lines, vec!["1".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Dual-engine: nested while accumulation under host.
 #[test]
 fn ooda_wasm_nested_while_runs_on_host() {
