@@ -946,6 +946,42 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Dual-engine: nested while accumulation under host.
+#[test]
+fn ooda_wasm_nested_while_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wnestw");
+    let path = dir.join("nestw.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    let mut i = 0;
+    let mut s = 0;
+    while i < 3 {
+        let mut j = 0;
+        while j < 2 {
+            s = s + 1;
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    println(s);
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    let lines = run_wat(&wat).expect("host nested while");
+    assert_eq!(lines, vec!["6".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Dual-engine: Bool `&&` + if/else under host.
 #[test]
 fn ooda_wasm_bool_and_if_else_runs_on_host() {
