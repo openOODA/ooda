@@ -2501,6 +2501,8 @@ pub fn run_check_from_src(src: String) {
     typecheck_call_logic_lits(toks);
     // R1: field/method on known receivers (x.foo, x.len() on Int) fail-closed.
     typecheck_field_method(toks);
+    // R1: field access types into binops (p.x + "a") fail-closed.
+    typecheck_field_binop_uses(toks);
     println("OK");
 }
 
@@ -3386,6 +3388,7 @@ pub fn typecheck_call_arg_lits(toks: List[String]) {
     let mut aliases = "\t";
     // Declared returns for `let x = g()` / `f(g())`.
     let ret_table = build_fn_ret_table(toks);
+    let struct_table = build_struct_field_table(toks);
     // Pure-lit / call-bound let env for IDENT args: `let x = g(); f(x)`.
     let mut lit_env = "\t";
     let mut ai = 0;
@@ -3399,7 +3402,11 @@ pub fn typecheck_call_arg_lits(toks: List[String]) {
                         if field_at(list_get(toks, ai + 2), 0) == "EQ" {
                             if ai + 3 < n {
                                 if field_at(list_get(toks, ai + 3), 0) == "IDENT" {
-                                    aliases = aliases + aname + ":" + field_at(list_get(toks, ai + 3), 3) + "\t";
+                                    let base = field_at(list_get(toks, ai + 3), 3);
+                                    // Keep struct type names out of simple aliases.
+                                    if base != "struct" {
+                                        aliases = aliases + aname + ":" + base + "\t";
+                                    }
                                 }
                             }
                         }
@@ -3447,6 +3454,12 @@ pub fn typecheck_call_arg_lits(toks: List[String]) {
                                                         ity = resolve_type_alias(aliases, got);
                                                     }
                                                 }
+                                            }
+                                        }
+                                        // `let p = Point { ... }`
+                                        if ity == "" {
+                                            if field_at(list_get(toks, p + 1), 0) == "LBRACE" {
+                                                ity = field_at(list_get(toks, p), 3);
                                             }
                                         }
                                     }
@@ -3611,7 +3624,8 @@ pub fn typecheck_call_arg_lits(toks: List[String]) {
                                                         p,
                                                         lit_env,
                                                         ret_table,
-                                                        aliases
+                                                        aliases,
+                                                        struct_table
                                                     );
                                                     if aty != "" {
                                                         let ety = nth_csv(types, arg_i);
@@ -3649,7 +3663,8 @@ pub fn typecheck_call_arg_lits(toks: List[String]) {
                                                     p,
                                                     lit_env,
                                                     ret_table,
-                                                    aliases
+                                                    aliases,
+                                                    struct_table
                                                 );
                                                 if aty != "" {
                                                     let ety = nth_csv(types, arg_i);
@@ -3692,14 +3707,15 @@ pub fn typecheck_call_arg_lits(toks: List[String]) {
     }
 }
 
-// Type of a call argument span [start, end): lit, lit-env IDENT, or zero-arg call.
+// Type of a call argument span [start, end): lit, lit-env IDENT, zero-arg call, or field access.
 pub fn resolve_arg_type(
     toks: List[String],
     start: Int,
     end: Int,
     lit_env: String,
     ret_table: String,
-    aliases: String
+    aliases: String,
+    struct_table: String
 ) -> String {
     if end <= start {
         return "";
@@ -3716,6 +3732,19 @@ pub fn resolve_arg_type(
             }
         }
         return aty;
+    }
+    // field access: IDENT DOT IDENT  (e.g. p.x)
+    if end == start + 3 {
+        if field_at(list_get(toks, start), 0) == "IDENT" {
+            if field_at(list_get(toks, start + 1), 0) == "DOT" {
+                if field_at(list_get(toks, start + 2), 0) == "IDENT" {
+                    let fty = field_access_type_at(toks, start, lit_env, struct_table);
+                    if fty != "" {
+                        return resolve_type_alias(aliases, fty);
+                    }
+                }
+            }
+        }
     }
     // zero-arg call: IDENT LPAREN RPAREN
     if end == start + 3 {
@@ -5618,7 +5647,7 @@ pub fn build_pure_lit_env(toks: List[String]) -> String {
     return lit_env;
 }
 
-// Struct field table: "\tPoint:x,y,\t" from `type Point = struct { x: T, y: U };`
+// Struct field table: "\tPoint:x:Int,y:Int,\t" from `type Point = struct { x: T, y: U };`
 pub fn build_struct_field_table(toks: List[String]) -> String {
     let n = list_len(toks);
     let mut table = "\t";
@@ -5648,7 +5677,18 @@ pub fn build_struct_field_table(toks: List[String]) -> String {
                                                         if kk == "IDENT" {
                                                             if p + 1 < n {
                                                                 if field_at(list_get(toks, p + 1), 0) == "COLON" {
-                                                                    fields = fields + field_at(list_get(toks, p), 3) + ",";
+                                                                    let fname = field_at(list_get(toks, p), 3);
+                                                                    let mut fty = "";
+                                                                    if p + 2 < n {
+                                                                        if field_at(list_get(toks, p + 2), 0) == "IDENT" {
+                                                                            fty = field_at(list_get(toks, p + 2), 3);
+                                                                        }
+                                                                    }
+                                                                    if fty != "" {
+                                                                        fields = fields + fname + ":" + fty + ",";
+                                                                    } else {
+                                                                        fields = fields + fname + ":_," ;
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -5671,11 +5711,11 @@ pub fn build_struct_field_table(toks: List[String]) -> String {
     return table;
 }
 
-// True if struct field table lists `field` under type `sname`.
-pub fn struct_has_field(table: String, sname: String, field: String) -> Bool {
+// Extract field blob for struct type; "" if unknown.
+pub fn struct_fields_blob(table: String, sname: String) -> String {
     let key = "\t" + sname + ":";
     if !table.contains(key) {
-        return false;
+        return "";
     }
     let tn = chars_len(table);
     let kn = chars_len(key);
@@ -5697,20 +5737,137 @@ pub fn struct_has_field(table: String, sname: String, field: String) -> Bool {
             while p < tn {
                 let c = char_at(table, p);
                 if c == "\t" {
-                    p = tn;
-                } else {
-                    fields = fields + c;
-                    p = p + 1;
+                    return fields;
                 }
+                fields = fields + c;
+                p = p + 1;
             }
-            // fields is "x,y," — look for field + comma
-            let needle = field + ",";
-            if fields.contains(needle) {
-                return true;
-            }
-            return false;
+            return fields;
         }
         pos = pos + 1;
+    }
+    return "";
+}
+
+// Type of field on struct type name; "" if missing/unknown.
+// fields blob format: "x:Int,y:Int,"
+pub fn struct_field_type(table: String, sname: String, field: String) -> String {
+    let fields = struct_fields_blob(table, sname);
+    if fields == "" {
+        return "";
+    }
+    let n = chars_len(fields);
+    let mut entry = "";
+    let mut ei = 0;
+    while ei <= n {
+        let mut at_end = false;
+        if ei == n {
+            at_end = true;
+        } else {
+            if char_at(fields, ei) == "," {
+                at_end = true;
+            }
+        }
+        if at_end {
+            if entry != "" {
+                let en = chars_len(entry);
+                let mut colon = 0 - 1;
+                let mut k = 0;
+                while k < en {
+                    if char_at(entry, k) == ":" {
+                        colon = k;
+                        k = en;
+                    } else {
+                        k = k + 1;
+                    }
+                }
+                if colon >= 0 {
+                    let mut ename = "";
+                    let mut ety = "";
+                    let mut k2 = 0;
+                    while k2 < colon {
+                        ename = ename + char_at(entry, k2);
+                        k2 = k2 + 1;
+                    }
+                    k2 = colon + 1;
+                    while k2 < en {
+                        ety = ety + char_at(entry, k2);
+                        k2 = k2 + 1;
+                    }
+                    if ename == field {
+                        if ety == "_" {
+                            return "";
+                        }
+                        return ety;
+                    }
+                }
+            }
+            entry = "";
+            ei = ei + 1;
+        } else {
+            entry = entry + char_at(fields, ei);
+            ei = ei + 1;
+        }
+    }
+    return "";
+}
+
+// True if struct field table lists `field` under type `sname`.
+pub fn struct_has_field(table: String, sname: String, field: String) -> Bool {
+    let fields = struct_fields_blob(table, sname);
+    if fields == "" {
+        return false;
+    }
+    // Present if name: appears as entry start (after comma or start).
+    // Parse entries like field_type does.
+    let ty = struct_field_type(table, sname, field);
+    if ty != "" {
+        return true;
+    }
+    // Field may exist with unknown type "_" stored as name:_,
+    let n = chars_len(fields);
+    let mut entry = "";
+    let mut ei = 0;
+    while ei <= n {
+        let mut at_end = false;
+        if ei == n {
+            at_end = true;
+        } else {
+            if char_at(fields, ei) == "," {
+                at_end = true;
+            }
+        }
+        if at_end {
+            if entry != "" {
+                let en = chars_len(entry);
+                let mut colon = 0 - 1;
+                let mut k = 0;
+                while k < en {
+                    if char_at(entry, k) == ":" {
+                        colon = k;
+                        k = en;
+                    } else {
+                        k = k + 1;
+                    }
+                }
+                if colon >= 0 {
+                    let mut ename = "";
+                    let mut k2 = 0;
+                    while k2 < colon {
+                        ename = ename + char_at(entry, k2);
+                        k2 = k2 + 1;
+                    }
+                    if ename == field {
+                        return true;
+                    }
+                }
+            }
+            entry = "";
+            ei = ei + 1;
+        } else {
+            entry = entry + char_at(fields, ei);
+            ei = ei + 1;
+        }
     }
     return false;
 }
@@ -5719,6 +5876,38 @@ pub fn struct_has_field(table: String, sname: String, field: String) -> Bool {
 pub fn is_known_struct_type(table: String, sname: String) -> Bool {
     let key = "\t" + sname + ":";
     return table.contains(key);
+}
+
+// Type of `IDENT . IDENT` at pos when receiver is in lit_env as a known struct.
+pub fn field_access_type_at(
+    toks: List[String],
+    pos: Int,
+    lit_env: String,
+    struct_table: String
+) -> String {
+    let n = list_len(toks);
+    if pos + 2 >= n {
+        return "";
+    }
+    if field_at(list_get(toks, pos), 0) != "IDENT" {
+        return "";
+    }
+    if field_at(list_get(toks, pos + 1), 0) != "DOT" {
+        return "";
+    }
+    if field_at(list_get(toks, pos + 2), 0) != "IDENT" {
+        return "";
+    }
+    let rname = field_at(list_get(toks, pos), 3);
+    let fname = field_at(list_get(toks, pos + 2), 3);
+    let rty = resolve_type_alias(lit_env, rname);
+    if rty == rname {
+        return "";
+    }
+    if !is_known_struct_type(struct_table, rty) {
+        return "";
+    }
+    return struct_field_type(struct_table, rty, fname);
 }
 
 // Count call args starting at LPAREN token index (depth-aware).
@@ -6018,6 +6207,101 @@ pub fn typecheck_field_method(toks: List[String]) {
                                     );
                                     process_exit(1);
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// Fail-closed: field access as binop operand when field type known.
+// Patterns: p.x + "a", 1 + p.x (IDENT DOT IDENT OP atom / atom OP IDENT DOT IDENT).
+pub fn typecheck_field_binop_uses(toks: List[String]) {
+    let n = list_len(toks);
+    let lit_env = build_pure_lit_env(toks);
+    let struct_table = build_struct_field_table(toks);
+    let mut i = 0;
+    while i < n {
+        // Left field: IDENT DOT IDENT BINOP rhs
+        if i + 4 < n {
+            if field_at(list_get(toks, i), 0) == "IDENT" {
+                if field_at(list_get(toks, i + 1), 0) == "DOT" {
+                    if field_at(list_get(toks, i + 2), 0) == "IDENT" {
+                        let opk = field_at(list_get(toks, i + 3), 0);
+                        if is_type_binop(opk) {
+                            let lty = field_access_type_at(toks, i, lit_env, struct_table);
+                            if lty != "" {
+                                let rty = atom_type_with_env(toks, i + 4, lit_env);
+                                if rty == "" {
+                                    // rhs may also be field access
+                                    let rty2 = field_access_type_at(toks, i + 4, lit_env, struct_table);
+                                    if rty2 != "" {
+                                        let comb = combine_binop_types(opk, lty, rty2);
+                                        if comb == "ERR_BINOP" {
+                                            let line = field_at(list_get(toks, i + 3), 1);
+                                            let col = field_at(list_get(toks, i + 3), 2);
+                                            println(
+                                                "ERR\ttype\tType error at "
+                                                    + line
+                                                    + ":"
+                                                    + col
+                                                    + ": incompatible operand types for binary operator"
+                                            );
+                                            process_exit(1);
+                                        }
+                                    }
+                                } else {
+                                    let comb = combine_binop_types(opk, lty, rty);
+                                    if comb == "ERR_BINOP" {
+                                        let line = field_at(list_get(toks, i + 3), 1);
+                                        let col = field_at(list_get(toks, i + 3), 2);
+                                        println(
+                                            "ERR\ttype\tType error at "
+                                                + line
+                                                + ":"
+                                                + col
+                                                + ": incompatible operand types for binary operator"
+                                        );
+                                        process_exit(1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Right field: atom BINOP IDENT DOT IDENT (when left is lit/env, not already field-left)
+        if i + 4 < n {
+            let opk = field_at(list_get(toks, i + 1), 0);
+            if is_type_binop(opk) {
+                // skip if left is already field access start (handled above)
+                let mut left_is_field = false;
+                if i >= 2 {
+                    if field_at(list_get(toks, i - 1), 0) == "DOT" {
+                        left_is_field = true;
+                    }
+                }
+                if !left_is_field {
+                    let lty = atom_type_with_env(toks, i, lit_env);
+                    if lty != "" {
+                        let rty = field_access_type_at(toks, i + 2, lit_env, struct_table);
+                        if rty != "" {
+                            let comb = combine_binop_types(opk, lty, rty);
+                            if comb == "ERR_BINOP" {
+                                let line = field_at(list_get(toks, i + 1), 1);
+                                let col = field_at(list_get(toks, i + 1), 2);
+                                println(
+                                    "ERR\ttype\tType error at "
+                                        + line
+                                        + ":"
+                                        + col
+                                        + ": incompatible operand types for binary operator"
+                                );
+                                process_exit(1);
                             }
                         }
                     }
