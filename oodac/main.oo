@@ -2807,62 +2807,8 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
                 if p < n && field_at(list_get(toks, p), 0) == "EQ" {
                     p = p + 1;
                     if p < n {
-                        // Pure lit / lit-binop-lit chain (R1 expand).
-                        let mut init_ty = infer_pure_lit_expr_type(toks, p);
-                        // Single IDENT initializer from prior pure-lit binding.
-                        if init_ty == "" {
-                            if field_at(list_get(toks, p), 0) == "IDENT" {
-                                // only single-token init (next SEMI or end of pure)
-                                let mut single = false;
-                                if p + 1 >= n {
-                                    single = true;
-                                } else {
-                                    let nk = field_at(list_get(toks, p + 1), 0);
-                                    if nk == "SEMI" {
-                                        single = true;
-                                    }
-                                }
-                                if single {
-                                    let src = field_at(list_get(toks, p), 3);
-                                    // inline lit_env lookup
-                                    let key = "\t" + src + ":";
-                                    if lit_env.contains(key) {
-                                        let tn = chars_len(lit_env);
-                                        let kn = chars_len(key);
-                                        let mut pos2 = 0;
-                                        while pos2 + kn <= tn {
-                                            let mut m = true;
-                                            let mut j2 = 0;
-                                            while j2 < kn {
-                                                if char_at(lit_env, pos2 + j2) != char_at(key, j2) {
-                                                    m = false;
-                                                    j2 = kn;
-                                                } else {
-                                                    j2 = j2 + 1;
-                                                }
-                                            }
-                                            if m {
-                                                let mut out = "";
-                                                let mut p3 = pos2 + kn;
-                                                while p3 < tn {
-                                                    let c = char_at(lit_env, p3);
-                                                    if c == "\t" {
-                                                        init_ty = out;
-                                                        p3 = tn;
-                                                    } else {
-                                                        out = out + c;
-                                                        p3 = p3 + 1;
-                                                    }
-                                                }
-                                                pos2 = tn;
-                                            } else {
-                                                pos2 = pos2 + 1;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        // Pure lit / lit-env IDENT / binops mixing both (R1 expand).
+                        let mut init_ty = infer_typed_expr_type(toks, p, lit_env);
                         if init_ty == "ERR_DIV0" {
                             println(
                                 "ERR\ttype\tType error at "
@@ -2980,14 +2926,15 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
             }
             i = i + 1;
         } else {
-            // Free pure lit binop: `1 + "a"` as expr stmt — fail-closed (was silent OK).
-            let lty = lit_token_type(k);
+            // Free binop: pure lit or lit-env IDENT operands — fail-closed.
+            // e.g. `1 + "a"` and `let a=1; let b="x"; a + b;`
+            let lty = atom_type_with_env(toks, i, lit_env);
             if lty != "" {
                 if i + 2 < n {
                     let opk = field_at(list_get(toks, i + 1), 0);
                     if is_type_binop(opk) {
                         let rtok = list_get(toks, i + 2);
-                        let rty = lit_token_type(field_at(rtok, 0));
+                        let rty = atom_type_with_env(toks, i + 2, lit_env);
                         if rty != "" {
                             // Const integer /0 and /0.0 — fail-closed (stage-0 parity).
                             if opk == "SLASH" {
@@ -4713,12 +4660,40 @@ pub fn typecheck_if_while_lit_cond(toks: List[String]) {
 // Returns "" if non-pure (vars/calls), "ERR_BINOP" if known-bad mix,
 // or Int/String/Bool/Float for successful pure chains.
 pub fn infer_pure_lit_expr_type(toks: List[String], pos0: Int) -> String {
+    return infer_typed_expr_type(toks, pos0, "\t");
+}
+
+// Type of a single atom: pure lit or IDENT present in lit_env ("\tname:Type\t").
+// Returns "" if unknown (incomplete TC — no false fail).
+pub fn atom_type_with_env(toks: List[String], pos: Int, lit_env: String) -> String {
+    let n = list_len(toks);
+    if pos >= n {
+        return "";
+    }
+    let k = field_at(list_get(toks, pos), 0);
+    let lit = lit_token_type(k);
+    if lit != "" {
+        return lit;
+    }
+    if k == "IDENT" {
+        let name = field_at(list_get(toks, pos), 3);
+        let got = resolve_type_alias(lit_env, name);
+        if got != name {
+            return got;
+        }
+    }
+    return "";
+}
+
+// Like pure-lit chain, but IDENT operands may resolve via lit_env.
+// Fixes silent OK: `let a = 1; let b = "x"; let c = a + b;`
+pub fn infer_typed_expr_type(toks: List[String], pos0: Int, lit_env: String) -> String {
     let n = list_len(toks);
     if pos0 >= n {
         return "";
     }
     let mut pos = pos0;
-    let mut cur = lit_token_type(field_at(list_get(toks, pos), 0));
+    let mut cur = atom_type_with_env(toks, pos, lit_env);
     if cur == "" {
         return "";
     }
@@ -4733,9 +4708,8 @@ pub fn infer_pure_lit_expr_type(toks: List[String], pos0: Int) -> String {
                 cont = false;
             } else {
                 let rtok = list_get(toks, pos + 1);
-                let rty = lit_token_type(field_at(rtok, 0));
+                let rty = atom_type_with_env(toks, pos + 1, lit_env);
                 if rty == "" {
-                    // non-pure right — abandon (incomplete TC, no false fail)
                     return "";
                 }
                 if opk == "SLASH" {
