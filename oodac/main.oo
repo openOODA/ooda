@@ -4319,6 +4319,7 @@ pub fn typecheck_mut_assign_types(toks: List[String]) {
 // Stage-0: unary '!' requires Bool, found Int. Non-lit operands stay incomplete (no false fail).
 pub fn typecheck_unary_bang_lit(toks: List[String]) {
     let n = list_len(toks);
+    let lit_env = build_pure_lit_env(toks);
     let mut i = 0;
     while i < n {
         let k = field_at(list_get(toks, i), 0);
@@ -4326,9 +4327,8 @@ pub fn typecheck_unary_bang_lit(toks: List[String]) {
             let line = field_at(list_get(toks, i), 1);
             let col = field_at(list_get(toks, i), 2);
             if i + 1 < n {
-                let ok = field_at(list_get(toks, i + 1), 0);
                 // `!=` is NEQ not BANG; BANG alone is unary.
-                let oty = lit_token_type(ok);
+                let oty = atom_type_with_env(toks, i + 1, lit_env);
                 if oty != "" {
                     if oty != "Bool" {
                         println(
@@ -4365,9 +4365,10 @@ pub fn is_value_token_kind(kind: String) -> Bool {
     return false;
 }
 
-// Fail-closed: unary `-` on String/Bool pure lit (stage-0: Expected number after '-').
+// Fail-closed: unary `-` on non-numeric pure lit / lit-env var.
 pub fn typecheck_unary_minus_lit(toks: List[String]) {
     let n = list_len(toks);
+    let lit_env = build_pure_lit_env(toks);
     let mut i = 0;
     while i < n {
         let k = field_at(list_get(toks, i), 0);
@@ -4383,8 +4384,7 @@ pub fn typecheck_unary_minus_lit(toks: List[String]) {
             }
             if unary {
                 if i + 1 < n {
-                    let ok = field_at(list_get(toks, i + 1), 0);
-                    let oty = lit_token_type(ok);
+                    let oty = atom_type_with_env(toks, i + 1, lit_env);
                     if oty != "" {
                         if oty != "Int" {
                             if oty != "Float" {
@@ -4612,8 +4612,86 @@ pub fn typecheck_logic_binop_lits(toks: List[String]) {
 }
 
 // `if 1 {` / `while true {` pure single-lit conditions: must be Bool.
+// Collect pure-lit / annotated-lit let bindings into "\tname:Type\t".
+pub fn build_pure_lit_env(toks: List[String]) -> String {
+    let n = list_len(toks);
+    let mut aliases = "\t";
+    let mut ai = 0;
+    while ai < n {
+        if field_at(list_get(toks, ai), 0) == "KW_TYPE" {
+            if ai + 1 < n {
+                if field_at(list_get(toks, ai + 1), 0) == "IDENT" {
+                    let aname = field_at(list_get(toks, ai + 1), 3);
+                    if ai + 2 < n {
+                        if field_at(list_get(toks, ai + 2), 0) == "EQ" {
+                            if ai + 3 < n {
+                                if field_at(list_get(toks, ai + 3), 0) == "IDENT" {
+                                    aliases = aliases + aname + ":" + field_at(list_get(toks, ai + 3), 3) + "\t";
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1;
+    }
+    let mut lit_env = "\t";
+    let mut i = 0;
+    while i < n {
+        if field_at(list_get(toks, i), 0) == "KW_LET" {
+            let mut p = i + 1;
+            if p < n {
+                if field_at(list_get(toks, p), 0) == "KW_MUT" {
+                    p = p + 1;
+                }
+            }
+            if p < n {
+                if field_at(list_get(toks, p), 0) == "IDENT" {
+                    let vname = field_at(list_get(toks, p), 3);
+                    p = p + 1;
+                    let mut ann = "";
+                    if p < n {
+                        if field_at(list_get(toks, p), 0) == "COLON" {
+                            p = p + 1;
+                            if p < n {
+                                if field_at(list_get(toks, p), 0) == "IDENT" {
+                                    ann = resolve_type_alias(aliases, field_at(list_get(toks, p), 3));
+                                    p = p + 1;
+                                }
+                            }
+                        }
+                    }
+                    if p < n {
+                        if field_at(list_get(toks, p), 0) == "EQ" {
+                            p = p + 1;
+                            if p < n {
+                                let ity = infer_typed_expr_type(toks, p, lit_env);
+                                if ity != "" {
+                                    if ity != "ERR_DIV0" {
+                                        if ity != "ERR_BINOP" {
+                                            if ann != "" {
+                                                lit_env = lit_env + vname + ":" + ann + "\t";
+                                            } else {
+                                                lit_env = lit_env + vname + ":" + ity + "\t";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return lit_env;
+}
+
 pub fn typecheck_if_while_lit_cond(toks: List[String]) {
     let n = list_len(toks);
+    let lit_env = build_pure_lit_env(toks);
     let mut i = 0;
     while i < n {
         let k = field_at(list_get(toks, i), 0);
@@ -4625,7 +4703,8 @@ pub fn typecheck_if_while_lit_cond(toks: List[String]) {
         }
         if is_cond {
             if i + 2 < n {
-                let cty = lit_token_type(field_at(list_get(toks, i + 1), 0));
+                // Single-token condition then LBRACE: lit or lit-env IDENT.
+                let cty = atom_type_with_env(toks, i + 1, lit_env);
                 if cty != "" {
                     if field_at(list_get(toks, i + 2), 0) == "LBRACE" {
                         if cty != "Bool" {
