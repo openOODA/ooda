@@ -2503,6 +2503,8 @@ pub fn run_check_from_src(src: String) {
     typecheck_field_method(toks);
     // R1: field access types into binops (p.x + "a") fail-closed.
     typecheck_field_binop_uses(toks);
+    // R1: struct lit field init types fail-closed (`Point { x: "hi" }`).
+    typecheck_struct_lit_inits(toks);
     println("OK");
 }
 
@@ -2718,6 +2720,7 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
     let mut lit_env = "\t";
     // Declared fn returns for `let x = g()` zero-arg binding into lit_env.
     let ret_table = build_fn_ret_table(toks);
+    let struct_table = build_struct_field_table(toks);
     // Pass 0: collect type aliases (top-level token stream).
     let mut ai = 0;
     while ai < n {
@@ -2731,7 +2734,9 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
                             if ai + 3 < n {
                                 if field_at(list_get(toks, ai + 3), 0) == "IDENT" {
                                     let base = field_at(list_get(toks, ai + 3), 3);
-                                    aliases = aliases + aname + ":" + base + "\t";
+                                    if base != "struct" {
+                                        aliases = aliases + aname + ":" + base + "\t";
+                                    }
                                 }
                             }
                         }
@@ -2839,6 +2844,12 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
                                         }
                                     }
                                 }
+                                // `let p = Point { ... }`
+                                if init_ty == "" {
+                                    if field_at(list_get(toks, p + 1), 0) == "LBRACE" {
+                                        init_ty = field_at(list_get(toks, p), 3);
+                                    }
+                                }
                             }
                         }
                         if init_ty == "ERR_DIV0" {
@@ -2897,43 +2908,41 @@ pub fn typecheck_ann_and_return_lits(toks: List[String]) {
                     if i + 1 < n {
                         let ik = field_at(list_get(toks, i + 1), 0);
                         let mut rty = lit_token_type(ik);
-                        // `return x` when x is a pure-lit binding in lit_env.
+                        // `return x` / `return p.x` / `return o.inner.v`
                         if rty == "" {
                             if ik == "IDENT" {
-                                let rn = field_at(list_get(toks, i + 1), 3);
-                                let key = "\t" + rn + ":";
-                                if lit_env.contains(key) {
-                                    let tn = chars_len(lit_env);
-                                    let kn = chars_len(key);
-                                    let mut pos2 = 0;
-                                    while pos2 + kn <= tn {
-                                        let mut m = true;
-                                        let mut j2 = 0;
-                                        while j2 < kn {
-                                            if char_at(lit_env, pos2 + j2) != char_at(key, j2) {
-                                                m = false;
-                                                j2 = kn;
-                                            } else {
-                                                j2 = j2 + 1;
-                                            }
-                                        }
-                                        if m {
-                                            let mut out = "";
-                                            let mut p3 = pos2 + kn;
-                                            while p3 < tn {
-                                                let c = char_at(lit_env, p3);
-                                                if c == "\t" {
-                                                    rty = out;
-                                                    p3 = tn;
-                                                } else {
-                                                    out = out + c;
-                                                    p3 = p3 + 1;
-                                                }
-                                            }
-                                            pos2 = tn;
+                                // Prefer field chain when next token is DOT.
+                                let mut re = i + 1;
+                                let mut cont_r = true;
+                                while cont_r {
+                                    if re >= n {
+                                        cont_r = false;
+                                    } else {
+                                        if field_at(list_get(toks, re), 0) == "SEMI" {
+                                            cont_r = false;
                                         } else {
-                                            pos2 = pos2 + 1;
+                                            re = re + 1;
                                         }
+                                    }
+                                }
+                                if is_field_chain_span(toks, i + 1, re) {
+                                    let fty = field_chain_type(
+                                        toks,
+                                        i + 1,
+                                        re,
+                                        lit_env,
+                                        struct_table
+                                    );
+                                    if fty != "" {
+                                        rty = fty;
+                                    }
+                                }
+                                // Bare `return x` when x is a pure-lit binding in lit_env.
+                                if rty == "" {
+                                    let rn = field_at(list_get(toks, i + 1), 3);
+                                    let got = resolve_type_alias(lit_env, rn);
+                                    if got != rn {
+                                        rty = got;
                                     }
                                 }
                             }
@@ -3733,17 +3742,11 @@ pub fn resolve_arg_type(
         }
         return aty;
     }
-    // field access: IDENT DOT IDENT  (e.g. p.x)
-    if end == start + 3 {
-        if field_at(list_get(toks, start), 0) == "IDENT" {
-            if field_at(list_get(toks, start + 1), 0) == "DOT" {
-                if field_at(list_get(toks, start + 2), 0) == "IDENT" {
-                    let fty = field_access_type_at(toks, start, lit_env, struct_table);
-                    if fty != "" {
-                        return resolve_type_alias(aliases, fty);
-                    }
-                }
-            }
+    // field chain: IDENT (DOT IDENT)+  e.g. p.x or o.inner.v
+    if is_field_chain_span(toks, start, end) {
+        let fty = field_chain_type(toks, start, end, lit_env, struct_table);
+        if fty != "" {
+            return resolve_type_alias(aliases, fty);
         }
     }
     // zero-arg call: IDENT LPAREN RPAREN
@@ -4284,7 +4287,10 @@ pub fn typecheck_mut_assign_types(toks: List[String]) {
                         if field_at(list_get(toks, ai + 2), 0) == "EQ" {
                             if ai + 3 < n {
                                 if field_at(list_get(toks, ai + 3), 0) == "IDENT" {
-                                    aliases = aliases + aname + ":" + field_at(list_get(toks, ai + 3), 3) + "\t";
+                                    let base = field_at(list_get(toks, ai + 3), 3);
+                                    if base != "struct" {
+                                        aliases = aliases + aname + ":" + base + "\t";
+                                    }
                                 }
                             }
                         }
@@ -4294,9 +4300,10 @@ pub fn typecheck_mut_assign_types(toks: List[String]) {
         }
         ai = ai + 1;
     }
-    // mut_env: mut vars with known types; lit_env: all pure-lit lets for RHS IDENT.
+    // mut_env: mut vars with known types; lit_env includes struct lits via build_pure_lit_env.
+    let struct_table = build_struct_field_table(toks);
+    let lit_env = build_pure_lit_env(toks);
     let mut mut_env = "\t";
-    let mut lit_env = "\t";
     let mut i = 0;
     while i < n {
         let k = field_at(list_get(toks, i), 0);
@@ -4336,8 +4343,14 @@ pub fn typecheck_mut_assign_types(toks: List[String]) {
                                             if ty == "" {
                                                 ty = ity;
                                             }
-                                            lit_env = lit_env + v + ":" + ty + "\t";
                                         }
+                                    }
+                                }
+                                // annotated or struct-lit bound mut from lit_env
+                                if ty == "" {
+                                    let got = resolve_type_alias(lit_env, v);
+                                    if got != v {
+                                        ty = got;
                                     }
                                 }
                             }
@@ -4375,11 +4388,46 @@ pub fn typecheck_mut_assign_types(toks: List[String]) {
                             if i + 2 < n {
                                 let mut rty = infer_pure_lit_expr_type(toks, i + 2);
                                 if rty == "" {
+                                    // field chain RHS: s = p.x / s = o.inner.v
+                                    let mut re = i + 2;
+                                    let mut cont_a = true;
+                                    while cont_a {
+                                        if re >= n {
+                                            cont_a = false;
+                                        } else {
+                                            if field_at(list_get(toks, re), 0) == "SEMI" {
+                                                cont_a = false;
+                                            } else {
+                                                re = re + 1;
+                                            }
+                                        }
+                                    }
+                                    if is_field_chain_span(toks, i + 2, re) {
+                                        let fty = field_chain_type(
+                                            toks,
+                                            i + 2,
+                                            re,
+                                            lit_env,
+                                            struct_table
+                                        );
+                                        if fty != "" {
+                                            rty = fty;
+                                        }
+                                    }
+                                }
+                                if rty == "" {
                                     if field_at(list_get(toks, i + 2), 0) == "IDENT" {
                                         let src = field_at(list_get(toks, i + 2), 3);
                                         let got = resolve_type_alias(lit_env, src);
                                         if got != src {
-                                            rty = got;
+                                            // only bare IDENT (not field chain start)
+                                            if i + 3 >= n {
+                                                rty = got;
+                                            } else {
+                                                if field_at(list_get(toks, i + 3), 0) != "DOT" {
+                                                    rty = got;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -5885,29 +5933,88 @@ pub fn field_access_type_at(
     lit_env: String,
     struct_table: String
 ) -> String {
+    return field_chain_type(toks, pos, pos + 3, lit_env, struct_table);
+}
+
+// Type of field chain span [start, end): IDENT (DOT IDENT)+
+// e.g. o.inner.v — walks struct field table per hop.
+pub fn field_chain_type(
+    toks: List[String],
+    start: Int,
+    end: Int,
+    lit_env: String,
+    struct_table: String
+) -> String {
     let n = list_len(toks);
-    if pos + 2 >= n {
+    if end > n {
         return "";
     }
-    if field_at(list_get(toks, pos), 0) != "IDENT" {
+    if end < start + 3 {
         return "";
     }
-    if field_at(list_get(toks, pos + 1), 0) != "DOT" {
+    if field_at(list_get(toks, start), 0) != "IDENT" {
         return "";
     }
-    if field_at(list_get(toks, pos + 2), 0) != "IDENT" {
+    if field_at(list_get(toks, start + 1), 0) != "DOT" {
         return "";
     }
-    let rname = field_at(list_get(toks, pos), 3);
-    let fname = field_at(list_get(toks, pos + 2), 3);
-    let rty = resolve_type_alias(lit_env, rname);
-    if rty == rname {
+    let rname = field_at(list_get(toks, start), 3);
+    let mut cur = resolve_type_alias(lit_env, rname);
+    if cur == rname {
         return "";
     }
-    if !is_known_struct_type(struct_table, rty) {
-        return "";
+    let mut p = start + 1;
+    while p < end {
+        if field_at(list_get(toks, p), 0) != "DOT" {
+            return "";
+        }
+        if p + 1 >= end {
+            return "";
+        }
+        if field_at(list_get(toks, p + 1), 0) != "IDENT" {
+            return "";
+        }
+        let fname = field_at(list_get(toks, p + 1), 3);
+        if !is_known_struct_type(struct_table, cur) {
+            return "";
+        }
+        let next = struct_field_type(struct_table, cur, fname);
+        if next == "" {
+            return "";
+        }
+        cur = next;
+        p = p + 2;
     }
-    return struct_field_type(struct_table, rty, fname);
+    return cur;
+}
+
+// True if [start, end) is only IDENT (DOT IDENT)+
+pub fn is_field_chain_span(toks: List[String], start: Int, end: Int) -> Bool {
+    if end < start + 3 {
+        return false;
+    }
+    if field_at(list_get(toks, start), 0) != "IDENT" {
+        return false;
+    }
+    let mut p = start + 1;
+    let mut hops = 0;
+    while p < end {
+        if field_at(list_get(toks, p), 0) != "DOT" {
+            return false;
+        }
+        if p + 1 >= end {
+            return false;
+        }
+        if field_at(list_get(toks, p + 1), 0) != "IDENT" {
+            return false;
+        }
+        hops = hops + 1;
+        p = p + 2;
+    }
+    if hops < 1 {
+        return false;
+    }
+    return p == end;
 }
 
 // Count call args starting at LPAREN token index (depth-aware).
@@ -6302,6 +6409,97 @@ pub fn typecheck_field_binop_uses(toks: List[String]) {
                                         + ": incompatible operand types for binary operator"
                                 );
                                 process_exit(1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// Fail-closed: known struct literal field initializers with pure-lit values.
+// `Point { x: "hi", y: 2 }` when x: Int → error.
+pub fn typecheck_struct_lit_inits(toks: List[String]) {
+    let n = list_len(toks);
+    let struct_table = build_struct_field_table(toks);
+    let mut i = 0;
+    while i < n {
+        if field_at(list_get(toks, i), 0) == "IDENT" {
+            if i + 1 < n {
+                if field_at(list_get(toks, i + 1), 0) == "LBRACE" {
+                    let sname = field_at(list_get(toks, i), 3);
+                    if is_known_struct_type(struct_table, sname) {
+                        // Walk fields at depth 1 until matching RBRACE.
+                        let mut p = i + 2;
+                        let mut depth = 1;
+                        let mut cont = true;
+                        while cont {
+                            if p >= n {
+                                cont = false;
+                            } else {
+                                let kk = field_at(list_get(toks, p), 0);
+                                if kk == "LBRACE" {
+                                    depth = depth + 1;
+                                }
+                                if kk == "RBRACE" {
+                                    depth = depth - 1;
+                                    if depth == 0 {
+                                        cont = false;
+                                    }
+                                }
+                                // field: value at depth 1
+                                if depth == 1 {
+                                    if kk == "IDENT" {
+                                        if p + 1 < n {
+                                            if field_at(list_get(toks, p + 1), 0) == "COLON" {
+                                                let fname = field_at(list_get(toks, p), 3);
+                                                let ety = struct_field_type(struct_table, sname, fname);
+                                                if ety != "" {
+                                                    if p + 2 < n {
+                                                        let vty = lit_token_type(
+                                                            field_at(list_get(toks, p + 2), 0)
+                                                        );
+                                                        // Nested struct lit: IDENT LBRACE — type is that IDENT if known struct.
+                                                        let mut got = vty;
+                                                        if got == "" {
+                                                            if field_at(list_get(toks, p + 2), 0) == "IDENT" {
+                                                                if p + 3 < n {
+                                                                    if field_at(list_get(toks, p + 3), 0) == "LBRACE" {
+                                                                        got = field_at(list_get(toks, p + 2), 3);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if got != "" {
+                                                            if !types_compatible(ety, got) {
+                                                                let line = field_at(list_get(toks, p), 1);
+                                                                let col = field_at(list_get(toks, p), 2);
+                                                                println(
+                                                                    "ERR\ttype\tType error at "
+                                                                        + line
+                                                                        + ":"
+                                                                        + col
+                                                                        + ": field '"
+                                                                        + fname
+                                                                        + "' of '"
+                                                                        + sname
+                                                                        + "' expects "
+                                                                        + ety
+                                                                        + ", found "
+                                                                        + got
+                                                                );
+                                                                process_exit(1);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                p = p + 1;
                             }
                         }
                     }
