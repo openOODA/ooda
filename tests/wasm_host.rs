@@ -1010,6 +1010,33 @@ pub fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Dual-engine: Int inequality under host.
+#[test]
+fn ooda_wasm_int_ne_runs_on_host() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let dir = unique_temp_dir("ooda_wine");
+    let path = dir.join("ine.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main() {
+    if 1 != 2 { println(1); } else { println(0); }
+    if 1 != 1 { println(1); } else { println(0); }
+}
+"#,
+    )
+    .unwrap();
+    let out = Command::new(bin)
+        .args(["build", "--target", "wasm", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(out.status.success());
+    let wat = std::fs::read_to_string(path.with_extension("wat")).unwrap();
+    let lines = run_wat(&wat).expect("host");
+    assert_eq!(lines, vec!["1".to_string(), "0".to_string()], "got {:?}", lines);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Dual-engine: Bool `||` under host.
 #[test]
 fn ooda_wasm_bool_or_runs_on_host() {
