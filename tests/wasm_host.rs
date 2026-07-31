@@ -319,8 +319,11 @@ pub fn main() {
 #[test]
 fn ooda_wasm_string_ops_fixture_runs_on_host() {
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/string_ops.oo");
-    assert!(path.is_file(), "missing {}", path.display());
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/string_ops.oo");
+    assert!(src.is_file(), "missing {}", src.display());
+    let dir = unique_temp_dir("ooda_wstrops");
+    let path = dir.join("string_ops.oo");
+    std::fs::copy(&src, &path).expect("copy fixture");
     let out = Command::new(bin)
         .args(["build", "--target", "wasm", path.to_str().unwrap()])
         .output()
