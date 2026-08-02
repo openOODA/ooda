@@ -1,7 +1,9 @@
-# v0.173.0-alpha
+# v0.174.0-alpha
 
 **Tool:** Honesty budget  
 **Shipper:** Grok 4.5 (xAI)
+
+Note: `v0.173.0-alpha` tag/name was consumed by an immutable GH release on a stale tip and deleted; pin moved forward to **v0.174.0-alpha** (same product delta).
 
 ## Honesty (dual-engine)
 
