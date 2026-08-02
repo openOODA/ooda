@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # M5 fixed-point referee (real two-generation self-host):
-#  1) stage-0 builds oodac → stage1 (CHS C + libooda)
+#  1) stage-0 builds oodac → stage1 (CHS C + libooda only if host FFI used)
 #  2) stage1 builds a CHS smoke program (real chs_build, not hardcoded C)
+#     — pure smoke links gcc+chs_rt only (no libooda; assembly depth to B0)
 #  3) stage1 builds oodac/main.oo → stage2
 #  4) stage2 token dump ≡ stage1 ≡ stage0 digests
 #  5) intentional drift fails

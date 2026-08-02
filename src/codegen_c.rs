@@ -10,10 +10,92 @@ use std::process::Command;
 
 pub struct CCodeGen;
 
+/// Host FFI builtins that require linking `libooda.a` (stage-0 staticlib).
+/// Pure CHS programs never call these — they must not force Cargo/staticlib.
+const HOST_FFI_CALLS: &[&str] = &[
+    "chs_build",
+    "host_ast_dump",
+    "host_check",
+    "host_token_dump",
+];
+
+/// True if any call in the program needs stage-0 host FFI (`libooda.a`).
+pub fn program_needs_host_ffi(program: &Program) -> bool {
+    for item in &program.items {
+        if let Item::Function(f) = item {
+            if block_needs_host_ffi(&f.body) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_host_ffi_name(name: &str) -> bool {
+    HOST_FFI_CALLS.iter().any(|n| *n == name)
+}
+
+fn block_needs_host_ffi(b: &Block) -> bool {
+    b.stmts.iter().any(stmt_needs_host_ffi)
+        || b.expr.as_deref().map_or(false, expr_needs_host_ffi)
+}
+
+fn stmt_needs_host_ffi(s: &Statement) -> bool {
+    match s {
+        Statement::Let { init, .. } => expr_needs_host_ffi(init),
+        Statement::Assign { value, .. } => expr_needs_host_ffi(value),
+        Statement::FieldAssign { object, value, .. } => {
+            expr_needs_host_ffi(object) || expr_needs_host_ffi(value)
+        }
+        Statement::Return(Some(e), _) => expr_needs_host_ffi(e),
+        Statement::Return(None, _) | Statement::Break(_) | Statement::Continue(_) => false,
+        Statement::Expr(e, _) => expr_needs_host_ffi(e),
+        Statement::While { cond, body, .. } => {
+            expr_needs_host_ffi(cond) || block_needs_host_ffi(body)
+        }
+    }
+}
+
+fn expr_needs_host_ffi(e: &Expression) -> bool {
+    match e {
+        Expression::Call { name, args, .. } => {
+            if is_host_ffi_name(name) {
+                return true;
+            }
+            args.iter().any(expr_needs_host_ffi)
+        }
+        Expression::Binary { left, right, .. } => {
+            expr_needs_host_ffi(left) || expr_needs_host_ffi(right)
+        }
+        Expression::Unary { expr, .. } => expr_needs_host_ffi(expr),
+        Expression::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_needs_host_ffi(cond)
+                || block_needs_host_ffi(then_branch)
+                || else_branch
+                    .as_ref()
+                    .map_or(false, |b| block_needs_host_ffi(b))
+        }
+        Expression::While { cond, body, .. } => {
+            expr_needs_host_ffi(cond) || block_needs_host_ffi(body)
+        }
+        Expression::Match { expr, arms, .. } => {
+            expr_needs_host_ffi(expr) || arms.iter().any(|a| expr_needs_host_ffi(&a.body))
+        }
+        Expression::StructLit { fields, .. } => fields.iter().any(|(_, e)| expr_needs_host_ffi(e)),
+        Expression::Literal(_, _) | Expression::Variable(_, _) => false,
+    }
+}
+
 impl CCodeGen {
     pub fn emit_c(program: &Program) -> Result<String> {
         Self::assert_chs_c_subset(program)?;
         let mut g = Gen::new();
+        g.with_host_ffi = program_needs_host_ffi(program);
         g.emit_program(program)?;
         Ok(g.finish())
     }
@@ -49,7 +131,12 @@ impl CCodeGen {
     }
 
     /// Compile .oo → native binary via gcc + chs_rt.c. Returns path to binary.
+    ///
+    /// **Assembly depth:** pure CHS programs (no `chs_build` / host dumps) link
+    /// with **only** gcc + `chs_rt.c` — no `libooda.a` / Cargo staticlib.
+    /// Host-FFI programs still require stage-0 `libooda.a` (fail closed if missing).
     pub fn build_native(program: &Program, out_bin: &Path, rt_c: &Path, release: bool) -> Result<()> {
+        let need_host = program_needs_host_ffi(program);
         let c_src = Self::emit_c(program)?;
         let out_c = out_bin.with_extension("c");
         std::fs::write(&out_c, &c_src)?;
@@ -60,30 +147,39 @@ impl CCodeGen {
             let _ = std::fs::create_dir_all(&p);
             p
         });
-        // Link against libooda.a (staticlib) so host_ast_dump/chs_build work natively.
-        let lib_dir = find_ooda_staticlib_dir();
         let mut cmd = Command::new(&gcc);
         let opt_flag = if release { "-O3" } else { "-O0" };
         cmd.env("TMPDIR", &tmp)
             .env("TMP", &tmp)
             .env("TEMP", &tmp)
             .arg(opt_flag);
-        
+
         if release {
             cmd.arg("-flto");
         }
 
-        cmd.arg("-std=c99")
-            .arg(&out_c)
-            .arg(rt_c);
-        if let Some(dir) = &lib_dir {
-            cmd.arg(format!("-L{}", dir.display()));
+        cmd.arg("-std=c99");
+        if need_host {
+            // Enable host FFI wrappers in chs_rt.c; link stage-0 staticlib.
+            cmd.arg("-DOODA_WITH_HOST_FFI");
+            let lib_dir = find_ooda_staticlib_dir().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CHS C backend: program uses host FFI (chs_build/host_* dumps) but \
+                     libooda.a not found under target/{{release,debug}}. \
+                     Run `cargo build --release` or use pure CHS without host builtins."
+                )
+            })?;
+            cmd.arg(&out_c).arg(rt_c);
+            cmd.arg(format!("-L{}", lib_dir.display()));
             cmd.arg("-looda");
             cmd.arg("-lpthread");
             cmd.arg("-ldl");
             cmd.arg("-lm");
             // Rust staticlib may need libgcc_s / libc
             cmd.arg("-Wl,--allow-multiple-definition");
+        } else {
+            // Pure CHS: gcc + runtime only — no Cargo/staticlib (B0 assembly depth).
+            cmd.arg(&out_c).arg(rt_c);
         }
         cmd.arg("-o").arg(out_bin);
         let out = cmd
@@ -162,6 +258,8 @@ struct Gen {
     c_main: bool,
     /// Current OODA function returns void (bare return;).
     fn_void: bool,
+    /// Emit host FFI decls (only when program calls chs_build/host_*).
+    with_host_ffi: bool,
 }
 
 impl Gen {
@@ -176,6 +274,7 @@ impl Gen {
             tmp: 0,
             c_main: false,
             fn_void: false,
+            with_host_ffi: false,
         }
     }
 
@@ -230,16 +329,20 @@ impl Gen {
         s.push_str("void oo_print_str(OoStr); void oo_print_int(long long); void oo_print_bool(int); void oo_println(void);\n");
         s.push_str("int oo_str_eq(OoStr,OoStr); int oo_str_contains(OoStr,OoStr);\n");
         s.push_str("OoStr oo_int_to_str(long long); OoStr oo_str_trim(OoStr); OoStr oo_str_to_lowercase(OoStr);\n");
-        /* Host FFI (libooda.a) — exact stage-0 dumps + real CHS build */
-        s.push_str("char *ooda_host_ast_dump(const char *path);\n");
-        s.push_str("char *ooda_host_check(const char *path);\n");
-        s.push_str("char *ooda_host_token_dump(const char *path);\n");
-        s.push_str("int ooda_host_chs_build(const char *src, const char *out_bin);\n");
-        s.push_str("void ooda_host_free(char *p);\n");
-        s.push_str("OoStr oo_host_ast_dump(OoStr path);\n");
-        s.push_str("OoStr oo_host_check(OoStr path);\n");
-        s.push_str("OoStr oo_host_token_dump(OoStr path);\n");
-        s.push_str("OoResS oo_chs_build(OoStr src, OoStr out_bin);\n\n");
+        // Host FFI only when the program calls it — pure CHS never needs libooda.a.
+        if self.with_host_ffi {
+            s.push_str("/* Host FFI (libooda.a) — stage-0 dumps + chs_build */\n");
+            s.push_str("char *ooda_host_ast_dump(const char *path);\n");
+            s.push_str("char *ooda_host_check(const char *path);\n");
+            s.push_str("char *ooda_host_token_dump(const char *path);\n");
+            s.push_str("int ooda_host_chs_build(const char *src, const char *out_bin);\n");
+            s.push_str("void ooda_host_free(char *p);\n");
+            s.push_str("OoStr oo_host_ast_dump(OoStr path);\n");
+            s.push_str("OoStr oo_host_check(OoStr path);\n");
+            s.push_str("OoStr oo_host_token_dump(OoStr path);\n");
+            s.push_str("OoResS oo_chs_build(OoStr src, OoStr out_bin);\n");
+        }
+        s.push('\n');
         s.push_str(&self.prelude);
         for f in &self.functions {
             s.push_str(f);
@@ -1369,5 +1472,69 @@ mod tests {
             "must not use int list for string elements: {}",
             main
         );
+    }
+
+    #[test]
+    fn pure_chs_emit_omits_host_ffi_decls() {
+        let p = parse(
+            r#"
+            pub fn main() {
+                let mut xs = list_new();
+                xs = list_push(xs, 1);
+                println(list_len(xs));
+            }
+            "#,
+        );
+        assert!(
+            !super::program_needs_host_ffi(&p),
+            "pure list program must not need host FFI"
+        );
+        let c = CCodeGen::emit_c(&p).expect("emit");
+        assert!(
+            !c.contains("ooda_host") && !c.contains("oo_chs_build"),
+            "pure emit must not declare host FFI (assembly depth): {}",
+            c.lines().take(40).collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    #[test]
+    fn chs_build_call_needs_host_ffi() {
+        let p = parse(
+            r#"
+            pub fn main() {
+                let r = chs_build("a.oo", "a.bin");
+            }
+            "#,
+        );
+        assert!(
+            super::program_needs_host_ffi(&p),
+            "chs_build must require host FFI / libooda"
+        );
+        let c = CCodeGen::emit_c(&p).expect("emit");
+        assert!(
+            c.contains("oo_chs_build"),
+            "host-using emit must declare oo_chs_build"
+        );
+    }
+
+    #[test]
+    fn pure_chs_build_native_without_staticlib() {
+        // Integration: pure program links with gcc+chs_rt only (no libooda.a required).
+        let p = parse(
+            r#"
+            pub fn main() {
+                println(1 + 2);
+            }
+            "#,
+        );
+        let rt = super::runtime_c_path();
+        let out = std::env::temp_dir().join(format!("ooda_pure_chs_{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        CCodeGen::build_native(&p, &out, &rt, false).expect("pure build_native");
+        assert!(out.exists(), "binary missing");
+        let status = std::process::Command::new(&out).output().expect("run");
+        assert!(status.status.success(), "pure binary failed");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(out.with_extension("c"));
     }
 }

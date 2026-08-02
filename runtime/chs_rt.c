@@ -307,7 +307,11 @@ OoStr oo_str_to_lowercase(OoStr s) {
   return r;
 }
 
-/* ----- Host FFI wrappers (symbols from libooda.a) ----- */
+/* ----- Host FFI wrappers (symbols from libooda.a) -----
+ * Only compiled when OODA_WITH_HOST_FFI is set (programs that call
+ * chs_build / host_* dumps). Pure CHS links without Cargo/staticlib.
+ */
+#ifdef OODA_WITH_HOST_FFI
 extern char *ooda_host_ast_dump(const char *path);
 extern char *ooda_host_check(const char *path);
 extern char *ooda_host_token_dump(const char *path);
@@ -343,3 +347,4 @@ OoResS oo_chs_build(OoStr src, OoStr out_bin) {
   }
   return r;
 }
+#endif /* OODA_WITH_HOST_FFI */
