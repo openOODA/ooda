@@ -4779,6 +4779,7 @@ pub fn typecheck_reject_amp_pipe_binop(toks: List[String]) {
 pub fn typecheck_logic_binop_lits(toks: List[String]) {
     let n = list_len(toks);
     let lit_env = build_pure_lit_env(toks);
+    let struct_table = build_struct_field_table(toks);
     let mut i = 0;
     while i < n {
         let k = field_at(list_get(toks, i), 0);
@@ -4791,8 +4792,69 @@ pub fn typecheck_logic_binop_lits(toks: List[String]) {
         if is_logic {
             if i > 0 {
                 if i + 1 < n {
-                    let lty = atom_type_with_env(toks, i - 1, lit_env);
-                    let rty = atom_type_with_env(toks, i + 1, lit_env);
+                    // Honesty: multi-hop field chains ending at && are real operands
+                    // (`o.inner.v && true`). Comparison RHS tokens are not
+                    // (`v > 0 && …` must not read left as Int from the `0`).
+                    let mut preceded_by_binop = false;
+                    if i >= 2 {
+                        if is_type_binop(field_at(list_get(toks, i - 2), 0)) {
+                            preceded_by_binop = true;
+                        }
+                    }
+                    let mut right_continues = false;
+                    if i + 2 < n {
+                        let nk = field_at(list_get(toks, i + 2), 0);
+                        if is_type_binop(nk) {
+                            right_continues = true;
+                        }
+                        if nk == "DOT" {
+                            right_continues = true;
+                        }
+                    }
+                    let mut lty = "";
+                    if field_at(list_get(toks, i - 1), 0) == "IDENT" {
+                        let mut chain_start = i - 1;
+                        let mut walk = true;
+                        while walk {
+                            if chain_start >= 2 {
+                                if field_at(list_get(toks, chain_start - 1), 0) == "DOT" {
+                                    if field_at(list_get(toks, chain_start - 2), 0) == "IDENT" {
+                                        chain_start = chain_start - 2;
+                                    } else {
+                                        walk = false;
+                                    }
+                                } else {
+                                    walk = false;
+                                }
+                            } else {
+                                walk = false;
+                            }
+                        }
+                        if chain_start < i - 1 {
+                            lty = field_chain_type(
+                                toks,
+                                chain_start,
+                                i,
+                                lit_env,
+                                struct_table
+                            );
+                        } else {
+                            if !preceded_by_binop {
+                                lty = atom_type_with_env(toks, i - 1, lit_env);
+                            }
+                        }
+                    } else {
+                        if !preceded_by_binop {
+                            lty = atom_type_with_env(toks, i - 1, lit_env);
+                        }
+                    }
+                    let mut rty = "";
+                    if !right_continues {
+                        rty = field_access_type_at(toks, i + 1, lit_env, struct_table);
+                        if rty == "" {
+                            rty = atom_type_with_env(toks, i + 1, lit_env);
+                        }
+                    }
                     if lty != "" {
                         if rty != "" {
                             let line = field_at(list_get(toks, i), 1);
@@ -5621,6 +5683,71 @@ pub fn build_pure_lit_env(toks: List[String]) -> String {
         ai = ai + 1;
     }
     let mut lit_env = "\t";
+    // R1: bind fn parameters with annotated types so struct-typed params
+    // unlock field chains (o.inner.v) — was silent-OK when only let-env existed.
+    let mut pi = 0;
+    while pi < n {
+        if field_at(list_get(toks, pi), 0) == "KW_FN" {
+            if pi + 1 < n {
+                if field_at(list_get(toks, pi + 1), 0) == "IDENT" {
+                    let mut p = pi + 2;
+                    if p < n {
+                        if field_at(list_get(toks, p), 0) == "LPAREN" {
+                            p = p + 1;
+                            let mut cont_p = true;
+                            while cont_p {
+                                if p >= n {
+                                    cont_p = false;
+                                } else {
+                                    let kk = field_at(list_get(toks, p), 0);
+                                    if kk == "RPAREN" {
+                                        cont_p = false;
+                                    } else if kk == "IDENT" {
+                                        let pname = field_at(list_get(toks, p), 3);
+                                        p = p + 1;
+                                        if p < n {
+                                            if field_at(list_get(toks, p), 0) == "COLON" {
+                                                p = p + 1;
+                                                if p < n {
+                                                    if field_at(list_get(toks, p), 0) == "IDENT" {
+                                                        let pty = resolve_type_alias(
+                                                            aliases,
+                                                            field_at(list_get(toks, p), 3)
+                                                        );
+                                                        // Simple IDENT types only (structs/aliases);
+                                                        // List[T] param anns skip binding (incomplete TC).
+                                                        let mut next_p = p + 1;
+                                                        let mut is_list = false;
+                                                        if next_p < n {
+                                                            if field_at(list_get(toks, next_p), 0) == "LBRACKET" {
+                                                                is_list = true;
+                                                            }
+                                                        }
+                                                        if !is_list {
+                                                            lit_env = lit_env + pname + ":" + pty + "\t";
+                                                        }
+                                                        p = p + 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if p < n {
+                                            if field_at(list_get(toks, p), 0) == "COMMA" {
+                                                p = p + 1;
+                                            }
+                                        }
+                                    } else {
+                                        p = p + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pi = pi + 1;
+    }
     let mut i = 0;
     while i < n {
         if field_at(list_get(toks, i), 0) == "KW_LET" {
@@ -5926,13 +6053,59 @@ pub fn is_known_struct_type(table: String, sname: String) -> Bool {
     return table.contains(key);
 }
 
+// End index (exclusive) of longest IDENT (DOT IDENT)+ starting at start.
+// Stops before method calls (DOT IDENT LPAREN). Returns 0 if not a field chain.
+pub fn field_chain_end(toks: List[String], start: Int) -> Int {
+    let n = list_len(toks);
+    if start >= n {
+        return 0;
+    }
+    if field_at(list_get(toks, start), 0) != "IDENT" {
+        return 0;
+    }
+    let mut p = start + 1;
+    let mut hops = 0;
+    let mut cont = true;
+    while cont {
+        if p + 1 >= n {
+            cont = false;
+        } else if field_at(list_get(toks, p), 0) != "DOT" {
+            cont = false;
+        } else if field_at(list_get(toks, p + 1), 0) != "IDENT" {
+            cont = false;
+        } else {
+            // Method call: recv.foo( — not a field hop.
+            if p + 2 < n {
+                if field_at(list_get(toks, p + 2), 0) == "LPAREN" {
+                    cont = false;
+                } else {
+                    hops = hops + 1;
+                    p = p + 2;
+                }
+            } else {
+                hops = hops + 1;
+                p = p + 2;
+            }
+        }
+    }
+    if hops < 1 {
+        return 0;
+    }
+    return p;
+}
+
 // Type of `IDENT . IDENT` at pos when receiver is in lit_env as a known struct.
+// Also resolves multi-hop chains when present (o.inner.v).
 pub fn field_access_type_at(
     toks: List[String],
     pos: Int,
     lit_env: String,
     struct_table: String
 ) -> String {
+    let end = field_chain_end(toks, pos);
+    if end > 0 {
+        return field_chain_type(toks, pos, end, lit_env, struct_table);
+    }
     return field_chain_type(toks, pos, pos + 3, lit_env, struct_table);
 }
 
@@ -6152,10 +6325,44 @@ pub fn typecheck_field_method(toks: List[String]) {
                         }
                         if rty == "" {
                             if pk == "IDENT" {
-                                let rn = field_at(list_get(toks, i - 1), 3);
-                                let got = resolve_type_alias(lit_env, rn);
-                                if got != rn {
-                                    rty = got;
+                                // Nested field chain receiver: o.inner . v — walk chain
+                                // ending at this DOT (span [recv_start, i)).
+                                let mut recv_start = i - 1;
+                                let mut walk = true;
+                                while walk {
+                                    if recv_start >= 2 {
+                                        if field_at(list_get(toks, recv_start - 1), 0) == "DOT" {
+                                            if field_at(list_get(toks, recv_start - 2), 0) == "IDENT" {
+                                                recv_start = recv_start - 2;
+                                            } else {
+                                                walk = false;
+                                            }
+                                        } else {
+                                            walk = false;
+                                        }
+                                    } else {
+                                        walk = false;
+                                    }
+                                }
+                                if recv_start < i - 1 {
+                                    // Multi-hop: type of field chain before this DOT.
+                                    let chain_ty = field_chain_type(
+                                        toks,
+                                        recv_start,
+                                        i,
+                                        lit_env,
+                                        struct_table
+                                    );
+                                    if chain_ty != "" {
+                                        rty = chain_ty;
+                                    }
+                                }
+                                if rty == "" {
+                                    let rn = field_at(list_get(toks, i - 1), 3);
+                                    let got = resolve_type_alias(lit_env, rn);
+                                    if got != rn {
+                                        rty = got;
+                                    }
                                 }
                             }
                         }
@@ -6325,55 +6532,39 @@ pub fn typecheck_field_method(toks: List[String]) {
 }
 
 // Fail-closed: field access as binop operand when field type known.
-// Patterns: p.x + "a", 1 + p.x (IDENT DOT IDENT OP atom / atom OP IDENT DOT IDENT).
+// Patterns: p.x + "a", o.inner.v + "a", 1 + p.x (field chain OP atom / atom OP field chain).
 pub fn typecheck_field_binop_uses(toks: List[String]) {
     let n = list_len(toks);
     let lit_env = build_pure_lit_env(toks);
     let struct_table = build_struct_field_table(toks);
     let mut i = 0;
     while i < n {
-        // Left field: IDENT DOT IDENT BINOP rhs
-        if i + 4 < n {
-            if field_at(list_get(toks, i), 0) == "IDENT" {
-                if field_at(list_get(toks, i + 1), 0) == "DOT" {
-                    if field_at(list_get(toks, i + 2), 0) == "IDENT" {
-                        let opk = field_at(list_get(toks, i + 3), 0);
-                        if is_type_binop(opk) {
-                            let lty = field_access_type_at(toks, i, lit_env, struct_table);
-                            if lty != "" {
-                                let rty = atom_type_with_env(toks, i + 4, lit_env);
-                                if rty == "" {
-                                    // rhs may also be field access
-                                    let rty2 = field_access_type_at(toks, i + 4, lit_env, struct_table);
-                                    if rty2 != "" {
-                                        let comb = combine_binop_types(opk, lty, rty2);
-                                        if comb == "ERR_BINOP" {
-                                            let line = field_at(list_get(toks, i + 3), 1);
-                                            let col = field_at(list_get(toks, i + 3), 2);
-                                            println(
-                                                "ERR\ttype\tType error at "
-                                                    + line
-                                                    + ":"
-                                                    + col
-                                                    + ": incompatible operand types for binary operator"
-                                            );
-                                            process_exit(1);
-                                        }
-                                    }
-                                } else {
-                                    let comb = combine_binop_types(opk, lty, rty);
-                                    if comb == "ERR_BINOP" {
-                                        let line = field_at(list_get(toks, i + 3), 1);
-                                        let col = field_at(list_get(toks, i + 3), 2);
-                                        println(
-                                            "ERR\ttype\tType error at "
-                                                + line
-                                                + ":"
-                                                + col
-                                                + ": incompatible operand types for binary operator"
-                                        );
-                                        process_exit(1);
-                                    }
+        // Left field chain: IDENT (DOT IDENT)+ BINOP rhs
+        if field_at(list_get(toks, i), 0) == "IDENT" {
+            let end = field_chain_end(toks, i);
+            if end > 0 {
+                if end < n {
+                    let opk = field_at(list_get(toks, end), 0);
+                    if is_type_binop(opk) {
+                        let lty = field_chain_type(toks, i, end, lit_env, struct_table);
+                        if lty != "" {
+                            let mut rty = atom_type_with_env(toks, end + 1, lit_env);
+                            if rty == "" {
+                                rty = field_access_type_at(toks, end + 1, lit_env, struct_table);
+                            }
+                            if rty != "" {
+                                let comb = combine_binop_types(opk, lty, rty);
+                                if comb == "ERR_BINOP" {
+                                    let line = field_at(list_get(toks, end), 1);
+                                    let col = field_at(list_get(toks, end), 2);
+                                    println(
+                                        "ERR\ttype\tType error at "
+                                            + line
+                                            + ":"
+                                            + col
+                                            + ": incompatible operand types for binary operator"
+                                    );
+                                    process_exit(1);
                                 }
                             }
                         }
@@ -6381,13 +6572,12 @@ pub fn typecheck_field_binop_uses(toks: List[String]) {
                 }
             }
         }
-        // Right field: atom BINOP IDENT DOT IDENT (when left is lit/env, not already field-left)
-        if i + 4 < n {
+        // Right field: atom BINOP field-chain (when left is lit/env, not mid field-chain)
+        if i + 2 < n {
             let opk = field_at(list_get(toks, i + 1), 0);
             if is_type_binop(opk) {
-                // skip if left is already field access start (handled above)
                 let mut left_is_field = false;
-                if i >= 2 {
+                if i >= 1 {
                     if field_at(list_get(toks, i - 1), 0) == "DOT" {
                         left_is_field = true;
                     }
@@ -6421,6 +6611,7 @@ pub fn typecheck_field_binop_uses(toks: List[String]) {
 
 // Fail-closed: known struct literal field initializers with pure-lit values.
 // `Point { x: "hi", y: 2 }` when x: Int → error.
+// Also: missing required fields (`Inner {}` when v required) fail-closed.
 pub fn typecheck_struct_lit_inits(toks: List[String]) {
     let n = list_len(toks);
     let struct_table = build_struct_field_table(toks);
@@ -6435,6 +6626,10 @@ pub fn typecheck_struct_lit_inits(toks: List[String]) {
                         let mut p = i + 2;
                         let mut depth = 1;
                         let mut cont = true;
+                        // Present fields as ",name," for membership.
+                        let mut present = ",";
+                        let mut close_line = field_at(list_get(toks, i + 1), 1);
+                        let mut close_col = field_at(list_get(toks, i + 1), 2);
                         while cont {
                             if p >= n {
                                 cont = false;
@@ -6446,6 +6641,8 @@ pub fn typecheck_struct_lit_inits(toks: List[String]) {
                                 if kk == "RBRACE" {
                                     depth = depth - 1;
                                     if depth == 0 {
+                                        close_line = field_at(list_get(toks, p), 1);
+                                        close_col = field_at(list_get(toks, p), 2);
                                         cont = false;
                                     }
                                 }
@@ -6455,6 +6652,7 @@ pub fn typecheck_struct_lit_inits(toks: List[String]) {
                                         if p + 1 < n {
                                             if field_at(list_get(toks, p + 1), 0) == "COLON" {
                                                 let fname = field_at(list_get(toks, p), 3);
+                                                present = present + fname + ",";
                                                 let ety = struct_field_type(struct_table, sname, fname);
                                                 if ety != "" {
                                                     if p + 2 < n {
@@ -6494,12 +6692,90 @@ pub fn typecheck_struct_lit_inits(toks: List[String]) {
                                                             }
                                                         }
                                                     }
+                                                } else {
+                                                    // Unknown field name on known struct.
+                                                    if !struct_has_field(struct_table, sname, fname) {
+                                                        let line = field_at(list_get(toks, p), 1);
+                                                        let col = field_at(list_get(toks, p), 2);
+                                                        println(
+                                                            "ERR\ttype\tType error at "
+                                                                + line
+                                                                + ":"
+                                                                + col
+                                                                + ": struct '"
+                                                                + sname
+                                                                + "' has no field '"
+                                                                + fname
+                                                                + "'"
+                                                        );
+                                                        process_exit(1);
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                                 p = p + 1;
+                            }
+                        }
+                        // Missing required fields (blob "x:Int,y:Int,").
+                        let fields = struct_fields_blob(struct_table, sname);
+                        if fields != "" {
+                            let fn_len = chars_len(fields);
+                            let mut entry = "";
+                            let mut ei = 0;
+                            while ei <= fn_len {
+                                let mut at_end = false;
+                                if ei == fn_len {
+                                    at_end = true;
+                                } else {
+                                    if char_at(fields, ei) == "," {
+                                        at_end = true;
+                                    }
+                                }
+                                if at_end {
+                                    if entry != "" {
+                                        let en = chars_len(entry);
+                                        let mut colon = 0 - 1;
+                                        let mut k = 0;
+                                        while k < en {
+                                            if char_at(entry, k) == ":" {
+                                                colon = k;
+                                                k = en;
+                                            } else {
+                                                k = k + 1;
+                                            }
+                                        }
+                                        if colon >= 0 {
+                                            let mut ename = "";
+                                            let mut k2 = 0;
+                                            while k2 < colon {
+                                                ename = ename + char_at(entry, k2);
+                                                k2 = k2 + 1;
+                                            }
+                                            let needle = "," + ename + ",";
+                                            if !present.contains(needle) {
+                                                println(
+                                                    "ERR\ttype\tType error at "
+                                                        + close_line
+                                                        + ":"
+                                                        + close_col
+                                                        + ": missing required field '"
+                                                        + ename
+                                                        + "' in struct literal for '"
+                                                        + sname
+                                                        + "'"
+                                                );
+                                                process_exit(1);
+                                            }
+                                        }
+                                    }
+                                    entry = "";
+                                    ei = ei + 1;
+                                } else {
+                                    entry = entry + char_at(fields, ei);
+                                    ei = ei + 1;
+                                }
                             }
                         }
                     }
@@ -6513,6 +6789,7 @@ pub fn typecheck_struct_lit_inits(toks: List[String]) {
 pub fn typecheck_if_while_lit_cond(toks: List[String]) {
     let n = list_len(toks);
     let lit_env = build_pure_lit_env(toks);
+    let struct_table = build_struct_field_table(toks);
     let mut i = 0;
     while i < n {
         let k = field_at(list_get(toks, i), 0);
@@ -6547,6 +6824,44 @@ pub fn typecheck_if_while_lit_cond(toks: List[String]) {
                                     + cty
                             );
                             process_exit(1);
+                        }
+                    }
+                }
+                // Field-chain condition: `if o.inner.v {` must be Bool.
+                if field_at(list_get(toks, i + 1), 0) == "IDENT" {
+                    let end = field_chain_end(toks, i + 1);
+                    if end > 0 {
+                        if end < n {
+                            if field_at(list_get(toks, end), 0) == "LBRACE" {
+                                let fty = field_chain_type(
+                                    toks,
+                                    i + 1,
+                                    end,
+                                    lit_env,
+                                    struct_table
+                                );
+                                if fty != "" {
+                                    if fty != "Bool" {
+                                        let line = field_at(list_get(toks, i), 1);
+                                        let col = field_at(list_get(toks, i), 2);
+                                        let mut w = "if";
+                                        if k == "KW_WHILE" {
+                                            w = "while";
+                                        }
+                                        println(
+                                            "ERR\ttype\tType error at "
+                                                + line
+                                                + ":"
+                                                + col
+                                                + ": '"
+                                                + w
+                                                + "' condition must be Bool, found "
+                                                + fty
+                                        );
+                                        process_exit(1);
+                                    }
+                                }
+                            }
                         }
                     }
                 }

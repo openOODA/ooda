@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.172.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.173.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.172.0-alpha (CHS M0–M5)
+## What's real in v0.173.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -70,7 +70,7 @@ import "lib.oo";       // relative / OODA_PATH
 | **CHS:** `List`, string walk, structs, real FS, argv | Real on interpreter |
 | **CHS C backend** (`ooda build --target c`) | Real — gcc + `runtime/chs_rt.c` (no clang required) |
 | **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
-| **oodac** (`oodac/main.oo`) | Real lex/parse/cap-check + **R1 typecheck slice** (annotated let, return lits, pure lit binops + undefined-var fail-closed in `.oo`); build hybrid. Not full typecheck/eval self-host |
+| **oodac** (`oodac/main.oo`) | Real lex/parse/cap-check + **R1 typecheck slice** in `.oo`: ann/return lits, pure/var binops, field chains (incl. nested + param-typed), missing struct-lit fields, if/logic field honesty; build hybrid. Not full typecheck/eval self-host |
 | **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
 | `break` / `continue` | Real in while/for (interp + CHS C + WASM + LLVM integer subset); while-body tail `if`/break not silently dropped; outside loop fails typecheck |
 | `for x in list` / `lo..hi` | Real: desugars to while+list_get (interp + C); unannotated lists refine element type on assign; **C defers list kind until first push** (int vs string) |

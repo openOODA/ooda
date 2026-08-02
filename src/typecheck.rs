@@ -2374,6 +2374,17 @@ impl TypeChecker {
                                 ));
                             }
                         }
+                        for (def_name, _) in &def_fields {
+                            if !fields.iter().any(|(n, _)| n == def_name) {
+                                return Err(anyhow!(
+                                    "Type error at {}:{}: missing required field '{}' in struct literal for '{}'",
+                                    span.line,
+                                    span.col,
+                                    def_name,
+                                    name
+                                ));
+                            }
+                        }
                         Ok(Ty::Struct {
                             name: sn.or_else(|| Some(name.clone())),
                             fields: def_fields,
