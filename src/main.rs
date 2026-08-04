@@ -31,7 +31,7 @@ use anyhow::{Context, Result};
 #[derive(ClapParser)]
 #[command(name = "ooda")]
 #[command(author = "openOODA Core Team")]
-#[command(version = "0.177.0-alpha")]
+#[command(version = "0.179.0-alpha")]
 #[command(about = "The OODA Programming Language Compiler & Toolchain", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -374,12 +374,24 @@ fn main() -> Result<()> {
                     target_l
                 );
             }
-            // Dual-engine honesty: sealed I/O has no runtime cap tokens in C/LLVM/WASM yet.
-            // Refuse to emit open native binaries that drop the interpreter's default-deny gate.
-            if matches!(
-                target_l.as_str(),
-                "c" | "chs" | "native" | "wasm" | "llvm"
-            ) {
+            // Dual-engine honesty for sealed I/O:
+            // - C/native/chs: only effects lowered by CHS C + chs_rt (compile-time caps;
+            //   tokens erased in C main). Aligns CLI with host chs_build (oodac bootstrap).
+            // - wasm/llvm: still refuse all sealed effects (no runtime cap tokens / no lower).
+            if matches!(target_l.as_str(), "c" | "chs" | "native") {
+                let unsupported =
+                    ooda::codegen_c::sealed_effects_not_lowered_on_c(&program);
+                if !unsupported.is_empty() {
+                    anyhow::bail!(
+                        "build --target {}: sealed effectful builtins not lowered on CHS C \
+                         (found: {}). Supported on C: read_file/write_file/path_exists/file_size/\
+                         env_get/sys_exec (+ method forms). Use `ooda run` for other sealed I/O, \
+                         or remove those calls from compiled code.",
+                        target_l,
+                        unsupported.join(", ")
+                    );
+                }
+            } else if matches!(target_l.as_str(), "wasm" | "llvm") {
                 let sealed = ooda::capabilities::collect_sealed_effect_names(&program);
                 if !sealed.is_empty() {
                     anyhow::bail!(
@@ -1222,9 +1234,9 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.177.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.179.0-alpha";
     // For comparing against Cargo.toml which lacks the 'v'
-    const CANONICAL_VERSION_NO_V: &str = "0.177.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.179.0-alpha";
 
     fn clap_version() -> &'static str {
         let src = include_str!("main.rs");

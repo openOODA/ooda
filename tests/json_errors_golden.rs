@@ -511,14 +511,63 @@ fn build_wasm_refuses_sealed_io_effects() {
 }
 
 #[test]
-fn build_c_refuses_sealed_io_effects() {
+fn build_c_lowers_fscap_sealed_io() {
+    // Assembly depth + honesty: CHS C lowers compile-time-capped FS (chs_rt fopen).
+    // Aligns CLI `build --target c` with host chs_build (native oodac bootstrap).
     let bin = env!("CARGO_BIN_EXE_ooda");
     let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/chs_fs_roundtrip.oo");
     let out = std::process::Command::new(bin)
         .args(["build", example, "--target", "c"])
         .output()
         .expect("spawn ooda build");
-    assert!(!out.status.success(), "sealed FS must not compile to C without runtime caps");
+    assert!(
+        out.status.success(),
+        "C must lower FsCap I/O for bootstrap: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exe = std::path::Path::new(example).with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run fs binary");
+    assert!(run.status.success(), "fs binary failed: {:?}", run);
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        stdout.contains("chs-m0-ok"),
+        "expected roundtrip body, got: {}",
+        stdout
+    );
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_file(exe.with_extension("c"));
+}
+
+#[test]
+fn build_native_lowers_fscap_sealed_io() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/chs_fs_roundtrip.oo");
+    let out = std::process::Command::new(bin)
+        .args(["build", example, "--target", "native"])
+        .output()
+        .expect("spawn ooda build native");
+    assert!(
+        out.status.success(),
+        "native must lower FsCap I/O: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let exe = std::path::Path::new(example).with_extension("");
+    let _ = std::fs::remove_file(&exe);
+    let _ = std::fs::remove_file(exe.with_extension("c"));
+}
+
+#[test]
+fn build_llvm_refuses_sealed_io_effects() {
+    let bin = env!("CARGO_BIN_EXE_ooda");
+    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/chs_fs_roundtrip.oo");
+    let out = std::process::Command::new(bin)
+        .args(["build", example, "--target", "llvm"])
+        .output()
+        .expect("spawn ooda build llvm");
+    assert!(
+        !out.status.success(),
+        "sealed FS must not compile to llvm without runtime caps"
+    );
     let err = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stderr),
@@ -526,37 +575,44 @@ fn build_c_refuses_sealed_io_effects() {
     );
     assert!(
         err.contains("sealed") || err.contains("capability") || err.contains("read_file"),
-        "expected sealed I/O refuse message, got: {}",
+        "expected sealed refuse for llvm: {}",
         err
     );
 }
 
 #[test]
-fn build_llvm_and_native_refuse_sealed_io_effects() {
+fn build_c_refuses_net_sealed_fetch() {
+    // Net is not lowered on C — fail closed (no silent oo_fetch link error theater).
     let bin = env!("CARGO_BIN_EXE_ooda");
-    let example = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/chs_fs_roundtrip.oo");
-    for target in ["llvm", "native"] {
-        let out = std::process::Command::new(bin)
-            .args(["build", example, "--target", target])
-            .output()
-            .expect("spawn ooda build");
-        assert!(
-            !out.status.success(),
-            "sealed FS must not compile to {} without runtime caps",
-            target
-        );
-        let err = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stderr),
-            String::from_utf8_lossy(&out.stdout)
-        );
-        assert!(
-            err.contains("sealed") || err.contains("capability") || err.contains("read_file"),
-            "expected sealed refuse for {}: {}",
-            target,
-            err
-        );
-    }
+    let dir = std::env::temp_dir().join(format!("ooda_c_fetch_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("m.oo");
+    std::fs::write(
+        &path,
+        r#"
+pub fn main(net: &NetCap) {
+    let r = fetch(net, "http://example.com");
+    println("x");
+}
+"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(bin)
+        .args(["build", "--target", "c", path.to_str().unwrap()])
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "C must refuse sealed fetch");
+    let err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("sealed") || err.contains("fetch") || err.contains("not lowered"),
+        "expected sealed net refuse, got: {}",
+        err
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -3006,7 +3062,7 @@ pub fn main() { println(f(true)); }
 }
 
 #[test]
-fn build_c_refuses_sys_exec_method() {
+fn build_c_lowers_sys_exec_method() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_c_sys_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -3026,19 +3082,13 @@ pub fn main(sys: &SysCap) -> Int {
         .output()
         .expect("spawn");
     assert!(
-        !out.status.success(),
-        "C must refuse sealed .sys_exec without runtime cap tokens"
+        out.status.success(),
+        "C must lower sealed .sys_exec: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    let err = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout)
-    );
-    assert!(
-        err.contains("sealed") || err.contains(".sys_exec") || err.contains("sys_exec"),
-        "expected sealed refuse, got: {}",
-        err
-    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success(), "sys_exec binary failed");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3196,7 +3246,7 @@ pub fn main() {
 }
 
 #[test]
-fn build_c_refuses_path_exists_method() {
+fn build_c_lowers_path_exists_method() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_c_exists_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -3217,19 +3267,15 @@ pub fn main(fs: &FsCap) {
         .output()
         .expect("spawn");
     assert!(
-        !out.status.success(),
-        "C must refuse sealed .path_exists without runtime cap tokens"
+        out.status.success(),
+        "C must lower sealed .path_exists: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    let err = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout)
-    );
-    assert!(
-        err.contains("sealed") || err.contains("path_exists"),
-        "expected sealed refuse, got: {}",
-        err
-    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("exists"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3275,7 +3321,7 @@ pub fn main(fs: &FsCap) {{
 }
 
 #[test]
-fn build_c_refuses_file_size_method() {
+fn build_c_lowers_file_size_method() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_c_sz_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -3297,19 +3343,15 @@ pub fn main(fs: &FsCap) {
         .output()
         .expect("spawn");
     assert!(
-        !out.status.success(),
-        "C must refuse sealed .file_size without runtime cap tokens"
+        out.status.success(),
+        "C must lower sealed .file_size: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    let err = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout)
-    );
-    assert!(
-        err.contains("sealed") || err.contains("file_size"),
-        "expected sealed refuse, got: {}",
-        err
-    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(!stdout.trim().is_empty(), "expected size print, stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3346,7 +3388,7 @@ pub fn main(env: &EnvCap) {
 }
 
 #[test]
-fn build_c_refuses_env_get_method() {
+fn build_c_lowers_env_get_method() {
     let bin = env!("CARGO_BIN_EXE_ooda");
     let dir = std::env::temp_dir().join(format!("ooda_c_env_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
@@ -3368,19 +3410,15 @@ pub fn main(env: &EnvCap) {
         .output()
         .expect("spawn");
     assert!(
-        !out.status.success(),
-        "C must refuse sealed .env_get without runtime cap tokens"
+        out.status.success(),
+        "C must lower sealed .env_get: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    let err = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stderr),
-        String::from_utf8_lossy(&out.stdout)
-    );
-    assert!(
-        err.contains("sealed") || err.contains("env_get"),
-        "expected sealed refuse, got: {}",
-        err
-    );
+    let exe = path.with_extension("");
+    let run = std::process::Command::new(&exe).output().expect("run");
+    assert!(run.status.success());
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(stdout.contains("env ok"), "stdout={}", stdout);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

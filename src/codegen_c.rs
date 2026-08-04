@@ -19,6 +19,44 @@ const HOST_FFI_CALLS: &[&str] = &[
     "host_token_dump",
 ];
 
+/// Sealed effectful builtins that CHS C + `chs_rt.c` actually lower.
+///
+/// **Honesty:** C erases capability tokens at `main` (compile-time cap check
+/// via typecheck/capability stays). Interpreter still runtime-gates tokens.
+/// Anything outside this set must fail-closed on C/native (no silent `oo_fetch`).
+/// Free and method forms (`.name`) both listed — `collect_sealed` records either.
+const C_LOWERED_SEALED: &[&str] = &[
+    "read_file",
+    "write_file",
+    "fs_read",
+    "fs_write",
+    ".read_file",
+    ".write_file",
+    "path_exists",
+    "fs_exists",
+    ".path_exists",
+    "file_size",
+    ".file_size",
+    "env_get",
+    ".env_get",
+    "sys_exec",
+    "system_exec",
+    ".sys_exec",
+];
+
+/// True if the sealed effect name is lowered by the C backend + chs_rt.
+pub fn c_backend_lowers_sealed(name: &str) -> bool {
+    C_LOWERED_SEALED.iter().any(|n| *n == name)
+}
+
+/// Sealed effect names used in `program` that C does **not** lower (fail-closed).
+pub fn sealed_effects_not_lowered_on_c(program: &Program) -> Vec<String> {
+    crate::capabilities::collect_sealed_effect_names(program)
+        .into_iter()
+        .filter(|n| !c_backend_lowers_sealed(n))
+        .collect()
+}
+
 /// True if any call in the program needs stage-0 host FFI (`libooda.a`).
 pub fn program_needs_host_ffi(program: &Program) -> bool {
     for item in &program.items {
@@ -1534,6 +1572,70 @@ mod tests {
         assert!(out.exists(), "binary missing");
         let status = std::process::Command::new(&out).output().expect("run");
         assert!(status.status.success(), "pure binary failed");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(out.with_extension("c"));
+    }
+
+    #[test]
+    fn sealed_fs_is_lowered_on_c_net_is_not() {
+        let fs = parse(
+            r#"
+            pub fn main(fs: &FsCap) {
+                let r = read_file(fs, "x.oo");
+                if r.is_ok() {
+                    println("ok");
+                }
+            }
+            "#,
+        );
+        assert!(
+            super::sealed_effects_not_lowered_on_c(&fs).is_empty(),
+            "read_file must be C-lowered"
+        );
+        assert!(super::c_backend_lowers_sealed("read_file"));
+        assert!(super::c_backend_lowers_sealed(".path_exists"));
+        assert!(!super::c_backend_lowers_sealed("fetch"));
+        assert!(!super::c_backend_lowers_sealed("mkdir_p"));
+        assert!(!super::c_backend_lowers_sealed(".mkdir_p"));
+
+        let net = parse(
+            r#"
+            pub fn main(net: &NetCap) {
+                let r = fetch(net, "http://example.com");
+                println("x");
+            }
+            "#,
+        );
+        let bad = super::sealed_effects_not_lowered_on_c(&net);
+        assert!(
+            bad.iter().any(|s| s == "fetch"),
+            "fetch must not be C-lowered: {:?}",
+            bad
+        );
+    }
+
+    #[test]
+    fn fscap_program_builds_native_with_read_file() {
+        // Bootstrap path: oodac-style FS I/O must link (no silent refuse).
+        let p = parse(
+            r#"
+            pub fn main(fs: &FsCap) {
+                let r = read_file(fs, "/etc/hosts");
+                if r.is_ok() {
+                    println("ok");
+                }
+            }
+            "#,
+        );
+        let rt = super::runtime_c_path();
+        let out = std::env::temp_dir().join(format!("ooda_fs_chs_{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        CCodeGen::build_native(&p, &out, &rt, false).expect("fs build_native");
+        assert!(out.exists());
+        let status = std::process::Command::new(&out).output().expect("run");
+        assert!(status.status.success(), "fs binary failed");
+        let stdout = String::from_utf8_lossy(&status.stdout);
+        assert!(stdout.contains("ok"), "stdout={}", stdout);
         let _ = std::fs::remove_file(&out);
         let _ = std::fs::remove_file(out.with_extension("c"));
     }

@@ -49,10 +49,21 @@ pub fn host_check_path(path: &Path) -> String {
 }
 
 /// Real CHS native build: load → type/cap check → C emit → gcc link.
+///
+/// Same sealed-effect allowlist as `ooda build --target c` (dual-engine honesty):
+/// only effects lowered by CHS C + chs_rt; others fail closed before emit.
 pub fn host_chs_build(src: &Path, out_bin: &Path) -> Result<(), String> {
     let prog = load_program(src).map_err(|e| format!("load: {}", e))?;
     CapabilityChecker::check_program(&prog).map_err(|e| format!("cap: {}", e))?;
     TypeChecker::check_program(&prog).map_err(|e| format!("type: {}", e))?;
+    let unsupported = crate::codegen_c::sealed_effects_not_lowered_on_c(&prog);
+    if !unsupported.is_empty() {
+        return Err(format!(
+            "sealed effectful builtins not lowered on CHS C (found: {}). \
+             Supported: read_file/write_file/path_exists/file_size/env_get/sys_exec",
+            unsupported.join(", ")
+        ));
+    }
     let rt = runtime_c_path();
     CCodeGen::build_native(&prog, out_bin, &rt, false).map_err(|e| format!("build: {}", e))
 }

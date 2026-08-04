@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.177.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.179.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -38,7 +38,7 @@ import "lib.oo";       // relative / OODA_PATH
 
 ---
 
-## What's real in v0.177.0-alpha (CHS M0–M5)
+## What's real in v0.179.0-alpha (CHS M0–M5)
 
 | Capability | Status |
 |---|---|
@@ -46,7 +46,7 @@ import "lib.oo";       // relative / OODA_PATH
 | Option / Result / must-use / let mut | Real |
 | Nested block scopes | Real: `let` inside if/while does **not** leak; match-arm pattern shadows restore; outer `let mut` assign in match+if persists |
 | Type aliases | Real: unify for arith/return; `Int[lo..hi]` on params **and** let/return (const TC + runtime) |
-| Caps + sealed effects | **Interpreter:** static + runtime object-cap (live handle). **C/LLVM/WASM:** sealed free **and method** forms (`.read_file`, `.path_exists`, `.file_size`, `.env_get`, `.sys_exec`, …) are **refused** at build — no ambient native bypass |
+| Caps + sealed effects | **Interpreter:** static + runtime object-cap (live handle). **CHS C/native:** lowered sealed set (read_file/write_file/path_exists/file_size/env_get/sys_exec + methods) with **compile-time** caps (tokens erased in C main); other sealed (fetch/mkdir_p/…) **fail-closed**. **WASM/LLVM:** all sealed I/O still refused |
 | `?` try-operator | Real: unwraps Result; early-return on Err; only in Result-returning fns; build refuses outside interp |
 | Bool match | Real: `true`/`false` patterns + exhaustiveness |
 | `.contains` | Real on String (interp + CHS C) |
@@ -61,8 +61,8 @@ import "lib.oo";       // relative / OODA_PATH
 | Measured `ooda em` / `em --json` / `bench --em` | Real clocks only (W, µs, V); JSON EmReport for agents — no fake Boyd Ps |
 | String methods | Real on interpreter + CHS C (`.char_at` / `.str_slice`); LLVM subset refuses strings fail-closed |
 | WASM strings + List[Int]/List[String] | Real: string methods + `+` concat; List[Int] deep `==` (`$list_eq`); List[String] push/len/get/for + content `==` (`$list_str_eq`/streq, not pointer). Eq RT gated (W↓). Sealed caps still refuse. Fixture `list_string.oo`. Dev wasmtime smoke |
-| Dual engine compile | Contracts + sealed I/O **refused** on C/LLVM/WASM (method forms included as of v0.69); pure compute subset may lower; IR-only link fails non-zero |
-| `EnvCap` `.env_get` | Real on **interpreter**; C build refuses (sealed) |
+| Dual engine compile | Contracts + `?` refused outside interp; C lowers allowlisted sealed FS/env/sys; wasm/llvm refuse sealed; pure compute subset may lower |
+| `EnvCap` `.env_get` | Real on **interpreter** and **CHS C** (compile-time EnvCap); wasm/llvm refuse |
 | Network `pkg install` | Partial: local pin; https `*.tar.gz` via curl+tar; `.minisig`/`.sig` fail-closed when present (need pubkey/gpg; `OODA_PKG_ALLOW_UNSIGNED=1` escape); `.sha256` optional/`OODA_PKG_REQUIRE_SHA256=1` |
 | `ooda patch` | Real body / params / return type / requires / ensures |
 | `ooda migrate --edition 2026` | Partial real: exhaustive match wildcards + assigned `let`→`let mut` |
