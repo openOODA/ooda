@@ -10,9 +10,9 @@ mod version_consistency_tests {
     ///
     /// If you need to bump: change every string below to the new
     /// version, then commit.
-    const CANONICAL_VERSION: &str = "v0.180.0-alpha";
+    const CANONICAL_VERSION: &str = "v0.181.0-alpha";
     // For comparing against Cargo.toml which lacks the 'v'
-    const CANONICAL_VERSION_NO_V: &str = "0.180.0-alpha";
+    const CANONICAL_VERSION_NO_V: &str = "0.181.0-alpha";
 
     fn clap_version() -> &'static str {
         // Cli derive lives in cli_parts after main.rs modularize.
