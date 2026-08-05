@@ -1,298 +1,441 @@
-# File-size split plan (≤250 lines) — functional boundaries only
+# Complete split plan — all owned source ≤250 lines
 
-**Status:** Plan only — execute after current Gemini turn finishes.  
-**Rule:** Owned source ≤ **250 lines** per file (`scripts/check_file_lines.sh`).  
-**Entropy:** \(O\) = oversize file count; good ships drive **\(O \downarrow\)** (`TOOLS.md`).  
-**Non-negotiable:** Splits are **functional and first-principles**, never “every N lines.”
+**Status:** Full inventory + functional target map. Execute after each rotation’s probes.  
+**Cap:** 250 lines per owned `.oo` / `.rs` / hand `.c`/`.h` / `.sh`.  
+**Lock:** `scripts/check_file_lines.sh` (strict → O=0; `--ratchet` while O>0).  
+**Entropy:** \(O\) = oversize file count.  
+**Law:** Splits only at **functional seams** (pipeline + language domain). Never mid-fn line chops.
 
-Generated excluded: `oodac/main.c`, `oodac/oodac2.c`, `*.oo.c`, `*.oo.bin`, `target/`, `dist/`.
-
----
-
-## First principles (read before any extract)
-
-### 1. A module is a *job*, not a line budget
-
-Cut only where a competent compiler engineer would name a crate/package:
-
-| Question | Must answer “yes” |
-|----------|-------------------|
-| Does this unit have **one responsibility** in the pipeline or language model? | |
-| Can you state its **inputs → outputs** without referring to “the rest of main.oo”? | |
-| Would a **new reader** know where a bug in behavior X lives? | |
-| Do dependencies point **downstream only** (lex ↛ depends on typecheck)? | |
-
-If the only reason to cut is “file hit 250,” **keep cutting conceptually** until the seam is a real interface — then place the file boundary there. If that unit is still >250, **decompose the unit further by sub-responsibility**, not by line number.
-
-### 2. Pipeline is the primary axis (universal compiler shape)
-
-oodac’s own section markers already encode this (do not invent a second architecture):
-
-```text
-source text
-    → Lex          (characters → token validity / positions)
-    → Tokens       (stable token stream representation + dump)
-    → Parse / AST  (tokens → structure: items, stmts, exprs)
-    → Check        (structure + sealed capabilities / program shape)
-    → Typecheck    (types, names, control, structs, refinements, …)
-    → Emit (C)     (tokens/structure → C text)
-CLI (main) only dispatches commands onto this pipeline.
-```
-
-**File tree must mirror this pipeline.** Do not mix lex helpers into typecheck files or emit into parse.
-
-### 3. Within a stage, split by *language semantics*, not chronology
-
-Especially typecheck: group by **what fact about the program is being enforced**, aligned with DESIGN pillars and grammar:
-
-| Semantic domain | Enforces | Examples in monofile today |
-|-----------------|----------|----------------------------|
-| **Names / bindings** | What exists; scopes | `typecheck_undefined_vars`, `binds_has`, `scope_has`, `drop_depth`, `is_known_name` |
-| **Type lattice / lits** | What a type is; lit↔ann | `lit_token_type`, `types_compatible`, `resolve_type_alias`, `combine_binop_types`, `typecheck_ann_and_return_lits` |
-| **Calls** | Arity, arg/ret of calls | `typecheck_call_*`, `resolve_arg_type`, `arity_get`, `build_fn_ret_table`, `typecheck_let_ann_call_init` |
-| **Assignment / mutability** | Store rules | `typecheck_immut_assign`, `typecheck_mut_assign_types`, `typecheck_return_and_assign_calls`, `is_mut_binding` |
-| **Operators** | Op well-typedness / rejects | unary bang/minus, cmp, logic binop, shift/amp/pipe rejects |
-| **Structs / fields / methods** | Nominal fields & receivers | `build_struct_field_table`, `field_chain_*`, `typecheck_field_*`, `typecheck_struct_lit_inits` |
-| **Control flow** | Cond types; branch consistency | `typecheck_if_while_lit_cond`, `typecheck_control_flow_branches` |
-| **Refinements** | `Int[lo..hi]` etc. | `typecheck_refinements`, `parse_int` (as refine helper) |
-| **Effects / caps** | Sealed I/O requires caps | `check_function`, `is_sealed_*` (DESIGN pillar 1) |
-| **Must-use / returns** | Result discipline | `typecheck_must_use_result`, `typecheck_missing_return` |
-
-A typecheck file named `tc_misc.oo` is a **smell** — it is a junk drawer, not a principle. Prefer the domains above; if something does not fit, name the new domain, don’t dump it.
-
-### 4. Function boundary before file boundary
-
-1. **Never** split mid-`fn` at an arbitrary line.  
-2. If `fn f` is >250 (or bloated): extract **named** helpers that mean something  
-   (`lex_string_lit`, `lex_number`, `check_call_arity_at`) — not `f_part2`.  
-3. Only after helpers exist do you move a **closed set** of fns that share one job into a module.  
-4. Public surface of a module should be small: **stage entry + few pure helpers** others need.
-
-### 5. Dependency rule (acyclic)
-
-```text
-cli → {lex, tokens, parse, check, typecheck_*, emit}
-typecheck_* → may use: tokens representation, parse navigators (tok field accessors), type lattice helpers
-emit → may use: tokens / light parse navigation; must not call typecheck
-parse → may use: tokens; must not call typecheck or emit
-lex → pure over String; no parse/tc/emit
-```
-
-If an extract forces a reverse dependency, the **seam is wrong** — redesign the interface (e.g. pass token list + indexes), don’t “just move lines.”
-
-### 6. Dual-engine honesty is a seam constraint
-
-Stage-0 Rust modules already follow pipeline names (`lexer`, `parser`, `typecheck`, `eval`, `codegen_*`).  
-**oodac modules should map to the same conceptual stages** so dual-engine work has an obvious peer, not a random `.oo` shard.
-
-### 7. 250 is a *pressure*, not the *reason*
-
-- Cap forces modularity (SPEC § LLM context).  
-- **Reason** for each file is the job in §1–3.  
-- Reject PRs/rotations that only chop for green checker without a one-line job statement in the module header.
+Generated **excluded** from cap: `oodac/main.c`, `oodac/oodac2.c`, `*.oo.c`, `*.oo.bin`, `target/`, `dist/`.
 
 ---
 
-## Anti-patterns (explicit)
+## First principles (every extract)
 
-| Forbidden | Why |
-|-----------|-----|
-| Split at line 250 / 500 / 1000 | No meaning; breaks fns mid-thought |
-| `main_1.oo` … `main_4.oo` | Chronological dump |
-| `tc_misc` / `utils` catch-alls | Entropy dump; grows forever |
-| Moving half a typecheck domain to “make room” | Breaks cohesion |
-| New behavior only in the leftover monofile | Restores the problem |
-| Reverse imports (lex imports tc) | Architecture lie |
+1. **One job per file** — name the responsibility; fill header `job / in / out / stage`.  
+2. **Pipeline primary axis:** `cli → lex → tokens → parse → check → typecheck → emit`.  
+3. **Typecheck secondary axis:** names · types · calls · assign · ops · struct/field · control · refine · effects.  
+4. **Function before file** — oversized `fn` → named sub-jobs, then move a closed set.  
+5. **Deps acyclic** — later stages may use earlier; never reverse.  
+6. **250 is pressure** — seam reason is never “file was long.”  
+7. **Peer stage-0** — oodac modules should map to host module *concepts* for dual-engine work.
 
----
-
-## Current baseline (recompute after Gemini)
-
-```bash
-cd /home/jeryd/Projects/openOODA/ooda
-./scripts/check_file_lines.sh
-# O=24 at plan refresh; oodac/main.oo ~7.7k+ and may still grow under Gemini
-```
-
-| Priority | Path | Role (functional) |
-|---------:|------|-------------------|
-| **P0** | `oodac/main.oo` | Whole R1 pipeline in one file |
-| **P1** | `src/{typecheck,eval,codegen_*,main,parser,…}.rs` | Stage-0 host — same pipeline jobs |
-| **P2** | large tests/scripts/runtime | Harness / RT — split by **suite domain** or **RT subsystem** |
-
-**Order:** P0 first (product path). P1 only when that host file is touched or after oodac stages exist as peers.
-
----
-
-## P0 — `oodac/main.oo` target architecture
-
-### Module map (each file = one job)
-
-```text
-oodac/
-  main.oo                 # CLI dispatch only (tokens|ast|check|build|emit-c)
-  lex.oo                  # Character scanner: lex_all (+ pure lex helpers if extracted)
-  token_stream.oo         # Token materialization: collect_tokens, tok_line, field_at, n_toks, …
-  token_dump.oo           # Human/tool dump path: dump_tokens, emit_tok, keyword_kind
-  parse_item.oo           # Item-level: parse_fn_item, parse_and_print_ast, skip_balanced
-  parse_stmt.oo           # Statement structure: block/stmt dump, skip_stmt, count_stmts, indent
-  parse_expr.oo           # Expression grammar: bp/primary/method chain, bin_bp, escape_dump
-  check_drive.oo          # check command orchestration: run_check_from_src
-  check_caps.oo           # Sealed-effect capability checking (DESIGN caps pillar)
-  tc_types.oo             # Type lattice: aliases, lit types, compatibility, binop type combine
-  tc_scope.oo             # Bindings/scopes/env tables for names
-  tc_names.oo             # Undefined / known-name enforcement
-  tc_calls.oo             # Call arity, arg types, call-vs-lit/op interactions, fn ret table
-  tc_assign.oo            # Let/assign/return store rules + mut
-  tc_ops.oo               # Unary/cmp/logic + rejected operators
-  tc_struct.oo            # Struct tables, field chains, methods, struct lits
-  tc_control.oo           # if/while conditions + branch typing
-  tc_refine.oo            # Refinement types Int[lo..hi] etc.
-  tc_effects.oo           # must_use Result, missing return (completion/effect of values)
-  c_emit.oo               # C backend entry + fn/block/stmt/preamble
-```
-
-**Header required** at top of every new module (one short block comment):
+### Required module header
 
 ```text
 // job: <one sentence>
-// in:  <types/values>
-// out: <types/values or side-effect>
-// stage: lex | tokens | parse | check | typecheck | emit | cli
+// in:  <…>
+// out: <…>
+// stage: cli | lex | tokens | parse | check | typecheck | emit | host | test | install | runtime
 ```
 
-If you cannot fill that header honestly, **do not create the file**.
+---
 
-### How monofile maps today (anchors, not cut lines)
+## Baseline (recompute each Observe)
 
-| Stage | Existing markers / owners | Typical entry fns |
-|-------|---------------------------|-------------------|
-| CLI | top of file | `main` |
-| Lex | `// ===== Lex all` | `lex_all` |
-| Tokens | `// ===== Token dump` | `dump_tokens`, `collect_tokens`, `emit_tok`, `keyword_kind` |
-| Parse | `// ===== Real AST dump` | `dump_ast_from_src`, `parse_*`, `skip_*`, `print_expr_bp`, … |
-| Check + caps | `// ===== Real capability + structure check` | `run_check_from_src`, `check_function`, `is_sealed_*` |
-| Typecheck | `// ===== R1 typecheck slice` | all `typecheck_*`, type lattice, struct/field helpers, infer_* |
-| Emit | late file | `c_emit_stream`, `c_emit_fn/block/stmt`, `c_emit_preamble` |
+```bash
+./scripts/check_file_lines.sh   # O=24 as of this plan; main.oo ~7297
+```
 
-Line numbers **shift**; re-find by **marker + `pub fn` name**, never by stale L#### alone.
-
-### Oversized *functions* — split by sub-responsibility
-
-When a single `pub fn` exceeds ~250 or is clearly multi-job:
-
-| Function (today) | First-principles decomposition |
-|------------------|--------------------------------|
-| `dump_tokens` / `collect_tokens` | Separate **string lit**, **number**, **ident/keyword**, **punct** scanners; shared cursor state helpers |
-| `parse_primary_dump` | **atom**, **paren/group**, **call suffix**, **field/method suffix** |
-| `typecheck_ann_and_return_lits` | **annotation check** vs **return-lit check** vs **alias resolve** path |
-| `typecheck_call_arg_lits` | **resolve callee**, **each arg**, **arity** (compose `typecheck_call_arity`) |
-| `typecheck_refinements` | **parse bound**, **check let**, **check assign/return** |
-| `typecheck_field_method` | **resolve receiver type**, **method arity table**, **arg check** |
-
-Helpers stay in the **same stage module** until that module’s job is full — then promote a sub-module that is still one semantic noun (`token_scan_string.oo` only if string lex is a real subsystem).
-
-### Phased extraction (each phase = one pipeline seam)
-
-| Phase | Functional goal | Move (closed set) | Prove with |
-|------:|-----------------|-------------------|------------|
-| **0** | Baseline + no growth | Nothing — measure \(O\), ratchet | `check_file_lines.sh` |
-| **1** | **Lex stage** standalone | `lex_all` + pure lex helpers only | lex fail fixtures; tokens/ast/check still green |
-| **2** | **Token stream** vs **token dump** | Materialize stream vs print dump | `tokens` cmd + consumers of `collect_tokens` |
-| **3** | **Parse: items** | item-level parse only | `ast` on fn-shaped programs |
-| **4** | **Parse: stmt / expr** | stmt module then expr module (expr may precede stmt if deps require) | nested expr/stmt ast fixtures |
-| **5** | **Check drive + caps** | orchestration vs sealed caps (two files, two jobs) | fail-closed sealed; structure check |
-| **6** | **Type lattice + scope** | `tc_types` + `tc_scope` first (foundations) | ann/return lit fixtures |
-| **7** | **Typecheck by domain** | names → calls → assign → ops → struct → control → refine → effects | corpus **per domain** dual-engine |
-| **8** | **Emit** | all `c_emit_*` | emit-c + build smoke |
-| **9** | **CLI-only main** | `main` dispatch only ≤250 | fixed_point / CHS scripts |
-
-**Phase order is dependency order**, not “easiest line chop.”  
-Typecheck domains (phase 7) may be multiple rotations — **one domain per rotation** is correct Power Law.
-
-### Tests (functional, not theater)
-
-- Fixtures must fail if the **job** of the module regresses (immune rail).  
-- Prefer corpus paths that match the domain (`typecheck/fail/*` for tc_*, etc.).  
-- Dual-engine on the same fixture when the stage has a stage-0 peer.  
-- No “split done” without green suite for that stage.
-
-### Multi-file wiring
-
-Use the language’s real module mechanism (filesystem modules / imports per DESIGN–SPEC).  
-If oodac currently runs only as a single file: temporary **concat for ship** is allowed only if:
-
-1. Source of truth remains **split files** with real jobs, and  
-2. Concat is a **build step**, not the editing surface, and  
-3. Goal is still true multi-file load — concat is residual host-like debt.
-
-Do not pretend concat is the architecture.
+| Done (≤250) | Remaining monofile weight |
+|-------------|---------------------------|
+| `lex.oo`, `token_emit.oo`, `token_fmt.oo`, `check_caps.oo` | `oodac/main.oo` + 23 other oversize paths |
 
 ---
 
-## P1 — Stage-0 Rust (same principles)
+# Part A — `oodac/main.oo` (P0) — complete target tree
 
-Split **along the same pipeline and semantic domains**, matching existing module names where they already exist:
+## A.0 Target tree (every file ≤250)
 
-| Current monofile | Functional split (examples) |
-|------------------|-----------------------------|
-| `typecheck.rs` | types / scope / names / calls / assign / ops / struct / control / refine — **same domains as oodac** |
-| `eval.rs` | values / expr / stmt / call / caps effects |
-| `codegen_c.rs` / `codegen_wasm.rs` | preamble/types, expr, stmt, fn, runtime glue |
-| `main.rs` | one module per CLI command surface |
-| `parser.rs` | item / stmt / expr (grammar nonterminals) |
-| `capabilities.rs` | per cap kind or check vs env |
+```text
+oodac/
+  main.oo                 # CLI only (≤250)
+  lex.oo                  # DONE — lex_all
+  token_emit.oo           # DONE — emit_tok, keyword_kind
+  token_fmt.oo            # DONE — tokenize_lines, tok_line, field_at
+  token_scan_string.oo    # string-lit scan helpers (from dump/collect)
+  token_scan_number.oo    # number/float scan helpers
+  token_scan_ident.oo     # ident + keyword path
+  token_scan_punct.oo     # operators/punct multi-char
+  token_scan_ws.oo        # ws + line comments (shared)
+  token_dump.oo           # dump_tokens driver (thin loop)
+  token_stream.oo         # collect_tokens driver (thin loop)
+  parse_drive.oo          # dump_ast_from_src, parse_and_print_ast, n_toks
+  parse_item.oo           # parse_fn_item, skip_balanced
+  parse_stmt.oo           # block/stmt dump, skip_stmt, count_stmts, indent
+  parse_expr.oo           # expr bp, skip/print, bin_bp, bin_op_name
+  parse_primary.oo        # parse_primary_dump + method chain/from_var, escape_dump
+  parse_skip.oo           # skip_primary, skip_expr_bp (navigation only)
+  check_drive.oo          # run_check_from_src orchestration
+  check_caps.oo           # DONE — check_function, is_sealed_*, skip_until_semi
+  tc_types.oo             # type lattice
+  tc_scope.oo             # binds/scope/env
+  tc_names.oo             # undefined / known names
+  tc_calls.oo             # call arity/args/call-op interactions (+ helpers)
+  tc_assign.oo            # immut/mut assign, return/assign calls
+  tc_ops.oo               # unary, cmp, logic, rejected ops
+  tc_struct.oo            # struct tables + field chains + methods + struct lits
+  tc_control.oo           # if/while cond + branch typing
+  tc_refine.oo            # refinements + parse_int
+  tc_effects.oo           # must_use, missing_return
+  tc_infer.oo             # lit env + typed expr inference helpers
+  c_emit.oo               # c_emit_* (grow carefully; split if >250)
+```
 
-Do not create `typecheck_part2.rs`.  
-Do not grow host files; if you must touch one >250, **extract a domain first** in the same rotation.
+Wire: `import "….oo";` from `main.oo` (and between modules only **down** the DAG).
 
----
-
-## P2 — Tests, scripts, runtime
-
-| Asset | Functional split |
-|-------|------------------|
-| `tests/json_errors_golden.rs` | By **diagnostic class** (or data file + ≤250 runner) |
-| `tests/wasm_host.rs` | By **host feature** (lists, strings, control, …) |
-| `scripts/chs_parity.sh` | By **parity concern** (frontend fixed-point vs semantic) |
-| `install/install.oo` | By **install phase** (fetch, place, verify) |
-| `runtime/chs_rt.c` | By **runtime subsystem** (strings, lists, I/O, process) |
-
----
-
-## Lock policy
-
-1. **While \(O > 0\):** `./scripts/check_file_lines.sh --ratchet` — no oversize growth, no new oversize.  
-2. **Goal:** strict checker → \(O = 0\).  
-3. **PROGRESS:** report \(O\) and which **stage/domain** moved.  
-4. Reject work that raises \(O\) or adds features only into the monofile leftover.
-
----
-
-## Post-Gemini checklist
-
-- [ ] Re-run checker; record \(O\)  
-- [ ] Clean non-product scratch  
-- [ ] Phase 0 ratchet green (stop growth)  
-- [ ] Phase 1–2: **lex** then **tokens** (pipeline head)  
-- [ ] Phase 3–5: **parse** then **check/caps**  
-- [ ] Phase 6–7: **tc foundations** then **one domain per rotation**  
-- [ ] Phase 8–9: **emit** then thin **CLI**  
-- [ ] P1 host only on touch, same domain rules  
-- [ ] \(O = 0\) strict  
+**Self-host note:** stage-0 `ooda run` expands imports. oodac `emit-c`/`check` on a *path* may still be single-file — track as residual; fix with import-aware load or build-time concat **only as temporary debt**.
 
 ---
 
-## Review gate (every extract PR/rotation)
+## A.1 Function → module assignment (current monofile)
 
-Before Lock, answer in PROGRESS (≤3 bullets):
+Line ranges shift; **bind by `pub fn` name**.
 
-1. **Job** of each new/changed module (one sentence).  
-2. **Stage** in the pipeline.  
-3. **Why this seam** (first principle — not “file was long”).
+### CLI — `main.oo`
 
-If (3) is only line count → **rework the split**.
+| Fn | ~Lines | Notes |
+|----|-------:|-------|
+| `main` | 83 | Args + dispatch only after extracts |
+
+### Lex — `lex.oo` ✅
+
+| Fn | Status |
+|----|--------|
+| `lex_all` | Done |
+
+### Tokens — emit/fmt ✅; scan/dump/stream TODO
+
+| Fn | ~Lines | Target module | Job |
+|----|-------:|---------------|-----|
+| `emit_tok` | 4 | `token_emit.oo` ✅ | print one token |
+| `keyword_kind` | 24 | `token_emit.oo` ✅ | ident → KW_* |
+| `tokenize_lines` | 13 | `token_fmt.oo` ✅ | src → lines via collect |
+| `tok_line` | 4 | `token_fmt.oo` ✅ | encode token line |
+| `field_at` | 29 | `token_fmt.oo` ✅ | decode field |
+| `dump_tokens` | **404** | **split first** → `token_dump.oo` + scan_* | validate via lex_all; emit stream |
+| `collect_tokens` | **366** | **split first** → `token_stream.oo` + scan_* | same scan, store lines |
+
+**Mandatory internal split before file extract** (shared jobs for dump + collect):
+
+| Helper job | Responsibility | Used by |
+|------------|----------------|---------|
+| `scan_ws_comment` | space/tab/nl + `//` comments; advance i/line/col | dump, collect |
+| `scan_string_lit` | `"…"` + escapes → STRING token text | dump, collect |
+| `scan_number` | int/float + `..` range boundary rules | dump, collect |
+| `scan_ident_or_kw` | ident run + `keyword_kind` | dump, collect |
+| `scan_punct` | multi-char ops (`<=`,`&&`,`..=`,…) + singles | dump, collect |
+
+Drivers after helpers exist:
+
+- `dump_tokens`: probe `lex_all` → loop → dispatch scan_* → `emit_tok`  
+- `collect_tokens`: loop → dispatch scan_* → append `tok_line`  
+
+Each scan_* module ≤250; drivers thin.
+
+### Parse
+
+| Fn | ~Lines | Target | Job |
+|----|-------:|--------|-----|
+| `dump_ast_from_src` | 4 | `parse_drive.oo` | entry |
+| `parse_and_print_ast` | 85 | `parse_drive.oo` | program walk |
+| `n_toks` | 4 | `parse_drive.oo` | len |
+| `parse_fn_item` | 230 | `parse_item.oo` | fn item nonterminal |
+| `skip_balanced` | 22 | `parse_item.oo` | brace/paren skip |
+| `parse_block_dump` | 66 | `parse_stmt.oo` | block |
+| `count_stmts` | 26 | `parse_stmt.oo` | |
+| `skip_stmt` | 54 | `parse_stmt.oo` | |
+| `indent` | 10 | `parse_stmt.oo` | dump formatting |
+| `parse_stmt_dump` | 92 | `parse_stmt.oo` | stmt nonterminal |
+| `parse_expr_dump` | 4 | `parse_expr.oo` | |
+| `parse_expr_bp` | 14 | `parse_expr.oo` | Pratt entry |
+| `print_expr_bp` | 74 | `parse_expr.oo` | |
+| `bin_bp` | 10 | `parse_expr.oo` | precedence table |
+| `bin_op_name` | 16 | `parse_expr.oo` | |
+| `skip_expr_bp` | 27 | `parse_skip.oo` | navigate without print |
+| `skip_primary` | 151 | `parse_skip.oo` | |
+| `parse_primary_dump` | **293** | **split** → `parse_primary.oo` | atoms + call/field suffix |
+| `parse_method_from_var` | 52 | `parse_primary.oo` | |
+| `parse_method_chain` | 4 | `parse_primary.oo` | |
+| `escape_dump` | 21 | `parse_primary.oo` | string escape for dump |
+
+`parse_primary_dump` sub-jobs if still >250: **atom**, **call-args**, **field/method suffix**.
+
+### Check
+
+| Fn | ~Lines | Target | Job |
+|----|-------:|--------|-----|
+| `run_check_from_src` | 94 | `check_drive.oo` | orchestrate structure + caps + typecheck hooks |
+| `check_function` + `is_sealed_*` + `skip_until_semi` | — | `check_caps.oo` ✅ | sealed effects |
+
+### Typecheck — by language domain
+
+#### `tc_types.oo` — type lattice
+
+| Fn | ~Lines |
+|----|-------:|
+| `resolve_type_alias` | 38 |
+| `lit_token_type` | 20 |
+| `types_compatible` | 15 |
+| `is_type_binop` | 16 |
+| `combine_binop_types` | 31 |
+| `typecheck_ann_and_return_lits` | **349** → split: **ann path** / **return path** / shared alias |
+
+#### `tc_scope.oo` — bindings
+
+| Fn | ~Lines |
+|----|-------:|
+| `binds_has` | 7 |
+| `scope_has` | 12 |
+| `drop_depth` | 62 |
+| `env_lookup_type` | 38 |
+| `is_mut_binding` | 24 |
+| `build_pure_lit_env` | 168 |
+| `build_fn_ret_table` | 44 |
+
+#### `tc_names.oo`
+
+| Fn | ~Lines |
+|----|-------:|
+| `is_known_name` | 75 |
+| `typecheck_undefined_vars` | 132 |
+
+#### `tc_calls.oo`
+
+| Fn | ~Lines |
+|----|-------:|
+| `typecheck_call_arg_lits` | **326** → resolve callee / each arg / compose arity |
+| `resolve_arg_type` | 50 |
+| `nth_csv` | 25 |
+| `arity_get` | 52 |
+| `typecheck_call_arity` | 154 |
+| `typecheck_call_binop_lits` | 99 |
+| `typecheck_call_logic_lits` | 102 |
+| `typecheck_call_order_lits` | 134 |
+| `typecheck_call_eq_lits` | 96 |
+| `typecheck_let_ann_call_init` | 91 |
+| `typecheck_return_and_assign_calls` | 193 |
+
+If `tc_calls.oo` would exceed 250 after move: split **`tc_call_arity.oo`** vs **`tc_call_expr.oo`** (call-in-expr checks).
+
+#### `tc_assign.oo`
+
+| Fn | ~Lines |
+|----|-------:|
+| `typecheck_immut_assign` | 71 |
+| `typecheck_mut_assign_types` | 210 |
+
+#### `tc_ops.oo`
+
+| Fn | ~Lines |
+|----|-------:|
+| `typecheck_unary_bang_lit` | 57 |
+| `is_value_token_kind` | 17 |
+| `typecheck_unary_minus_lit` | 70 |
+| `typecheck_cmp_numeric_lits` | 59 |
+| `typecheck_reject_shift_ops` | 50 |
+| `typecheck_reject_amp_pipe_binop` | 39 |
+| `typecheck_logic_binop_lits` | 120 |
+
+#### `tc_struct.oo`
+
+| Fn | ~Lines |
+|----|-------:|
+| `build_struct_field_table` | 64 |
+| `struct_fields_blob` | 39 |
+| `struct_field_type` | 62 |
+| `struct_has_field` | 60 |
+| `is_known_struct_type` | 7 |
+| `field_chain_end` | 41 |
+| `field_access_type_at` | 15 |
+| `field_chain_type` | 51 |
+| `is_field_chain_span` | 29 |
+| `count_paren_args` | 40 |
+| `method_expected_args` | 41 |
+| `is_list_type_name` | 23 |
+| `typecheck_field_method` | 237 |
+| `typecheck_field_assign` | 87 |
+| `typecheck_field_binop_uses` | 79 |
+| `typecheck_struct_lit_inits` | 174 |
+
+If over 250: **`tc_struct_table.oo`** (tables) vs **`tc_struct_use.oo`** (field/method/lit checks).
+
+#### `tc_control.oo`
+
+| Fn | ~Lines |
+|----|-------:|
+| `typecheck_if_while_lit_cond` | 158 |
+| `typecheck_control_flow_branches` | 94 |
+
+#### `tc_infer.oo`
+
+| Fn | ~Lines |
+|----|-------:|
+| `infer_pure_lit_expr_type` | 6 |
+| `atom_type_with_env` | 22 |
+| `infer_typed_expr_type` | 42 |
+| `infer_typed_expr_type_exact` | 46 |
+
+#### `tc_refine.oo`
+
+| Fn | ~Lines |
+|----|-------:|
+| `parse_int` | 28 |
+| `typecheck_refinements` | **270** → parse bounds / check let / check assign·return |
+
+#### `tc_effects.oo`
+
+| Fn | ~Lines |
+|----|-------:|
+| `typecheck_must_use_result` | 66 |
+| `typecheck_missing_return` | 101 |
+
+### Emit — `c_emit.oo` (currently small; keep ≤250)
+
+| Fn | ~Lines |
+|----|-------:|
+| `c_emit_stream` | 22 |
+| `c_emit_fn` | 43 |
+| `c_emit_block` | 19 |
+| `c_emit_stmt` | 34 |
+| `c_emit_preamble` | 35 |
+
+When emit grows: split **preamble/types**, **stmt**, **expr** by codegen job — not by date.
 
 ---
 
-*Process/bootstrap plan. Product truth: `DESIGN.md`. Beta: `BETA.md`. Line Lock: `scripts/check_file_lines.sh`.*
+## A.2 Ordered execution waves (oodac)
+
+| Wave | Functional goal | Modules | Exit criteria |
+|-----:|-----------------|---------|---------------|
+| **0** | No growth | — | `--ratchet` green on oodac |
+| **1** | Lex | `lex.oo` | ✅ Done |
+| **2a** | Token helpers | `token_emit`, `token_fmt` | ✅ Done |
+| **2b** | Shared scan kernel | `token_scan_{ws,string,number,ident,punct}` | dump+collect call helpers; tokens cmd green |
+| **2c** | Token drivers | `token_dump`, `token_stream` | both ≤250; parity with stage-0 tokens sample |
+| **3** | Caps check | `check_caps` | ✅ Done |
+| **4** | Check drive | `check_drive` | check orchestration only |
+| **5** | Parse drive + item | `parse_drive`, `parse_item` | `ast` on fn programs |
+| **6** | Parse stmt / skip / expr / primary | `parse_stmt`, `parse_skip`, `parse_expr`, `parse_primary` | nested ast fixtures |
+| **7** | TC foundations | `tc_types`, `tc_scope`, `tc_infer` | ann/return lit fixtures |
+| **8** | TC domains (one/rotation) | names → calls → assign → ops → struct → control → refine → effects | corpus per domain dual-engine |
+| **9** | Emit | `c_emit` (+ splits if grown) | emit-c smoke |
+| **10** | CLI only | `main.oo` ≤250 | fixed_point / CHS scripts; **O contributes −1** |
+
+**Power law:** one domain or one stage per rotation when large.
+
+---
+
+# Part B — Stage-0 host (P1) — all oversize `.rs`
+
+Same pipeline. Split when **touching** the file or after oodac peer exists. Do not grow.
+
+| File | ~Lines | Functional modules (target) |
+|------|-------:|-------------------------------|
+| `src/typecheck.rs` | 4189 | `typecheck/{mod,types,scope,names,calls,assign,ops,struct_fields,control,refine,effects,util}.rs` — **mirror oodac tc_*** |
+| `src/eval.rs` | 2564 | `eval/{mod,value,cap,expr,stmt,call,runtime}.rs` |
+| `src/codegen_wasm.rs` | 2314 | `codegen_wasm/{mod,types,expr,stmt,fn,host,strings}.rs` |
+| `src/codegen_c.rs` | 1645 | `codegen_c/{mod,sealed,expr,stmt,fn,link,runtime}.rs` |
+| `src/main.rs` | 1372 | `cli/{mod,run,check,build,dump,em,version}.rs` or one file per subcommand |
+| `src/codegen.rs` | 1043 | by backend dispatch vs shared IR helpers |
+| `src/lsp.rs` | 1041 | `lsp/{mod,server,hover,complete,diag}.rs` |
+| `src/parser.rs` | 1029 | `parser/{mod,item,stmt,expr,ty}.rs` (grammar nonterminals) |
+| `src/capabilities.rs` | 999 | per cap kind + check vs env (`caps/{net,fs,sys,env,check}.rs`) |
+| `src/migrate.rs` | 827 | one module per migrate codemod class |
+| `src/patch.rs` | 657 | parse patch / apply / validate |
+| `src/dump.rs` | 507 | dump tokens vs ast vs other formats |
+| `src/pkg.rs` | 423 | resolve / lock / fetch concerns |
+| `src/lexer.rs` | 397 | already one stage — split only if scanner classes (string/number/ident) |
+| `src/outline.rs` | 391 | outline collect vs format |
+| `src/ast.rs` | 338 | types only stay; move large impl/helpers out if needed |
+| `src/diagnostics.rs` | 323 | emit JSON vs human; codes table |
+| `src/bench.rs` | 298 | bench harness vs cases |
+
+**Host tests inside modules:** `mod tests` in-file is fine if file stays ≤250; else `tests/` or `*_test` modules by domain.
+
+---
+
+# Part C — Tests, install, scripts, runtime (P2)
+
+| File | ~Lines | Functional split |
+|------|-------:|------------------|
+| `tests/json_errors_golden.rs` | 4362 | **Data vs runner:** golden tables as `.json`/`.oo` fixtures; runner ≤250. Or split by diagnostic class files |
+| `tests/wasm_host.rs` | 1678 | By host feature: lists, strings, control, floats, bools, … |
+| `install/install.oo` | 448 | Phases: `install_{fetch,place,verify,pin}.oo` + thin driver |
+| `runtime/chs_rt.c` | 358 | `chs_rt_{str,list,io,process}.c` + thin `chs_rt.c` umbrella if link allows |
+| `scripts/chs_parity.sh` | 314 | `scripts/parity.d/` fragments by concern (frontend FP vs semantic) + thin driver |
+
+---
+
+# Part D — Global order of battle
+
+```text
+1. Finish oodac tokens (wave 2b–2c)     ← unblocks readable frontend
+2. oodac parse (waves 5–6)
+3. oodac typecheck domains (waves 7–8) ← largest honesty surface
+4. oodac emit + thin main (waves 9–10)
+5. Host typecheck/eval/codegen on touch or after peer stage exists
+6. Tests/install/runtime/scripts      ← when they block Lock O=0
+```
+
+**O=0** only when Part A–C all clear (or exceptions explicitly revoked in TOOLS — none today).
+
+---
+
+# Part E — Per-extract checklist
+
+- [ ] Job header written (not “part of main”)  
+- [ ] Closed fn set; no mid-fn cut  
+- [ ] Deps only downward  
+- [ ] `wc -l` ≤250 for every new/changed owned file  
+- [ ] `./scripts/check_file_lines.sh --ratchet`  
+- [ ] Probes: pass + fail for that stage/domain  
+- [ ] Dual-engine if stage has host peer  
+- [ ] PROGRESS: \(O\), \(\Delta\), stage name  
+
+---
+
+# Part F — Anti-goals
+
+- Line-number shards (`main_2.oo`)  
+- `utils` / `misc` junk drawers  
+- Growing any oversize file  
+- Deleting `.rs` to fake O without `.oo` ownership  
+- Claiming split done without fail+pass rails  
+
+---
+
+## Snapshot: current O=24 list
+
+| Lines | Path | Part |
+|------:|------|------|
+| 7297 | `oodac/main.oo` | A |
+| 4362 | `tests/json_errors_golden.rs` | C |
+| 4189 | `src/typecheck.rs` | B |
+| 2564 | `src/eval.rs` | B |
+| 2314 | `src/codegen_wasm.rs` | B |
+| 1678 | `tests/wasm_host.rs` | C |
+| 1645 | `src/codegen_c.rs` | B |
+| 1372 | `src/main.rs` | B |
+| 1043 | `src/codegen.rs` | B |
+| 1041 | `src/lsp.rs` | B |
+| 1029 | `src/parser.rs` | B |
+| 999 | `src/capabilities.rs` | B |
+| 827 | `src/migrate.rs` | B |
+| 657 | `src/patch.rs` | B |
+| 507 | `src/dump.rs` | B |
+| 448 | `install/install.oo` | C |
+| 423 | `src/pkg.rs` | B |
+| 397 | `src/lexer.rs` | B |
+| 391 | `src/outline.rs` | B |
+| 358 | `runtime/chs_rt.c` | C |
+| 338 | `src/ast.rs` | B |
+| 323 | `src/diagnostics.rs` | B |
+| 314 | `scripts/chs_parity.sh` | C |
+| 298 | `src/bench.rs` | B |
+
+**Already ≤250 (oodac):** `lex.oo`, `token_emit.oo`, `token_fmt.oo`, `check_caps.oo`.
+
+---
+
+*Product architecture: `DESIGN.md`. Beta: `BETA.md`. Process lenses: `TOOLS.md`. Line Lock: `scripts/check_file_lines.sh`.*
