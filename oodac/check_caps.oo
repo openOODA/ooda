@@ -1,0 +1,165 @@
+// job: sealed-effect capability check on fn items; stage: check
+// in: token list + pos; out: pos after fn; DESIGN caps pillar
+
+pub fn skip_until_semi(toks: List[String], pos0: Int) -> Int {
+    let n = list_len(toks);
+    let mut pos = pos0;
+    while pos < n {
+        if field_at(list_get(toks, pos), 0) == "SEMI" {
+            return pos + 1;
+        }
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+// Check one function for sealed-effect capability violations. Returns pos after fn.
+pub fn check_function(toks: List[String], pos0: Int) -> Int {
+    let n = list_len(toks);
+    let mut pos = pos0;
+    if field_at(list_get(toks, pos), 0) == "KW_PUB" {
+        pos = pos + 1;
+    }
+    // FN
+    pos = pos + 1;
+    // name
+    let fname = field_at(list_get(toks, pos), 3);
+    pos = pos + 1;
+    // (
+    pos = pos + 1;
+    let mut has_net = false;
+    let mut has_fs = false;
+    let mut has_sys = false;
+    let mut has_env = false;
+    // scan params until )
+    let mut cont = true;
+    while cont {
+        if pos >= n {
+            cont = false;
+        } else {
+            let k = field_at(list_get(toks, pos), 0);
+            if k == "RPAREN" {
+                cont = false;
+            } else {
+                let t = field_at(list_get(toks, pos), 3);
+                if t == "NetCap" {
+                    has_net = true;
+                }
+                if t == "FsCap" {
+                    has_fs = true;
+                }
+                if t == "SysCap" {
+                    has_sys = true;
+                }
+                if t == "EnvCap" {
+                    has_env = true;
+                }
+                pos = pos + 1;
+            }
+        }
+    }
+    // )
+    if field_at(list_get(toks, pos), 0) == "RPAREN" {
+        pos = pos + 1;
+    }
+    // skip to body LBRACE
+    while pos < n {
+        if field_at(list_get(toks, pos), 0) == "LBRACE" {
+            // body until matching RBRACE
+            let body_start = pos + 1;
+            let body_end = skip_balanced(toks, pos) - 1;
+            // scan body for sealed calls
+            let mut i = body_start;
+            while i < body_end {
+                let k = field_at(list_get(toks, i), 0);
+                let text = field_at(list_get(toks, i), 3);
+                if k == "IDENT" {
+                    if i + 1 < n {
+                        if field_at(list_get(toks, i + 1), 0) == "LPAREN" {
+                            // free call
+                            if is_sealed_net(text) {
+                                if !has_net {
+                                    let line = field_at(list_get(toks, i), 1);
+                                    let col = field_at(list_get(toks, i), 2);
+                                    println("ERR\tcapability\tSecurity Capability Violation: Function '" + fname + "' calls sealed effectful builtin '" + text + "' which requires a &NetCap parameter, but none was declared at line " + line + ", col " + col + ". Default-deny: grant the capability token explicitly.");
+                                    process_exit(1);
+                                }
+                            }
+                            if is_sealed_fs(text) {
+                                if !has_fs {
+                                    let line = field_at(list_get(toks, i), 1);
+                                    let col = field_at(list_get(toks, i), 2);
+                                    println("ERR\tcapability\tSecurity Capability Violation: Function '" + fname + "' calls sealed effectful builtin '" + text + "' which requires a &FsCap parameter, but none was declared at line " + line + ", col " + col + ". Default-deny: grant the capability token explicitly.");
+                                    process_exit(1);
+                                }
+                            }
+                            if is_sealed_sys(text) {
+                                if !has_sys {
+                                    let line = field_at(list_get(toks, i), 1);
+                                    let col = field_at(list_get(toks, i), 2);
+                                    println("ERR\tcapability\tSecurity Capability Violation: Function '" + fname + "' calls sealed effectful builtin '" + text + "' which requires a &SysCap parameter, but none was declared at line " + line + ", col " + col + ". Default-deny: grant the capability token explicitly.");
+                                    process_exit(1);
+                                }
+                            }
+                        }
+                    }
+                }
+                i = i + 1;
+            }
+            pos = skip_balanced(toks, pos);
+            // verify skip
+            if pos < n {
+                if field_at(list_get(toks, pos), 0) == "KW_VERIFY" {
+                    pos = pos + 1;
+                    if pos < n {
+                        if field_at(list_get(toks, pos), 0) == "IDENT" {
+                            pos = pos + 1;
+                        }
+                    }
+                    if pos < n {
+                        if field_at(list_get(toks, pos), 0) == "LBRACE" {
+                            pos = skip_balanced(toks, pos);
+                        }
+                    }
+                }
+            }
+            return pos;
+        }
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+pub fn is_sealed_net(name: String) -> Bool {
+    if name == "fetch" { return true; }
+    if name == "downloadData" { return true; }
+    if name == "http_get" { return true; }
+    if name == "net_get" { return true; }
+    if name == "net_connect" { return true; }
+    if name == "query_remote_api" { return true; }
+    return false;
+}
+
+pub fn is_sealed_fs(name: String) -> Bool {
+    if name == "read_file" { return true; }
+    if name == "write_file" { return true; }
+    if name == "fs_read" { return true; }
+    if name == "fs_write" { return true; }
+    return false;
+}
+
+pub fn is_sealed_sys(name: String) -> Bool {
+    if name == "sys_exec" { return true; }
+    if name == "exec" { return true; }
+    if name == "spawn_process" { return true; }
+    if name == "async_spawn_internal" { return true; }
+    return false;
+}
+
+// ===== R1 typecheck slice in .oo (annotated let + return literals) =====
+// Only fails when both annotation and initializer/return are known literals.
+// Unknown inits (vars/calls) are skipped — incomplete TC stays fail-open only
+// where we lack information, never claims full typecheck.
+
+// Resolve annotation through `type Alias = Base` table ("\tAlias:Base\t").
+// Unknown / multi-hop incomplete → returns ann unchanged after one hop max.
