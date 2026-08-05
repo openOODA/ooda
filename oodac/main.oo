@@ -3,9 +3,13 @@
 // tokens/ast/check are implemented in this file (not host-only wrappers).
 // build uses chs_build host for native emit (M4 hybrid).
 
-pub fn main(fs: &FsCap, args: List[String]) {
+import "lex.oo";
+import "token_emit.oo";
+import "token_fmt.oo";
+
+pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
     if list_len(args) < 1 {
-        println("oodac: usage: tokens|ast|check|build <file>");
+        println("oodac: usage: tokens|ast|check|build|emit-c <file>");
         process_exit(2);
     }
     let cmd = list_get(args, 0);
@@ -20,17 +24,35 @@ pub fn main(fs: &FsCap, args: List[String]) {
         if list_len(args) >= 3 {
             out = list_get(args, 2);
         }
-        let r = chs_build(path, out);
-        if r.is_ok() {
+        
+        let c_path = path + ".c";
+        
+        // 1. Run oodac emit-c into .c file
+        let emit_cmd = "ooda run oodac/main.oo -- emit-c " + path + " > " + c_path;
+        let r1 = sys_exec(sys, "sh", "-c", emit_cmd);
+        if r1.is_err() {
+            let e = match r1 {
+                Ok(s) => s,
+                Err(msg) => msg,
+            };
+            println("ERR\tbuild\t" + e);
+            process_exit(1);
+        }
+        
+        // 2. Compile with gcc
+        let r2 = sys_exec(sys, "gcc", "-O2", "-Iruntime", "runtime/chs_rt.c", c_path, "-Ltarget/debug", "-looda", "-lm", "-lpthread", "-o", out);
+        
+        if r2.is_ok() {
             println("OK\tbuild\t" + out);
             return;
+        } else {
+            let e = match r2 {
+                Ok(s) => s,
+                Err(msg) => msg,
+            };
+            println("ERR\tbuild\t" + e);
+            process_exit(1);
         }
-        let e = match r {
-            Ok(s) => s,
-            Err(msg) => msg,
-        };
-        println("ERR\tbuild\t" + e);
-        process_exit(1);
     }
 
     let src_r = read_file(fs, path);
@@ -47,6 +69,10 @@ pub fn main(fs: &FsCap, args: List[String]) {
         Err(msg) => msg,
     };
 
+    if cmd == "emit-c" {
+        c_emit_stream(src);
+        return;
+    }
     if cmd == "tokens" {
         dump_tokens(src);
         return;
@@ -62,257 +88,6 @@ pub fn main(fs: &FsCap, args: List[String]) {
     println("oodac: unknown command");
     process_exit(2);
 }
-
-// ===== Lex all: returns Ok("") or Err(message). Side-effect free lists via
-// re-lexing in dump_tokens / dump_ast_from_src / run_check_from_src. =====
-
-pub fn lex_all(src: String) -> Result[String, String] {
-    let n = chars_len(src);
-    let mut i = 0;
-    let mut line = 1;
-    let mut col = 1;
-    while i < n {
-        let ch = char_at(src, i);
-        if ch == " " {
-            i = i + 1;
-            col = col + 1;
-        } else if ch == "\t" {
-            i = i + 1;
-            col = col + 1;
-        } else if ch == "\n" {
-            i = i + 1;
-            line = line + 1;
-            col = 1;
-        } else if ch == "/" {
-            let j = i + 1;
-            if j < n {
-                let nch = char_at(src, j);
-                if nch == "/" {
-                    i = i + 2;
-                    col = col + 2;
-                    let mut cont_c = true;
-                    while cont_c {
-                        if i >= n {
-                            cont_c = false;
-                        } else {
-                            let c2 = char_at(src, i);
-                            if c2 == "\n" {
-                                cont_c = false;
-                            } else {
-                                i = i + 1;
-                                col = col + 1;
-                            }
-                        }
-                    }
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            } else {
-                i = i + 1;
-                col = col + 1;
-            }
-        } else if ch == "\"" {
-            i = i + 1;
-            col = col + 1;
-            let mut cont_s = true;
-            while cont_s {
-                if i >= n {
-                    return Err("Unterminated string");
-                }
-                let c2 = char_at(src, i);
-                if c2 == "\"" {
-                    i = i + 1;
-                    col = col + 1;
-                    cont_s = false;
-                } else if c2 == "\\" {
-                    i = i + 2;
-                    col = col + 2;
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            }
-        } else if char_is_digit(ch) {
-            i = i + 1;
-            col = col + 1;
-            let mut cont_d = true;
-            while cont_d {
-                if i >= n {
-                    cont_d = false;
-                } else {
-                    let c2 = char_at(src, i);
-                    if char_is_digit(c2) {
-                        i = i + 1;
-                        col = col + 1;
-                    } else {
-                        cont_d = false;
-                    }
-                }
-            }
-        } else if char_is_alpha(ch) || ch == "_" {
-            i = i + 1;
-            col = col + 1;
-            let mut cont_id = true;
-            while cont_id {
-                if i >= n {
-                    cont_id = false;
-                } else {
-                    let c2 = char_at(src, i);
-                    if char_is_alpha(c2) || char_is_digit(c2) || c2 == "_" {
-                        i = i + 1;
-                        col = col + 1;
-                    } else {
-                        cont_id = false;
-                    }
-                }
-            }
-        } else if ch == "+" || ch == "*" || ch == ":" || ch == ";" || ch == "," || ch == "?" || ch == "(" || ch == ")" || ch == "{" || ch == "}" || ch == "[" || ch == "]" {
-            i = i + 1;
-            col = col + 1;
-        } else if ch == "-" {
-            let j = i + 1;
-            if j < n {
-                let nch = char_at(src, j);
-                if nch == ">" {
-                    i = i + 2;
-                    col = col + 2;
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            } else {
-                i = i + 1;
-                col = col + 1;
-            }
-        } else if ch == "=" {
-            let j = i + 1;
-            if j < n {
-                let nch = char_at(src, j);
-                if nch == "=" {
-                    i = i + 2;
-                    col = col + 2;
-                } else if nch == ">" {
-                    i = i + 2;
-                    col = col + 2;
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            } else {
-                i = i + 1;
-                col = col + 1;
-            }
-        } else if ch == "!" {
-            let j = i + 1;
-            if j < n {
-                let nch = char_at(src, j);
-                if nch == "=" {
-                    i = i + 2;
-                    col = col + 2;
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            } else {
-                i = i + 1;
-                col = col + 1;
-            }
-        } else if ch == "<" {
-            let j = i + 1;
-            if j < n {
-                let nch = char_at(src, j);
-                if nch == "=" {
-                    i = i + 2;
-                    col = col + 2;
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            } else {
-                i = i + 1;
-                col = col + 1;
-            }
-        } else if ch == ">" {
-            let j = i + 1;
-            if j < n {
-                let nch = char_at(src, j);
-                if nch == "=" {
-                    i = i + 2;
-                    col = col + 2;
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            } else {
-                i = i + 1;
-                col = col + 1;
-            }
-        } else if ch == "&" {
-            let j = i + 1;
-            if j < n {
-                let nch = char_at(src, j);
-                if nch == "&" {
-                    i = i + 2;
-                    col = col + 2;
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            } else {
-                i = i + 1;
-                col = col + 1;
-            }
-        } else if ch == "|" {
-            let j = i + 1;
-            if j < n {
-                let nch = char_at(src, j);
-                if nch == "|" {
-                    i = i + 2;
-                    col = col + 2;
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            } else {
-                i = i + 1;
-                col = col + 1;
-            }
-        } else if ch == "." {
-            let j = i + 1;
-            if j < n {
-                let nch = char_at(src, j);
-                if nch == "." {
-                    let k = j + 1;
-                    if k < n {
-                        let n2 = char_at(src, k);
-                        if n2 == "=" {
-                            i = i + 3;
-                            col = col + 3;
-                        } else {
-                            i = i + 2;
-                            col = col + 2;
-                        }
-                    } else {
-                        i = i + 2;
-                        col = col + 2;
-                    }
-                } else {
-                    i = i + 1;
-                    col = col + 1;
-                }
-            } else {
-                i = i + 1;
-                col = col + 1;
-            }
-        } else {
-            // FAIL CLOSED — never soft-skip unknown characters
-            return Err("Unexpected character '" + ch + "' at " + line.to_string() + ":" + col.to_string());
-        }
-    }
-    return Ok("");
-}
-
 // ===== Token dump (emit KIND\tLINE\tCOL\tTEXT) — same as before, fail-closed =====
 
 pub fn dump_tokens(src: String) {
@@ -719,49 +494,8 @@ pub fn dump_tokens(src: String) {
     emit_tok("EOF", line, col, "");
 }
 
-pub fn emit_tok(kind: String, line: Int, col: Int, text: String) {
-    println(kind + "\t" + line.to_string() + "\t" + col.to_string() + "\t" + text);
-}
-
-pub fn keyword_kind(id: String) -> String {
-    if id == "fn" { return "KW_FN"; }
-    if id == "pub" { return "KW_PUB"; }
-    if id == "let" { return "KW_LET"; }
-    if id == "mut" { return "KW_MUT"; }
-    if id == "import" { return "KW_IMPORT"; }
-    if id == "requires" { return "KW_REQUIRES"; }
-    if id == "ensures" { return "KW_ENSURES"; }
-    if id == "verify" { return "KW_VERIFY"; }
-    if id == "if" { return "KW_IF"; }
-    if id == "else" { return "KW_ELSE"; }
-    if id == "match" { return "KW_MATCH"; }
-    if id == "while" { return "KW_WHILE"; }
-    if id == "return" { return "KW_RETURN"; }
-    if id == "type" { return "KW_TYPE"; }
-    if id == "where" { return "KW_WHERE"; }
-    if id == "true" { return "KW_TRUE"; }
-    if id == "false" { return "KW_FALSE"; }
-    return "IDENT";
-}
-
-// ===== Real AST dump in .oo: recursive descent over re-tokenized stream =====
-// Produces the same structural lines as stage-0 `ooda dump ast` (spans from tokens).
-
 pub fn dump_ast_from_src(src: String) {
     parse_and_print_ast(src);
-}
-
-pub fn tokenize_lines(src: String) -> List[String] {
-    let probe = lex_all(src);
-    if probe.is_err() {
-        let e = match probe {
-            Ok(s) => s,
-            Err(msg) => msg,
-        };
-        println("ERR\tlex\t" + e);
-        process_exit(1);
-    }
-    return collect_tokens(src);
 }
 
 pub fn collect_tokens(src: String) -> List[String] {
@@ -1128,39 +862,6 @@ pub fn collect_tokens(src: String) -> List[String] {
     }
     out = list_push(out, tok_line("EOF", line, col, ""));
     return out;
-}
-
-pub fn tok_line(kind: String, line: Int, col: Int, text: String) -> String {
-    return kind + "\t" + line.to_string() + "\t" + col.to_string() + "\t" + text;
-}
-
-pub fn field_at(line: String, which: Int) -> String {
-    // split by tab: 0=kind 1=line 2=col 3=text (text may be empty)
-    let n = chars_len(line);
-    let mut start = 0;
-    let mut idx = 0;
-    let mut i = 0;
-    while i <= n {
-        let at_end = i == n;
-        let is_tab = false;
-        let mut ch = "";
-        if !at_end {
-            ch = char_at(line, i);
-        }
-        if at_end || ch == "\t" {
-            if idx == which {
-                return str_slice(line, start, i);
-            }
-            idx = idx + 1;
-            start = i + 1;
-        }
-        if at_end {
-            i = n + 1;
-        } else {
-            i = i + 1;
-        }
-    }
-    return "";
 }
 
 pub fn parse_and_print_ast(src: String) {
@@ -7599,4 +7300,159 @@ pub fn typecheck_refinements(toks: List[String]) {
         
         i = i + 1;
     }
+}
+
+
+pub fn c_emit_stream(src: String) {
+    c_emit_preamble();
+    
+    let toks: List[String] = tokenize_lines(src);
+    let n = list_len(toks);
+    let mut pos = 0;
+    
+    while pos < n {
+        let k = field_at(list_get(toks, pos), 0);
+        if k == "EOF" {
+            pos = n;
+        } else if k == "KW_PUB" || k == "KW_FN" {
+            pos = c_emit_fn(toks, pos, n);
+        } else if k == "KW_TYPE" || k == "KW_IMPORT" {
+            pos = skip_until_semi(toks, pos);
+        } else {
+            println("ERR\tc_emit\tunexpected " + k);
+            process_exit(1);
+        }
+    }
+}
+
+pub fn c_emit_fn(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    if field_at(list_get(toks, p), 0) == "KW_PUB" {
+        p = p + 1;
+    }
+    if field_at(list_get(toks, p), 0) == "KW_FN" {
+        p = p + 1;
+    }
+    let fn_name = field_at(list_get(toks, p), 3);
+    p = p + 1;
+    
+    // LPAREN
+    p = p + 1;
+    
+    // Skip params for now
+    while p < n {
+        if field_at(list_get(toks, p), 0) == "RPAREN" {
+            p = p + 1;
+            break;
+        }
+        p = p + 1;
+    }
+    
+    // Check for return type arrow
+    if p < n {
+        if field_at(list_get(toks, p), 0) == "ARROW" {
+            // skip arrow and type
+            p = p + 2; 
+        }
+    }
+    
+    if fn_name == "main" {
+        println("");
+        println("int main(int argc, char **argv) {");
+    } else {
+        println("");
+        println("void " + fn_name + "() {");
+    }
+    
+    p = c_emit_block(toks, p, n);
+    return p;
+}
+
+pub fn c_emit_block(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    if field_at(list_get(toks, p), 0) == "LBRACE" {
+        p = p + 1;
+    }
+    
+    while p < n {
+        let k = field_at(list_get(toks, p), 0);
+        if k == "RBRACE" {
+            println("  return 0;");
+            println("}");
+            p = p + 1;
+            break;
+        }
+        p = c_emit_stmt(toks, p, n);
+    }
+    return p;
+}
+
+pub fn c_emit_stmt(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    let k = field_at(list_get(toks, p), 0);
+    
+    if k == "IDENT" {
+        let id = field_at(list_get(toks, p), 3);
+        if id == "println" {
+            p = p + 1;
+            // LPAREN
+            p = p + 1;
+            let text = field_at(list_get(toks, p), 3);
+            p = p + 1; // STRING
+            // RPAREN
+            p = p + 1;
+            // SEMI
+            p = p + 1;
+            
+            println("  oo_print_str(oo_str_lit(\"" + text + "\"));");
+            println("  oo_println();");
+            return p;
+        }
+    }
+    
+    // Fallback: skip to semicolon
+    while p < n {
+        if field_at(list_get(toks, p), 0) == "SEMI" {
+            p = p + 1;
+            break;
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+pub fn c_emit_preamble() {
+    println("#include <stdio.h>");
+    println("#include <stdlib.h>");
+    println("#include <string.h>");
+    println("#include <stdbool.h>");
+    println("#include <unistd.h>");
+    println("/* runtime decls (defined in chs_rt.c) */");
+    println("typedef struct { char *data; long long len; } OoStr;");
+    println("typedef struct { long long *data; long long len; long long cap; } OoIList;");
+    println("typedef struct { OoStr *data; long long len; long long cap; } OoSList;");
+    println("typedef struct { int ok; OoStr val; } OoResS;");
+    println("typedef struct { int ok; OoStr err; } OoResV;");
+    println("OoStr oo_str_lit(const char*); OoStr oo_str_concat(OoStr,OoStr);");
+    println("long long oo_str_byte_len(OoStr); long long oo_chars_len(OoStr);");
+    println("OoStr oo_char_at(OoStr,long long); OoStr oo_str_slice(OoStr,long long,long long);");
+    println("int oo_str_contains(OoStr,OoStr);");
+    println("int oo_char_is_digit(OoStr); int oo_char_is_alpha(OoStr); int oo_char_is_space(OoStr);");
+    println("OoIList oo_ilist_new(void); OoIList oo_ilist_push(OoIList,long long);");
+    println("long long oo_ilist_get(OoIList,long long); long long oo_ilist_len(OoIList);");
+    println("OoSList oo_slist_new(void); OoSList oo_slist_push(OoSList,OoStr);");
+    println("OoStr oo_slist_get(OoSList,long long); long long oo_slist_len(OoSList);");
+    println("OoResS oo_read_file(OoStr); OoResV oo_write_file(OoStr,OoStr); int oo_path_exists(OoStr); long long oo_file_size(OoStr); OoResS oo_env_get(OoStr);");
+    println("void oo_print_str(OoStr); void oo_print_int(long long); void oo_print_bool(int); void oo_println(void);");
+    println("int oo_str_eq(OoStr,OoStr); int oo_str_contains(OoStr,OoStr);");
+    println("OoStr oo_int_to_str(long long); OoStr oo_str_trim(OoStr); OoStr oo_str_to_lowercase(OoStr);");
+    println("char *ooda_host_ast_dump(const char *path);");
+    println("char *ooda_host_check(const char *path);");
+    println("char *ooda_host_token_dump(const char *path);");
+    println("int ooda_host_chs_build(const char *src, const char *out_bin);");
+    println("void ooda_host_free(char *p);");
+    println("OoStr oo_host_ast_dump(OoStr path);");
+    println("OoStr oo_host_check(OoStr path);");
+    println("OoStr oo_host_token_dump(OoStr path);");
+    println("OoResS oo_chs_build(OoStr src, OoStr out_bin);");
 }
