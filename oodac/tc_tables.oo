@@ -1,0 +1,215 @@
+// job: lit env + fn return tables; stage: typecheck
+// in: toks; out: env/ret table strings
+
+pub fn build_pure_lit_env(toks: List[String]) -> String {
+    let n = list_len(toks);
+    let mut aliases = "\t";
+    let mut ai = 0;
+    while ai < n {
+        if field_at(list_get(toks, ai), 0) == "KW_TYPE" {
+            if ai + 1 < n {
+                if field_at(list_get(toks, ai + 1), 0) == "IDENT" {
+                    let aname = field_at(list_get(toks, ai + 1), 3);
+                    if ai + 2 < n {
+                        if field_at(list_get(toks, ai + 2), 0) == "EQ" {
+                            if ai + 3 < n {
+                                if field_at(list_get(toks, ai + 3), 0) == "IDENT" {
+                                    let base = field_at(list_get(toks, ai + 3), 3);
+                                    // Keep struct aliases as the type name (not "struct").
+                                    if base != "struct" {
+                                        aliases = aliases + aname + ":" + base + "\t";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1;
+    }
+    let mut lit_env = "\t";
+    // R1: bind fn parameters with annotated types so struct-typed params
+    // unlock field chains (o.inner.v) — was silent-OK when only let-env existed.
+    let mut pi = 0;
+    while pi < n {
+        if field_at(list_get(toks, pi), 0) == "KW_FN" {
+            if pi + 1 < n {
+                if field_at(list_get(toks, pi + 1), 0) == "IDENT" {
+                    let mut p = pi + 2;
+                    if p < n {
+                        if field_at(list_get(toks, p), 0) == "LPAREN" {
+                            p = p + 1;
+                            let mut cont_p = true;
+                            while cont_p {
+                                if p >= n {
+                                    cont_p = false;
+                                } else {
+                                    let kk = field_at(list_get(toks, p), 0);
+                                    if kk == "RPAREN" {
+                                        cont_p = false;
+                                    } else if kk == "IDENT" {
+                                        let pname = field_at(list_get(toks, p), 3);
+                                        p = p + 1;
+                                        if p < n {
+                                            if field_at(list_get(toks, p), 0) == "COLON" {
+                                                p = p + 1;
+                                                if p < n {
+                                                    if field_at(list_get(toks, p), 0) == "IDENT" {
+                                                        let pty = resolve_type_alias(
+                                                            aliases,
+                                                            field_at(list_get(toks, p), 3)
+                                                        );
+                                                        // Simple IDENT types only (structs/aliases);
+                                                        // List[T] param anns skip binding (incomplete TC).
+                                                        let mut next_p = p + 1;
+                                                        let mut is_list = false;
+                                                        if next_p < n {
+                                                            if field_at(list_get(toks, next_p), 0) == "LBRACKET" {
+                                                                is_list = true;
+                                                            }
+                                                        }
+                                                        if !is_list {
+                                                            lit_env = lit_env + pname + ":" + pty + "\t";
+                                                        }
+                                                        p = p + 1;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        if p < n {
+                                            if field_at(list_get(toks, p), 0) == "COMMA" {
+                                                p = p + 1;
+                                            }
+                                        }
+                                    } else {
+                                        p = p + 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        pi = pi + 1;
+    }
+    let mut i = 0;
+    while i < n {
+        if field_at(list_get(toks, i), 0) == "KW_LET" {
+            let mut p = i + 1;
+            if p < n {
+                if field_at(list_get(toks, p), 0) == "KW_MUT" {
+                    p = p + 1;
+                }
+            }
+            if p < n {
+                if field_at(list_get(toks, p), 0) == "IDENT" {
+                    let vname = field_at(list_get(toks, p), 3);
+                    p = p + 1;
+                    let mut ann = "";
+                    if p < n {
+                        if field_at(list_get(toks, p), 0) == "COLON" {
+                            p = p + 1;
+                            if p < n {
+                                if field_at(list_get(toks, p), 0) == "IDENT" {
+                                    ann = resolve_type_alias(aliases, field_at(list_get(toks, p), 3));
+                                    p = p + 1;
+                                }
+                            }
+                        }
+                    }
+                    if p < n {
+                        if field_at(list_get(toks, p), 0) == "EQ" {
+                            p = p + 1;
+                            if p < n {
+                                let mut ity = infer_typed_expr_type(toks, p, lit_env);
+                                if ity == "" {
+                                    if field_at(list_get(toks, p), 0) == "IDENT" {
+                                        if p + 2 < n {
+                                            if field_at(list_get(toks, p + 1), 0) == "LPAREN" {
+                                                if field_at(list_get(toks, p + 2), 0) == "RPAREN" {
+                                                    let ret_table = build_fn_ret_table(toks);
+                                                    let cname = field_at(list_get(toks, p), 3);
+                                                    let got = resolve_type_alias(ret_table, cname);
+                                                    if got != cname {
+                                                        ity = resolve_type_alias(aliases, got);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // `let p = Point { ... }` — bind as struct type name.
+                                        if ity == "" {
+                                            if field_at(list_get(toks, p + 1), 0) == "LBRACE" {
+                                                ity = field_at(list_get(toks, p), 3);
+                                            }
+                                        }
+                                    }
+                                }
+                                if ity != "" {
+                                    if ity != "ERR_DIV0" {
+                                        if ity != "ERR_BINOP" {
+                                            if ann != "" {
+                                                lit_env = lit_env + vname + ":" + ann + "\t";
+                                            } else {
+                                                lit_env = lit_env + vname + ":" + ity + "\t";
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return lit_env;
+}
+
+// Struct field table: "\tPoint:x:Int,y:Int,\t" from `type Point = struct { x: T, y: U };`
+pub fn build_fn_ret_table(toks: List[String]) -> String {
+    let n = list_len(toks);
+    let mut table = "\t";
+    let mut i = 0;
+    while i < n {
+        let k = field_at(list_get(toks, i), 0);
+        if k == "KW_FN" {
+            if i + 1 < n {
+                if field_at(list_get(toks, i + 1), 0) == "IDENT" {
+                    let fname = field_at(list_get(toks, i + 1), 3);
+                    let mut j = i + 2;
+                    let mut ret = "";
+                    let mut cont = true;
+                    while cont {
+                        if j >= n {
+                            cont = false;
+                        } else {
+                            let kk = field_at(list_get(toks, j), 0);
+                            if kk == "ARROW" {
+                                j = j + 1;
+                                if j < n {
+                                    if field_at(list_get(toks, j), 0) == "IDENT" {
+                                        ret = field_at(list_get(toks, j), 3);
+                                    }
+                                }
+                            } else if kk == "LBRACE" {
+                                cont = false;
+                            } else {
+                                j = j + 1;
+                            }
+                        }
+                    }
+                    if ret != "" {
+                        table = table + fname + ":" + ret + "\t";
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return table;
+}
+
+// Fail-closed: return g() or x = g() when declared types mismatch (zero-arg calls).
