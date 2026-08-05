@@ -4,13 +4,7 @@ impl TypeChecker {
         &self,
         env: &mut HashMap<String, Ty>,
         mutable: &mut HashMap<String, bool>,
-        refinements: &mut HashMap<String, (i64, i64)>,
-        list_lens: &mut HashMap<String, i64>,
         last: &mut Ty,
-        path_returned: &mut bool,
-        expected_ret: Option<&Ty>,
-        return_bounds: Option<(i64, i64)>,
-        ctx: &str,
         stmt: &Statement,
     ) -> Result<()> {
         match stmt {
@@ -91,12 +85,10 @@ impl TypeChecker {
         env: &mut HashMap<String, Ty>,
         mutable: &mut HashMap<String, bool>,
         refinements: &mut HashMap<String, (i64, i64)>,
-        list_lens: &mut HashMap<String, i64>,
         last: &mut Ty,
         path_returned: &mut bool,
         expected_ret: Option<&Ty>,
         return_bounds: Option<(i64, i64)>,
-        ctx: &str,
         stmt: &Statement,
     ) -> Result<()> {
         match stmt {
@@ -206,12 +198,9 @@ impl TypeChecker {
         env: &mut HashMap<String, Ty>,
         mutable: &mut HashMap<String, bool>,
         refinements: &mut HashMap<String, (i64, i64)>,
-        list_lens: &mut HashMap<String, i64>,
         last: &mut Ty,
-        path_returned: &mut bool,
         expected_ret: Option<&Ty>,
         return_bounds: Option<(i64, i64)>,
-        ctx: &str,
         stmt: &Statement,
     ) -> Result<()> {
         match stmt {

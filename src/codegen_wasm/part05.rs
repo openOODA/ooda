@@ -31,10 +31,10 @@ impl WasmCodeGen {
                 // local.get is type-polymorphic — works for both i64 and f64.
                 wat.push_str(&format!("    local.get ${}\n", name));
             }
-            Expression::Binary { op, left, right, .. } => {
+            Expression::Binary { .. } => {
                 wat.push_str(&Self::emit_expr_binary(expr, locals)?);
             }
-            Expression::Call { name, args, .. } => {
+            Expression::Call { .. } => {
                 wat.push_str(&Self::emit_expr_call(expr, locals)?);
             }
             Expression::If {

@@ -157,7 +157,6 @@ impl TypeChecker {
                 expr.span().col,
                 other
             )),
-            _ => unreachable!("method_return_ty_1: {}", name),
         }
     }
 

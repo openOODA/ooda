@@ -2,9 +2,6 @@ impl Gen {
     fn emit_call_methods_0(
         &mut self,
         method_name: &str,
-        name: &str,
-        args: &[Expression],
-        env: &mut HashMap<String, String>,
         mut code: String,
         cargs: Vec<String>,
         arg_tys: Vec<String>,

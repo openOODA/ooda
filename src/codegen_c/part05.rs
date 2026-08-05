@@ -137,10 +137,10 @@ impl Gen {
         let t = self.fresh("r");
         let method_name = name.strip_prefix('.').unwrap_or(name);
         if matches!(method_name, "list_new" | "push" | "list_push" | "list_get" | "list_len" | "chars_len" | "char_at" | "str_slice" | "contains" | "str_contains" | "char_is_digit" | "char_is_alpha" | "char_is_space" | "read_file" | "fs_read" | ".read_file" | "write_file" | "fs_write" | ".write_file" | "path_exists" | "fs_exists" | "file_size" | "is_some" | "is_ok" | "is_none" | "is_err" | "env_get" | "to_string" | "trim" | "to_lowercase") {
-            return self.emit_call_methods_0(method_name, name, args, env, code, cargs, arg_tys, t);
+            return self.emit_call_methods_0(method_name, code, cargs, arg_tys, t);
         }
         if matches!(method_name, "host_ast_dump" | "host_check" | "host_token_dump" | "chs_build" | "process_exit" | "sys_exec" | "system_exec" | "Ok" | "Err" | "println" | ".contains" | ".char_at" | ".str_slice") {
-            return self.emit_call_methods_1(method_name, name, args, env, code, cargs, arg_tys, t);
+            return self.emit_call_methods_1(method_name, code, cargs, arg_tys, t);
         }
         if method_name.starts_with('.') {
             bail!("C backend: unsupported method {}", method_name);

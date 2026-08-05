@@ -6,7 +6,6 @@
 // Renaming calls cannot invent new I/O primitives outside this table.
 // ===================================================================
 use crate::ast::*;
-use anyhow::{anyhow, Result};
 
 /// Which capability token an effectful operation requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

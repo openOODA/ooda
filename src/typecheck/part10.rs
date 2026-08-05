@@ -4,7 +4,6 @@ impl TypeChecker {
         &self,
         expr: &Expression,
         env: &HashMap<String, Ty>,
-        mutable: &HashMap<String, bool>,
     ) -> Result<Ty> {
         match expr {
             Expression::StructLit { name, fields, span } => {
@@ -176,10 +175,10 @@ impl TypeChecker {
 
         // List surface: track element types (no soft List[Unknown] forever).
         if name == "list_new" || name == "list_push" || name == "list_get" || name == "list_len" || name == "char_at" {
-            return self.infer_call_specials_0(name, args, &arg_tys, env, expr);
+            return self.infer_call_specials_0(name, args, &arg_tys, expr);
         }
         if name == "str_slice" || name == "Ok" || name == "Err" || name == "Some" || name == "assert_eq" || name == "sys_exec" || name == "exec" || name == "spawn_process" {
-            return self.infer_call_specials_1(name, args, &arg_tys, env, expr);
+            return self.infer_call_specials_1(name, args, &arg_tys, expr);
         }
         if let Some((params, ret)) = self.functions.get(name) {
             // println is varargs at runtime (prints every arg).

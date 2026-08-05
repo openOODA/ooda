@@ -1,5 +1,5 @@
 /// Second half of typecheck error → fix suggestion map.
-fn tc_fix_part_b(msg: &str, line: usize) -> (String, String, bool) {
+fn tc_fix_part_b(msg: &str) -> (String, String, bool) {
 if msg.contains("out of bounds")
     && (msg.contains("char_at") || msg.contains("str_slice"))
 {
@@ -193,6 +193,6 @@ fn typecheck_fix_suggestion(msg: &str, line: usize) -> (String, String, bool) {
     if let Some(x) = tc_fix_part_a(msg, line) {
         return x;
     }
-    tc_fix_part_b(msg, line)
+    tc_fix_part_b(msg)
 }
 

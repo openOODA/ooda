@@ -27,7 +27,7 @@ impl TypeChecker {
                     None
                 })
                 .ok_or_else(|| anyhow!("Type error at {}:{}: undefined variable '{}'", expr.span().line, expr.span().col, name)),
-            Expression::Binary { op, left, right, .. } => self.infer_binary_expr(expr, env, mutable),
+            Expression::Binary { .. } => self.infer_binary_expr(expr, env),
             Expression::Call {
                 name,
                 args,
@@ -35,12 +35,7 @@ impl TypeChecker {
                 propagate_err,
                 ..
             } => self.infer_call(name, args, span, propagate_err, env, expr),
-            Expression::If {
-                cond,
-                then_branch,
-                else_branch,
-                ..
-            } => self.infer_if_expr(expr, env, mutable),
+            Expression::If { .. } => self.infer_if_expr(expr, env, mutable),
             Expression::Unary { op, expr, span } => {
                 let t = self.infer_expr(expr, env)?;
                 match op {
@@ -93,7 +88,7 @@ impl TypeChecker {
                 )?;
                 Ok(Ty::Void)
             }
-            Expression::StructLit { name, fields, span } => self.infer_struct_lit_expr(expr, env, mutable),
+            Expression::StructLit { .. } => self.infer_struct_lit_expr(expr, env),
             Expression::Match { .. } => self.infer_match_expr(expr, env, mutable),
         }
     }
@@ -102,7 +97,6 @@ impl TypeChecker {
         &self,
         expr: &Expression,
         env: &HashMap<String, Ty>,
-        mutable: &HashMap<String, bool>,
     ) -> Result<Ty> {
         match expr {
             Expression::Binary { op, left, right, .. } => {

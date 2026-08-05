@@ -7,7 +7,6 @@ impl TypeChecker {
         name: &str,
         args: &[Expression],
         arg_tys: &[Ty],
-        env: &HashMap<String, Ty>,
         expr: &Expression,
     ) -> Result<Ty> {
         if name == "list_new" {

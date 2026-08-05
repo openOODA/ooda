@@ -1,5 +1,5 @@
 use crate::ast::*;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use super::*;
 impl super::CapabilityChecker {
     pub fn check_program(program: &Program) -> Result<()> {

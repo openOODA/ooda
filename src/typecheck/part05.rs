@@ -32,13 +32,13 @@ impl TypeChecker {
             }
             match stmt {
                 Statement::Let { .. } => {
-                    self.check_stmt_let(env, mutable, &mut refinements, &mut list_lens, &mut last, &mut path_returned, expected_ret, return_bounds, ctx, stmt)?;
+                    self.check_stmt_let(env, mutable, &mut refinements, &mut list_lens, &mut last, ctx, stmt)?;
                 }
                 Statement::Assign { .. } => {
-                    self.check_stmt_assign(env, mutable, &mut refinements, &mut list_lens, &mut last, &mut path_returned, expected_ret, return_bounds, ctx, stmt)?;
+                    self.check_stmt_assign(env, mutable, &mut refinements, &mut list_lens, &mut last, stmt)?;
                 }
                 Statement::FieldAssign { .. } => {
-                    self.check_stmt_field_assign(env, mutable, &mut refinements, &mut list_lens, &mut last, &mut path_returned, expected_ret, return_bounds, ctx, stmt)?;
+                    self.check_stmt_field_assign(env, mutable, &mut last, stmt)?;
                 }
                 Statement::Return(Some(expr), span) => {
                     last = self.infer_expr(expr, env)?;
@@ -102,10 +102,10 @@ impl TypeChecker {
                     path_returned = true;
                 }
                 Statement::Expr { .. } => {
-                    self.check_stmt_expr(env, mutable, &mut refinements, &mut list_lens, &mut last, &mut path_returned, expected_ret, return_bounds, ctx, stmt)?;
+                    self.check_stmt_expr(env, mutable, &mut refinements, &mut last, &mut path_returned, expected_ret, return_bounds, stmt)?;
                 }
                 Statement::While { .. } => {
-                    self.check_stmt_while(env, mutable, &mut refinements, &mut list_lens, &mut last, &mut path_returned, expected_ret, return_bounds, ctx, stmt)?;
+                    self.check_stmt_while(env, mutable, &mut refinements, &mut last, expected_ret, return_bounds, stmt)?;
                 }
             }
         }
