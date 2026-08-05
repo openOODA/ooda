@@ -1,133 +1,8 @@
 use anyhow::{anyhow, Result};
+use super::token::{Token, SpannedToken};
+use super::core::Lexer;
 
-/// Lexical token kinds (location is carried by `SpannedToken`).
-#[derive(Debug, Clone, PartialEq)]
-pub enum Token {
-    Fn,
-    Pub,
-    Let,
-    Mut,
-    Import,
-    Requires,
-    Ensures,
-    Verify,
-    If,
-    Else,
-    Match,
-    While,
-    For,
-    In,
-    Break,
-    Continue,
-    Return,
-    Type,
-    Where,
-    True,
-    False,
-    Ident(String),
-    IntLit(i64),
-    FloatLit(f64),
-    StringLit(String),
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    EqEq,
-    Neq,
-    Lt,
-    Lte,
-    Gt,
-    Gte,
-    AndAnd,
-    OrOr,
-    Eq,
-    Arrow,
-    FatArrow,
-    Question,
-    Exclamation,
-    Colon,
-    Semi,
-    Comma,
-    Dot,
-    DotDot,
-    DotDotEq,
-    Ampersand,
-    Pipe,
-    LParen,
-    RParen,
-    LBrace,
-    RBrace,
-    LBracket,
-    RBracket,
-    Eof,
-}
-
-/// Token with 1-based source location for diagnostics.
-#[derive(Debug, Clone)]
-pub struct SpannedToken {
-    pub token: Token,
-    pub line: usize,
-    pub col: usize,
-}
-
-impl PartialEq for SpannedToken {
-    fn eq(&self, other: &Self) -> bool {
-        self.token == other.token
-    }
-}
-
-impl PartialEq<Token> for SpannedToken {
-    fn eq(&self, other: &Token) -> bool {
-        &self.token == other
-    }
-}
-
-impl PartialEq<SpannedToken> for Token {
-    fn eq(&self, other: &SpannedToken) -> bool {
-        self == &other.token
-    }
-}
-
-impl SpannedToken {
-    fn new(token: Token, line: usize, col: usize) -> Self {
-        Self { token, line, col }
-    }
-}
-
-pub struct Lexer<'a> {
-    chars: std::iter::Peekable<std::str::Chars<'a>>,
-    line: usize,
-    col: usize,
-}
-
-impl<'a> Lexer<'a> {
-    pub fn new(input: &'a str) -> Self {
-        Self {
-            chars: input.chars().peekable(),
-            line: 1,
-            col: 1,
-        }
-    }
-
-    fn advance(&mut self) -> Option<char> {
-        let ch = self.chars.next()?;
-        if ch == '\n' {
-            self.line += 1;
-            self.col = 1;
-        } else {
-            self.col += 1;
-        }
-        Some(ch)
-    }
-
-    fn peek(&mut self) -> Option<&char> {
-        self.chars.peek()
-    }
-
-    fn push(&self, tokens: &mut Vec<SpannedToken>, token: Token, line: usize, col: usize) {
-        tokens.push(SpannedToken::new(token, line, col));
-    }
-
+impl Lexer<'_> {
     pub fn tokenize(&mut self) -> Result<Vec<SpannedToken>> {
         let mut tokens = Vec::new();
 
@@ -354,30 +229,7 @@ impl<'a> Lexer<'a> {
                             break;
                         }
                     }
-                    let kw = match ident.as_str() {
-                        "fn" => Token::Fn,
-                        "pub" => Token::Pub,
-                        "let" => Token::Let,
-                        "mut" => Token::Mut,
-                        "import" => Token::Import,
-                        "requires" => Token::Requires,
-                        "ensures" => Token::Ensures,
-                        "verify" => Token::Verify,
-                        "if" => Token::If,
-                        "else" => Token::Else,
-                        "match" => Token::Match,
-                        "while" => Token::While,
-                        "for" => Token::For,
-                        "in" => Token::In,
-                        "break" => Token::Break,
-                        "continue" => Token::Continue,
-                        "return" => Token::Return,
-                        "type" => Token::Type,
-                        "where" => Token::Where,
-                        "true" => Token::True,
-                        "false" => Token::False,
-                        _ => Token::Ident(ident),
-                    };
+                    let kw = super::keywords::keyword_or_ident(ident);
                     self.push(&mut tokens, kw, start_line, start_col);
                 }
                 other => {

@@ -1307,10 +1307,13 @@ impl Gen {
             "sys_exec" | "system_exec" => {
                 let cmd = cargs.last().unwrap();
                 code.push_str(&format!(
-                    "  int {} = system({}.data ? {}.data : \"\");\n",
-                    t, cmd, cmd
+                    "  int sysret_{} = system({}.data ? {}.data : \"\");\n", t, cmd, cmd
                 ));
-                Ok((code, t, "int".into()))
+                code.push_str(&format!(
+                    "  OoResS {} = {{ .ok = (sysret_{} == 0), .val = oo_str_lit(sysret_{} == 0 ? \"OK\" : \"FAIL\") }};\n",
+                    t, t, t
+                ));
+                Ok((code, t, "OoResS".into()))
             }
             "Ok" => {
                 // Result ok — payload is String or generic; use OoResS
