@@ -43,10 +43,11 @@ S = U + D + F + W + O
 | **\(W\)** | **Hand-waves** — stubs that present as done without fail-closed residual |
 | **\(O\)** | **Oversize files** — owned source files with **> 256 lines** (`scripts/check_file_lines.sh`) |
 
-**File-size cap (always):** Owned `.oo` / `.rs` / hand `.c`/`.h` / `.sh` ≤ **256 lines**.  
+**File-size cap (always):** Owned `.oo` / `.rs` / hand `.c`/`.h` / `.sh` / product `scripts/*.py` ≤ **256 lines**.  
 Exclude generated emit (`*.oo.c`, `oodac/main.c`, `oodac/oodac2.c`, `target/`, `dist/`).  
 Plan: [`bootstrap/SPLIT_PLAN.md`](bootstrap/SPLIT_PLAN.md).  
-Lock: `./scripts/check_file_lines.sh` (strict when aiming O=0; `--ratchet` while splitting — fail if oversize **grows** or new oversize appears).
+Lock: `./scripts/check_file_lines.sh` (strict when aiming O=0; `--ratchet` while splitting — fail if oversize **grows** or new oversize appears).  
+Audit residual inventory: [`bootstrap/AUDIT_RESIDUAL.md`](bootstrap/AUDIT_RESIDUAL.md).
 
 **Rules of counting (anti-theater):**
 

@@ -23,7 +23,7 @@ Status legend:
 | `write_file` | `&FsCap` | sealed free call | `oo_write_file(cap, path, content)` | `oo_write_file` + require | **real** (static+runtime) |
 | `path_exists` | `&FsCap` | sealed free call | `oo_path_exists(cap, path)` | require + fopen probe | **real** |
 | `file_size` | `&FsCap` | sealed free call | `oo_file_size(cap, path)` | require + ftell | **real** |
-| `sys_exec` | `&SysCap` | sealed free call | `oo_sys_exec1(cap, last_arg)` | preamble require + `system(3)` | **real** |
+| `sys_exec` | `&SysCap` | sealed free call + arg-flow | `oo_sys_exec1(cap, last_arg)` string-aware | preamble require + `system(3)` shell residual | **real** (shell residual: see `AUDIT_RESIDUAL.md` R2/R3) |
 | `env_get` | `&EnvCap` | sealed free call | `oo_env_get(cap, key)` | require + getenv | **real** |
 | `fetch` / `http_get` / `net_get` / `net_connect` / `downloadData` / `query_remote_api` | `&NetCap` | sealed free call; allow only with `NetCap` | **explicit `ERR\tc_emit\tnet residual`** | none | **fail-closed residual** (no silent stub) |
 | `process_exit` | none (ambient) | not sealed | `oo_process_exit` | `exit` | **real** (not a cap class) |

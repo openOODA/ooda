@@ -7,7 +7,7 @@
 #   ./scripts/check_file_lines.sh --ratchet # exit 1 only if oversize grew / new oversize
 #   ./scripts/check_file_lines.sh --json    # machine-readable summary on stdout
 #
-# Owned source: .oo .rs .c .h .sh under repo root, excluding generated/noise.
+# Owned source: .oo .rs .c .h .sh .py under repo root, excluding generated/noise.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -43,7 +43,7 @@ is_excluded() {
 # Collect: relpath lines
 mapfile -t ALL < <(
   find . -type f \
-    \( -name '*.oo' -o -name '*.rs' -o -name '*.c' -o -name '*.h' -o -name '*.sh' \) \
+    \( -name '*.oo' -o -name '*.rs' -o -name '*.c' -o -name '*.h' -o -name '*.sh' -o -name '*.py' \) \
     -not -path './.git/*' \
     -not -path './target/*' \
     -not -path './dist/*' \

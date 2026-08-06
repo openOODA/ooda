@@ -41,13 +41,14 @@ case "$MODE" in
     file="${1:?missing file}"
     shift || true
     out="${TMPDIR:-/tmp}/ooda_run_$$_bin"
+    cleanup_run() { rm -f "$out"; }
+    trap cleanup_run EXIT
     "$EM" build "$file" "$out" >/dev/null
     test -x "$out"
     set +e
     "$out" "$@"
     ec=$?
     set -e
-    rm -f "$out"
     exit "$ec"
     ;;
   test)

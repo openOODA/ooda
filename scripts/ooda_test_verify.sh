@@ -44,6 +44,12 @@ fi
 # --- 2) lower verify blocks → harness .oo ---
 HARNESS="$TMPDIR/ooda_test_$$_harness.oo"
 OUTBIN="$TMPDIR/ooda_test_$$_bin"
+cleanup_test() {
+  if [[ -z "${OODA_TEST_KEEP:-}" ]]; then
+    rm -f "$HARNESS" "$OUTBIN" "$HARNESS.c" 2>/dev/null || true
+  fi
+}
+trap cleanup_test EXIT
 export OODA_TEST_SRC="$SRC"
 export OODA_TEST_HARNESS="$HARNESS"
 PY="$ROOT/scripts/ooda_test_harness.py"
@@ -86,18 +92,11 @@ cat "$TMPDIR/ooda_test_run.out" 2>/dev/null || true
 if [[ $rr -ne 0 ]]; then
   cat "$TMPDIR/ooda_test_run.err" >&2 2>/dev/null || true
   echo "ERR	test	verify failed (exit=$rr)" >&2
-  if [[ -z "${OODA_TEST_KEEP:-}" ]]; then
-    rm -f "$HARNESS" "$OUTBIN" "$HARNESS.c" 2>/dev/null || true
-  fi
   exit 1
 fi
 
 if ! grep -q "OK verify" "$TMPDIR/ooda_test_run.out"; then
   echo "ERR	test	harness ran but missing OK verify" >&2
   exit 1
-fi
-
-if [[ -z "${OODA_TEST_KEEP:-}" ]]; then
-  rm -f "$HARNESS" "$OUTBIN" "$HARNESS.c" 2>/dev/null || true
 fi
 exit 0

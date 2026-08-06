@@ -72,18 +72,27 @@ collect() {
 }
 collect "$MAIN_ABS"
 
-# C1: single-module product builds run full check (import expand).
-# Multi-module self-host: emit rejects int/lit caps (c_arg_is_cap_ident); full
-# expanded typecheck of oodac (~410KiB) is not a pure_build gate (O hang).
-if [[ "${PURE_SKIP_CHECK:-}" != "1" && ${#MODS[@]} -eq 1 ]]; then
-  set +e
-  timeout 60 "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
-  main_ck=$?
-  set -e
-  if [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; then
-    echo "ERR_CHECK $MAIN_ABS" >&2
-    head -20 "$TMP/main_check.out" "$TMP/main_check.err" 2>/dev/null || true
-    exit 1
+# C1 check gate (import-expanded main):
+# - always when 1 module
+# - small multi (≤8 modules): try check, timeout 90s fail-closed
+# - large multi (compiler ~86 mods): skip full check — residual; emit still
+#   rejects int/lit caps (c_arg_is_cap_ident). See bootstrap/AUDIT_RESIDUAL.md
+if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
+  nmods=${#MODS[@]}
+  if [[ $nmods -eq 1 ]] || [[ $nmods -le 8 ]]; then
+    set +e
+    timeout 90 "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
+    main_ck=$?
+    set -e
+    if [[ $main_ck -eq 124 ]]; then
+      echo "ERR_CHECK_TIMEOUT $MAIN_ABS (nmods=$nmods)" >&2
+      exit 1
+    fi
+    if [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; then
+      echo "ERR_CHECK $MAIN_ABS" >&2
+      head -20 "$TMP/main_check.out" "$TMP/main_check.err" 2>/dev/null || true
+      exit 1
+    fi
   fi
 fi
 
