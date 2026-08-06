@@ -40,7 +40,11 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 - [ ] Line lock \(O=0\)
 
 ### P1 — Core systems development loop
-- [ ] **Contracts on native path** — lower or enforce `requires`/`ensures` on Backend-C (or document a dedicated check phase that is the supported path)
+- [x] **Contracts on native path** — Backend-C **skips** `requires`/`ensures` to LBRACE (real token skip in `c_emit_skip_contracts`); bodies emit correctly
+  - Not runtime-enforced on native (honest residual); optional assert mode not landed
+  - Pass: `bootstrap/corpus/emit-c/pass/fn_contracts_add.oo` + `fixtures/int_main.oo` / `hello.oo`
+  - Fail: `bootstrap/corpus/emit-c/fail/contract_no_brace.oo` (mid-header garbage / missing LBRACE)
+  - Smoke: `scripts/contracts_native_smoke.sh` (+ c_emit_smoke corpus)
 - [x] **Real `ooda test`** — run `verify` blocks (not only typecheck)
   - Pure path: check → lower `assert_eq!` in `verify` → Backend-C harness build+run
   - Scripts: `scripts/ooda_test_verify.sh` + `ooda_test_harness.py`; CLI `ooda test`

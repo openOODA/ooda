@@ -58,7 +58,7 @@ ooda version
 | `--json-errors` / `--fuzz` / `--release` / `--emit-llvm` | Fail-closed residual |
 | `build --target wasm\|llvm` | Fail-closed (beta-out / residual) |
 | LSP / pkg / migrate / patch / bench | Removed from product |
-| Host interpreter / contracts on native | Residual — native does not lower requires/ensures; test strips them for harness |
+| Host interpreter / contracts on native | Residual — emit **skips** `requires`/`ensures` (bodies ok); not runtime-enforced on native; test harness still strips for verify |
 | `verify` body beyond `assert_eq!` | Residual — only `assert_eq!` lowered today |
 | Cold-start seed | Need prebuilt pure `oodac` once (`SEED_OODAC`) |
 
