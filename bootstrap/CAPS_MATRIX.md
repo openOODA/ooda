@@ -36,8 +36,10 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 
 ### Check
 - Free-call scan inside each `fn` body: `IDENT` + `LPAREN` matched against `is_sealed_{net,fs,sys,env}`.
-- Cap present iff param type text is `NetCap` / `FsCap` / `SysCap` / `EnvCap` (token scan).
-- **Method form:** `fs.read_file(...)` is sealed — scan is IDENT + LPAREN, so the method name is caught (not only free calls). Residual: dynamic/computed callees not scanned.
+- Cap **param** grant only for type after `COLON` + `AMP` + Cap IDENT (e.g. `fs: &FsCap`).
+- Cap **arg-flow (F01):** free call first arg (or method receiver `fs.read_file`) must be an IDENT naming a param of that cap class — not merely “param present somewhere.”
+- Fixtures: `check/fail/cap_arg_not_passed.oo`, `cap_arg_wrong_name.oo`; pass method: `check/pass/ok_method_fs_read.oo`.
+- Residual: dynamic/computed callees not scanned; cap only as param name (not expression).
 
 ### Emit (Backend-C)
 - Cap tokens compile to `long long`; `main` injects `OO_CAP_FS` / `OO_CAP_SYS` / `OO_CAP_ENV`.

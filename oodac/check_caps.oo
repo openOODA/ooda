@@ -1,5 +1,7 @@
 // job: sealed-effect capability check on fn items; stage: check
 // in: token list + pos; out: pos after fn; DESIGN caps pillar
+// F01: sealed call must pass cap-typed arg (not only declare &Cap param)
+// helpers: check_cap_util.oo
 
 pub fn skip_until_semi(toks: List[String], pos0: Int) -> Int {
     let n = list_len(toks);
@@ -20,23 +22,24 @@ pub fn check_function(toks: List[String], pos0: Int) -> Int {
     if field_at(list_get(toks, pos), 0) == "KW_PUB" {
         pos = pos + 1;
     }
-    // FN
     pos = pos + 1;
-    // name
     let fname = field_at(list_get(toks, pos), 3);
     pos = pos + 1;
-    // (
     pos = pos + 1;
     let mut has_net = false;
     let mut has_fs = false;
     let mut has_sys = false;
     let mut has_env = false;
-    // Scan params until ). Grant ONLY for type after COLON + AMP + Cap IDENT
-    // (e.g. `fs: &FsCap`). Do NOT grant on param name `FsCap` or `List[FsCap]`.
+    let mut fs_names = "";
+    let mut sys_names = "";
+    let mut env_names = "";
+    let mut net_names = "";
+    // Scan params: grant ONLY COLON+AMP+Cap; record param IDENT for arg-flow seal
     let mut cont = true;
     let mut after_colon = false;
     let mut after_amp = false;
     let mut bracket_depth = 0;
+    let mut last_param = "";
     while cont {
         if pos >= n {
             cont = false;
@@ -47,6 +50,7 @@ pub fn check_function(toks: List[String], pos0: Int) -> Int {
             } else if k == "COMMA" {
                 after_colon = false;
                 after_amp = false;
+                last_param = "";
                 pos = pos + 1;
             } else if k == "COLON" {
                 after_colon = true;
@@ -70,21 +74,34 @@ pub fn check_function(toks: List[String], pos0: Int) -> Int {
                 if after_amp && bracket_depth == 0 {
                     if t == "NetCap" {
                         has_net = true;
+                        if last_param != "" {
+                            net_names = cap_bag_put(net_names, last_param);
+                        }
                     }
                     if t == "FsCap" {
                         has_fs = true;
+                        if last_param != "" {
+                            fs_names = cap_bag_put(fs_names, last_param);
+                        }
                     }
                     if t == "SysCap" {
                         has_sys = true;
+                        if last_param != "" {
+                            sys_names = cap_bag_put(sys_names, last_param);
+                        }
                     }
                     if t == "EnvCap" {
                         has_env = true;
+                        if last_param != "" {
+                            env_names = cap_bag_put(env_names, last_param);
+                        }
                     }
                     after_amp = false;
                     after_colon = false;
                 } else if after_colon && bracket_depth == 0 {
-                    // bare `x: FsCap` without & — do not grant (DESIGN uses &Cap)
                     after_colon = false;
+                } else if !after_colon && bracket_depth == 0 {
+                    last_param = t;
                 }
                 pos = pos + 1;
             } else {
@@ -92,17 +109,13 @@ pub fn check_function(toks: List[String], pos0: Int) -> Int {
             }
         }
     }
-    // )
     if field_at(list_get(toks, pos), 0) == "RPAREN" {
         pos = pos + 1;
     }
-    // skip to body LBRACE
     while pos < n {
         if field_at(list_get(toks, pos), 0) == "LBRACE" {
-            // body until matching RBRACE
             let body_start = pos + 1;
             let body_end = skip_balanced(toks, pos) - 1;
-            // scan body for sealed calls
             let mut i = body_start;
             while i < body_end {
                 let k = field_at(list_get(toks, i), 0);
@@ -110,37 +123,78 @@ pub fn check_function(toks: List[String], pos0: Int) -> Int {
                 if k == "IDENT" {
                     if i + 1 < n {
                         if field_at(list_get(toks, i + 1), 0) == "LPAREN" {
-                            // free call
-                            if is_sealed_net(text) {
-                                if !has_net {
-                                    let line = field_at(list_get(toks, i), 1);
-                                    let col = field_at(list_get(toks, i), 2);
-                                    println("ERR\tcapability\tSecurity Capability Violation: Function '" + fname + "' calls sealed effectful builtin '" + text + "' which requires a &NetCap parameter, but none was declared at line " + line + ", col " + col + ". Default-deny: grant the capability token explicitly.");
-                                    process_exit(1);
+                            let sealed_fs = is_sealed_fs(text);
+                            let sealed_sys = is_sealed_sys(text);
+                            let sealed_env = is_sealed_env(text);
+                            let sealed_net = is_sealed_net(text);
+                            if sealed_fs || sealed_sys || sealed_env || sealed_net {
+                                let line = field_at(list_get(toks, i), 1);
+                                let col = field_at(list_get(toks, i), 2);
+                                let mut kind = "FsCap";
+                                let mut has = has_fs;
+                                let mut bag = fs_names;
+                                if sealed_sys {
+                                    kind = "SysCap";
+                                    has = has_sys;
+                                    bag = sys_names;
                                 }
-                            }
-                            if is_sealed_fs(text) {
-                                if !has_fs {
-                                    let line = field_at(list_get(toks, i), 1);
-                                    let col = field_at(list_get(toks, i), 2);
-                                    println("ERR\tcapability\tSecurity Capability Violation: Function '" + fname + "' calls sealed effectful builtin '" + text + "' which requires a &FsCap parameter, but none was declared at line " + line + ", col " + col + ". Default-deny: grant the capability token explicitly.");
-                                    process_exit(1);
+                                if sealed_env {
+                                    kind = "EnvCap";
+                                    has = has_env;
+                                    bag = env_names;
                                 }
-                            }
-                            if is_sealed_sys(text) {
-                                if !has_sys {
-                                    let line = field_at(list_get(toks, i), 1);
-                                    let col = field_at(list_get(toks, i), 2);
-                                    println("ERR\tcapability\tSecurity Capability Violation: Function '" + fname + "' calls sealed effectful builtin '" + text + "' which requires a &SysCap parameter, but none was declared at line " + line + ", col " + col + ". Default-deny: grant the capability token explicitly.");
-                                    process_exit(1);
+                                if sealed_net {
+                                    kind = "NetCap";
+                                    has = has_net;
+                                    bag = net_names;
                                 }
-                            }
-                            if is_sealed_env(text) {
-                                if !has_env {
-                                    let line = field_at(list_get(toks, i), 1);
-                                    let col = field_at(list_get(toks, i), 2);
-                                    println("ERR\tcapability\tSecurity Capability Violation: Function '" + fname + "' calls sealed effectful builtin '" + text + "' which requires a &EnvCap parameter, but none was declared at line " + line + ", col " + col + ". Default-deny: grant the capability token explicitly.");
-                                    process_exit(1);
+                                if sealed_fs {
+                                    kind = "FsCap";
+                                    has = has_fs;
+                                    bag = fs_names;
+                                }
+                                if !has {
+                                    cap_deny(
+                                        fname,
+                                        text,
+                                        kind,
+                                        line,
+                                        col,
+                                        "parameter, but none was declared"
+                                    );
+                                }
+                                // Net is check-only residual: param grant only (no cap-first-arg ABI).
+                                // Fs/Sys/Env product lowers: free first arg or method receiver must be cap name.
+                                if !sealed_net {
+                                    let mut cap_id = "";
+                                    let mut ok_form = false;
+                                    if i >= 2 {
+                                        if field_at(list_get(toks, i - 1), 0) == "DOT" {
+                                            if field_at(list_get(toks, i - 2), 0) == "IDENT" {
+                                                cap_id = field_at(list_get(toks, i - 2), 3);
+                                                ok_form = true;
+                                            }
+                                        }
+                                    }
+                                    if !ok_form {
+                                        let apos = i + 2;
+                                        if apos < n {
+                                            if field_at(list_get(toks, apos), 0) == "IDENT" {
+                                                cap_id = field_at(list_get(toks, apos), 3);
+                                                ok_form = true;
+                                            }
+                                        }
+                                    }
+                                    if !ok_form || !cap_bag_has(bag, cap_id) {
+                                        cap_deny(
+                                            fname,
+                                            text,
+                                            kind,
+                                            line,
+                                            col,
+                                            "as first argument (or method receiver), but call does not pass a matching cap token"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -149,7 +203,6 @@ pub fn check_function(toks: List[String], pos0: Int) -> Int {
                 i = i + 1;
             }
             pos = skip_balanced(toks, pos);
-            // verify skip
             if pos < n {
                 if field_at(list_get(toks, pos), 0) == "KW_VERIFY" {
                     pos = pos + 1;
@@ -170,39 +223,4 @@ pub fn check_function(toks: List[String], pos0: Int) -> Int {
         pos = pos + 1;
     }
     return pos;
-}
-
-pub fn is_sealed_net(name: String) -> Bool {
-    if name == "fetch" { return true; }
-    if name == "downloadData" { return true; }
-    if name == "http_get" { return true; }
-    if name == "net_get" { return true; }
-    if name == "net_connect" { return true; }
-    if name == "query_remote_api" { return true; }
-    return false;
-}
-
-pub fn is_sealed_fs(name: String) -> Bool {
-    if name == "read_file" { return true; }
-    if name == "write_file" { return true; }
-    if name == "fs_read" { return true; }
-    if name == "fs_write" { return true; }
-    if name == "path_exists" { return true; }
-    if name == "file_size" { return true; }
-    return false;
-}
-
-pub fn is_sealed_sys(name: String) -> Bool {
-    if name == "sys_exec" { return true; }
-    if name == "exec" { return true; }
-    if name == "spawn_process" { return true; }
-    if name == "async_spawn_internal" { return true; }
-    return false;
-}
-
-pub fn is_sealed_env(name: String) -> Bool {
-    if name == "env_get" { return true; }
-    if name == "env_set" { return true; }
-    if name == "getenv" { return true; }
-    return false;
 }
