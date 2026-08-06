@@ -85,29 +85,39 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 
 #### B.1 In for beta (must work)
 
-*Edit this table only when deliberately changing beta scope—not casually per feature PR.*
+*Edit this table only when deliberately changing beta scope—not casually per feature PR.*  
+*Pin reference for this freeze of the real alpha surface: **v0.182.1-alpha** (BUILD_OUT sweep). Still **not** a beta tag.*
 
 | Area | In-beta requirement | Proof rails (examples) |
 |------|---------------------|-------------------------|
-| **CLI** | `ooda version`, `help`, `check`, `dump tokens\|ast\|check`, `build --target c\|chs\|native`, `run` (native build+exec), `test` as pure check gate (or stronger if promoted) | `product_pure_dispatch_smoke`, `beta_cli_smoke` |
+| **CLI core** | `ooda version`, `help`, `check`, `dump tokens\|ast\|check` | `product_pure_dispatch_smoke`, `beta_cli_smoke` |
+| **Build / run** | `build --target c\|chs\|native`; `run` = permanent pure **native** build+exec (no host interpreter) | `chs_parity`, product smokes |
+| **Backend** | **`--backend c` only** on product/oodac build (FLOOR Backend-C); non-`c` fail-closed | `p3_no_cargo_smoke`, `BACKEND_F3_PREP.md` |
+| **Test** | `ooda test`: check + lower **`assert_eq!` / `assert_ne!` / `assert!`** in `verify` → Backend-C harness build+run | `ooda_test_verify.sh`, `verify_pass.oo` / `verify_fail.oo` |
+| **JSON diags** | `check --json-errors` (product + oodac): codes + optional `fix_hint`; clean → `[]` | `json_errors_smoke`, `DIAG_CODES.md` |
+| **AI agent loop** | `outline` (pub fn summary); `reflect` (NDJSON fn/verify/caps/contracts text); `patch` **`replace_fn` only** (CLI or JSON stdin; path-safe) | `outline_reflect_smoke`, `patch_smoke`, `OUTLINE_REFLECT.md` |
 | **Compiler** | Pure `oodac`: tokens, ast, check, emit-c, multi-module pure build | `fixed_point`, `c_emit_smoke`, `chs_parity` |
-| **Language** | At least **CHS** surface (see `CHS.md`) usable for user programs on check + native C path | CHS fixtures + emit pass/fail |
-| **Caps** | Default-deny sealed I/O; CHS-supported caps lowered or fail-closed consistently on claimed path | corpus check fail `no_cap_*`; C sealed allowlist honesty |
+| **Language** | At least **CHS** surface (see `CHS.md`) on check + native C path | CHS fixtures + emit pass/fail |
+| **Caps (static)** | Default-deny sealed I/O at check; CHS-supported Fs/Sys/Env lowered on C; Net fail-closed at emit | `caps_matrix_smoke`, corpus `no_cap_*` |
 | **Self-host** | Seed + pure rebuild of compiler + product CLI without Rust | `bootstrap_no_cargo`, `fixed_point` |
 | **Install / pin** | Single pin string: BOOTSTRAP_PIN ↔ release ↔ site install ↔ `ooda version` | release extract smoke + install dry-run |
 | **Docs** | README + release notes: In list, Out list, seed+gcc, no cargo primary path | review checklist |
 
 #### B.2 Out of beta (must fail closed — not “missing quietly”)
 
-| Area | Out-of-beta (examples) | Behavior |
-|------|------------------------|----------|
+| Area | Out-of-beta | Behavior |
+|------|-------------|----------|
 | Host Rust / Cargo product | any reintroduction | Forbidden (B0/B1) |
-| `build --target wasm` / `llvm` / `--emit-llvm` / `--release` (until promoted) | residual or beta-out | non-zero |
-| `--fuzz` (until promoted) | residual | non-zero |
-| `--json-errors` | **promoted (BUILD_OUT P2)** — pure check path; see DIAG_CODES.md | 0 + `[]` on clean; non-zero + codes on fail |
-| Full DESIGN AI suite (`outline` / `reflect` / `patch` as product) | residual unless promoted into B.1 | non-zero or absent with docs |
-| Full SPEC beyond CHS + explicit promotions | post-beta | fail-closed or not advertised |
+| `build --target wasm` / `llvm` / `--emit-llvm` / `--release` | residual / P4 drop | non-zero (`P4_DROPS.md`) |
+| `ooda test --fuzz` | DESIGN deferral | non-zero exit 2 (`FUZZ_DEFER.md`) |
+| **ensures** + complex `requires` | not fully lowered on native | incomplete residual (simple `requires IDENT OP lit\|ident` only) |
+| **`for` / `match` stmt lower** | Backend-C residual | emit non-zero (`for residual` / `match residual`; use `while` / `if is_ok`) |
+| **Net ops** (`fetch` / friends) | sealed check only; no product runtime | emit `ERR … net residual` |
+| **Multi-arg `sys_exec`** | product lowers **`oo_sys_exec1`** (last-arg / single cmd) | multi-arg exec residual vs full argv |
+| **Runtime caps** | C path is **static check only** (cap tokens are compile placeholders; no runtime gate on C) | honesty residual (`CAPS_MATRIX.md`) |
 | Non-`c` `--backend` (until F3+) | residual | `ERR backend …` |
+| Full SPEC beyond CHS + explicit B.1 promotions | post-beta | fail-closed or not advertised |
+| `patch` line-range / AST node_id | residual | fail-closed / not shipped (`replace_fn` only is In) |
 
 Promoting an Out item to In requires: implementation + pass/fail rails + this table edit + B4 still true for what remains Out.
 
@@ -142,18 +152,22 @@ public notes match In/Out tables
 
 ## Current status (recompute each Observe — not a beta claim)
 
-| Piece | Typical alpha status (update when proving) |
-|-------|--------------------------------------------|
-| B0 RS=0, no Cargo.toml | Often **PASS** on pure tree |
-| B1 no-Cargo build scripts | **PASS** local; CI matrix may be residual |
-| B2 pure fixed_point | **PASS** when rails green |
-| B3 release/install path | Path exists; dress-rehearsal residual |
-| B4 honesty | Process; tag not cut |
-| B5 org | Product-critical siblings no Rust |
-| Part B.1 full freeze + all rails | **Not complete** until table is intentionally frozen and proven |
+**Observe pin: v0.182.1-alpha** (BUILD_OUT 8-agent sweep; B.1 table edited to match real alpha surface).  
+**Public beta tag: not claimed. Owner-only.**
+
+| Piece | Status @ v0.182.1-alpha |
+|-------|-------------------------|
+| B0 RS=0, no Cargo.toml | **PASS** (`RS_COUNT=0`; no `src/`, no `Cargo.toml`) |
+| B1 no-Cargo build scripts | **PASS** local + GHA `no_rust.yml` (cargo/rustc shadowed); seed required |
+| B2 pure fixed_point | **PASS** (`fixed_point.sh`; s1≡s2; no OK_HOST) |
+| B3 release/install path | **PASS path** (`release.sh` packs pure bins + runtime C); dress rehearsal offline OK; cold seed residual |
+| B4 honesty | **PASS process** — Out rows fail-closed; alpha pin; **no beta tag cut** |
+| B5 org | **PASS** product-critical siblings no Rust; editors optional |
+| Part B.1 In surface | **Table promoted** to real alpha (check/dump/build/run/test asserts/json-errors/outline/reflect/patch replace_fn/`--backend c`); rails exist — still not “owner freezes beta forever” |
+| Part B.2 Out surface | **Documented** fuzz, wasm/llvm, ensures incomplete, for/match residual, net residual, multi-arg exec residual, runtime caps static-only |
 | Public beta tag | **Not claimed** |
 
-Live notes: monorepo `PROGRESS.md`, optional `bootstrap/B0_B5_PROOF.md`.
+Live notes: monorepo `PROGRESS.md`, `bootstrap/B0_B5_PROOF.md`.
 
 ---
 
