@@ -39,11 +39,11 @@ echo "stage-1: $STAGE1"
 
 echo "=== fixed-point: stage-1 real-builds CHS smoke ==="
 rm -f "$SMOKE_BIN"
-# Pure CHS: stage-1 self-emit. Full oodac recompile may use $OODA host seed (see oodac build).
+# Pure only: stage-1 emit-c + gcc (no stage-0 host soft-pass).
 export OODAC_BIN="$STAGE1"
-export OODA
+unset OODA || true
 set +e
-(cd "$ROOT" && "$STAGE1" build "$SMOKE_SRC" "$SMOKE_BIN" >"$TMPDIR/stage1_build_smoke.txt" 2>&1)
+(cd "$ROOT" && env -u OODA OODAC_BIN="$STAGE1" "$STAGE1" build "$SMOKE_SRC" "$SMOKE_BIN" >"$TMPDIR/stage1_build_smoke.txt" 2>&1)
 rc=$?
 set -e
 cat "$TMPDIR/stage1_build_smoke.txt"
@@ -65,25 +65,33 @@ if ! echo "$smoke_out" | grep -q '2'; then
 fi
 echo "OK stage-1 real smoke build"
 
-echo "=== fixed-point: stage-1 builds oodac → stage-2 ==="
+echo "=== fixed-point: stage-1 builds oodac → stage-2 (pure emit only) ==="
 rm -f "$STAGE2" "$ROOT/oodac/main" "$ROOT/oodac/main.c" "$ROOT/oodac/main.oo.c"
 set +e
-# From repo root so runtime/ + OODA host seed resolve; OODAC_BIN prefers pure emit then host.
-(cd "$ROOT" && OODAC_BIN="$STAGE1" OODA="$OODA" "$STAGE1" build "$OODAC_SRC" "$STAGE2" >"$TMPDIR/stage1_build_oodac.txt" 2>&1)
+# Must be pure stage-1 emit-c+gcc — no $OODA host re-seed (soft-pass forbidden).
+(cd "$ROOT" && env -u OODA OODAC_BIN="$STAGE1" "$STAGE1" build "$OODAC_SRC" "$STAGE2" >"$TMPDIR/stage1_build_oodac.txt" 2>&1)
 rc=$?
 set -e
 cat "$TMPDIR/stage1_build_oodac.txt"
 if [[ $rc -ne 0 ]] || [[ ! -x "$STAGE2" ]]; then
-  echo "FAIL: stage-1 did not build stage-2 oodac" >&2
+  echo "FAIL: stage-1 did not pure-build stage-2 oodac (emit residual — no host soft-pass)" >&2
   exit 1
 fi
-# Prove stage-2 is not a bit-identical copy of stage-1 produced by cp
-# (BuildID may still match if emit is deterministic — compare mtimes/paths and both run)
 if [[ "$STAGE1" -ef "$STAGE2" ]]; then
   echo "FAIL: stage-2 is same inode as stage-1" >&2
   exit 1
 fi
-echo "OK stage-2 binary produced by stage-1"
+# Reject bit-identical host re-seed theater (same bytes as stage-1).
+if cmp -s "$STAGE1" "$STAGE2"; then
+  echo "FAIL: stage-2 is byte-identical to stage-1 (host re-seed / cp theater)" >&2
+  exit 1
+fi
+# Build log must not claim OK_HOST
+if grep -q 'OK_HOST' "$TMPDIR/stage1_build_oodac.txt" 2>/dev/null; then
+  echo "FAIL: stage-2 used OK_HOST soft-pass" >&2
+  exit 1
+fi
+echo "OK stage-2 binary pure-built by stage-1"
 
 echo "=== fixed-point: digests stage0 ≡ stage1 ≡ stage2 tokens ==="
 CORPUS="$ROOT/fixtures/int_main.oo"

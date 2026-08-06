@@ -27,6 +27,7 @@ PASS_DIR="$ROOT/bootstrap/corpus/emit-c/pass"
 n_pass=0
 for src in "$PASS_DIR"/*.oo; do
   [[ -f "$src" ]] || continue
+  [[ "$src" == *.concat.oo ]] && continue
   n_pass=$((n_pass + 1))
   base="$(basename "$src" .oo)"
   c_out="$TMPDIR/emit_${base}.c"
@@ -62,6 +63,7 @@ FAIL_DIR="$ROOT/bootstrap/corpus/emit-c/fail"
 n_fail=0
 for src in "$FAIL_DIR"/*.oo; do
   [[ -f "$src" ]] || continue
+  [[ "$src" == *.concat.oo ]] && continue
   n_fail=$((n_fail + 1))
   base="$(basename "$src" .oo)"
   c_out="$TMPDIR/emit_fail_${base}.c"
