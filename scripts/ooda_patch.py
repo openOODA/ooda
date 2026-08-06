@@ -13,7 +13,7 @@ def die(msg: str, code: int = 2) -> None:
     raise SystemExit(code)
 
 def confine(user_path: str, label: str) -> Path:
-    """Confine file + body paths under cwd (absolute paths no longer escape)."""
+    """Confine file + body paths under cwd (reject .. and abs outside cwd)."""
     if not user_path or not user_path.strip():
         die(f"{label}: empty path")
     if "\0" in user_path:
@@ -24,14 +24,14 @@ def confine(user_path: str, label: str) -> Path:
         die(f"{label}: path traversal rejected (..)")
     cwd = Path.cwd().resolve()
     try:
-        # Absolute or relative: both must resolve under cwd
-        resolved = (cwd / user_path).resolve(strict=False) if not Path(user_path).is_absolute() else Path(user_path).resolve(strict=False)
+        p = Path(user_path)
+        resolved = p.resolve(strict=False) if p.is_absolute() else (cwd / p).resolve(strict=False)
     except OSError as e:
         die(f"{label}: cannot resolve path: {e}")
     try:
         resolved.relative_to(cwd)
     except ValueError:
-        die(f"{label}: path escapes cwd (absolute paths outside tree rejected)")
+        die(f"{label}: path escapes cwd")
     return resolved
 
 def _skip_string(t: str, j: int) -> int:

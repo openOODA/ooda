@@ -18,14 +18,19 @@ fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
 
-WORK="$TMPDIR/patch_smoke_$$"
+# Work under repo cwd so path confinement allows relative paths
+WORK="$ROOT/.patch_smoke_work_$$"
 mkdir -p "$WORK"
-cp "$ROOT/fixtures/patch_add.oo" "$WORK/target.oo"
-cp "$ROOT/fixtures/patch_add_body.txt" "$WORK/body.txt"
+# relative paths from ROOT (cwd when smoke runs from ROOT)
+cd "$ROOT"
+cp fixtures/patch_add.oo "$WORK/target.oo"
+cp fixtures/patch_add_body.txt "$WORK/body.txt"
+REL_T="${WORK#$ROOT/}/target.oo"
+REL_B="${WORK#$ROOT/}/body.txt"
 
 # --- pass: replace_fn via CLI --with ---
 set +e
-"$OODA" patch "$WORK/target.oo" --replace-fn add --with "$WORK/body.txt" \
+"$OODA" patch "$REL_T" --replace-fn add --with "$REL_B" \
   >"$TMPDIR/patch_ok.out" 2>"$TMPDIR/patch_ok.err"
 rc=$?
 set -e
@@ -39,10 +44,9 @@ else
 fi
 
 # --- pass: --check after patch ---
-cp "$ROOT/fixtures/patch_add.oo" "$WORK/target2.oo"
-# body that still typechecks (subtract)
+cp fixtures/patch_add.oo "$WORK/target2.oo"
 set +e
-"$OODA" patch "$WORK/target2.oo" --replace-fn add --with "$WORK/body.txt" --check \
+"$OODA" patch "${WORK#$ROOT/}/target2.oo" --replace-fn add --with "$REL_B" --check \
   >"$TMPDIR/patch_chk.out" 2>"$TMPDIR/patch_chk.err"
 rc=$?
 set -e
@@ -53,9 +57,9 @@ else
 fi
 
 # --- fail: missing function ---
-cp "$ROOT/fixtures/patch_add.oo" "$WORK/miss.oo"
+cp fixtures/patch_add.oo "$WORK/miss.oo"
 set +e
-"$OODA" patch "$WORK/miss.oo" --replace-fn nosuch --with "$WORK/body.txt" \
+"$OODA" patch "${WORK#$ROOT/}/miss.oo" --replace-fn nosuch --with "$REL_B" \
   >"$TMPDIR/patch_miss.out" 2>"$TMPDIR/patch_miss.err"
 rc=$?
 set -e
@@ -67,7 +71,7 @@ fi
 
 # --- fail: path traversal ---
 set +e
-"$OODA" patch "../etc/passwd" --replace-fn add --with "$WORK/body.txt" \
+"$OODA" patch "../etc/passwd" --replace-fn add --with "$REL_B" \
   >"$TMPDIR/patch_trav.out" 2>"$TMPDIR/patch_trav.err"
 rc=$?
 set -e
@@ -77,11 +81,23 @@ else
   pass "path traversal rejected"
 fi
 
+# --- fail: absolute path outside cwd ---
+set +e
+"$OODA" patch /etc/passwd --replace-fn add --with "$REL_B" \
+  >"$TMPDIR/patch_abs.out" 2>"$TMPDIR/patch_abs.err"
+rc=$?
+set -e
+if [[ $rc -eq 0 ]]; then
+  bad "absolute outside cwd should fail"
+else
+  pass "absolute outside cwd rejected"
+fi
+
 # --- pass: JSON stdin ---
-cp "$ROOT/fixtures/patch_add.oo" "$WORK/json.oo"
+cp fixtures/patch_add.oo "$WORK/json.oo"
 set +e
 printf '%s' '{"op":"replace_fn","name":"add","body":"return a * b;"}' \
-  | "$OODA" patch "$WORK/json.oo" \
+  | "$OODA" patch "${WORK#$ROOT/}/json.oo" \
   >"$TMPDIR/patch_json.out" 2>"$TMPDIR/patch_json.err"
 rc=$?
 set -e
@@ -93,10 +109,10 @@ else
 fi
 
 # --- fail: unknown JSON op ---
-cp "$ROOT/fixtures/patch_add.oo" "$WORK/badop.oo"
+cp fixtures/patch_add.oo "$WORK/badop.oo"
 set +e
 printf '%s' '{"op":"eval","name":"add","body":"x"}' \
-  | "$OODA" patch "$WORK/badop.oo" \
+  | "$OODA" patch "${WORK#$ROOT/}/badop.oo" \
   >"$TMPDIR/patch_badop.out" 2>"$TMPDIR/patch_badop.err"
 rc=$?
 set -e
@@ -107,10 +123,10 @@ else
 fi
 
 # --- fail: free-form shell payload not executed (body is text only) ---
-cp "$ROOT/fixtures/patch_add.oo" "$WORK/shell.oo"
+cp fixtures/patch_add.oo "$WORK/shell.oo"
 set +e
 printf '%s' '{"op":"replace_fn","name":"add","body":"return 1; // $(touch /tmp/ooda_patch_pwned)"}' \
-  | "$OODA" patch "$WORK/shell.oo" \
+  | "$OODA" patch "${WORK#$ROOT/}/shell.oo" \
   >"$TMPDIR/patch_shell.out" 2>"$TMPDIR/patch_shell.err"
 rc=$?
 set -e
