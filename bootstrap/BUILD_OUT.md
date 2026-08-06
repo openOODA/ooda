@@ -42,16 +42,16 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 - [x] Line lock \(O=0\) — *standing rail* (`scripts/check_file_lines.sh`); O=0 on main (re-check every pin)
 
 ### P1 — Core systems development loop
-- [x] **Contracts on native path** — Backend-C **skips** `requires`/`ensures` to LBRACE (real token skip in `c_emit_skip_contracts`); bodies emit correctly
-  - Not runtime-enforced on native (honest residual); optional assert mode not landed
+- [x] **Contracts on native path** — Backend-C lowers **simple `requires IDENT OP lit|ident`** at runtime (`c_emit_contract.oo`); structural skip still correct
+  - Residual: **ensures** + complex requires not lowered (bodies still emit; no false claim of full contracts)
   - Pass: `bootstrap/corpus/emit-c/pass/fn_contracts_add.oo` + `fixtures/int_main.oo` / `hello.oo`
-  - Fail: `bootstrap/corpus/emit-c/fail/contract_no_brace.oo` (mid-header garbage / missing LBRACE)
-  - Smoke: `scripts/contracts_native_smoke.sh` (+ c_emit_smoke corpus)
+  - Fail: `bootstrap/corpus/emit-c/fail/contract_no_brace.oo`; requires violation rail in `problem_hunt_smoke.sh`
+  - Smoke: `scripts/contracts_native_smoke.sh` + `scripts/problem_hunt_smoke.sh`
 - [x] **Real `ooda test`** — run `verify` blocks (not only typecheck)
   - Pure path: check → lower `assert_eq!` in `verify` → Backend-C harness build+run
   - Scripts: `scripts/ooda_test_verify.sh` + `ooda_test_harness.py`; CLI `ooda test`
   - Fixtures: `fixtures/verify_pass.oo` / `verify_fail.oo`; product smoke rails
-  - Residual: `--fuzz` (DESIGN deferral); contracts not runtime-enforced; only `assert_eq!` in verify bodies
+  - Residual: `--fuzz` (DESIGN deferral); ensures not runtime; verify supports `assert_eq!`/`assert_ne!`/`assert!` only
 - [x] **`ooda test --fuzz`** — fail-closed DESIGN deferral (exit 2)
   - Message points to `bootstrap/FUZZ_DEFER.md` (when/gates for real integer-domain MVP)
   - Prefer honest residual over fake fuzz; product smoke expects non-zero
@@ -60,7 +60,7 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Check seal: `is_sealed_{fs,sys,env,net}` incl. `env_get`, `path_exists`, `file_size`
   - Emit: real lower for read/write/path/size/env/sys; **net → ERR residual** (no silent stub)
   - Fixtures: `bootstrap/corpus/check/{pass,fail}/` per class; rail `scripts/caps_matrix_smoke.sh`
-  - Residual: method-form sealed calls not scanned; net product runtime none
+  - Residual: net product runtime none; dynamic callees not sealed (method IDENT+LPAREN is sealed)
 - [x] **Richer `ooda run`** — **permanent pure native build+exec** (no host interpreter return)
   - Documented in README + help; clearer errors (missing file / build fail / no exe)
   - Residual: no JIT/interpret path on product surface

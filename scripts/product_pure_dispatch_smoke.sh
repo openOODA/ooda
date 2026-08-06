@@ -154,6 +154,20 @@ else
   bad "missing patch_smoke.sh"
 fi
 
+# --- problem-hunt honesty rails (differential / mutation / contracts) ---
+if [[ -x "$ROOT/scripts/problem_hunt_smoke.sh" ]]; then
+  set +e
+  "$ROOT/scripts/problem_hunt_smoke.sh" >"$TMPDIR/prod_ph.out" 2>"$TMPDIR/prod_ph.err"
+  ph=$?
+  set -e
+  if [[ $ph -ne 0 ]]; then
+    bad "problem_hunt_smoke"
+    tail -15 "$TMPDIR/prod_ph.err" "$TMPDIR/prod_ph.out" 2>/dev/null || true
+  else
+    pass "problem_hunt_smoke"
+  fi
+fi
+
 # --- host modules + Rust shell gone (B0) ---
 if [[ -d "$ROOT/src" ]]; then
   bad "src/ still present"

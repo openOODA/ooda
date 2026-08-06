@@ -36,7 +36,7 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 ### Check
 - Free-call scan inside each `fn` body: `IDENT` + `LPAREN` matched against `is_sealed_{net,fs,sys,env}`.
 - Cap present iff param type text is `NetCap` / `FsCap` / `SysCap` / `EnvCap` (token scan).
-- **Residual:** method forms (`fs.read_file(...)`) not scanned; only free calls. Contracts / nested modules same per-fn scan.
+- **Method form:** `fs.read_file(...)` is sealed — scan is IDENT + LPAREN, so the method name is caught (not only free calls). Residual: dynamic/computed callees not scanned.
 
 ### Emit (Backend-C)
 - Cap tokens compile to `int` placeholders; **no runtime gate on C** — security is static check + refuse net.

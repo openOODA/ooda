@@ -64,8 +64,8 @@ ooda version
 | `build --target wasm\|llvm` | Fail-closed (beta-out / residual) |
 | LSP / pkg / migrate / bench | Removed from product |
 | Host interpreter | **Permanent product choice:** `ooda run` = native only (no interpret return) |
-| contracts on native | Residual — emit **skips** `requires`/`ensures` (bodies ok); not runtime-enforced on native; test harness still strips for verify |
-| `verify` body beyond `assert_eq!` | Residual — only `assert_eq!` lowered today |
+| contracts on native | **Simple `requires IDENT OP lit/ident` runtime-enforced** on Backend-C; **ensures** + complex requires still residual (not lowered); test harness strips contracts for verify harness |
+| `verify` body | **`assert_eq!` / `assert_ne!` / `assert!`** lowered; other stmts fail-closed |
 | `patch` line-range / AST node_id | Residual — `replace_fn` only |
 | Cold-start seed | Need prebuilt pure `oodac` once (`SEED_OODAC`) |
 
