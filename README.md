@@ -20,9 +20,11 @@ export SEED_OODAC="${SEED_OODAC:-$PWD/oodac/oodac}"
 ./bin/ooda version
 ./bin/ooda check fixtures/chs_list_string.oo
 ./bin/ooda test fixtures/verify_pass.oo   # check + verify/assert_eq
-./bin/ooda run fixtures/chs_list_string.oo
+./bin/ooda run fixtures/chs_list_string.oo   # native build+exec (permanent product path)
 ./bin/ooda dump tokens fixtures/int_main.oo
 ./bin/ooda build --target c fixtures/while_count.oo
+# surgical edit (agents): replace function body only
+# ./bin/ooda patch file.oo --replace-fn add --with body.txt [--check]
 ```
 
 Requires: **bash, gcc, seed binary**. Does **not** require `cargo`, `rustc`, or `rustup`.
@@ -44,8 +46,9 @@ ooda version
 | Compiler `oodac` | Pure `.oo` self-host; lex/parse/check + emit-c + multi-module pure build |
 | `check` / `dump tokens\|ast\|check` | Real on pure path |
 | `build --target c\|chs\|native` | Real: emit-c + gcc + `runtime/chs_rt*.c` |
-| `run` | Real: pure native build+exec (not host interpreter) |
-| `test` | **Real:** check + run `verify`/`assert_eq!` via Backend-C harness; `--fuzz` residual |
+| `run` | **Permanent pure native build+exec** (no host interpreter; product path) |
+| `test` | **Real:** check + run `verify`/`assert_eq!` via Backend-C harness; `--fuzz` DESIGN-deferred |
+| `patch` | **Real:** structured `replace_fn` (CLI flags or JSON stdin); atomic write; path-safe |
 | Fixed-point | `scripts/fixed_point.sh` pure seed → stage-1 → stage-2; digests s1≡s2; no OK_HOST |
 | Parity | `scripts/chs_parity.sh` product ≡ pure oodac |
 | Line lock | `scripts/check_file_lines.sh` O=0 |
@@ -55,11 +58,15 @@ ooda version
 
 | Item | Behavior |
 |---|---|
-| `--json-errors` / `--fuzz` / `--release` / `--emit-llvm` | Fail-closed residual |
+| `--json-errors` | **Real on check:** JSON diags + codes — see [`bootstrap/DIAG_CODES.md`](bootstrap/DIAG_CODES.md) |
+| `--release` / `--emit-llvm` | Fail-closed residual |
+| `--fuzz` | Fail-closed DESIGN deferral — see [`bootstrap/FUZZ_DEFER.md`](bootstrap/FUZZ_DEFER.md) |
 | `build --target wasm\|llvm` | Fail-closed (beta-out / residual) |
-| LSP / pkg / migrate / patch / bench | Removed from product |
-| Host interpreter / contracts on native | Residual — emit **skips** `requires`/`ensures` (bodies ok); not runtime-enforced on native; test harness still strips for verify |
+| LSP / pkg / migrate / bench | Removed from product |
+| Host interpreter | **Permanent product choice:** `ooda run` = native only (no interpret return) |
+| contracts on native | Residual — emit **skips** `requires`/`ensures` (bodies ok); not runtime-enforced on native; test harness still strips for verify |
 | `verify` body beyond `assert_eq!` | Residual — only `assert_eq!` lowered today |
+| `patch` line-range / AST node_id | Residual — `replace_fn` only |
 | Cold-start seed | Need prebuilt pure `oodac` once (`SEED_OODAC`) |
 
 ---

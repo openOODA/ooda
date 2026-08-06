@@ -95,12 +95,18 @@ else
   pass "product pure run native"
 fi
 
-# --- test --fuzz residual ---
+# --- test --fuzz DESIGN deferral ---
 set +e
 "$OODA" test "$BUILD_SRC" --fuzz >"$TMPDIR/fuzz.out" 2>"$TMPDIR/fuzz.err"
 rz=$?
 set -e
-if [[ $rz -eq 0 ]]; then bad "test --fuzz accepted"; else pass "test --fuzz fail-closed"; fi
+if [[ $rz -eq 0 ]]; then
+  bad "test --fuzz accepted"
+elif grep -qE 'FUZZ_DEFER|DESIGN deferral' "$TMPDIR/fuzz.err" "$TMPDIR/fuzz.out" 2>/dev/null; then
+  pass "test --fuzz DESIGN deferral"
+else
+  pass "test --fuzz fail-closed (exit=$rz)"
+fi
 
 # --- ooda test: real verify/assert_eq (P1 BUILD_OUT) ---
 set +e
@@ -129,6 +135,23 @@ if [[ $tzz -eq 0 ]]; then
   bad "product test --fuzz should residual"
 else
   pass "product test --fuzz residual"
+fi
+
+# --- ooda patch replace_fn (P2 SAFE) ---
+PATCH_SMOKE="$ROOT/scripts/patch_smoke.sh"
+if [[ -x "$PATCH_SMOKE" ]]; then
+  set +e
+  "$PATCH_SMOKE" >"$TMPDIR/patch_smoke.out" 2>"$TMPDIR/patch_smoke.err"
+  ps=$?
+  set -e
+  if [[ $ps -ne 0 ]]; then
+    bad "patch_smoke exit=$ps"
+    head -20 "$TMPDIR/patch_smoke.err" 2>/dev/null || true
+  else
+    pass "patch_smoke"
+  fi
+else
+  bad "missing patch_smoke.sh"
 fi
 
 # --- host modules + Rust shell gone (B0) ---

@@ -2,17 +2,20 @@
 // in:  FsCap + SysCap + argv
 // out: dispatch to pure oodac; process exit
 // stage: cli
-// Helpers first (pure emit has no forward protos on single-file).
 
 fn print_help() {
     println("ooda 0.182.1-alpha — pure .oo product CLI (no Rust)");
-    println("usage: ooda version|check|dump|build|run|test …");
+    println("usage: ooda version|check|dump|build|run|test|outline|reflect|patch …");
     println("  ooda check|test <file.oo>   # test = check + verify/assert_eq");
+    println("  ooda outline <file.oo>      # token-cheap pub fn summary");
+    println("  ooda reflect <file.oo> [sym]# symbol/contract/cap JSON lines");
     println("  ooda dump tokens|ast|check <file.oo>");
     println("  ooda build [--target c|chs|native] [--backend c] <file.oo>");
-    println("  ooda run <file.oo> [-- args...]");
-    println("residual: --json-errors --fuzz --release --emit-llvm wasm llvm");
-    println("backend: only c (FLOOR.md); other --backend fail-closed");
+    println("  ooda run <file.oo> [-- args...]  # native build+exec (permanent)");
+    println("  ooda patch <file.oo> --replace-fn <name> --with <body> [--check]");
+    println("  ooda check <file.oo> --json-errors   # machine-readable diags");
+    println("residual: --fuzz --release --emit-llvm wasm llvm");
+    println("backend: only c; run = pure native only (no interpreter)");
 }
 
 fn resolve_oodac_sh() -> String {
@@ -27,9 +30,7 @@ fn forward_oodac(sys: &SysCap, ocmd: String, path: String, extra: String) {
     let sh = "set -e; " + resolve_oodac_sh()
         + "\"$EM\" " + ocmd + " \"" + path + "\"" + extra + "; exit $?";
     let r = sys_exec(sys, "sh", "-c", sh);
-    if r.is_ok() {
-        return;
-    }
+    if r.is_ok() { return; }
     process_exit(1);
 }
 
@@ -42,22 +43,13 @@ fn cmd_build(sys: &SysCap, args: List[String]) {
         let a = list_get(args, i);
         if a == "--target" {
             i = i + 1;
-            if i >= list_len(args) {
-                println("ooda build: --target needs value");
-                process_exit(2);
-            }
+            if i >= list_len(args) { println("ooda build: --target needs value"); process_exit(2); }
             target = list_get(args, i);
         } else if a == "--backend" {
             i = i + 1;
-            if i >= list_len(args) {
-                println("ERR\tbackend\tmissing value (only c)");
-                process_exit(2);
-            }
+            if i >= list_len(args) { println("ERR\tbackend\tmissing value (only c)"); process_exit(2); }
             let bv = list_get(args, i);
-            if bv != "c" {
-                println("ERR\tbackend\t" + bv + " residual (only c; FLOOR.md)");
-                process_exit(2);
-            }
+            if bv != "c" { println("ERR\tbackend\t" + bv + " residual (only c; FLOOR.md)"); process_exit(2); }
             backend_pass = " --backend c";
         } else if a == "--release" || a == "--emit-llvm" {
             println("ERR\tcli\t" + a + " residual (pure path only)");
@@ -67,10 +59,7 @@ fn cmd_build(sys: &SysCap, args: List[String]) {
         }
         i = i + 1;
     }
-    if file == "" {
-        println("ooda build: missing file");
-        process_exit(2);
-    }
+    if file == "" { println("ooda build: missing file"); process_exit(2); }
     if target == "wasm" || target == "llvm" {
         println("ERR\tcli\tbuild --target " + target + " residual/beta-out");
         process_exit(2);
@@ -85,15 +74,14 @@ fn cmd_build(sys: &SysCap, args: List[String]) {
         + "test -x \"$out\"; "
         + "echo \"🚀 [openOODA pure oodac] Native executable: $out\"";
     let r = sys_exec(sys, "sh", "-c", sh);
-    if r.is_ok() {
-        return;
-    }
+    if r.is_ok() { return; }
     process_exit(1);
 }
 
 fn cmd_run(sys: &SysCap, args: List[String]) {
+    // Permanent product path: pure native build+exec (no host interpreter).
     if list_len(args) < 2 {
-        println("ooda run: missing file");
+        println("ooda run: missing file (native build+exec; no interpreter)");
         process_exit(2);
     }
     let mut i = 1;
@@ -105,6 +93,10 @@ fn cmd_run(sys: &SysCap, args: List[String]) {
         i = i + 1;
     }
     let file = list_get(args, 1);
+    if str_slice(file, 0, 1) == "-" {
+        println("ooda run: expected <file.oo>, got flag");
+        process_exit(2);
+    }
     let mut prog_args = "";
     let mut j = 2;
     let mut skip_dd = false;
@@ -120,76 +112,108 @@ fn cmd_run(sys: &SysCap, args: List[String]) {
     }
     let sh = "set -e; " + resolve_oodac_sh()
         + "f=\"" + file + "\"; "
+        + "if [ ! -f \"$f\" ]; then echo \"ooda run: file not found: $f\" >&2; exit 2; fi; "
         + "out=\"${TMPDIR:-/tmp}/ooda_run_$$_$(basename \"$f\" .oo)\"; "
-        + "OODAC_BIN=\"$EM\" \"$EM\" build \"$f\" \"$out\" >/dev/null; "
-        + "test -x \"$out\"; \"$out\"" + prog_args + "; ec=$?; rm -f \"$out\"; exit $ec";
+        + "OODAC_BIN=\"$EM\" \"$EM\" build \"$f\" \"$out\" >/dev/null || { "
+        + "echo \"ooda run: native build failed for $f\" >&2; exit 1; }; "
+        + "test -x \"$out\" || { echo \"ooda run: no executable produced\" >&2; exit 1; }; "
+        + "\"$out\"" + prog_args + "; ec=$?; rm -f \"$out\"; exit $ec";
     let r = sys_exec(sys, "sh", "-c", sh);
-    if r.is_ok() {
-        return;
-    }
+    if r.is_ok() { return; }
     process_exit(1);
 }
 
 fn cmd_test(sys: &SysCap, args: List[String]) {
-    if list_len(args) < 2 {
-        println("ooda test: missing file");
-        process_exit(2);
-    }
+    if list_len(args) < 2 { println("ooda test: missing file"); process_exit(2); }
     let mut j = 1;
     while j < list_len(args) {
         if list_get(args, j) == "--fuzz" {
-            println("ERR\tcli\t--fuzz residual (host interpreter removed)");
+            println("ERR\tcli\t--fuzz DESIGN deferral (bootstrap/FUZZ_DEFER.md)");
             process_exit(2);
         }
         j = j + 1;
     }
     let tpath = list_get(args, 1);
-    // check + lower verify/assert_eq! → Backend-C harness
     let sh = "set -e; " + resolve_oodac_sh()
         + "export OODAC_BIN=\"$EM\"; "
         + "S=./scripts/ooda_test_verify.sh; [ -x \"$S\" ] || S=scripts/ooda_test_verify.sh; "
         + "[ -x \"$S\" ] || { echo ERR_NO_TEST_SCRIPT >&2; exit 1; }; "
         + "exec \"$S\" \"" + tpath + "\"";
     let r = sys_exec(sys, "sh", "-c", sh);
-    if r.is_ok() {
-        return;
+    if r.is_ok() { return; }
+    process_exit(1);
+}
+
+fn cmd_patch(sys: &SysCap, args: List[String]) {
+    // Structured replace_fn only; body never shell-evaled (scripts/ooda_patch.py).
+    if list_len(args) < 2 {
+        println("ooda patch: usage: patch <file.oo> --replace-fn <n> --with <body> [--check]");
+        process_exit(2);
     }
+    let mut i = 1;
+    let mut argv = "";
+    while i < list_len(args) {
+        argv = argv + " \"" + list_get(args, i) + "\"";
+        i = i + 1;
+    }
+    let sh = "set -e; S=./scripts/ooda_patch.sh; [ -x \"$S\" ] || S=scripts/ooda_patch.sh; "
+        + "[ -x \"$S\" ] || { echo ERR_NO_PATCH_SCRIPT >&2; exit 1; }; "
+        + "exec \"$S\"" + argv;
+    let r = sys_exec(sys, "sh", "-c", sh);
+    if r.is_ok() { return; }
+    process_exit(1);
+}
+
+// Parse-only agent tools (no user-code exec). Residual: python helper.
+fn cmd_outline_reflect(sys: &SysCap, mode: String, args: List[String]) {
+    if list_len(args) < 2 {
+        println("ooda " + mode + ": missing file");
+        process_exit(2);
+    }
+    let path = list_get(args, 1);
+    let mut extra = "";
+    let mut i = 2;
+    while i < list_len(args) {
+        extra = extra + " \"" + list_get(args, i) + "\"";
+        i = i + 1;
+    }
+    let sh = "set -e; "
+        + "P=./scripts/ooda_outline_reflect.py; [ -f \"$P\" ] || P=scripts/ooda_outline_reflect.py; "
+        + "[ -f \"$P\" ] || { echo ERR_NO_OUTLINE_REFLECT >&2; exit 1; }; "
+        + "exec python3 \"$P\" " + mode + " \"" + path + "\"" + extra;
+    let r = sys_exec(sys, "sh", "-c", sh);
+    if r.is_ok() { return; }
     process_exit(1);
 }
 
 pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
-    if list_len(args) < 1 {
-        print_help();
-        process_exit(2);
-    }
+    if list_len(args) < 1 { print_help(); process_exit(2); }
     let cmd = list_get(args, 0);
-
     if cmd == "version" || cmd == "--version" || cmd == "-V" {
         println("ooda 0.182.1-alpha (pure .oo CLI)");
         return;
     }
-    if cmd == "help" || cmd == "--help" || cmd == "-h" {
-        print_help();
-        return;
-    }
-    if cmd == "lsp" || cmd == "pkg" || cmd == "migrate" || cmd == "patch" || cmd == "bench" {
+    if cmd == "help" || cmd == "--help" || cmd == "-h" { print_help(); return; }
+    if cmd == "lsp" || cmd == "pkg" || cmd == "migrate" || cmd == "bench" {
         println("ERR\tcli\tbeta-out command: " + cmd);
         process_exit(2);
     }
     if cmd == "check" {
-        if list_len(args) < 2 {
-            println("ooda check: missing file");
-            process_exit(2);
-        }
+        if list_len(args) < 2 { println("ooda check: missing file"); process_exit(2); }
+        let mut file = "";
+        let mut extra = "";
         let mut i = 1;
         while i < list_len(args) {
-            if list_get(args, i) == "--json-errors" {
-                println("ERR\tcli\t--json-errors residual (host AiDiagnostic removed)");
-                process_exit(2);
+            let a = list_get(args, i);
+            if a == "--json-errors" || a == "-json" {
+                extra = " --json-errors";
+            } else if str_slice(a, 0, 1) != "-" {
+                file = a;
             }
             i = i + 1;
         }
-        forward_oodac(sys, "check", list_get(args, 1), "");
+        if file == "" { println("ooda check: missing file"); process_exit(2); }
+        forward_oodac(sys, "check", file, extra);
         return;
     }
     if cmd == "dump" {
@@ -205,18 +229,12 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
         println("ooda dump: unknown kind (tokens|ast|check)");
         process_exit(2);
     }
-    if cmd == "test" {
-        cmd_test(sys, args);
-        return;
-    }
-    if cmd == "build" {
-        cmd_build(sys, args);
-        return;
-    }
-    if cmd == "run" {
-        cmd_run(sys, args);
-        return;
-    }
+    if cmd == "test" { cmd_test(sys, args); return; }
+    if cmd == "outline" { cmd_outline_reflect(sys, "outline", args); return; }
+    if cmd == "reflect" { cmd_outline_reflect(sys, "reflect", args); return; }
+    if cmd == "patch" { cmd_patch(sys, args); return; }
+    if cmd == "build" { cmd_build(sys, args); return; }
+    if cmd == "run" { cmd_run(sys, args); return; }
     println("ooda: unknown command '" + cmd + "' (try help)");
     process_exit(2);
 }

@@ -51,20 +51,28 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Pure path: check → lower `assert_eq!` in `verify` → Backend-C harness build+run
   - Scripts: `scripts/ooda_test_verify.sh` + `ooda_test_harness.py`; CLI `ooda test`
   - Fixtures: `fixtures/verify_pass.oo` / `verify_fail.oo`; product smoke rails
-  - Residual: `--fuzz`; contracts not runtime-enforced; only `assert_eq!` in verify bodies
-- [ ] **`ooda test --fuzz`** — or keep fail-closed with explicit DESIGN deferral in notes
+  - Residual: `--fuzz` (DESIGN deferral); contracts not runtime-enforced; only `assert_eq!` in verify bodies
+- [x] **`ooda test --fuzz`** — fail-closed DESIGN deferral (exit 2)
+  - Message points to `bootstrap/FUZZ_DEFER.md` (when/gates for real integer-domain MVP)
+  - Prefer honest residual over fake fuzz; product smoke expects non-zero
 - [x] **Caps completeness on claimed path** — Fs/Sys/Env/(Net) matrix: lower or fail-closed consistently; expand sealed C allowlist with fixtures
   - Matrix: `bootstrap/CAPS_MATRIX.md`
   - Check seal: `is_sealed_{fs,sys,env,net}` incl. `env_get`, `path_exists`, `file_size`
   - Emit: real lower for read/write/path/size/env/sys; **net → ERR residual** (no silent stub)
   - Fixtures: `bootstrap/corpus/check/{pass,fail}/` per class; rail `scripts/caps_matrix_smoke.sh`
   - Residual: method-form sealed calls not scanned; net product runtime none
-- [ ] **Richer `ooda run`** — restore fast interpret *or* document native-only as permanent; if interpret, pure `.oo` or thin supported path
+- [x] **Richer `ooda run`** — **permanent pure native build+exec** (no host interpreter return)
+  - Documented in README + help; clearer errors (missing file / build fail / no exe)
+  - Residual: no JIT/interpret path on product surface
 - [ ] **Import load honesty** — real multi-file load in oodac (reduce bash-concat residual) with cycle/missing fail fixtures
 - [ ] **Typecheck depth** — close gaps vs SPEC/CHS needs for real programs (methods, structs, refinements, …) with corpus
 
 ### P2 — AI-native / agent loop (DESIGN §3 + aligned extras)
-- [ ] **`--json-errors`** (or successor) on pure check path
+- [x] **`--json-errors`** (or successor) on pure check path
+  - `oodac check --json-errors` / `-json` → JSON array `{code,line,col,msg,path}`
+  - Product `ooda check --json-errors` forwards to oodac (not residual)
+  - Codes: `bootstrap/DIAG_CODES.md`; smoke: `scripts/json_errors_smoke.sh`
+  - Residual: no suggested_fix / timings (not host AiDiagnostic)
 - [x] **`ooda outline`** — token-cheap API summary
   - Parse-only: `scripts/ooda_outline_reflect.py`; CLI `ooda outline`
   - One line per `pub fn` (params, ret, `caps=…`); fail-closed unreadable
@@ -73,8 +81,15 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 - [x] **`ooda reflect`** — symbol/contract/cap metadata
   - NDJSON: fn (requires/ensures/caps) + verify names; optional symbol filter
   - Same helper + smoke; never executes user code
-- [ ] **`ooda patch`** — surgical edits for agents
-- [ ] **Stable diagnostic codes** for agent routing (aligned with DESIGN intent)
+- [x] **`ooda patch`** — surgical `replace_fn` for agents (SAFE)
+  - CLI: `ooda patch <file.oo> --replace-fn <name> --with <body_file> [--check]`
+  - Or JSON stdin `{"op":"replace_fn","name":…,"body":…}` only (unknown op fail-closed)
+  - Security: no shell-eval of body; reject `..`; relative under cwd; atomic write
+  - Engine: `scripts/ooda_patch.py` + `scripts/ooda_patch.sh`; rails: `scripts/patch_smoke.sh`
+  - Fixtures: `fixtures/patch_add.oo` + `patch_add_body.txt`
+  - Residual: no line-range op yet; no AST node_id path
+- [x] **Stable diagnostic codes** for agent routing (aligned with DESIGN intent)
+  - `E_CAP` | `E_TC` | `E_PARSE` | `E_LEX` | `E_CHECK` | `E_LOAD` | … — `bootstrap/DIAG_CODES.md`
 - [ ] Optional: agent-oriented “fix suggestion” without reintroducing host bloat
 
 ### P3 — Platform & ship
