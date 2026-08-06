@@ -5,6 +5,7 @@
 # link recipe: Backend-C (see bootstrap/FLOOR.md) — swap here for other floors later
 # Notes:
 #  - Forward prototypes for all fns so use-before-def across modules is OK
+#  - Nested imports + cycle/missing fail-closed (parity with load_import.oo)
 #  - Never uses $OODA host soft-pass
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,18 +25,59 @@ fi
 if [[ ! -f "$MAIN" ]]; then
   if [[ -f "$ROOT/$MAIN" ]]; then MAIN="$ROOT/$MAIN"; fi
 fi
+if [[ ! -f "$MAIN" ]]; then
+  echo "ERR_MISSING $MAIN" >&2
+  exit 1
+fi
 DIR="$(cd "$(dirname "$MAIN")" && pwd)"
 BASE="$(basename "$MAIN")"
+MAIN_ABS="$DIR/$BASE"
 
-mapfile -t MODS < <(grep -E '^import "' "$MAIN" | sed -n 's/^import "\(.*\)";/\1/p')
-MODS+=("$BASE")
+# Collect modules (DFS, cycle/missing fail-closed). Order: deps first, main last.
+MODS=()
+declare -A SEEN=()
+declare -A STACK=()
+
+collect() {
+  local path="$1"
+  local abs
+  if [[ "$path" = /* ]]; then abs="$path"
+  else abs="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
+  fi
+  if [[ -n "${STACK[$abs]:-}" ]]; then
+    echo "ERR_IMPORT_CYCLE $abs" >&2
+    exit 1
+  fi
+  if [[ -n "${SEEN[$abs]:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$abs" ]]; then
+    echo "ERR_MISSING $abs" >&2
+    exit 1
+  fi
+  STACK[$abs]=1
+  local dir
+  dir="$(cd "$(dirname "$abs")" && pwd)"
+  local imp
+  while IFS= read -r imp; do
+    [[ -z "$imp" ]] && continue
+    if [[ "$imp" = /* ]]; then
+      collect "$imp"
+    else
+      collect "$dir/$imp"
+    fi
+  done < <(grep -E '^import "' "$abs" 2>/dev/null | sed -n 's/^import "\(.*\)";.*/\1/p' || true)
+  unset 'STACK[$abs]'
+  SEEN[$abs]=1
+  MODS+=("$abs")
+}
+
+collect "$MAIN_ABS"
 
 FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) \{'
 MCS=()
-for m in "${MODS[@]}"; do
-  src="$DIR/$m"
-  [[ -f "$src" ]] || { echo "ERR_MISSING $src" >&2; exit 1; }
-  mc="$TMP/$(echo "$m" | tr '/.' '__').c"
+for src in "${MODS[@]}"; do
+  mc="$TMP/$(echo "$src" | tr '/.' '__').c"
   EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>/dev/null || true
   if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
     echo "ERR_EMIT $src" >&2

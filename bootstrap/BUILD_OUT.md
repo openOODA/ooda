@@ -64,8 +64,16 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 - [x] **Richer `ooda run`** — **permanent pure native build+exec** (no host interpreter return)
   - Documented in README + help; clearer errors (missing file / build fail / no exe)
   - Residual: no JIT/interpret path on product surface
-- [ ] **Import load honesty** — real multi-file load in oodac (reduce bash-concat residual) with cycle/missing fail fixtures
-- [ ] **Typecheck depth** — close gaps vs SPEC/CHS needs for real programs (methods, structs, refinements, …) with corpus
+- [x] **Import load honesty** — real multi-file load in oodac (reduce bash-concat residual) with cycle/missing fail fixtures
+  - In-tree: `oodac/load_import.oo` expands imports for check|tokens|ast; cycle/missing → `ERR\timport\t…`
+  - Residual: emit-c multi-module still `EMIT_NO_CONCAT=1` per-file; optional `EMIT_CONCAT=1` → hardened `scripts/oodac_concat.sh`
+  - pure_build: nested import collect + cycle/missing fail-closed
+  - Fixtures: `bootstrap/corpus/import/{pass,fail}/`; smoke: `scripts/import_load_smoke.sh`
+- [x] **Typecheck depth** — close gaps vs SPEC/CHS needs for real programs (methods, structs, refinements, …) with corpus
+  - Refine: `return -N` vs `Int[lo..hi]` fail-closed; List/Result ann bind (base name + bracket skip)
+  - Methods: `.to_string` on primitives; `.is_ok`/`.is_err` need Result; builtin list_* arity
+  - Corpus: refine_ret_*, to_string_int_ok, result_is_ok, list_len_method, list_get_arity, is_ok_on_int
+  - Residual: full generic List[T]/Result[T,E] element typing; must-use on call-returning Result
 
 ### P2 — AI-native / agent loop (DESIGN §3 + aligned extras)
 - [x] **`--json-errors`** (or successor) on pure check path
