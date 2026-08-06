@@ -6,8 +6,10 @@
 |---|---|
 | **`install/install.oo`** | Full installer — story, XDG layout, download, place, config, verify |
 | **Website `install` / `install.sh`** | Chapter 0 bootstrap only (fetch prebuilt binary, then hand off) |
-| **`scripts/release.sh`** | Packages pure `bin/ooda` + `oodac` + `install/install.oo` + `share/` + runtime C (**no cargo**) |
+| **`scripts/release.sh`** | Packages pure `bin/ooda` + `oodac` + `install/install.oo` + `share/` + runtime C (**no cargo**); writes `.sha256` |
 | **`scripts/bootstrap_no_cargo.sh`** | Rebuild product from pure seed + gcc (no rustc) |
+| **`scripts/install_dress_rehearsal.sh`** | Offline layout dress rehearsal of release tarball / staged tree |
+| **`bootstrap/RELEASE_CHECKLIST.md`** | Pin lock + release notes habit (not beta gate) |
 
 Shell cannot be eliminated for a **first** install (no `ooda` yet). Everything after that is OODA.
 

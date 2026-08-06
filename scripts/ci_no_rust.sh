@@ -102,5 +102,6 @@ if [[ $fail -ne 0 ]]; then
   exit 1
 fi
 echo "ci_no_rust: PASSED"
-echo "residual: prebuilt SEED_OODAC required; no GitHub Actions matrix in-tree (local B1 rail only)"
+echo "residual: prebuilt SEED_OODAC required (bootstrap/seed, tree oodac, or pin release asset)"
+echo "remote: .github/workflows/no_rust.yml runs this rail without installing cargo"
 exit 0

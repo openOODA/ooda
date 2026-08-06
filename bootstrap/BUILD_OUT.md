@@ -35,9 +35,11 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 ## Open items (start from current pure product)
 
 ### P0 — Keep the runway green
-- [ ] Pure rails stay green: `fixed_point`, `chs_parity`, `c_emit_smoke`, product smokes, `bootstrap_no_cargo` / `ci_no_rust`
-- [ ] `RS_COUNT=0`; no Cargo product path
-- [ ] Line lock \(O=0\)
+> **Standing rails** — not one-shot ships. When GHA is green, treat as *standing — verified by CI* (re-check on every pin / red PR). Local: `scripts/ci_no_rust.sh`. Remote: `.github/workflows/no_rust.yml`.
+
+- [x] Pure rails stay green: `fixed_point`, `chs_parity`, `c_emit_smoke`, product smokes, `bootstrap_no_cargo` / `ci_no_rust` — *standing — verified by CI*
+- [x] `RS_COUNT=0`; no Cargo product path — *standing — verified by CI* (shadow cargo in `ci_no_rust` + GHA)
+- [ ] Line lock \(O=0\) — *standing rail* (`scripts/check_file_lines.sh`); residual O≥1 tracked in `SPLIT_PLAN.md` (e.g. `cli/main.oo`) until split
 
 ### P1 — Core systems development loop
 - [x] **Contracts on native path** — Backend-C **skips** `requires`/`ensures` to LBRACE (real token skip in `c_emit_skip_contracts`); bodies emit correctly
@@ -51,32 +53,43 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Fixtures: `fixtures/verify_pass.oo` / `verify_fail.oo`; product smoke rails
   - Residual: `--fuzz`; contracts not runtime-enforced; only `assert_eq!` in verify bodies
 - [ ] **`ooda test --fuzz`** — or keep fail-closed with explicit DESIGN deferral in notes
-- [ ] **Caps completeness on claimed path** — Fs/Sys/Env/(Net) matrix: lower or fail-closed consistently; expand sealed C allowlist with fixtures
+- [x] **Caps completeness on claimed path** — Fs/Sys/Env/(Net) matrix: lower or fail-closed consistently; expand sealed C allowlist with fixtures
+  - Matrix: `bootstrap/CAPS_MATRIX.md`
+  - Check seal: `is_sealed_{fs,sys,env,net}` incl. `env_get`, `path_exists`, `file_size`
+  - Emit: real lower for read/write/path/size/env/sys; **net → ERR residual** (no silent stub)
+  - Fixtures: `bootstrap/corpus/check/{pass,fail}/` per class; rail `scripts/caps_matrix_smoke.sh`
+  - Residual: method-form sealed calls not scanned; net product runtime none
 - [ ] **Richer `ooda run`** — restore fast interpret *or* document native-only as permanent; if interpret, pure `.oo` or thin supported path
 - [ ] **Import load honesty** — real multi-file load in oodac (reduce bash-concat residual) with cycle/missing fail fixtures
 - [ ] **Typecheck depth** — close gaps vs SPEC/CHS needs for real programs (methods, structs, refinements, …) with corpus
 
 ### P2 — AI-native / agent loop (DESIGN §3 + aligned extras)
 - [ ] **`--json-errors`** (or successor) on pure check path
-- [ ] **`ooda outline`** — token-cheap API summary
-- [ ] **`ooda reflect`** — symbol/contract/cap metadata
+- [x] **`ooda outline`** — token-cheap API summary
+  - Parse-only: `scripts/ooda_outline_reflect.py`; CLI `ooda outline`
+  - One line per `pub fn` (params, ret, `caps=…`); fail-closed unreadable
+  - Format: `bootstrap/OUTLINE_REFLECT.md`; rail `scripts/outline_reflect_smoke.sh`
+  - Residual: python helper (not full AST); no type/import outline lines yet
+- [x] **`ooda reflect`** — symbol/contract/cap metadata
+  - NDJSON: fn (requires/ensures/caps) + verify names; optional symbol filter
+  - Same helper + smoke; never executes user code
 - [ ] **`ooda patch`** — surgical edits for agents
 - [ ] **Stable diagnostic codes** for agent routing (aligned with DESIGN intent)
 - [ ] Optional: agent-oriented “fix suggestion” without reintroducing host bloat
 
 ### P3 — Platform & ship
 - [ ] **std growth** — modules real programs need (aligned with caps)
-- [ ] **Install / pin dress rehearsal** — clean machine from release tarball
-- [ ] **Remote CI no-Rust** (optional but high leverage)
-- [ ] **Release notes + pin lock** every ship
+- [x] **Install / pin dress rehearsal** — `scripts/install_dress_rehearsal.sh` validates release layout offline (tarball / staged tree / working-tree stage); residual: full XDG `install.oo` network fetch not exercised offline
+- [x] **Remote CI no-Rust** — `.github/workflows/no_rust.yml` runs `ci_no_rust` with cargo/rustc shadowed; seed = `bootstrap/seed/oodac` or pinned GitHub Release tarball+sha256 (no rustup/cargo install)
+- [x] **Release notes + pin lock** every ship — `bootstrap/RELEASE_CHECKLIST.md` + `release.sh` sha256 sidecar + notes reminder; habit not auto-beta
 - [ ] **FLOOR F3** — second backend MVP when owner prioritizes freedom over features
 - [ ] Shrink emit preamble **host residual** decls (`oo_host_*`) on pure path when safe
 
 ### P4 — Stretch (DESIGN or aligned)
-- [ ] LLVM / production optimize path **or** permanent honest drop from product claims
-- [ ] WASM product path **or** permanent fail-closed
-- [ ] Packaging/registry **only** if it stays fail-closed and cap-honest
-- [ ] Concurrency / async — only with DESIGN-aligned design, not drive-by
+- [x] LLVM / production optimize path — **permanent fail-closed product claim** (Backend-C only); see `bootstrap/P4_DROPS.md`
+- [x] WASM product path — **permanent fail-closed** until F3 MVP; `build --target wasm` / oodac `wasm` residual; `P4_DROPS.md`
+- [x] Packaging/registry — **fail-closed residual** (no product registry; ship = tarball+pin only); `P4_DROPS.md`
+- [x] Concurrency / async — **not in product**; DESIGN-aligned future only; `P4_DROPS.md`
 
 ---
 

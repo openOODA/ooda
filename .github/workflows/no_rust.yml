@@ -1,0 +1,153 @@
+# Remote B1 rail: pure product rails without cargo/rustc on the critical path.
+# Does NOT install rustup, cargo, or rustc. Does NOT claim beta.
+# Seed strategy (first hit wins):
+#   1) bootstrap/seed/oodac if executable in checkout
+#   2) SEED_OODAC env (workflow_dispatch input)
+#   3) GitHub Release tarball for install/BOOTSTRAP_PIN (pinned tag + sha256 sidecar)
+name: no-rust
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      seed_url:
+        description: "Optional override URL for ooda-*-linux-x86_64.tar.gz (must have matching .sha256)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  ci_no_rust:
+    name: ci_no_rust (no cargo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: System toolchain (gcc/bash only — never rustup/cargo)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential
+          # Refuse rust product path if someone adds it later
+          if command -v rustup >/dev/null 2>&1; then
+            echo "NOTE: rustup present on runner image; will shadow cargo/rustc"
+          fi
+          command -v gcc
+          command -v bash
+
+      - name: Shadow cargo/rustc on PATH
+        run: |
+          set -euo pipefail
+          SHADOW="${RUNNER_TEMP}/no_rust_shadow"
+          mkdir -p "$SHADOW"
+          printf '%s\n' '#!/bin/sh' 'echo ERR_SHADOW_CARGO >&2' 'exit 99' >"$SHADOW/cargo"
+          printf '%s\n' '#!/bin/sh' 'echo ERR_SHADOW_RUSTC >&2' 'exit 99' >"$SHADOW/rustc"
+          chmod +x "$SHADOW/cargo" "$SHADOW/rustc"
+          echo "$SHADOW" >>"$GITHUB_PATH"
+          echo "PATH_SHADOW=$SHADOW" >>"$GITHUB_ENV"
+
+      - name: Resolve SEED_OODAC (pin / local / release)
+        id: seed
+        env:
+          INPUT_SEED_URL: ${{ github.event.inputs.seed_url || '' }}
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          PIN="$(tr -d '\r\n' <"$ROOT/install/BOOTSTRAP_PIN" | head -1)"
+          case "$PIN" in v*) ;; *) PIN="v${PIN}" ;; esac
+          ARCH="linux-x86_64"
+          NAME="ooda-${PIN}-${ARCH}"
+          SEED=""
+
+          if [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then
+            SEED="$ROOT/bootstrap/seed/oodac"
+            echo "seed: local bootstrap/seed/oodac"
+          elif [[ -n "${SEED_OODAC:-}" && -x "${SEED_OODAC}" ]]; then
+            SEED="$SEED_OODAC"
+            echo "seed: SEED_OODAC env"
+          else
+            # Fetch pinned release asset (HTTPS + sha256 sidecar — no curl|sh)
+            DL="$RUNNER_TEMP/seed_dl"
+            mkdir -p "$DL"
+            if [[ -n "$INPUT_SEED_URL" ]]; then
+              URL="$INPUT_SEED_URL"
+            else
+              URL="https://github.com/${{ github.repository }}/releases/download/${PIN}/${NAME}.tar.gz"
+            fi
+            SHA_URL="${URL}.sha256"
+            echo "seed: download $URL"
+            curl -fsSL "$URL" -o "$DL/${NAME}.tar.gz"
+            curl -fsSL "$SHA_URL" -o "$DL/${NAME}.tar.gz.sha256" || {
+              echo "ERR: missing .sha256 sidecar for pin $PIN" >&2
+              exit 1
+            }
+            # Normalize sha file to "HASH  file" in $DL
+            (
+              cd "$DL"
+              # Accept "HASH  path" or bare HASH
+              HASH="$(awk '{print $1}' "${NAME}.tar.gz.sha256" | head -1)"
+              echo "${HASH}  ${NAME}.tar.gz" >"_check.sha256"
+              sha256sum -c "_check.sha256"
+            )
+            tar -C "$DL" -xzf "$DL/${NAME}.tar.gz"
+            SEED="$DL/${NAME}/oodac/oodac"
+            [[ -x "$SEED" ]] || { echo "ERR: oodac missing in release tarball" >&2; exit 1; }
+            echo "seed: release $PIN"
+          fi
+
+          echo "SEED_OODAC=$SEED" >>"$GITHUB_ENV"
+          echo "seed_path=$SEED" >>"$GITHUB_OUTPUT"
+          "$SEED" --help >/dev/null 2>&1 || true
+          ls -la "$SEED"
+
+      - name: Prove cargo/rustc shadowed
+        run: |
+          set -euo pipefail
+          if cargo version 2>/dev/null; then
+            echo "FAIL: cargo not shadowed" >&2
+            exit 1
+          fi
+          if rustc --version 2>/dev/null; then
+            echo "FAIL: rustc not shadowed" >&2
+            exit 1
+          fi
+          echo "OK cargo/rustc fail-closed on PATH"
+
+      - name: Anti — workflow must not install rust product path
+        run: |
+          set -euo pipefail
+          # Fail if steps would *install or invoke* a Rust product toolchain.
+          if grep -nE 'uses:.*(rust-toolchain|actions-rs)|rustup (install|update|default)|cargo (install|build|test|check)' \
+            .github/workflows/*.yml 2>/dev/null; then
+            echo "FAIL: workflow has cargo/rust product path" >&2
+            exit 1
+          fi
+          echo "OK workflow has no cargo product path"
+
+      - name: Run scripts/ci_no_rust.sh
+        run: |
+          set -euo pipefail
+          export SEED_OODAC
+          export TMPDIR="${RUNNER_TEMP}/ooda-tmp"
+          mkdir -p "$TMPDIR"
+          ./scripts/ci_no_rust.sh
+
+      - name: Dress rehearsal (staged tree offline)
+        run: |
+          set -euo pipefail
+          export SEED_OODAC
+          # Prefer release tarball if we downloaded one; else working-tree stage
+          if [[ -d "${RUNNER_TEMP}/seed_dl" ]]; then
+            TB=$(ls "${RUNNER_TEMP}/seed_dl"/ooda-*.tar.gz 2>/dev/null | head -1 || true)
+            if [[ -n "${TB:-}" && -f "$TB" ]]; then
+              RELEASE_TARBALL="$TB" ./scripts/install_dress_rehearsal.sh
+              exit 0
+            fi
+          fi
+          ./scripts/install_dress_rehearsal.sh

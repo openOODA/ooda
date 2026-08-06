@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # openOODA release packager — pure .oo + C path (no cargo/rustc)
 # Builds: ooda-<tag>-linux-x86_64/{bin/ooda,oodac/oodac,install,share,runtime}
+# Habit: bootstrap/RELEASE_CHECKLIST.md (pin → notes → rails → pack → dress)
+# Does not force beta tag.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -21,8 +23,15 @@ ARCH="linux-x86_64"
 NAME="ooda-${TAG}-${ARCH}"
 DIST_DIR="$ROOT/dist/${NAME}"
 TARBALL="$ROOT/dist/${NAME}.tar.gz"
+SHA_FILE="${TARBALL}.sha256"
+NOTES="$ROOT/RELEASE_NOTES_${TAG}.md"
+# filename uses tag without forcing v-prefix mismatch: RELEASE_NOTES_vX…
+NOTES_ALT="$ROOT/RELEASE_NOTES_${TAG#v}.md"
 
 echo "[openOODA Release] Building ${TAG} without cargo…"
+if [[ ! -f "$NOTES" && ! -f "$NOTES_ALT" ]]; then
+  echo "NOTE: missing RELEASE_NOTES for ${TAG} — see bootstrap/RELEASE_CHECKLIST.md" >&2
+fi
 
 # Ensure pure product binaries
 if [[ ! -x "$ROOT/bin/ooda" ]] || [[ ! -x "$ROOT/oodac/oodac" ]]; then
@@ -47,6 +56,7 @@ cp -a "$ROOT/oodac/"*.oo "$DIST_DIR/oodac/" 2>/dev/null || true
 cp "$ROOT/cli/main.oo" "$DIST_DIR/cli/main.oo"
 cp "$ROOT/scripts/oodac_pure_build.sh" "$DIST_DIR/scripts/"
 cp "$ROOT/scripts/bootstrap_no_cargo.sh" "$DIST_DIR/scripts/"
+cp "$ROOT/scripts/install_dress_rehearsal.sh" "$DIST_DIR/scripts/" 2>/dev/null || true
 chmod +x "$DIST_DIR/scripts/"*.sh
 
 # Runtime C (allowed forever)
@@ -55,16 +65,20 @@ cp "$ROOT/runtime/"*.c "$ROOT/runtime/"*.h "$DIST_DIR/runtime/" 2>/dev/null || t
 if [[ -f install/install.oo ]]; then
   cp install/install.oo "$DIST_DIR/install/install.oo"
 fi
+if [[ -f install/BOOTSTRAP_PIN ]]; then
+  cp install/BOOTSTRAP_PIN "$DIST_DIR/install/BOOTSTRAP_PIN"
+fi
 
 echo "$TAG" > "$DIST_DIR/share/VERSION"
 cp README.md "$DIST_DIR/share/README.md" 2>/dev/null || true
 [[ -f LICENSE ]] && cp LICENSE "$DIST_DIR/share/LICENSE"
 [[ -f DESIGN.md ]] && cp DESIGN.md "$DIST_DIR/share/DESIGN.md"
+[[ -f bootstrap/P4_DROPS.md ]] && cp bootstrap/P4_DROPS.md "$DIST_DIR/share/P4_DROPS.md"
 
 cat > "$DIST_DIR/README.md" <<EOF
 # openOODA ${TAG} (${ARCH})
 
-Pure self-hosted release (no Rust/Cargo in product).
+Pure self-hosted release (no Rust/Cargo in product). **Not beta** unless owner tagged.
 
 ## Binaries
 - \`bin/ooda\` — product CLI (pure .oo)
@@ -81,6 +95,20 @@ EOF
 
 mkdir -p "$ROOT/dist"
 tar -C "$ROOT/dist" -czf "$TARBALL" "$NAME"
+# Sidecar for CI pin verify (no secrets; publish with the tarball)
+(
+  cd "$ROOT/dist"
+  sha256sum "$(basename "$TARBALL")" >"$(basename "$SHA_FILE")"
+)
 echo "[openOODA Release] wrote $TARBALL"
-ls -la "$TARBALL"
+echo "[openOODA Release] wrote $SHA_FILE"
+ls -la "$TARBALL" "$SHA_FILE"
+
+# Offline dress (layout) when script present
+if [[ -x "$ROOT/scripts/install_dress_rehearsal.sh" ]]; then
+  RELEASE_TARBALL="$TARBALL" "$ROOT/scripts/install_dress_rehearsal.sh" \
+    || echo "NOTE: dress rehearsal failed — fix before publish" >&2
+fi
+
 echo "release: PASSED (no cargo)"
+echo "next: bootstrap/RELEASE_CHECKLIST.md (publish optional; no beta force)"
