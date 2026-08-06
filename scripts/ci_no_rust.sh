@@ -69,7 +69,24 @@ fi
 export OODA="$ROOT/bin/ooda"
 export OODAC_BIN="$ROOT/oodac/oodac"
 
-for rail in product_pure_dispatch_smoke.sh p3_no_cargo_smoke.sh chs_parity.sh beta_cli_smoke.sh c_emit_smoke.sh; do
+for rail in \
+  product_pure_dispatch_smoke.sh \
+  p3_no_cargo_smoke.sh \
+  chs_parity.sh \
+  beta_cli_smoke.sh \
+  c_emit_smoke.sh \
+  problem_hunt_smoke.sh \
+  caps_matrix_smoke.sh \
+  import_load_smoke.sh \
+  contracts_native_smoke.sh \
+  json_errors_smoke.sh \
+  outline_reflect_smoke.sh \
+  patch_smoke.sh
+do
+  if [[ ! -x "$ROOT/scripts/$rail" ]]; then
+    bad "missing rail $rail"
+    continue
+  fi
   if ! "$ROOT/scripts/$rail" >"$TMPDIR/ci_$rail.out" 2>"$TMPDIR/ci_$rail.err"; then
     bad "$rail"
     tail -15 "$TMPDIR/ci_$rail.err" || tail -15 "$TMPDIR/ci_$rail.out" || true
