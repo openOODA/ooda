@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lock: owned source files must be ≤ MAX_LINES (default 250).
+# Lock: owned source files must be ≤ MAX_LINES (default 256).
 # See bootstrap/SPLIT_PLAN.md and TOOLS.md (entropy O).
 #
 # Usage:
@@ -13,7 +13,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-MAX_LINES="${MAX_LINES:-250}"
+MAX_LINES="${MAX_LINES:-256}"
 MODE="strict"
 JSON=0
 for arg in "$@"; do

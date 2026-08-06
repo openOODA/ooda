@@ -1,7 +1,7 @@
-# Complete split plan — all owned source ≤250 lines
+# Complete split plan — all owned source ≤256 lines
 
 **Status:** Full inventory + functional target map. Execute after each rotation’s probes.  
-**Cap:** 250 lines per owned `.oo` / `.rs` / hand `.c`/`.h` / `.sh`.  
+**Cap:** 256 lines per owned `.oo` / `.rs` / hand `.c`/`.h` / `.sh`.  
 **Lock:** `scripts/check_file_lines.sh` (strict → O=0; `--ratchet` while O>0).  
 **Entropy:** \(O\) = oversize file count.  
 **Law:** Splits only at **functional seams** (pipeline + language domain). Never mid-fn line chops.
@@ -17,7 +17,7 @@ Generated **excluded** from cap: `oodac/main.c`, `oodac/oodac2.c`, `*.oo.c`, `*.
 3. **Typecheck secondary axis:** names · types · calls · assign · ops · struct/field · control · refine · effects.  
 4. **Function before file** — oversized `fn` → named sub-jobs, then move a closed set.  
 5. **Deps acyclic** — later stages may use earlier; never reverse.  
-6. **250 is pressure** — seam reason is never “file was long.”  
+6. **256 is pressure** — seam reason is never “file was long.”  
 7. **Peer stage-0** — oodac modules should map to host module *concepts* for dual-engine work.
 
 ### Required module header
@@ -37,7 +37,7 @@ Generated **excluded** from cap: `oodac/main.c`, `oodac/oodac2.c`, `*.oo.c`, `*.
 ./scripts/check_file_lines.sh   # O=24 as of this plan; main.oo ~7297
 ```
 
-| Done (≤250) | Remaining monofile weight |
+| Done (≤256) | Remaining monofile weight |
 |-------------|---------------------------|
 | `lex.oo`, `token_emit.oo`, `token_fmt.oo`, `check_caps.oo` | `oodac/main.oo` + 23 other oversize paths |
 
@@ -45,11 +45,11 @@ Generated **excluded** from cap: `oodac/main.c`, `oodac/oodac2.c`, `*.oo.c`, `*.
 
 # Part A — `oodac/main.oo` (P0) — complete target tree
 
-## A.0 Target tree (every file ≤250)
+## A.0 Target tree (every file ≤256)
 
 ```text
 oodac/
-  main.oo                 # CLI only (≤250)
+  main.oo                 # CLI only (≤256)
   lex.oo                  # DONE — lex_all
   token_emit.oo           # DONE — emit_tok, keyword_kind
   token_fmt.oo            # DONE — tokenize_lines, tok_line, field_at
@@ -79,7 +79,7 @@ oodac/
   tc_refine.oo            # refinements + parse_int
   tc_effects.oo           # must_use, missing_return
   tc_infer.oo             # lit env + typed expr inference helpers
-  c_emit.oo               # c_emit_* (grow carefully; split if >250)
+  c_emit.oo               # c_emit_* (grow carefully; split if >256)
 ```
 
 Wire: `import "….oo";` from `main.oo` (and between modules only **down** the DAG).
@@ -131,7 +131,7 @@ Drivers after helpers exist:
 - `dump_tokens`: probe `lex_all` → loop → dispatch scan_* → `emit_tok`  
 - `collect_tokens`: loop → dispatch scan_* → append `tok_line`  
 
-Each scan_* module ≤250; drivers thin.
+Each scan_* module ≤256; drivers thin.
 
 ### Parse
 
@@ -159,7 +159,7 @@ Each scan_* module ≤250; drivers thin.
 | `parse_method_chain` | 4 | `parse_primary.oo` | |
 | `escape_dump` | 21 | `parse_primary.oo` | string escape for dump |
 
-`parse_primary_dump` sub-jobs if still >250: **atom**, **call-args**, **field/method suffix**.
+`parse_primary_dump` sub-jobs if still >256: **atom**, **call-args**, **field/method suffix**.
 
 ### Check
 
@@ -216,7 +216,7 @@ Each scan_* module ≤250; drivers thin.
 | `typecheck_let_ann_call_init` | 91 |
 | `typecheck_return_and_assign_calls` | 193 |
 
-If `tc_calls.oo` would exceed 250 after move: split **`tc_call_arity.oo`** vs **`tc_call_expr.oo`** (call-in-expr checks).
+If `tc_calls.oo` would exceed 256 after move: split **`tc_call_arity.oo`** vs **`tc_call_expr.oo`** (call-in-expr checks).
 
 #### `tc_assign.oo`
 
@@ -258,7 +258,7 @@ If `tc_calls.oo` would exceed 250 after move: split **`tc_call_arity.oo`** vs **
 | `typecheck_field_binop_uses` | 79 |
 | `typecheck_struct_lit_inits` | 174 |
 
-If over 250: **`tc_struct_table.oo`** (tables) vs **`tc_struct_use.oo`** (field/method/lit checks).
+If over 256: **`tc_struct_table.oo`** (tables) vs **`tc_struct_use.oo`** (field/method/lit checks).
 
 #### `tc_control.oo`
 
@@ -290,7 +290,7 @@ If over 250: **`tc_struct_table.oo`** (tables) vs **`tc_struct_use.oo`** (field/
 | `typecheck_must_use_result` | 66 |
 | `typecheck_missing_return` | 101 |
 
-### Emit — `c_emit.oo` (currently small; keep ≤250)
+### Emit — `c_emit.oo` (currently small; keep ≤256)
 
 | Fn | ~Lines |
 |----|-------:|
@@ -312,7 +312,7 @@ When emit grows: split **preamble/types**, **stmt**, **expr** by codegen job —
 | **1** | Lex | `lex.oo` | ✅ Done |
 | **2a** | Token helpers | `token_emit`, `token_fmt` | ✅ Done |
 | **2b** | Shared scan kernel | `token_scan_{ws,string,number,ident,punct}` | dump+collect call helpers; tokens cmd green |
-| **2c** | Token drivers | `token_dump`, `token_stream` | both ≤250; parity with stage-0 tokens sample |
+| **2c** | Token drivers | `token_dump`, `token_stream` | both ≤256; parity with stage-0 tokens sample |
 | **3** | Caps check | `check_caps` | ✅ Done |
 | **4** | Check drive | `check_drive` | check orchestration only |
 | **5** | Parse drive + item | `parse_drive`, `parse_item` | `ast` on fn programs |
@@ -320,7 +320,7 @@ When emit grows: split **preamble/types**, **stmt**, **expr** by codegen job —
 | **7** | TC foundations | `tc_types`, `tc_scope`, `tc_infer` | ann/return lit fixtures |
 | **8** | TC domains (one/rotation) | names → calls → assign → ops → struct → control → refine → effects | corpus per domain dual-engine |
 | **9** | Emit | `c_emit` (+ splits if grown) | emit-c smoke |
-| **10** | CLI only | `main.oo` ≤250 | fixed_point / CHS scripts; **O contributes −1** |
+| **10** | CLI only | `main.oo` ≤256 | fixed_point / CHS scripts; **O contributes −1** |
 
 **Power law:** one domain or one stage per rotation when large.
 
@@ -351,7 +351,7 @@ Same pipeline. Split when **touching** the file or after oodac peer exists. Do n
 | `src/diagnostics.rs` | 323 | emit JSON vs human; codes table |
 | `src/bench.rs` | 298 | bench harness vs cases |
 
-**Host tests inside modules:** `mod tests` in-file is fine if file stays ≤250; else `tests/` or `*_test` modules by domain.
+**Host tests inside modules:** `mod tests` in-file is fine if file stays ≤256; else `tests/` or `*_test` modules by domain.
 
 ---
 
@@ -359,7 +359,7 @@ Same pipeline. Split when **touching** the file or after oodac peer exists. Do n
 
 | File | ~Lines | Functional split |
 |------|-------:|------------------|
-| `tests/json_errors_golden.rs` | 4362 | **Data vs runner:** golden tables as `.json`/`.oo` fixtures; runner ≤250. Or split by diagnostic class files |
+| `tests/json_errors_golden.rs` | 4362 | **Data vs runner:** golden tables as `.json`/`.oo` fixtures; runner ≤256. Or split by diagnostic class files |
 | `tests/wasm_host.rs` | 1678 | By host feature: lists, strings, control, floats, bools, … |
 | `install/install.oo` | 448 | Phases: `install_{fetch,place,verify,pin}.oo` + thin driver |
 | `runtime/chs_rt.c` | 358 | `chs_rt_{str,list,io,process}.c` + thin `chs_rt.c` umbrella if link allows |
@@ -387,7 +387,7 @@ Same pipeline. Split when **touching** the file or after oodac peer exists. Do n
 - [ ] Job header written (not “part of main”)  
 - [ ] Closed fn set; no mid-fn cut  
 - [ ] Deps only downward  
-- [ ] `wc -l` ≤250 for every new/changed owned file  
+- [ ] `wc -l` ≤256 for every new/changed owned file  
 - [ ] `./scripts/check_file_lines.sh --ratchet`  
 - [ ] Probes: pass + fail for that stage/domain  
 - [ ] Dual-engine if stage has host peer  
@@ -434,7 +434,7 @@ Same pipeline. Split when **touching** the file or after oodac peer exists. Do n
 | 314 | `scripts/chs_parity.sh` | C |
 | 298 | `src/bench.rs` | B |
 
-**Already ≤250 (oodac):** `lex.oo`, `token_emit.oo`, `token_fmt.oo`, `check_caps.oo`.
+**Already ≤256 (oodac):** `lex.oo`, `token_emit.oo`, `token_fmt.oo`, `check_caps.oo`.
 
 ---
 

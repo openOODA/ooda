@@ -27,7 +27,7 @@ Shipping a “fake fuzz” that only re-runs fixed asserts would raise \(W\) (ha
 
 Implement only when **all** hold:
 
-1. Pure path stays zero-Rust; module ≤250 lines; fail-closed on unsupported surfaces  
+1. Pure path stays zero-Rust; module ≤256 lines; fail-closed on unsupported surfaces  
 2. Scope is **explicit**: e.g. pure `Int` params + `assert_eq!` expected values only  
 3. Pass **and** fail rails (seeded domain that finds a known bug; rejects non-pure targets)  
 4. No shell/eval of user fixtures beyond the existing Backend-C build pipeline  

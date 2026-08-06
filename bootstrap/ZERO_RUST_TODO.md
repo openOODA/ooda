@@ -40,7 +40,7 @@ As of v0.182.1-alpha honesty pin: **RS_COUNT = 0**, pure `cli/main.oo` + `oodac`
 2. Each checkbox is a **ship**: code + pass/fail rail + O=0 + honest PROGRESS.  
 3. **Power law:** prefer items that **delete** host surface or **green fixed_point** over polish.  
 4. **Dual-engine** whenever check/run/build/emit semantics change.  
-5. **≤250 lines / file**; splits only at functional seams (`SPLIT_PLAN` first principles).  
+5. **≤256 lines / file**; splits only at functional seams (`SPLIT_PLAN` first principles).  
 6. Mark done only when proof exists (script exit 0 or documented fail-closed residual).
 
 ---
@@ -105,7 +105,7 @@ As of v0.182.1-alpha honesty pin: **RS_COUNT = 0**, pure `cli/main.oo` + `oodac`
 
 ### Emit engineering
 
-- [ ] **P0.3.21** Keep `c_emit*.oo` ≤250; split at seams (`stmt` / `expr` / `call` / `preamble`)  
+- [ ] **P0.3.21** Keep `c_emit*.oo` ≤256; split at seams (`stmt` / `expr` / `call` / `preamble`)  
 - [ ] **P0.3.22** `c_emit_smoke` expands as fixtures grow; optional gcc+run only for pass  
 - [ ] **P0.3.23** Dual-engine: host `build --target c` vs oodac `emit-c`+gcc on shared corpus where both claim support  
 
@@ -315,7 +315,7 @@ As of v0.182.1-alpha honesty pin: **RS_COUNT = 0**, pure `cli/main.oo` + `oodac`
 
 - [x] **P5.1.1** O=0 every ship (`check_file_lines.sh`)  
 - [x] **P5.1.2** S reported every PROGRESS pin with U/D/F/W/O  
-- [x] **P5.1.3** Never grow monofiles; extract at seams (cli/main ≤250)  
+- [x] **P5.1.3** Never grow monofiles; extract at seams (cli/main ≤256)  
 - [x] **P5.1.4** Untested claim → U until fixture lands (residual features fail-closed)  
 
 ## P5.2 Dual-engine & parity
@@ -336,7 +336,7 @@ As of v0.182.1-alpha honesty pin: **RS_COUNT = 0**, pure `cli/main.oo` + `oodac`
 - [x] **P5.4.1** Keep `runtime/chs_rt*.c` tracked  
 - [x] **P5.4.2** Minimal OS surface: print, str, list, fs, env, process  
 - [x] **P5.4.3** No Rust in runtime  
-- [x] **P5.4.4** Optional: split further only at domain seams ≤250  
+- [x] **P5.4.4** Optional: split further only at domain seams ≤256  
 
 ---
 

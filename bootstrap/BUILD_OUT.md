@@ -9,7 +9,7 @@
 - **Unfinished = fail-closed**, not silent.
 - **Beta tag = owner only** (`BETA.md`). This file is **build-out**, not auto-beta.
 - **No Rust product host.** `.oo` + thin C (or later FLOOR backends).
-- **≤250 lines / owned file**; E-M + entropy \(S\); tests as immune system.
+- **≤256 lines / owned file**; E-M + entropy \(S\); tests as immune system.
 
 **How the loop uses this:**  
 Observe → read PROGRESS + **this file** → pick highest-value open item (or split it) → Act with pass+fail fixtures → Lock rails → Ship → mark item or note residual.

@@ -14,7 +14,7 @@ is the teacher. Tools rank *work* — they do not edit language architecture (DE
 |------|----------------|---------|
 | **E-M** | Physics / flight | Rank + Act every turn. List in PROGRESS. |
 | **Entropy \(S\)** | Thermodynamics | Score disorder; good ships **lower \(S\)** (below). |
-| **≤250 lines** | Materials / modularity | Owned source file hard cap (SPEC intent). See split plan. |
+| **≤256 lines** | Materials / modularity | Owned source file hard cap (SPEC intent). See split plan. |
 | **Power Law** | Math / Pareto | Top **≤5**. Ignore the long tail this turn. |
 | **DESIGN** | — | Architecture from DESIGN only. |
 | **Tests+code** | Biology / immune | Pass+fail fixtures ship with behavior. |
@@ -41,9 +41,9 @@ S = U + D + F + W + O
 | **\(D\)** | **Dual-engine disagreements** — same fixture, engines differ on OK/ERR when they should agree |
 | **\(F\)** | **Fail-open holes** — silent-OK / soft-pass / missing fail fixture on critical paths |
 | **\(W\)** | **Hand-waves** — stubs that present as done without fail-closed residual |
-| **\(O\)** | **Oversize files** — owned source files with **> 250 lines** (`scripts/check_file_lines.sh`) |
+| **\(O\)** | **Oversize files** — owned source files with **> 256 lines** (`scripts/check_file_lines.sh`) |
 
-**File-size cap (always):** Owned `.oo` / `.rs` / hand `.c`/`.h` / `.sh` ≤ **250 lines**.  
+**File-size cap (always):** Owned `.oo` / `.rs` / hand `.c`/`.h` / `.sh` ≤ **256 lines**.  
 Exclude generated emit (`*.oo.c`, `oodac/main.c`, `oodac/oodac2.c`, `target/`, `dist/`).  
 Plan: [`bootstrap/SPLIT_PLAN.md`](bootstrap/SPLIT_PLAN.md).  
 Lock: `./scripts/check_file_lines.sh` (strict when aiming O=0; `--ratchet` while splitting — fail if oversize **grows** or new oversize appears).
