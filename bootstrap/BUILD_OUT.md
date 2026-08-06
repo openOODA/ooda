@@ -101,12 +101,18 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 - [ ] Optional: agent-oriented “fix suggestion” without reintroducing host bloat
 
 ### P3 — Platform & ship
-- [ ] **std growth** — modules real programs need (aligned with caps)
+- [x] **std growth** — modules real programs need (aligned with caps)
+  - Pure path: `std/result.oo`, `std/str.oo`, `std/option.oo` (+ `std/README.md`)
+  - Fixtures: `fixtures/std_{result,str,option}_main.oo` (pure multi-build); library `oodac check`
+  - Residual: no ambient FS/net; `Option[T]` sum emit not pure-lowered (Result encoding); multi-file check residual; generic Result beyond String residual; org-sibling json/crypto/fs/net not pure floor
 - [x] **Install / pin dress rehearsal** — `scripts/install_dress_rehearsal.sh` validates release layout offline (tarball / staged tree / working-tree stage); residual: full XDG `install.oo` network fetch not exercised offline
 - [x] **Remote CI no-Rust** — `.github/workflows/no_rust.yml` runs `ci_no_rust` with cargo/rustc shadowed; seed = `bootstrap/seed/oodac` or pinned GitHub Release tarball+sha256 (no rustup/cargo install)
 - [x] **Release notes + pin lock** every ship — `bootstrap/RELEASE_CHECKLIST.md` + `release.sh` sha256 sidecar + notes reminder; habit not auto-beta
 - [ ] **FLOOR F3** — second backend MVP when owner prioritizes freedom over features
-- [ ] Shrink emit preamble **host residual** decls (`oo_host_*`) on pure path when safe
+- [x] Shrink emit preamble **host residual** decls (`oo_host_*`) on pure path when safe
+  - Pure preamble no longer declares `ooda_host_*` / `oo_host_*` / `oo_chs_build`
+  - `runtime/chs_rt_host.c` kept for optional `OODA_WITH_HOST_FFI` only (not pure link)
+  - Residual: optional host FFI path; programs that need host dumps must opt into FFI
 
 ### P4 — Stretch (DESIGN or aligned)
 - [x] LLVM / production optimize path — **permanent fail-closed product claim** (Backend-C only); see `bootstrap/P4_DROPS.md`

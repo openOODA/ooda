@@ -44,10 +44,20 @@
 | `oo_read_file` / `oo_write_file` | fs | `chs_rt_fs.c` |
 | `oo_path_exists` / `oo_file_size` | fs | `chs_rt_fs.c` |
 | `oo_env_get` | env | `chs_rt_fs.c` (or host split) |
-| `oo_host_ast_dump` / `oo_host_check` / `oo_host_token_dump` | **host residual (decl only on pure link)** | `chs_rt_host.c` only if `OODA_WITH_HOST_FFI` |
-| `oo_chs_build` | **host residual (decl only on pure link)** | same |
 
-Also declared as C host FFI names in preamble (legacy): `ooda_host_ast_dump`, `ooda_host_check`, `ooda_host_token_dump`, `ooda_host_chs_build`, `ooda_host_free` — **host residual**. Pure default link (`chs_rt.c` without host FFI) does **not** define them; smoke bodies do not call them. Declaring them in every emit is **preamble bloat / landmine residual**, not a working host backend.
+### Host residual — **not** in pure emit preamble (removed)
+
+Pure Backend-C preamble no longer declares host-era symbols. Optional only under
+`OODA_WITH_HOST_FFI` in `runtime/chs_rt_host.c` (legacy):
+
+| Symbol | Notes |
+|--------|--------|
+| `oo_host_ast_dump` / `oo_host_check` / `oo_host_token_dump` | wrappers → `ooda_host_*` |
+| `oo_chs_build` | wrapper → `ooda_host_chs_build` |
+| `ooda_host_ast_dump` / `check` / `token_dump` / `chs_build` / `free` | C host FFI names |
+
+Pure default link (`chs_rt.c` without host FFI) does **not** define them; pure
+product emit must not reference them. Residual: optional host FFI path only.
 ### Inline in emit preamble (not separate .c exports)
 
 | Symbol | Notes |
@@ -80,7 +90,9 @@ Also declared as C host FFI names in preamble (legacy): `ooda_host_ast_dump`, `o
 
 Primarily print + `oo_str_lit` as needed.
 
-**Fact:** preamble still **declares** host residual and full string/fs set even when unused — floor surface is wider than smoke call set. That is **emit bloat / residual**, not proof those symbols run on pure smoke.
+**Fact:** pure preamble no longer declares host residual (`oo_host_*` / `ooda_host_*` /
+`oo_chs_build`). It still declares the full string/fs set even when unused — floor
+surface is wider than smoke call set (emit surface residual, not host landmine).
 
 ---
 

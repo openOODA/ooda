@@ -1,8 +1,12 @@
 #include "chs_rt.h"
 
-/* ----- Host FFI wrappers (symbols from libooda.a) -----
+/* ----- Host FFI wrappers (symbols from optional host staticlib) -----
  * Only compiled when OODA_WITH_HOST_FFI is set (programs that call
- * chs_build / host_* dumps). Pure CHS links without Cargo/staticlib.
+ * chs_build / host_* dumps). Pure CHS links without host FFI.
+ *
+ * Pure emit preamble deliberately does NOT declare these symbols
+ * (see oodac/c_emit_preamble.oo). Pure product binaries must not
+ * reference them; this TU stays for optional host FFI builds only.
  */
 #ifdef OODA_WITH_HOST_FFI
 extern char *ooda_host_ast_dump(const char *path);

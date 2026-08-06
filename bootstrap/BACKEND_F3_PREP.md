@@ -65,7 +65,8 @@ When F3 lands: accept second name without breaking `c`.
 ## Residual honesty
 
 Until F3 ships, **any** non-`c` backend string is fail-closed residual.  
-Host residual symbols still declared in Backend-C preamble (`oo_host_*`, `oo_chs_build`) — not a second backend; see ABI v0.
+Host residual symbols (`oo_host_*`, `oo_chs_build`) are **not** declared in pure Backend-C
+preamble (removed); optional only under `OODA_WITH_HOST_FFI` in `chs_rt_host.c` — see ABI v0.
 
 ---
 
