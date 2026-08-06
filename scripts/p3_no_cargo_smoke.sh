@@ -98,8 +98,7 @@ echo "RS_COUNT=$RS"
 if [[ "$RS" -eq 0 ]]; then
   pass "B0 RS=0"
 else
-  # Residual until shell deleted this pin
-  echo "NOTE residual RS=$RS (delete Rust shell for B0)"
+  bad "B0 RS=$RS (want 0; no soft-pass)"
 fi
 
 if [[ $fail -ne 0 ]]; then

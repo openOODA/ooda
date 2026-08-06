@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# job: native Backend-C contracts skip smoke (pass + fail)
+# job: native Backend-C contracts smoke (pass + fail + simple requires runtime)
 # stage: test
-# residual: contracts skipped at emit, not runtime-enforced
+# residual: ensures + complex requires not lowered; simple requires IDENT OP lit|ident are runtime
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
