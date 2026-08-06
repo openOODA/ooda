@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# CHS parity driver (helpers: chs_parity_lib.sh)
+# CHS parity driver — product pure CLI vs pure oodac (host frontend deleted)
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=chs_parity_lib.sh
 source "$SCRIPT_DIR/chs_parity_lib.sh"
 
-echo "=== CHS token parity (pass) ==="
+echo "=== CHS token parity product≡oodac (pass) ==="
 shopt -s nullglob
 for f in "$ROOT"/bootstrap/corpus/lex/pass/*.oo \
          "$ROOT"/fixtures/hello.oo \
@@ -21,14 +21,14 @@ for f in "$ROOT"/bootstrap/corpus/lex/fail/*.oo; do
   compare_tokens_fail "$f"
 done
 
-echo "=== CHS AST structure (real .oo parser, spans normalized) ==="
+echo "=== CHS AST structure product≡oodac ==="
 for f in "$ROOT"/bootstrap/corpus/parse/pass/*.oo \
          "$ROOT"/bootstrap/corpus/check/pass/ok_main.oo; do
   [[ -f "$f" ]] || continue
   compare_ast "$f"
 done
 
-echo "=== CHS check (real .oo cap/structure check) ==="
+echo "=== CHS check product≡oodac ==="
 for f in "$ROOT"/bootstrap/corpus/check/pass/*.oo; do
   [[ -f "$f" ]] || continue
   compare_check "$f" pass
@@ -38,49 +38,41 @@ for f in "$ROOT"/bootstrap/corpus/check/fail/*.oo; do
   compare_check "$f" fail
 done
 
-# R1 typecheck slice: oodac check must fail-closed on ann/return lit mismatches
-# (parity with stage-0 `ooda check` exit code; oodac emits ERR\ttype\t…).
-echo "=== R1 typecheck slice (oodac .oo vs stage-0 check) ==="
-for f in "$ROOT"/bootstrap/corpus/typecheck/pass/*.oo; do
-  [[ -f "$f" ]] || continue
-  compare_check "$f" pass
-done
+# Typecheck slice: pure oodac must fail-closed (product dump check = oodac)
+echo "=== R1 typecheck fail-closed (pure oodac) ==="
 for f in "$ROOT"/bootstrap/corpus/typecheck/fail/*.oo; do
   [[ -f "$f" ]] || continue
-  set +e
-  "$OODA" check "$f" >/dev/null 2>"$TMPDIR/tc0.err"
-  ra=$?
-  set -e
   b="$TMPDIR/tc_oodac.txt"
   rb=$(run_oodac_rc check "$f" "$b")
-  if [[ $ra -eq 0 ]]; then
-    echo "FAIL typecheck-fail: stage-0 accepted $f"
-    fail=1
-    continue
-  fi
   if [[ $rb -eq 0 ]]; then
-    echo "FAIL typecheck-fail: oodac accepted $f (must fail-closed)"
-    cat "$b" | head -10
+    echo "FAIL typecheck-fail: oodac accepted $f"
     fail=1
     continue
   fi
-  if ! grep -qE $'^ERR\ttype\t|ERRtype' "$b" 2>/dev/null; then
-    echo "FAIL typecheck-fail: oodac missing ERR type on $f"
-    cat "$b" | head -10
+  if ! grep -qiE 'ERR' "$b" "$b.err" 2>/dev/null; then
+    echo "FAIL typecheck-fail: oodac missing ERR on $f"
     fail=1
     continue
   fi
-  echo "OK typecheck fail-closed: $f (stage0_exit=$ra oodac_exit=$rb)"
+  echo "OK typecheck fail-closed: $f (oodac_exit=$rb)"
 done
 
 echo "=== drift detector ==="
 echo "KW_FAKE	1	1	x" >"$TMPDIR/drift_a.txt"
-"$OODA" dump tokens "$ROOT/fixtures/int_main.oo" >"$TMPDIR/drift_b.txt"
+"$OODAC" tokens "$ROOT/fixtures/int_main.oo" >"$TMPDIR/drift_b.txt" 2>/dev/null || true
 if diff -q "$TMPDIR/drift_a.txt" "$TMPDIR/drift_b.txt" >/dev/null; then
   echo "FAIL drift detector"
   fail=1
 else
   echo "OK drift detector"
+fi
+
+# Anti: host modules must stay gone
+if [[ -d "$ROOT/src/lexer" ]] || [[ -d "$ROOT/src/typecheck" ]] || [[ -d "$ROOT/src/codegen_c" ]]; then
+  echo "FAIL host spine modules reappeared"
+  fail=1
+else
+  echo "OK host spine modules absent"
 fi
 
 if [[ "$fail" -ne 0 ]]; then

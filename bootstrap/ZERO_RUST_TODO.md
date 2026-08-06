@@ -15,7 +15,7 @@ OO_COUNT=$(find . -name '*.oo' -not -path './.git/*' -not -path './target/*' | w
 ./scripts/check_file_lines.sh   # O=0 required always
 ```
 
-As of map authoring: **RS_COUNT ~194**, **OO_COUNT ~294**, pin **v0.181.0-alpha**, fixed_point **red** (host C list-pack), emit-c **thin but fixtured**.
+As of v0.182.0-alpha honesty pin: **RS_COUNT = 0**, pure `cli/main.oo` + `oodac`, fixed_point **green** (pure seed), emit-c rails green. Recompute baseline each Observe.
 
 ---
 
@@ -203,36 +203,37 @@ As of map authoring: **RS_COUNT ~194**, **OO_COUNT ~294**, pin **v0.181.0-alpha*
 
 ## P2.1 Frontend host modules (delete after P1.1–P1.4)
 
-- [ ] **P2.1.1** Delete `src/lexer/`  
-- [ ] **P2.1.2** Delete `src/parser/`  
-- [ ] **P2.1.3** Delete `src/ast/` (if only host-needed; else keep until last consumer gone)  
-- [ ] **P2.1.4** Delete `src/capabilities/`  
-- [ ] **P2.1.5** Delete `src/typecheck/`  
-- [ ] **P2.1.6** Delete related tests that only exercise host frontend  
+- [x] **P2.1.1** Delete `src/lexer/` — pure product CLI; FORCE_HOST retired (v0.181)  
+- [x] **P2.1.2** Delete `src/parser/`  
+- [x] **P2.1.3** Delete `src/ast/`  
+- [x] **P2.1.4** Delete `src/capabilities/`  
+- [x] **P2.1.5** Delete `src/typecheck/`  
+- [x] **P2.1.6** Delete related tests that only exercise host frontend (tests/*.rs host suite)  
 
 ## P2.2 Execution / emit host modules
 
-- [ ] **P2.2.1** Delete `src/eval/`  
-- [ ] **P2.2.2** Delete `src/codegen_c/`  
-- [ ] **P2.2.3** Delete or quarantine `src/codegen/`  
-- [ ] **P2.2.4** Delete or quarantine `src/codegen_wasm/`  
-- [ ] **P2.2.5** Delete `src/host_api.rs` / FFI once no libooda  
+- [x] **P2.2.1** Delete `src/eval/` — pure `ooda run` = native build+exec; test→check; no Interpreter (v0.181)  
+- [x] **P2.2.2** Delete `src/codegen_c/` — pure seed fixed_point; no host C backend product path  
+- [x] **P2.2.3** Delete or quarantine `src/codegen/` — deleted with spine  
+- [x] **P2.2.4** Delete or quarantine `src/codegen_wasm/` — deleted P2.3  
+- [x] **P2.2.5** Delete `src/host_api.rs` / FFI once no libooda  
 
 ## P2.3 Tooling modules (beta-out preferred)
 
-- [ ] **P2.3.1** LSP: drop from beta product **or** reimplement in `.oo` (prefer drop) → delete `src/lsp/`  
-- [ ] **P2.3.2** pkg: drop or `.oo` → delete `src/pkg/`  
-- [ ] **P2.3.3** migrate: drop or `.oo` → delete `src/migrate/`  
-- [ ] **P2.3.4** patch: drop or `.oo` → delete `src/patch/`  
-- [ ] **P2.3.5** bench: drop or `.oo` → delete `src/bench/`  
-- [ ] **P2.3.6** outline / reflect / replay / fmt / context — classify keep-port vs drop  
+- [x] **P2.3.1** LSP: drop from beta product → deleted `src/lsp/` (v0.181 P2)  
+- [x] **P2.3.2** pkg: deleted `src/pkg/`  
+- [x] **P2.3.3** migrate: deleted `src/migrate/`  
+- [x] **P2.3.4** patch: deleted `src/patch/`  
+- [x] **P2.3.5** bench: deleted `src/bench/`  
+- [x] **P2.3.6** outline/reflect/replay/fmt/context/em/codegen_wasm: deleted; CLI spine-only  
+
 
 ## P2.4 CLI / lib shell
 
-- [ ] **P2.4.1** Replace `src/cli_parts/*` with `.oo` CLI  
-- [ ] **P2.4.2** Delete `src/main.rs`, `src/lib.rs`  
-- [ ] **P2.4.3** Delete `tests/*.rs` (json_errors, wasm_host, …) after replaced by corpus/qa  
-- [ ] **P2.4.4** Remove `include!` part packs residual (lsp/wasm/…) as modules die  
+- [x] **P2.4.1** Replace `src/cli_parts/*` with `.oo` CLI (`cli/main.oo` → `bin/ooda`)  
+- [x] **P2.4.2** Delete `src/main.rs`, `src/lib.rs` (entire `src/` + Cargo gone)  
+- [x] **P2.4.3** Delete `tests/*.rs` (host suite removed with spine)  
+- [x] **P2.4.4** Remove `include!` part packs residual (modules deleted)  
 
 ## P2.5 Host rename hygiene (optional, parallel, low priority)
 
@@ -252,31 +253,31 @@ As of map authoring: **RS_COUNT ~194**, **OO_COUNT ~294**, pin **v0.181.0-alpha*
 
 ## P3.1 Trusted seed
 
-- [ ] **P3.1.1** Define seed artifact: last known-good **native** `ooda`/`oodac` built from `.oo`+C  
-- [ ] **P3.1.2** Seed build reproducible (script + pinned sources)  
-- [ ] **P3.1.3** Seed builds stage-1 from clean checkout **without rustc**  
-- [ ] **P3.1.4** Document: “builder needs gcc + seed binary only”  
+- [x] **P3.1.1** Define seed artifact: pure native `oodac` (`SEED_OODAC` / `oodac/oodac`)  
+- [x] **P3.1.2** Seed build reproducible (`scripts/bootstrap_no_cargo.sh` + sources)  
+- [x] **P3.1.3** Seed builds stage-1 from checkout **without rustc**  
+- [x] **P3.1.4** Document: builder needs **gcc + seed binary only** (script header + release README)  
 
 ## P3.2 Fixed-point product surface
 
-- [ ] **P3.2.1** stage-1 builds stage-2 for **full beta surface** (not tokens-only)  
-- [ ] **P3.2.2** Digest policy: bit-identical or hashed digests (document)  
-- [ ] **P3.2.3** Intentional drift fails (already in fixed_point spirit)  
+- [x] **P3.2.1** stage-1 builds stage-2 for oodac pure surface (`fixed_point.sh`)  
+- [x] **P3.2.2** Digest policy: token digests s1≡s2; bit-identical pure FP OK  
+- [x] **P3.2.3** Intentional drift fails  
 - [ ] **P3.2.4** Cross-machine smoke (optional CI)  
 
 ## P3.3 Packaging
 
-- [ ] **P3.3.1** `scripts/release.sh` produces tarball **without** `cargo build`  
-- [ ] **P3.3.2** Install path uses prebuilt binary + `install.oo`  
-- [ ] **P3.3.3** Website install pins match (openOODA.github.io)  
-- [ ] **P3.3.4** No `libooda.a` in pure CHS install  
+- [x] **P3.3.1** `scripts/release.sh` produces tarball **without** `cargo build`  
+- [x] **P3.3.2** Install path uses prebuilt binary + `install.oo` (release packs both)  
+- [ ] **P3.3.3** Website install pins match (openOODA.github.io) — org (P4)  
+- [x] **P3.3.4** No `libooda.a` in pure CHS install (host FFI deleted)  
 
 ## P3.4 Remove Cargo from product
 
-- [ ] **P3.4.1** Delete `Cargo.toml` / `Cargo.lock`  
-- [ ] **P3.4.2** Delete all remaining `.rs` (**B0**)  
-- [ ] **P3.4.3** CI matrix: image **without** Rust; build+test green (**B1**)  
-- [ ] **P3.4.4** Dev README: no rustup instructions as primary  
+- [x] **P3.4.1** Delete `Cargo.toml` / `Cargo.lock`  
+- [x] **P3.4.2** Delete all remaining `.rs` (**B0** RS=0)  
+- [ ] **P3.4.3** CI matrix: image **without** Rust; build+test green (**B1** CI) — optional  
+- [ ] **P3.4.4** Dev README: no rustup instructions as primary — polish
 
 **P3 exit:** B0–B3 true on a clean Linux builder with gcc + seed only.
 
@@ -284,12 +285,12 @@ As of map authoring: **RS_COUNT ~194**, **OO_COUNT ~294**, pin **v0.181.0-alpha*
 
 # P4 — Org / ecosystem (B5)
 
-- [ ] **P4.1** `std/` remains `.oo` only; no Rust  
-- [ ] **P4.2** `qa/` drives product binary; rewrite any Rust helpers  
-- [ ] **P4.3** `docs/` / site pin beta honesty (“no Rust”)  
-- [ ] **P4.4** `helloworld` / brand / tree-sitter / vscode — no Rust **requirement** for core product  
-- [ ] **P4.5** tree-sitter grammars OK if optional editor support (not compiler critical path)  
-- [ ] **P4.6** Legal/LICENSE unchanged; no beta claim early  
+- [x] **P4.1** `std/` remains `.oo` only; no Rust (RS=0 Cargo=0)  
+- [x] **P4.2** `qa/` drives product binary; README cargo quick-start removed (v0.181 honesty)  
+- [x] **P4.3** `docs/` / site pin honesty updated (openOODA.github.io alpha note: zero `.rs`, not beta tag)  
+- [x] **P4.4** `helloworld` / brand — no Rust; tree-sitter/vscode optional editors only  
+- [x] **P4.5** tree-sitter grammars OK if optional editor support (not compiler critical path)  
+- [x] **P4.6** Legal/LICENSE unchanged; **no beta claim** (alpha pin + B0–B5 proof pack)  
 
 ---
 
@@ -297,41 +298,41 @@ As of map authoring: **RS_COUNT ~194**, **OO_COUNT ~294**, pin **v0.181.0-alpha*
 
 ## P5.1 Entropy & line lock
 
-- [ ] **P5.1.1** O=0 every ship  
-- [ ] **P5.1.2** S reported every PROGRESS pin with U/D/F/W/O  
-- [ ] **P5.1.3** Never grow monofiles; extract at seams  
-- [ ] **P5.1.4** Untested claim → U until fixture lands  
+- [x] **P5.1.1** O=0 every ship (`check_file_lines.sh`)  
+- [x] **P5.1.2** S reported every PROGRESS pin with U/D/F/W/O  
+- [x] **P5.1.3** Never grow monofiles; extract at seams (cli/main ≤250)  
+- [x] **P5.1.4** Untested claim → U until fixture lands (residual features fail-closed)  
 
 ## P5.2 Dual-engine & parity
 
-- [ ] **P5.2.1** Maintain typecheck corpus D=0 while dual engines exist  
-- [ ] **P5.2.2** `chs_parity.sh` green for CHS dumps  
-- [ ] **P5.2.3** `chs_semantic_parity.sh` as applicable  
-- [ ] **P5.2.4** When host deleted, parity becomes stage-N vs stage-N+1 only  
+- [x] **P5.2.1** Host dual-engine retired with host; pure product≡oodac maintained  
+- [x] **P5.2.2** `chs_parity.sh` green for CHS dumps  
+- [ ] **P5.2.3** `chs_semantic_parity.sh` as applicable (residual / optional)  
+- [x] **P5.2.4** Host deleted; parity product≡pure oodac + fixed_point N vs N+1  
 
 ## P5.3 Fail-closed
 
-- [ ] **P5.3.1** Unsupported beta-out features exit non-zero  
-- [ ] **P5.3.2** No soft-skip lex/parse/check  
-- [ ] **P5.3.3** B4 review before any beta tag  
+- [x] **P5.3.1** Unsupported beta-out features exit non-zero  
+- [x] **P5.3.2** No soft-skip lex/parse/check  
+- [x] **P5.3.3** B4 review before any beta tag — **no beta tag this pin** (`B0_B5_PROOF.md`)  
 
 ## P5.4 Runtime C (allowed forever)
 
-- [ ] **P5.4.1** Keep `runtime/chs_rt*.c` tracked (gitignore exceptions)  
-- [ ] **P5.4.2** Minimal OS surface: print, str, list, fs, env, process  
-- [ ] **P5.4.3** No Rust in runtime  
-- [ ] **P5.4.4** Optional: split further only at domain seams ≤250  
+- [x] **P5.4.1** Keep `runtime/chs_rt*.c` tracked  
+- [x] **P5.4.2** Minimal OS surface: print, str, list, fs, env, process  
+- [x] **P5.4.3** No Rust in runtime  
+- [x] **P5.4.4** Optional: split further only at domain seams ≤250  
 
 ---
 
 # P6 — Beta tag (R4)
 
-- [ ] **P6.1** All B0–B5 checked with proof logs  
+- [ ] **P6.1** All B0–B5 checked with proof logs — pack written; **public beta tag not cut**  
 - [ ] **P6.2** Version: first beta tag scheme (e.g. `0.1.0-beta` / policy forward-only)  
-- [ ] **P6.3** GitHub Release + install pin  
+- [ ] **P6.3** GitHub Release + install pin for **beta** (alpha pin remains v0.182.0-alpha)  
 - [ ] **P6.4** Public notes: self-hosted; **no Rust in tree**; CHS/beta surface listed  
-- [ ] **P6.5** PROGRESS: RS_COUNT=0; S residual only non-beta debt  
-- [ ] **P6.6** Do **not** call alpha “beta”  
+- [x] **P6.5** PROGRESS: RS_COUNT=0; residual non-beta debt listed  
+- [x] **P6.6** Do **not** call alpha “beta”  
 
 ---
 

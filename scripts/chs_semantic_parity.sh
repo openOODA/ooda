@@ -7,9 +7,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
-OODA="${OODA_BIN:-$ROOT/target/release/ooda}"
+OODA="${OODA_BIN:-$ROOT/bin/ooda}"
 if [[ ! -x "$OODA" ]]; then
-  echo "error: need $OODA (cargo build --release) or OODA_BIN" >&2
+  echo "error: need pure $OODA (bin/ooda via bootstrap_no_cargo.sh) or OODA_BIN" >&2
   exit 1
 fi
 

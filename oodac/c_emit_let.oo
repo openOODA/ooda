@@ -1,0 +1,225 @@
+// package: backend-c — emit floor (see bootstrap/FLOOR.md)
+// job: emit let/assign stmts; bind list-kind env
+// stage: emit
+
+pub fn c_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
+    let mut p = pos;
+    let mut e = env;
+    let k = field_at(list_get(toks, p), 0);
+    if k == "KW_LET" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "KW_MUT" {
+            p = p + 1;
+        }
+    }
+    let name = field_at(list_get(toks, p), 3);
+    p = p + 1;
+    let mut ann_kind = "";
+    let mut ann_ty = "";
+    if p < n && field_at(list_get(toks, p), 0) == "COLON" {
+        p = p + 1;
+        ann_kind = c_peek_list_elem(toks, p, n);
+        ann_ty = c_ty_at(toks, p, n);
+        p = c_emit_skip_type(toks, p, n);
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "EQ" {
+        p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "KW_MATCH" {
+        // Result match: let x = match r { Ok(a)=>..., Err(b)=>... }
+        // OoResS stores payload in .val for both Ok and Err.
+        p = p + 1;
+        let pr_m = c_emit_expr_c(toks, p, n, e);
+        p = parse_int(list_get(pr_m, 0));
+        let scrut = list_get(pr_m, 1);
+        p = c_emit_skip_braces(toks, p, n);
+        println("  OoStr " + name + " = " + scrut + ".val;");
+        e = c_env_put(e, name, "T");
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+            p = p + 1;
+        }
+        return c_pack_pos_env(p, e);
+    }
+    // if-expression: let y = if c { a } else if d { b } else { e };
+    if p < n && field_at(list_get(toks, p), 0) == "KW_IF" {
+        let mut lty = "long long";
+        if ann_ty != "" && ann_ty != "void" {
+            lty = ann_ty;
+        }
+        println("  " + lty + " " + name + ";");
+        let mut ea = c_env_put(e, "__asgn__", name);
+        // walk if / else if / else as statements with assign target
+        let mut guard = 0;
+        while guard < 32 {
+            if p >= n {
+                break;
+            }
+            let kk = field_at(list_get(toks, p), 0);
+            if kk != "KW_IF" && kk != "KW_ELSE" {
+                break;
+            }
+            let st = c_emit_stmt(toks, p, n, ea);
+            p = parse_int(list_get(st, 0));
+            ea = list_get(st, 1);
+            guard = guard + 1;
+        }
+        // name is bound as local; no list/str env kind for default long long if-expr
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+            p = p + 1;
+        }
+        return c_pack_pos_env(p, e);
+    }
+    let mut env_rhs = e;
+    if ann_kind == "S" || ann_kind == "I" {
+        env_rhs = c_env_put(e, "__ann__", ann_kind);
+    }
+    let pr = c_emit_expr_c(toks, p, n, env_rhs);
+    p = parse_int(list_get(pr, 0));
+    let mut rhs = list_get(pr, 1);
+    let mut lty = "long long";
+    let mut bind_kind = ann_kind;
+    // Annotation wins when present (String/Int/Bool/List/Result)
+    if ann_ty != "" && ann_ty != "void" {
+        lty = ann_ty;
+        if ann_ty == "OoSList" {
+            bind_kind = "S";
+            if rhs == "oo_ilist_new()" {
+                rhs = "oo_slist_new()";
+            }
+        }
+        if ann_ty == "OoIList" {
+            bind_kind = "I";
+        }
+    } else if ann_kind == "S" {
+        lty = "OoSList";
+        if rhs == "oo_ilist_new()" {
+            rhs = "oo_slist_new()";
+        }
+    } else if ann_kind == "I" {
+        lty = "OoIList";
+    } else {
+        // Known call results: field_at → OoStr, lex_step → OoSList, …
+        let cnm = c_rhs_call_name(rhs);
+        let crt = c_call_result_ty(cnm);
+        if crt != "" {
+            lty = crt;
+            if crt == "OoSList" {
+                bind_kind = "S";
+            }
+            if crt == "OoIList" {
+                bind_kind = "I";
+            }
+        } else {
+            // Bare IDENT copy: inherit env kind (let mut num = ch)
+            let ek = c_env_get(e, rhs);
+            if ek == "T" {
+                lty = "OoStr";
+            } else if ek == "S" {
+                lty = "OoSList";
+                bind_kind = "S";
+            } else if ek == "I" {
+                lty = "OoIList";
+                bind_kind = "I";
+            } else if chars_len(rhs) >= 9 {
+                if char_at(rhs, 0) == "o" {
+                    if char_at(rhs, 3) == "i" && char_at(rhs, 4) == "l" {
+                        if chars_len(rhs) >= 12 && char_at(rhs, 9) == "n" {
+                            lty = "OoIList";
+                            bind_kind = "I";
+                        } else if chars_len(rhs) >= 13 && char_at(rhs, 9) == "p" {
+                            lty = "OoIList";
+                            bind_kind = "I";
+                        }
+                    }
+                    if char_at(rhs, 3) == "s" && char_at(rhs, 4) == "l" {
+                        if chars_len(rhs) >= 11 && char_at(rhs, 9) == "g" {
+                            lty = "OoStr";
+                        } else if chars_len(rhs) >= 12 && char_at(rhs, 9) == "n" {
+                            lty = "OoSList";
+                            bind_kind = "S";
+                        } else if chars_len(rhs) >= 13 && char_at(rhs, 9) == "p" {
+                            lty = "OoSList";
+                            bind_kind = "S";
+                        }
+                    }
+                    if char_at(rhs, 3) == "s" && char_at(rhs, 4) == "t" {
+                        lty = "OoStr";
+                    }
+                    if char_at(rhs, 3) == "c" && char_at(rhs, 4) == "h" && chars_len(rhs) > 8 {
+                        if char_at(rhs, 8) == "a" {
+                            lty = "OoStr";
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if bind_kind == "S" || bind_kind == "I" {
+        e = c_env_put(e, name, bind_kind);
+    }
+    // T = OoStr local (for println / ==)
+    if lty == "OoStr" {
+        e = c_env_put(e, name, "T");
+    }
+    println("  " + lty + " " + name + " = " + rhs + ";");
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+    return c_pack_pos_env(p, e);
+}
+
+pub fn c_emit_ident_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
+    let mut p = pos;
+    let mut e = env;
+    let id = field_at(list_get(toks, p), 3);
+    if id == "println" {
+        p = c_emit_println(toks, p, n, e);
+        return c_pack_pos_env(p, e);
+    }
+    if p + 1 < n && field_at(list_get(toks, p + 1), 0) == "EQ" {
+        let name = id;
+        p = p + 2;
+        // assign match Result → .val
+        if p < n && field_at(list_get(toks, p), 0) == "KW_MATCH" {
+            p = p + 1;
+            let prm = c_emit_expr_c(toks, p, n, e);
+            p = parse_int(list_get(prm, 0));
+            let scrut = list_get(prm, 1);
+            p = c_emit_skip_braces(toks, p, n);
+            println("  " + name + " = " + scrut + ".val;");
+            e = c_env_put(e, name, "T");
+            if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+                p = p + 1;
+            }
+            return c_pack_pos_env(p, e);
+        }
+        let pra = c_emit_expr_c(toks, p, n, e);
+        p = parse_int(list_get(pra, 0));
+        let rhs = list_get(pra, 1);
+        if chars_len(rhs) >= 12 {
+            if char_at(rhs, 3) == "s" && char_at(rhs, 4) == "l" {
+                e = c_env_put(e, name, "S");
+            }
+            if char_at(rhs, 3) == "i" && char_at(rhs, 4) == "l" {
+                e = c_env_put(e, name, "I");
+            }
+        }
+        println("  " + name + " = " + rhs + ";");
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+            p = p + 1;
+        }
+        return c_pack_pos_env(p, e);
+    }
+    let pr2 = c_emit_expr_c(toks, p, n, e);
+    p = parse_int(list_get(pr2, 0));
+    let asgn = c_env_get(e, "__asgn__");
+    if asgn != "" {
+        println("  " + asgn + " = " + list_get(pr2, 1) + ";");
+    } else {
+        println("  " + list_get(pr2, 1) + ";");
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+    return c_pack_pos_env(p, e);
+}

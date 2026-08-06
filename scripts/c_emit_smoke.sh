@@ -5,19 +5,20 @@
 # out: exit 0 if pass emit+gcc+run and fail produce ERR\tc_emit or non-zero
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OODA="${OODA:-$ROOT/target/release/ooda}"
+OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
-if [[ ! -x "$OODA" ]]; then
-  (cd "$ROOT" && cargo build --release)
+if [[ ! -x "$OODAC" ]]; then
+  echo "ERR_NO_OODAC: need $OODAC" >&2
+  exit 1
 fi
 
 run_emit() {
-  # writes C (or ERR) to $2; prints ooda exit code on stdout
+  # writes C (or ERR) to $2; prints oodac exit code on stdout
   local src="$1" out="$2" err="$3"
   set +e
-  "$OODA" run "$ROOT/oodac/main.oo" -- emit-c "$src" >"$out" 2>"$err"
+  "$OODAC" emit-c "$src" >"$out" 2>"$err"
   local rc=$?
   set +e
   printf '%s' "$rc"

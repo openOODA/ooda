@@ -1,4 +1,5 @@
-// job: emit one function from tokens
+// package: backend-c — emit floor (see bootstrap/FLOOR.md)
+// job: emit one function from tokens (params seed list-kind env; typed returns)
 // stage: emit
 
 pub fn c_emit_fn(toks: List[String], pos: Int, n: Int) -> Int {
@@ -13,9 +14,9 @@ pub fn c_emit_fn(toks: List[String], pos: Int, n: Int) -> Int {
     p = p + 1;
     // LPAREN
     p = p + 1;
-    // Params: name : Type , ...
     let mut plist = "";
     let mut first = true;
+    let mut env = "";
     while p < n {
         let pk = field_at(list_get(toks, p), 0);
         if pk == "RPAREN" {
@@ -30,27 +31,22 @@ pub fn c_emit_fn(toks: List[String], pos: Int, n: Int) -> Int {
             let mut pty = "long long";
             if p < n && field_at(list_get(toks, p), 0) == "COLON" {
                 p = p + 1;
-                if p < n && field_at(list_get(toks, p), 0) == "AMP" {
-                    pty = "int";
-                    p = c_emit_skip_type(toks, p, n);
-                } else if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                pty = c_ty_at(toks, p, n);
+                if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
                     let tn = field_at(list_get(toks, p), 3);
-                    if tn == "String" {
-                        pty = "OoStr";
-                    }
-                    if tn == "Int" {
-                        pty = "long long";
-                    }
-                    if tn == "Bool" {
-                        pty = "int";
-                    }
                     if tn == "List" {
-                        pty = "OoSList";
+                        let lk = c_peek_list_elem(toks, p, n);
+                        if lk == "I" {
+                            env = c_env_put(env, pname, "I");
+                        } else {
+                            env = c_env_put(env, pname, "S");
+                        }
                     }
-                    p = c_emit_skip_type(toks, p, n);
-                } else {
-                    p = c_emit_skip_type(toks, p, n);
+                    if tn == "String" {
+                        env = c_env_put(env, pname, "T");
+                    }
                 }
+                p = c_emit_skip_type(toks, p, n);
             }
             if first {
                 plist = pty + " " + pname;
@@ -62,29 +58,51 @@ pub fn c_emit_fn(toks: List[String], pos: Int, n: Int) -> Int {
             p = p + 1;
         }
     }
+    // Return type after ->  (default void when absent)
+    let mut ret_ty = "void";
     if p < n {
         if field_at(list_get(toks, p), 0) == "ARROW" {
             p = p + 1;
+            ret_ty = c_ty_at(toks, p, n);
+            // Seed list_new / list ops from return type
+            if ret_ty == "OoSList" {
+                env = c_env_put(env, "__ann__", "S");
+                env = c_env_put(env, "__ret__", "S");
+            }
+            if ret_ty == "OoIList" {
+                env = c_env_put(env, "__ann__", "I");
+                env = c_env_put(env, "__ret__", "I");
+            }
             p = c_emit_skip_type(toks, p, n);
         }
     }
     if fn_name == "main" {
+        // CHS main: inject argc/argv → args List[String]; dummy caps
+        env = c_env_put(env, "args", "S");
+        env = c_env_put(env, "__main__", "1");
         println("");
         println("int main(int argc, char **argv) {");
-        p = c_emit_block(toks, p, n);
+        println("  int fs = 0; int sys = 0;");
+        println("  OoSList args = oo_slist_new();");
+        println("  { int ai; for (ai = 1; ai < argc; ai++) {");
+        println("    args = oo_slist_push(args, oo_str_lit(argv[ai]));");
+        println("  } }");
+        let br = c_emit_block(toks, p, n, env);
+        p = parse_int(list_get(br, 0));
         println("  return 0;");
         println("}");
     } else {
         println("");
+        let mut sig = ret_ty + " " + fn_name;
         if first {
-            println("void " + fn_name + "(void) {");
+            sig = sig + "(void)";
         } else {
-            println("void " + fn_name + "(" + plist + ") {");
+            sig = sig + "(" + plist + ")";
         }
-        p = c_emit_block(toks, p, n);
+        println(sig + " {");
+        let br2 = c_emit_block(toks, p, n, env);
+        p = parse_int(list_get(br2, 0));
         println("}");
     }
     return p;
 }
-
-// Skip a type: Ident | Ident[T,...] | &Ident | nested brackets.

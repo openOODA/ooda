@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# job: product CLI pure-only dispatch (host frontend deleted)
+# in:  release ooda + native oodac
+# out: exit 0 if pure path + fail rails + anti FORCE_HOST host path
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+mkdir -p "$TMPDIR"
+OODA="${OODA:-$ROOT/bin/ooda}"
+OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
+
+if [[ ! -x "$OODA" ]]; then
+  echo "ERR_NO_OODA: need pure $OODA (scripts/bootstrap_no_cargo.sh)" >&2
+  exit 1
+fi
+if [[ ! -x "$OODAC" ]]; then
+  echo "ERR_NO_OODAC: need $OODAC" >&2
+  exit 1
+fi
+
+fail=0
+pass() { echo "OK $*"; }
+bad() { echo "FAIL $*" >&2; fail=1; }
+
+F="$ROOT/fixtures/int_main.oo"
+CAP_FAIL="$ROOT/bootstrap/corpus/check/fail/no_cap_fetch.oo"
+LEX_FAIL="$ROOT/bootstrap/corpus/lex/fail/bad_char.oo"
+BUILD_SRC="$ROOT/fixtures/chs_list_string.oo"
+
+# --- pure dump tokens ≡ direct oodac ---
+"$OODA" dump tokens "$F" >"$TMPDIR/prod_tok.txt"
+"$OODAC" tokens "$F" >"$TMPDIR/oodac_tok.txt"
+if diff -q "$TMPDIR/prod_tok.txt" "$TMPDIR/oodac_tok.txt" >/dev/null; then
+  pass "product dump tokens == oodac"
+else
+  bad "product dump tokens diverge from oodac"
+fi
+
+# --- product check pure ---
+"$OODA" check "$F" >"$TMPDIR/prod_chk.txt" 2>"$TMPDIR/prod_chk.err"
+pc=$?
+if [[ $pc -ne 0 ]]; then bad "product check pass exit=$pc"; else pass "product check pass"; fi
+if grep -q 'openOODA check' "$TMPDIR/prod_chk.txt" 2>/dev/null; then
+  bad "product check still uses host banner"
+else
+  pass "product check not host banner"
+fi
+
+# --- fail rails ---
+set +e
+"$OODA" check "$CAP_FAIL" >"$TMPDIR/cap.out" 2>"$TMPDIR/cap.err"
+rc=$?
+set -e
+if [[ $rc -eq 0 ]]; then bad "product check accepted no_cap_fetch"; else pass "product check fail-closed cap"; fi
+
+set +e
+"$OODA" dump tokens "$LEX_FAIL" >"$TMPDIR/lex.out" 2>"$TMPDIR/lex.err"
+rl=$?
+set -e
+if [[ $rl -eq 0 ]]; then bad "product dump tokens accepted bad_char"; else pass "product dump fail-closed lex"; fi
+
+# --- pure build-c ---
+cp "$BUILD_SRC" "$TMPDIR/smoke.oo"
+"$OODA" build --target c "$TMPDIR/smoke.oo" >"$TMPDIR/build.out" 2>"$TMPDIR/build.err" || true
+if [[ -x "$TMPDIR/smoke" ]]; then
+  out=$("$TMPDIR/smoke" | tr '\n' ',' | head -c 80)
+  if echo "$out" | grep -q '2'; then
+    pass "product pure build-c smoke ($out)"
+  else
+    bad "product pure build odd output: $out"
+  fi
+  rm -f "$TMPDIR/smoke"
+else
+  bad "product pure build-c missing binary"
+  cat "$TMPDIR/build.out" "$TMPDIR/build.err" | head -20 || true
+fi
+
+# --- wasm fail-closed ---
+set +e
+"$OODA" build --target wasm "$F" >"$TMPDIR/wasm.out" 2>"$TMPDIR/wasm.err"
+rw=$?
+set -e
+if [[ $rw -eq 0 ]]; then bad "wasm accepted"; else pass "wasm fail-closed"; fi
+
+# --- pure native run ---
+set +e
+"$OODA" run "$BUILD_SRC" >"$TMPDIR/run.out" 2>"$TMPDIR/run.err"
+rr=$?
+set -e
+if [[ $rr -ne 0 ]]; then
+  bad "product pure run failed exit=$rr"
+elif ! grep -q '2' "$TMPDIR/run.out"; then
+  bad "product pure run missing expected output"
+else
+  pass "product pure run native"
+fi
+
+# --- test --fuzz residual ---
+set +e
+"$OODA" test "$BUILD_SRC" --fuzz >"$TMPDIR/fuzz.out" 2>"$TMPDIR/fuzz.err"
+rz=$?
+set -e
+if [[ $rz -eq 0 ]]; then bad "test --fuzz accepted"; else pass "test --fuzz fail-closed"; fi
+
+# --- host modules + Rust shell gone (B0) ---
+if [[ -d "$ROOT/src" ]]; then
+  bad "src/ still present"
+else
+  pass "src/ deleted (no Rust shell)"
+fi
+if [[ -f "$ROOT/Cargo.toml" ]]; then
+  bad "Cargo.toml still present"
+else
+  pass "Cargo.toml deleted (no Cargo product)"
+fi
+
+# --- no OK_HOST in pure sources ---
+if grep -rq 'OK_HOST' "$ROOT/oodac" "$ROOT/cli" --include='*.oo' 2>/dev/null; then
+  bad "OK_HOST still in pure sources"
+else
+  pass "no OK_HOST in pure sources"
+fi
+
+RS=$(find "$ROOT" -name '*.rs' -not -path '*/.git/*' -not -path '*/target/*' | wc -l)
+echo "RS_COUNT=$RS"
+if [[ "$RS" -eq 0 ]]; then
+  pass "B0 RS_COUNT=0"
+else
+  bad "RS_COUNT=$RS (want 0)"
+fi
+
+# Product binary must be pure (bin/ooda), not cargo target
+if [[ "$OODA" == *target/release* ]]; then
+  bad "OODA still points at cargo target"
+else
+  pass "OODA=$OODA pure path"
+fi
+
+if [[ $fail -ne 0 ]]; then
+  echo "product_pure_dispatch_smoke: FAILED" >&2
+  exit 1
+fi
+echo "product_pure_dispatch_smoke: PASSED"
+exit 0

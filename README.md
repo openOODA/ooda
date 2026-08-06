@@ -1,96 +1,121 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.181.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.182.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
 > **DESIGN.md** is the north star (unchanged by alpha releases).  
-> Userland is **`.oo`**. **CHS self-host frontend** is green (`oodac` native + fixed-point referee).  
-> Full SPEC product self-host is **not** claimed on alpha.  
-> **Beta goal:** **zero `.rs` files** in the product tree (self-hosted; no Cargo/Rust host) — see [`bootstrap/BETA.md`](bootstrap/BETA.md).
+> Product tree is **zero `.rs`** (B0). Build/ship path uses pure `.oo` + C runtime + a trusted seed binary — **no Cargo/rustc**.  
+> **Not a beta tag:** residual seed bootstrap, residual fail-closed features, org pin polish remain. See [`bootstrap/BETA.md`](bootstrap/BETA.md).
 
 ---
 
-## Quick Start
+## Quick start (no Rust)
 
 ```bash
 git clone https://github.com/openOODA/ooda.git && cd ooda
-cargo build --release
+# Need a pure seed compiler once (prebuilt oodac, or existing oodac/oodac in tree):
+export SEED_OODAC="${SEED_OODAC:-$PWD/oodac/oodac}"
+./scripts/bootstrap_no_cargo.sh   # gcc + seed only → oodac/oodac + bin/ooda
 
-./target/release/ooda run fixtures/hello.oo
-./target/release/ooda run fixtures/while_count.oo
-./target/release/ooda check fixtures/hello.oo
-./target/release/ooda build fixtures/while_count.oo --emit-llvm
-./target/release/ooda build --target wasm fixtures/while_count.oo
+./bin/ooda version
+./bin/ooda check fixtures/chs_list_string.oo
+./bin/ooda run fixtures/chs_list_string.oo
+./bin/ooda dump tokens fixtures/int_main.oo
+./bin/ooda build --target c fixtures/while_count.oo
 ```
 
-`fixtures/` is harness input only (tests, parity, fixed-point) — not a tutorial pack.  
-Historical demos remain in git history under the old `examples/` path.
+Requires: **bash, gcc, seed binary**. Does **not** require `cargo`, `rustc`, or `rustup`.
+
+Install story (fetch prebuilt release + `install.oo`):
 
 ```bash
 curl -fsSL https://openOODA.github.io/install.sh | sh
-ooda --version   # 0.115.0-alpha
-```
-
-```ooda
-import std::crypto;   // needs OODA_STD pointing at openooda-std
-import "lib.oo";       // relative / OODA_PATH
+ooda version
 ```
 
 ---
 
-## What's real in v0.181.0-alpha (CHS M0–M5)
+## What's real in v0.182.0-alpha (pure product)
 
 | Capability | Status |
 |---|---|
-| `while` / `else if` / unary `!` | Real (interp + C + LLVM/WAT; WASM while polarity + i32→i64 compare extend) |
-| Option / Result / must-use / let mut | Real |
-| Nested block scopes | Real: `let` inside if/while does **not** leak; match-arm pattern shadows restore; outer `let mut` assign in match+if persists |
-| Type aliases | Real: unify for arith/return; `Int[lo..hi]` on params **and** let/return (const TC + runtime) |
-| Caps + sealed effects | **Interpreter:** static + runtime object-cap (live handle). **CHS C/native:** lowered sealed set (read_file/write_file/path_exists/file_size/env_get/sys_exec + methods) with **compile-time** caps (tokens erased in C main); other sealed (fetch/mkdir_p/…) **fail-closed**. **WASM/LLVM:** all sealed I/O still refused |
-| `?` try-operator | Real: unwraps Result; early-return on Err; only in Result-returning fns; build refuses outside interp |
-| Bool match | Real: `true`/`false` patterns + exhaustiveness |
-| `.contains` | Real on String (interp + CHS C) |
-| Field assign | Real: `p.x = v` and nested `o.inner.n = v` on `let mut` roots (interp + CHS C) |
-| Sealed method receiver types | Real: `.path_exists`/`.file_size` need `FsCap`; `.env_get`→`EnvCap`; `.sys_exec`→`SysCap`; `.get`→`NetCap` |
-| list_get const OOB | Real: const negative / known list_new+push length chains fail at typecheck |
-| Nested/tail return refine | Real: const `return` inside if/while + tail expr enforces `Int[lo..hi]` / aliases |
-| `Int[lo..hi]` refinement | Real on let/assign/return/params **including via type aliases**; const typecheck + runtime |
-| Types fail-closed | Missing returns fail; match arms unify; same-type arith/eq; if-value needs else; assert_eq types |
-| Net GET (`fetch` / `http_get` / `.get`) | Real HTTPS via curl under threaded `&NetCap` (interpreter) |
-| AI diagnostics (`--json-errors`) | Real JSON + measured timings; patch codemods including `refinement_bounds` |
-| Measured `ooda em` / `em --json` / `bench --em` | Real clocks only (W, µs, V); JSON EmReport for agents — no fake Boyd Ps |
-| String methods | Real on interpreter + CHS C (`.char_at` / `.str_slice`); LLVM subset refuses strings fail-closed |
-| WASM strings + List[Int]/List[String] | Real: string methods + `+` concat; List[Int] deep `==` (`$list_eq`); List[String] push/len/get/for + content `==` (`$list_str_eq`/streq, not pointer). Eq RT gated (W↓). Sealed caps still refuse. Fixture `list_string.oo`. Dev wasmtime smoke |
-| Dual engine compile | Contracts + `?` refused outside interp; C lowers allowlisted sealed FS/env/sys; wasm/llvm refuse sealed; pure compute subset may lower |
-| `EnvCap` `.env_get` | Real on **interpreter** and **CHS C** (compile-time EnvCap); wasm/llvm refuse |
-| Network `pkg install` | Partial: local pin; https `*.tar.gz` via curl+tar; `.minisig`/`.sig` fail-closed when present (need pubkey/gpg; `OODA_PKG_ALLOW_UNSIGNED=1` escape); `.sha256` optional/`OODA_PKG_REQUIRE_SHA256=1` |
-| `ooda patch` | Real body / params / return type / requires / ensures |
-| `ooda migrate --edition 2026` | Partial real: exhaustive match wildcards + assigned `let`→`let mut` |
-| `type T = Int where lo..hi` | Real subset: const Int range → `Int[lo..hi]` alias; other `where` forms fail parse |
-| **CHS:** `List`, string walk, structs, real FS, argv | Real on interpreter |
-| **CHS C backend** (`ooda build --target c`) | Real — gcc + `runtime/chs_rt.c` (no clang required) |
-| **Canonical dumps** `ooda dump tokens\|ast\|check` | Real |
-| **oodac** (`oodac/main.oo`) | Real lex/parse/cap-check + **R1 typecheck slice** in `.oo`: ann/return lits, pure/var binops, field chains (incl. nested + param-typed), missing struct-lit fields, if/logic field honesty; build hybrid. Not full typecheck/eval self-host |
-| **Parity / fixed-point** | `scripts/chs_parity.sh`, `scripts/fixed_point.sh` |
-| `break` / `continue` | Real in while/for (interp + CHS C + WASM + LLVM integer subset); while-body tail `if`/break not silently dropped; outside loop fails typecheck |
-| `for x in list` / `lo..hi` | Real: desugars to while+list_get (interp + C); unannotated lists refine element type on assign; **C defers list kind until first push** (int vs string) |
-| `ooda build --release` | Real on CHS C path: gcc `-O3 -flto` |
-| LLVM Int/Bool/Float + while | Real (clang to link when present) |
-| LSP live diagnostics | Real Incremental `textDocumentSync` (kind 2) + open-buffer store. **WorkspaceEdit**: `let mut`, missing return, return-type, undefined-var stub, missing `: Int`, arg-type whole-token default (not completion/hover/rename) |
+| Product CLI `bin/ooda` | Pure `.oo` (`cli/main.oo`) → native; dispatches to pure `oodac` |
+| Compiler `oodac` | Pure `.oo` self-host; lex/parse/check + emit-c + multi-module pure build |
+| `check` / `dump tokens\|ast\|check` | Real on pure path |
+| `build --target c\|chs\|native` | Real: emit-c + gcc + `runtime/chs_rt*.c` |
+| `run` | Real: pure native build+exec (not host interpreter) |
+| `test` | Pure check gate; `--fuzz` fail-closed residual |
+| Fixed-point | `scripts/fixed_point.sh` pure seed → stage-1 → stage-2; digests s1≡s2; no OK_HOST |
+| Parity | `scripts/chs_parity.sh` product ≡ pure oodac |
+| Line lock | `scripts/check_file_lines.sh` O=0 |
+| Zero `.rs` in product tree | **B0** (`RS_COUNT=0`; no `src/`, no `Cargo.toml`) |
 
-## Not implemented (fail non-zero)
+### Residual fail-closed (non-zero; not beta surface)
 
-Full LSP (no completion/hover/rename), full package registry, time-travel replay, in-process CPython/PyTorch, **full WASM product** (still subset + sealed refuse), full SPEC self-host / **zero `.rs` beta**.  
-oodac typecheck is a **literal/annotation/pure-binop/undefined-var slice only** — not full `src/typecheck.rs` parity.  
-`ooda migrate` is **not** a full edition engine — only the two codemods above.
-
-
-Stage-0 is still **Rust** (`src/**/*.rs`). That is intentional on alpha. **Beta exit criterion:** no `.rs` left — [`bootstrap/BETA.md`](bootstrap/BETA.md).
-
-See `bootstrap/CHS.md` (CHS freeze) and `bootstrap/BETA.md` (zero-Rust beta gate).
+| Item | Behavior |
+|---|---|
+| `--json-errors` / `--fuzz` / `--release` / `--emit-llvm` | Fail-closed residual |
+| `build --target wasm\|llvm` | Fail-closed (beta-out / residual) |
+| LSP / pkg / migrate / patch / bench | Removed from product |
+| Host interpreter / contracts on native | Residual — native does not lower requires/ensures |
+| Cold-start seed | Need prebuilt pure `oodac` once (`SEED_OODAC`) |
 
 ---
 
-Ship notes: [GitHub Releases](https://github.com/openOODA/ooda/releases) (not root RELEASE_NOTES files; history recoverable via git).
+## Floor / backends (freedom later)
 
-Related: `spec`, `qa`, `std` (.oo), `openOODA.github.io`.
+Product self-host today uses **Backend-C** (`emit-c` + `runtime/chs_rt*` + `gcc`).  
+That is an intentional thin OS floor, **not** a Rust host and **not** required to stay the only floor forever.
+
+- Policy + roadmap: [`bootstrap/FLOOR.md`](bootstrap/FLOOR.md)  
+- Runtime ABI sketch: [`bootstrap/RUNTIME_ABI_v0.md`](bootstrap/RUNTIME_ABI_v0.md)  
+
+Frontend (lex/parse/check) stays backend-neutral; lowering the floor means new emit/runtime/link packages, not rewriting the language.
+
+## Bootstrap & release (no Cargo)
+
+```bash
+# Rebuild product from seed (no rustc)
+SEED_OODAC=./oodac/oodac ./scripts/bootstrap_no_cargo.sh
+
+# Self-host referee
+./scripts/fixed_point.sh
+
+# Rails
+./scripts/p3_no_cargo_smoke.sh
+./scripts/product_pure_dispatch_smoke.sh
+./scripts/chs_parity.sh
+./scripts/beta_cli_smoke.sh
+./scripts/c_emit_smoke.sh
+./scripts/ci_no_rust.sh   # B1-style: asserts no cargo on product path
+
+# Release tarball (no cargo)
+./scripts/release.sh v0.182.0-alpha
+```
+
+Builder needs **gcc + seed binary only**. See `scripts/bootstrap_no_cargo.sh`.
+
+---
+
+## Beta gates (honest)
+
+| Gate | Status (this pin) |
+|---|---|
+| **B0** no `.rs` | PASS |
+| **B1** no Cargo product build | PASS (scripts; CI matrix optional residual) |
+| **B2** pure fixed-point surface | PASS (oodac) |
+| **B3** ship without stage-0 Rust | PASS path (`release.sh` + seed) |
+| **B4** honesty / fail-closed residual | PASS process; **no beta tag** until public review |
+| **B5** org siblings non-Rust product | PASS for product-critical siblings (std/qa/docs …); editors optional |
+
+**Do not call this beta** until a public beta tag + install pin + notes are deliberately cut. This is **v0.182.0-alpha** with a zero-Rust product tree.
+
+Proof logs: monorepo `PROGRESS.md`; bootstrap checklist `bootstrap/ZERO_RUST_TODO.md`; criteria `bootstrap/BETA.md`.
+
+---
+
+## Related
+
+`spec`, `qa`, `std` (`.oo` only), `openOODA.github.io`, optional `tree-sitter` / `vscode` (editor support — not compiler critical path).
+
+Ship notes: [GitHub Releases](https://github.com/openOODA/ooda/releases).

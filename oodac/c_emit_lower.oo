@@ -1,81 +1,9 @@
-// job: lower CHS expr tokens to C snippets (list/string builtins)
-// in:  toks + start pos (at first expr token)
-// out: via side-effect helpers; c_emit_expr_c returns C text, advances via c_emit_expr_end
+// package: backend-c — emit floor (see bootstrap/FLOOR.md)
+// job: lower CHS expr tokens to C snippets (primary + expr)
 // stage: emit
 
-// Map known call names to C runtime (empty string = unknown).
-
-pub fn c_lower_call_name(name: String) -> String {
-    if name == "list_new" {
-        return "oo_ilist_new";
-    }
-    if name == "list_push" {
-        return "oo_ilist_push";
-    }
-    if name == "list_get" {
-        return "oo_ilist_get";
-    }
-    if name == "list_len" {
-        return "oo_ilist_len";
-    }
-    if name == "chars_len" {
-        return "oo_chars_len";
-    }
-    if name == "char_at" {
-        return "oo_char_at";
-    }
-    if name == "str_slice" {
-        return "oo_str_slice";
-    }
-    if name == "char_is_alpha" {
-        return "oo_char_is_alpha";
-    }
-    if name == "char_is_digit" {
-        return "oo_char_is_digit";
-    }
-    if name == "char_is_space" {
-        return "oo_char_is_space";
-    }
-    if name == "str_contains" {
-        return "oo_str_contains";
-    }
-    if name == "pack_skip" || name == "pack_tok" || name == "pack_err" {
-        return name;
-    }
-    if name == "Ok" {
-        return "/*Ok*/";
-    }
-    if name == "Err" {
-        return "/*Err*/";
-    }
-    return "";
-}
-
-// C type for let-binding of a call result (heuristic for CHS smoke).
-
-pub fn c_lower_result_ty(name: String) -> String {
-    if name == "list_new" || name == "list_push" {
-        return "OoIList";
-    }
-    if name == "char_at" || name == "str_slice" {
-        return "OoStr";
-    }
-    if name == "chars_len" || name == "list_len" || name == "list_get" {
-        return "long long";
-    }
-    if name == "char_is_alpha" || name == "char_is_digit" || name == "char_is_space" {
-        return "int";
-    }
-    return "long long";
-}
-
-// Emit one primary/call/literal starting at pos; returns new pos after primary.
-// Prints nothing — returns C expression string via println? No: we use a side channel:
-// pack into a single string by building it.
-
-
-pub fn c_emit_primary_c(toks: List[String], pos: Int, n: Int) -> List[String] {
-    // returns [new_pos_str, c_text]
+// returns [new_pos_str, c_text]; env = "name=S;..." for list kind.
+pub fn c_emit_primary_c(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
     let mut p = pos;
     let k = field_at(list_get(toks, p), 0);
     let t = field_at(list_get(toks, p), 3);
@@ -108,38 +36,88 @@ pub fn c_emit_primary_c(toks: List[String], pos: Int, n: Int) -> List[String] {
         outf = list_push(outf, "0");
         return outf;
     }
+    // Grouping: (expr) — required for (ri + 1) < rn and field_at emit
+    if k == "LPAREN" {
+        p = p + 1;
+        let pr = c_emit_expr_c(toks, p, n, env);
+        p = parse_int(list_get(pr, 0));
+        let inner = list_get(pr, 1);
+        if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
+            p = p + 1;
+        }
+        let mut outp: List[String] = list_new();
+        outp = list_push(outp, p.to_string());
+        outp = list_push(outp, "(" + inner + ")");
+        return outp;
+    }
+    // Unary ! and - (prefix at primary position)
+    if k == "BANG" || t == "!" {
+        p = p + 1;
+        let pru = c_emit_primary_c(toks, p, n, env);
+        p = parse_int(list_get(pru, 0));
+        let mut outu: List[String] = list_new();
+        outu = list_push(outu, p.to_string());
+        outu = list_push(outu, "(!" + list_get(pru, 1) + ")");
+        return outu;
+    }
+    if k == "MINUS" || t == "-" {
+        p = p + 1;
+        let prm = c_emit_primary_c(toks, p, n, env);
+        p = parse_int(list_get(prm, 0));
+        let mut outm: List[String] = list_new();
+        outm = list_push(outm, p.to_string());
+        outm = list_push(outm, "(-" + list_get(prm, 1) + ")");
+        return outm;
+    }
     if k == "IDENT" {
         p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "DOT" {
+            return c_emit_method(toks, p, n, env, t);
+        }
         if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
             p = p + 1;
-            let cname = c_lower_call_name(t);
-            let mut args = "";
-            let mut first = true;
-            while p < n {
-                let ak = field_at(list_get(toks, p), 0);
-                if ak == "RPAREN" {
-                    p = p + 1;
-                    break;
-                }
-                if ak == "COMMA" {
-                    p = p + 1;
-                } else {
-                    let pr = c_emit_primary_c(toks, p, n);
-                    p = parse_int(list_get(pr, 0));
-                    let a = list_get(pr, 1);
-                    if first {
-                        args = a;
-                        first = false;
-                    } else {
-                        args = args + ", " + a;
-                    }
-                }
+            let ap = c_emit_call_args(toks, p, n, env);
+            p = parse_int(list_get(ap, 0));
+            let args = list_get(ap, 1);
+            let a0 = list_get(ap, 2);
+            let a1 = list_get(ap, 3);
+            let mut cname = c_lower_call_name(t);
+            if t == "list_new" || t == "list_push" || t == "list_get" || t == "list_len" {
+                let lk = c_infer_list_kind(env, t, a0, a1);
+                cname = c_list_c_name(t, lk);
             }
+            // Result constructors → OoResS compound (ok=1 Ok, ok=0 Err; val holds payload)
             let mut call = t + "(" + args + ")";
-            if cname != "" {
+            if t == "Ok" {
+                call = "((OoResS){1, " + args + "})";
+            } else if t == "Err" {
+                call = "((OoResS){0, " + args + "})";
+            } else if t == "process_exit" {
+                // process_exit(code) → oo_process_exit(code)
+                call = "oo_process_exit(" + args + ")";
+            } else if t == "read_file" {
+                // read_file(fs, path) or read_file(path) → oo_read_file(path)
+                let mut patha = a0;
+                if a1 != "" {
+                    patha = a1;
+                }
+                call = "oo_read_file(" + patha + ")";
+            } else if t == "write_file" {
+                // write_file(fs, path, content) — last two args
+                call = "oo_write_file(" + args + ")";
+            } else if t == "sys_exec" {
+                // sys_exec(sys, ..., shell_cmd) → last string arg via system(3)
+                let mut cmd = args;
+                // prefer last comma-separated piece if multi
+                if a1 != "" {
+                    cmd = a1;
+                }
+                // if more than 2 args, use full args string's last segment: re-parse poorly —
+                // convention: last arg is shell string; rebuild from trailing
+                call = "oo_sys_exec1(" + c_sys_exec_last_arg(args) + ")";
+            } else if cname != "" {
                 call = cname + "(" + args + ")";
             }
-            // Trailing binary op: x + 1 after call (rare)
             let mut out3: List[String] = list_new();
             out3 = list_push(out3, p.to_string());
             out3 = list_push(out3, call);
@@ -157,22 +135,7 @@ pub fn c_emit_primary_c(toks: List[String], pos: Int, n: Int) -> List[String] {
     return out5;
 }
 
-// Full expression: primary with left-assoc binary ops (no right-primary reentry of binop).
-pub fn c_emit_expr_c(toks: List[String], pos: Int, n: Int) -> List[String] {
-    let mut pack = c_emit_primary_c(toks, pos, n);
-    let mut guard = 0;
-    while guard < 32 {
-        let next = c_emit_maybe_binop(toks, pack, n);
-        let p0 = list_get(pack, 0);
-        let p1 = list_get(next, 0);
-        if p0 == p1 {
-            return next;
-        }
-        pack = next;
-        guard = guard + 1;
-    }
-    return pack;
+// Full expression with ||/&& vs == precedence (Pratt left-assoc).
+pub fn c_emit_expr_c(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
+    return c_emit_expr_prec(toks, pos, n, env, 1);
 }
-
-// Escape .oo string token text into a C string body (no surrounding quotes).
-

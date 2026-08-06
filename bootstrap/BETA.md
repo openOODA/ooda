@@ -1,126 +1,228 @@
-# Beta exit criterion: zero Rust (`.rs`)
+# Beta exit criterion (product + purity)
 
 **Status:** Goal (not claimed yet — still alpha).  
-**Constitution:** `DESIGN.md` unchanged; this is a *product/bootstrap* exit bar, not a redesign of the north star.  
-**Userland rule (all alphas + beta):** product code is **`.oo`**. This document goes further for **beta**.
+**Constitution:** `DESIGN.md` is the language north star and is **not** edited here.  
+**This document:** criteria for a **beta tag** — purity, ship, honesty, and a **frozen beta product surface**.  
+**Userland rule (all alphas + beta):** product code is **`.oo`**.
+
+### Owner authority (non-negotiable)
+
+**Only the project owner decides when openOODA is ready for a beta tag** (and which version string that is).
+
+| This document does | This document does **not** |
+|--------------------|----------------------------|
+| Define **minimum** gates so “beta” cannot mean hollow purity or fake surface | Force a tag the day B0–B5 or Part B first go green |
+| Give agents/humans a checklist to work against | Auto-declare beta from CI, agents, or PROGRESS prose |
+| Allow **promoting** Out → In (grow beta surface) by deliberate table edit | Forbid staying on alpha while growing DESIGN, platform, or polish |
+
+**Growing and improving is always allowed on alpha** (and after beta, on later releases).  
+Meeting gates = **eligible** for beta consideration.  
+**Shipping the tag** = owner decision only — after whatever extra growth, polish, or delay the owner wants.
+
+Agents, rails, and collaborators may report “gates green” or “gaps remain.” They must **not** claim beta, cut a beta tag, or treat gate-green as mandatory immediate release.
 
 ---
 
-## Goal (one line)
+## One-line goal
 
-**When openOODA ships its first beta, the `openOODA/ooda` product tree must contain no `.rs` files** — the stage-0 Rust host is gone; the toolchain is built and shipped without a Rust/Cargo dependency.
+**First beta** = pure self-hosted toolchain (no Rust product host) **and** a **named, proven product surface** that works end-to-end; everything else **fail-closed** and documented as out-of-beta — **and** the owner chooses to tag.
+
+Beta is **not** “DESIGN.md fully implemented.”  
+Beta is **not** automatic when the checklist is green.
 
 ---
 
-## Definition of done (beta gate)
+## How this doc relates to others
 
-All of the following must be true before tagging anything as **beta**:
+| Doc | Role |
+|-----|------|
+| **`DESIGN.md`** | What OODA *is* long-term (caps, contracts, AI-native, systems/native). Unchanged by beta. |
+| **`CHS.md`** | Frozen **compiler-host subset** for self-host. Beta surface ⊇ CHS (at least enough to build the compiler). |
+| **`FLOOR.md`** | Native **backend policy** (Backend-C today; other backends later). C allowed at beta. |
+| **`BETA.md` (this file)** | **Definition of done for a beta tag** + in/out surface + proof. |
+| **`B0_B5_PROOF.md`** | Live proof log for purity gates (update when re-verifying). |
 
-| # | Gate | How we prove it |
-|---|------|------------------|
-| **B0** | **No `.rs` in tree** | `find . -name '*.rs' -not -path './.git/*' \| wc -l` → **0** (exclude only `.git`; no `src/**/*.rs`, no `tests/**/*.rs`) |
-| **B1** | **No Cargo product build** | No `Cargo.toml` / `Cargo.lock` required to build or install the shipped compiler; CI builds without `rustc`/`cargo` |
-| **B2** | **Self-host fixed-point (product surface)** | Compiler written in `.oo` builds itself: stage-N and stage-N+1 are bit-identical (or digest-identical) for the beta surface — stronger than CHS frontend-only fixed-point |
-| **B3** | **Ship path** | `install` / release tarball ships an `ooda` binary produced **without** linking stage-0 Rust |
-| **B4** | **Honesty** | Unfinished beta-out-of-scope features still **fail non-zero**; no fake “self-hosted” claims while any `.rs` remains |
-| **B5** | **Org consistency** | `std`, `qa`, `install` remain `.oo` (or shell bootstrap only); no new Rust in sibling product repos |
+```text
+DESIGN     →  long-term language vision
+BETA       →  “may we tag beta?” (purity + frozen surface + ship)
+CHS        →  bootstrap language fence
+FLOOR      →  codegen/runtime floor under native builds
+```
+
+---
+
+## Definition of done (owner may tag beta only if all true)
+
+These gates are **necessary** for an honest beta tag. They are **not sufficient** to force a tag — see **Owner authority** above.
+
+### Part A — Purity & ship (B0–B5)
+
+| # | Gate | Proof |
+|---|------|--------|
+| **B0** | **No `.rs` in product tree** | `find . -name '*.rs' -not -path './.git/*' -not -path './target/*' \| wc -l` → **0** |
+| **B1** | **No Cargo product build** | No `Cargo.toml` / `Cargo.lock` as supported path; build/install without `rustc`/`cargo` (script and/or CI) |
+| **B2** | **Self-host fixed-point on beta surface** | Compiler in `.oo` builds itself: stage-N vs N+1 digests match for the **beta surface** (see rails below); pure path only (no host soft-pass) |
+| **B3** | **Ship path without stage-0 Rust** | Release tarball / install ships `ooda` (and seed compiler as needed) from `.oo`+C pipeline only |
+| **B4** | **Honesty** | Out-of-beta features **fail non-zero**; no “self-hosted” or “beta” claims that contradict residual list |
+| **B5** | **Org consistency** | Product-critical siblings (`std`, `qa`, `install`, docs/site pins) do not **require** Rust for the beta product path |
 
 **Allowed at beta (not Rust):**
 
-- Thin **C** runtime / host glue (e.g. today’s spirit of `runtime/chs_rt.c`) if required for OS I/O and linking — preferred bootstrap seed over Rust.
-- Chapter-0 **shell** bootstrap (`install` / `install.sh`) that only fetches a prebuilt binary and hands off to `install.oo`.
-- Prebuilt **release artifacts** (binaries), as long as they were produced by the `.oo`/C pipeline.
+- Thin **C** runtime / link glue (`runtime/chs_rt*`) — Backend-C floor (`FLOOR.md`).
+- Chapter-0 **shell** install that fetches a prebuilt binary then hands off to `install.oo`.
+- Prebuilt **seed** binary (`SEED_OODAC` / `oodac` in the tarball) produced by the pure pipeline.
+- Optional editor grammars (tree-sitter, etc.) that are **not** required to build or run the compiler.
 
 **Not allowed at beta:**
 
-- Shipping or requiring `src/*.rs`, `tests/*.rs`, or `cargo build` as the supported path.
-- “Beta” tags while stage-0 Rust is still the real compiler.
+- Shipping or requiring product `src/**/*.rs`, `Cargo.toml`, or `cargo build` as the supported toolchain path.
+- A beta tag while any of B0–B5 or Part B lacks captured proof.
+- Claiming full DESIGN (LLVM production path, full AI suite, full net/async, …) unless those items are **in** the frozen surface below and proven.
+
+### Part B — Frozen beta product surface
+
+**Done for product beta** means every **In** row is green on the pure product binary; every **Out** row fails closed (non-zero) with a clear error.
+
+#### B.1 In for beta (must work)
+
+*Edit this table only when deliberately changing beta scope—not casually per feature PR.*
+
+| Area | In-beta requirement | Proof rails (examples) |
+|------|---------------------|-------------------------|
+| **CLI** | `ooda version`, `help`, `check`, `dump tokens\|ast\|check`, `build --target c\|chs\|native`, `run` (native build+exec), `test` as pure check gate (or stronger if promoted) | `product_pure_dispatch_smoke`, `beta_cli_smoke` |
+| **Compiler** | Pure `oodac`: tokens, ast, check, emit-c, multi-module pure build | `fixed_point`, `c_emit_smoke`, `chs_parity` |
+| **Language** | At least **CHS** surface (see `CHS.md`) usable for user programs on check + native C path | CHS fixtures + emit pass/fail |
+| **Caps** | Default-deny sealed I/O; CHS-supported caps lowered or fail-closed consistently on claimed path | corpus check fail `no_cap_*`; C sealed allowlist honesty |
+| **Self-host** | Seed + pure rebuild of compiler + product CLI without Rust | `bootstrap_no_cargo`, `fixed_point` |
+| **Install / pin** | Single pin string: BOOTSTRAP_PIN ↔ release ↔ site install ↔ `ooda version` | release extract smoke + install dry-run |
+| **Docs** | README + release notes: In list, Out list, seed+gcc, no cargo primary path | review checklist |
+
+#### B.2 Out of beta (must fail closed — not “missing quietly”)
+
+| Area | Out-of-beta (examples) | Behavior |
+|------|------------------------|----------|
+| Host Rust / Cargo product | any reintroduction | Forbidden (B0/B1) |
+| `build --target wasm` / `llvm` / `--emit-llvm` / `--release` (until promoted) | residual or beta-out | non-zero |
+| `--json-errors`, `--fuzz` (until promoted) | residual | non-zero |
+| Full DESIGN AI suite (`outline` / `reflect` / `patch` as product) | residual unless promoted into B.1 | non-zero or absent with docs |
+| Full SPEC beyond CHS + explicit promotions | post-beta | fail-closed or not advertised |
+| Non-`c` `--backend` (until F3+) | residual | `ERR backend …` |
+
+Promoting an Out item to In requires: implementation + pass/fail rails + this table edit + B4 still true for what remains Out.
+
+#### B.3 How we know Part B is done
+
+```text
+for each row in B.1:
+  pass fixtures green on pure bin/ooda + oodac
+  fail fixtures non-zero where meaningful
+for each row in B.2:
+  documented + non-zero (or explicitly “not shipped”)
+B0–B5 green with proof log (B0_B5_PROOF.md or release notes)
+public notes match In/Out tables
+```
+
+**No row in B.1 ⇒ not a beta requirement.**  
+**If it should block beta, put it in B.1.** That is how “done” stays knowable.
 
 ---
 
-## What is already true (alpha)
+## What beta is / is not
 
-| Piece | Status |
-|-------|--------|
-| Userland / std / install story | `.oo` |
-| CHS frontend (`oodac/main.oo`) fixed-point | Green (frontend only) |
-| Stage-0 host (`src/**/*.rs`) | **Still required** — real product `ooda` |
-| Full SPEC product self-host | **Not claimed** |
-
-Alpha may (and will) keep growing `.oo` while Rust shrinks module-by-module. **Beta is the hard cutover.**
-
----
-
-## Roadmap (depth order — power law)
-
-Work is sequenced so each step removes real dependency on Rust, not just renames files.
-
-### Phase R1 — Product surface in `.oo` (parity with stage-0 CLI)
-Port remaining stage-0 responsibilities into `.oo` (+ C backend as needed), with golden parity against current `ooda`:
-
-1. Lex / parse / check (extend `oodac` beyond CHS dumps)  
-2. Capability checker + typechecker (full alpha surface)  
-3. Interpreter **or** native path sufficient to run the compiler on itself  
-4. Codegen: CHS→C (primary); LLVM/WASM only if beta still needs them — subsets must fail closed  
-5. CLI: `run`, `check`, `build`, `test`, `dump`, `--json-errors`  
-
-**Gate:** `oodac` (or successor) implements the beta CLI surface under `ooda run` / native binary, with parity scripts.
-
-### Phase R2 — Replace stage-0 modules (delete `.rs` as you go)
-For each Rust module (`eval`, `typecheck`, `codegen_*`, `capabilities`, …):
-
-1. Implement in `.oo`  
-2. Parity tests (same inputs → same diagnostics / same output digests)  
-3. Switch default driver to `.oo` implementation  
-4. **Delete** the corresponding `.rs`  
-
-**Rule:** unfinished ports stay fail-closed; never dual-maintain silent stubs that claim success.
-
-### Phase R3 — Bootstrap without Rust
-1. Trusted seed: C (or last known-good native `ooda` binary) builds stage-1 from `.oo` sources  
-2. stage-1 builds stage-2; digests match (product fixed-point)  
-3. Release packaging uses stage-2 only  
-4. Remove `Cargo.toml`, `Cargo.lock`, `src/`, Rust CI jobs  
-
-**Gate:** B0–B5 all green on a clean machine with **no Rust toolchain installed**.
-
-### Phase R4 — Beta tag
-1. Version policy: first beta is e.g. `0.1.0-beta` / `1.0.0-beta` (exact scheme TBD; **forward only**)  
-2. GitHub Release + website install pin match  
-3. Public notes state: **self-hosted; no Rust in tree**  
+| Beta **is** | Beta **is not** |
+|-------------|-----------------|
+| Pure `.oo` product + self-host + ship | Full DESIGN complete |
+| Frozen In surface proven | “Feature complete systems platform” |
+| Out surface fail-closed | Silent stubs / soft-pass |
+| C floor allowed (Backend-C) | Claim of zero low-level floor |
+| Seed binary allowed | “No trusted binary ever” |
 
 ---
 
-## Anti-goals (keep honesty)
+## Current status (recompute each Observe — not a beta claim)
 
-- Do **not** delete `.rs` early and leave a hollow beta that shells out to a hidden Rust binary.  
-- Do **not** count generated C or checked-in binaries as “self-host done.”  
-- Do **not** edit `DESIGN.md` to declare victory; proof is B0–B5.  
-- Do **not** clear the full not-implemented list just to look beta-ready; unfinished stays fail-closed.
+| Piece | Typical alpha status (update when proving) |
+|-------|--------------------------------------------|
+| B0 RS=0, no Cargo.toml | Often **PASS** on pure tree |
+| B1 no-Cargo build scripts | **PASS** local; CI matrix may be residual |
+| B2 pure fixed_point | **PASS** when rails green |
+| B3 release/install path | Path exists; dress-rehearsal residual |
+| B4 honesty | Process; tag not cut |
+| B5 org | Product-critical siblings no Rust |
+| Part B.1 full freeze + all rails | **Not complete** until table is intentionally frozen and proven |
+| Public beta tag | **Not claimed** |
+
+Live notes: monorepo `PROGRESS.md`, optional `bootstrap/B0_B5_PROOF.md`.
 
 ---
 
-## Tracking metric (every release)
+## Rails (minimum set toward beta)
 
-Until beta:
+| Rail | Role |
+|------|------|
+| `scripts/check_file_lines.sh` | O=0 |
+| `scripts/fixed_point.sh` | B2 pure self-host |
+| `scripts/bootstrap_no_cargo.sh` / `ci_no_rust.sh` | B1 path |
+| `scripts/chs_parity.sh` | product ≡ pure oodac |
+| `scripts/c_emit_smoke.sh` | emit pass+fail |
+| `scripts/product_pure_dispatch_smoke.sh` / `beta_cli_smoke.sh` | CLI surface |
+| `scripts/release.sh` + extract smoke | B3 |
+| Corpus under `bootstrap/corpus/` + fixtures | Part B language/caps |
+
+---
+
+## Roadmap (toward a beta tag — power law)
+
+Order is **finish purity proof + freeze surface + ship dress rehearsal**, not “implement all of DESIGN.”
+
+1. **Purity locked** — B0–B3 green with re-runnable proof (CI preferred for B1).  
+2. **Freeze B.1 / B.2** — explicit edit; stop casual scope creep.  
+3. **Close B.1 gaps** — only items on the In list (e.g. contracts-on-native only if listed).  
+4. **Release dress rehearsal** — tarball + pin + install on clean machine (still may be `*-alpha` or `*-rc`).  
+5. **Owner decides to tag beta** — optional; version scheme forward-only; notes: self-hosted, no Rust, In/Out tables, seed+gcc.  
+   Until then: keep growing on **alpha** (or rc pins) as long as the owner wants.
+
+Post-beta: grow toward DESIGN (AI suite, broader language, more backends per FLOOR) without reintroducing a Rust product host.  
+Pre-beta with green gates: **still fine** — owner may keep improving without tagging.
+
+---
+
+## Anti-goals
+
+- Do **not** edit `DESIGN.md` to declare beta victory.  
+- Do **not** treat B0 alone as “product beta done.”  
+- Do **not** delete purity gates to ship a hollow binary.  
+- Do **not** advertise Out-of-beta features as working.  
+- Do **not** count generated C or a checked-in seed alone as “self-host done” without fixed_point-class proof.  
+- Do **not** reintroduce Cargo/Rust as the supported product path.  
+- Do **not** treat green gates as an automatic beta release; **owner tags beta**.  
+- Do **not** block further alpha growth because “beta criteria are already met.”
+
+---
+
+## Metrics (every pin until beta tag)
 
 ```text
 RS_COUNT=$(find . -name '*.rs' -not -path './.git/*' -not -path './target/*' | wc -l)
-OO_PRODUCT=$(find . -name '*.oo' -not -path './.git/*' | wc -l)
+OO_COUNT=$(find . -name '*.oo' -not -path './.git/*' -not -path './target/*' | wc -l)
+# O=0 via scripts/check_file_lines.sh
+# B0..B5 and Part B: pass/fail in PROGRESS or B0_B5_PROOF.md
 ```
 
-Report in release notes: **`RS_COUNT` remaining toward beta zero.**  
-Alpha is allowed to have `RS_COUNT > 0`. **Beta requires `RS_COUNT = 0`.**
+**Alpha** may still improve surface. **Beta tag** requires this document’s Definition of done (Part A **and** Part B).
 
 ---
 
-## For multi-LLM rotations
+## Multi-LLM / agent rotations
 
-When prioritizing work toward beta:
+1. Prefer work that **greens a B.1 row** or **B0–B5 proof** over random DESIGN sprawl.  
+2. Prefer rails (fixed_point, parity, emit fail corpus) over untested claims.  
+3. Prefer fail-closed over soft-pass.  
+4. Never claim beta without Part A + Part B proof **and owner intent**.  
+5. CHS grows only when self-host needs it; product surface grows only via B.1 table edit.  
+6. Never cut a beta tag, rename the version to beta, or announce beta on the owner’s behalf.  
+7. Prefer long alpha growth over rushing a tag when gates are merely “eligible.”
 
-1. Prefer ports that **delete** a Rust module over greenfield features outside the beta surface.  
-2. Prefer parity + fixed-point scripts over inflated QA counts.  
-3. Keep version pin discipline (Cargo only until R3; then drop Cargo).  
-4. Never claim beta while B0 fails.
+---
 
-See also: `bootstrap/CHS.md` (CHS frontend freeze), `README.md` (alpha reality table).
+See also: `DESIGN.md` (vision), `CHS.md` (bootstrap subset), `FLOOR.md` (backends), `README.md` (alpha reality).
