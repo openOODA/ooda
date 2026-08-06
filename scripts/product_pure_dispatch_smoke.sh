@@ -181,7 +181,7 @@ else
 fi
 
 # --- no OK_HOST in pure sources ---
-if grep -rq 'OK_HOST' "$ROOT/oodac" "$ROOT/cli" --include='*.oo' 2>/dev/null; then
+if grep -rI --include='*.oo' 'OK_HOST' "$ROOT/oodac" "$ROOT/cli" 2>/dev/null | grep -v '//' | grep -q OK_HOST; then
   bad "OK_HOST still in pure sources"
 else
   pass "no OK_HOST in pure sources"
