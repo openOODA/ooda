@@ -204,5 +204,42 @@ mod tests {
         let _ = std::fs::remove_file(&out);
         let _ = std::fs::remove_file(out.with_extension("c"));
     }
+
+    /// Anti-regression: bare + if-branch `return list_new()` under List[String].
+    #[test]
+    fn return_empty_list_new_honors_string_list_ret() {
+        let p = parse(
+            r#"
+            pub fn empty(i: Int) -> List[String] {
+                if i < 0 {
+                    return list_new();
+                }
+                return list_new();
+            }
+            pub fn main() {
+                println(list_len(empty(0)));
+            }
+            "#,
+        );
+        let c = CCodeGen::emit_c(&p).expect("emit");
+        assert!(
+            c.contains("oo_slist_new"),
+            "List[String] empty return must use slist: {}",
+            c
+        );
+        // Function body must not *return* OoIList (preamble still declares OoIList types).
+        let body = c.split("OoSList oo_empty").nth(1).unwrap_or(&c);
+        assert!(
+            !body.contains("OoIList"),
+            "empty() body must not use OoIList: {}",
+            body
+        );
+        let rt = super::runtime_c_path();
+        let out = std::env::temp_dir().join(format!("ooda_slret_{}", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        CCodeGen::build_native(&p, &out, &rt, false).expect("build List[String] return");
+        assert!(out.exists());
+        let _ = std::fs::remove_file(&out);
+    }
 }
 

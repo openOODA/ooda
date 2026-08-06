@@ -71,6 +71,7 @@ import "tc_ann_return.oo";
 import "tc_ann_binop.oo";
 import "tc_ann.oo";
 import "c_emit_preamble.oo";
+import "c_emit_lower.oo";
 import "c_emit.oo";
 
 pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
@@ -90,11 +91,26 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
         if list_len(args) >= 3 {
             out = list_get(args, 2);
         }
-        
         let c_path = path + ".c";
-        
-        // 1. Run oodac emit-c into .c file
-        let emit_cmd = "ooda run oodac/main.oo -- emit-c " + path + " > " + c_path;
+        // Prefer self-host binary (OODAC_BIN / oodac/oodac) over stage-0 `ooda run`.
+        // Pure CHS smoke must not require rustc or libooda on the link line.
+        let emit_cmd = "if [ -n \"$OODAC_BIN\" ] && [ -x \"$OODAC_BIN\" ]; then \"$OODAC_BIN\" emit-c "
+            + path
+            + " > "
+            + c_path
+            + "; elif [ -x ./oodac/oodac ]; then ./oodac/oodac emit-c "
+            + path
+            + " > "
+            + c_path
+            + "; elif [ -x ./oodac/main ]; then ./oodac/main emit-c "
+            + path
+            + " > "
+            + c_path
+            + "; else ooda run oodac/main.oo -- emit-c "
+            + path
+            + " > "
+            + c_path
+            + "; fi";
         let r1 = sys_exec(sys, "sh", "-c", emit_cmd);
         if r1.is_err() {
             let e = match r1 {
@@ -104,10 +120,14 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
             println("ERR\tbuild\t" + e);
             process_exit(1);
         }
-        
-        // 2. Compile with gcc
-        let r2 = sys_exec(sys, "gcc", "-O2", "-Iruntime", "runtime/chs_rt.c", c_path, "-Ltarget/debug", "-looda", "-lm", "-lpthread", "-o", out);
-        
+        // C backend sys_exec only runs cargs.last() via system(3) — full shell line required.
+        // Pure CHS: gcc + chs_rt only (no libooda). Host-FFI programs need stage-0.
+        let gcc_cmd = "gcc -O2 -Iruntime runtime/chs_rt.c \""
+            + c_path
+            + "\" -lm -o \""
+            + out
+            + "\"";
+        let r2 = sys_exec(sys, "sh", "-c", gcc_cmd);
         if r2.is_ok() {
             println("OK\tbuild\t" + out);
             return;
@@ -136,9 +156,22 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
     };
 
     if cmd == "emit-c" {
-        let r_concat = sys_exec(sys, "sh", "scripts/oodac_concat.sh", path);
+        // Concat imports to temp file then read (native system() cannot capture stdout).
+        let concat_tmp = path + ".concat.oo";
+        let concat_cmd = "sh scripts/oodac_concat.sh \""
+            + path
+            + "\" > \""
+            + concat_tmp
+            + "\" 2>/dev/null";
+        let r_concat = sys_exec(sys, "sh", "-c", concat_cmd);
         if r_concat.is_ok() {
-            src = match r_concat { Ok(s) => s, Err(e) => "" };
+            let cr = read_file(fs, concat_tmp);
+            if cr.is_ok() {
+                src = match cr {
+                    Ok(s) => s,
+                    Err(e) => src,
+                };
+            }
         }
         c_emit_stream(src);
         return;

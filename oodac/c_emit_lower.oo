@@ -1,0 +1,178 @@
+// job: lower CHS expr tokens to C snippets (list/string builtins)
+// in:  toks + start pos (at first expr token)
+// out: via side-effect helpers; c_emit_expr_c returns C text, advances via c_emit_expr_end
+// stage: emit
+
+// Map known call names to C runtime (empty string = unknown).
+pub fn c_lower_call_name(name: String) -> String {
+    if name == "list_new" {
+        return "oo_ilist_new";
+    }
+    if name == "list_push" {
+        return "oo_ilist_push";
+    }
+    if name == "list_get" {
+        return "oo_ilist_get";
+    }
+    if name == "list_len" {
+        return "oo_ilist_len";
+    }
+    if name == "chars_len" {
+        return "oo_chars_len";
+    }
+    if name == "char_at" {
+        return "oo_char_at";
+    }
+    if name == "str_slice" {
+        return "oo_str_slice";
+    }
+    if name == "char_is_alpha" {
+        return "oo_char_is_alpha";
+    }
+    if name == "char_is_digit" {
+        return "oo_char_is_digit";
+    }
+    if name == "char_is_space" {
+        return "oo_char_is_space";
+    }
+    if name == "str_contains" {
+        return "oo_str_contains";
+    }
+    return "";
+}
+
+// C type for let-binding of a call result (heuristic for CHS smoke).
+pub fn c_lower_result_ty(name: String) -> String {
+    if name == "list_new" || name == "list_push" {
+        return "OoIList";
+    }
+    if name == "char_at" || name == "str_slice" {
+        return "OoStr";
+    }
+    if name == "chars_len" || name == "list_len" || name == "list_get" {
+        return "long long";
+    }
+    if name == "char_is_alpha" || name == "char_is_digit" || name == "char_is_space" {
+        return "int";
+    }
+    return "long long";
+}
+
+// Emit one primary/call/literal starting at pos; returns new pos after primary.
+// Prints nothing — returns C expression string via println? No: we use a side channel:
+// pack into a single string by building it.
+
+pub fn c_emit_primary_c(toks: List[String], pos: Int, n: Int) -> List[String] {
+    // returns [new_pos_str, c_text]
+    let mut p = pos;
+    let k = field_at(list_get(toks, p), 0);
+    let t = field_at(list_get(toks, p), 3);
+    if k == "INT" {
+        let mut out: List[String] = list_new();
+        let p1 = p + 1;
+        out = list_push(out, p1.to_string());
+        out = list_push(out, t + "LL");
+        return out;
+    }
+    if k == "STRING" {
+        let mut out2: List[String] = list_new();
+        let p2 = p + 1;
+        out2 = list_push(out2, p2.to_string());
+        out2 = list_push(out2, "oo_str_lit(\"" + t + "\")");
+        return out2;
+    }
+    if k == "IDENT" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+            p = p + 1;
+            let cname = c_lower_call_name(t);
+            let mut args = "";
+            let mut first = true;
+            while p < n {
+                let ak = field_at(list_get(toks, p), 0);
+                if ak == "RPAREN" {
+                    p = p + 1;
+                    break;
+                }
+                if ak == "COMMA" {
+                    p = p + 1;
+                } else {
+                    let pr = c_emit_primary_c(toks, p, n);
+                    p = parse_int(list_get(pr, 0));
+                    let a = list_get(pr, 1);
+                    if first {
+                        args = a;
+                        first = false;
+                    } else {
+                        args = args + ", " + a;
+                    }
+                }
+            }
+            let mut call = t + "(" + args + ")";
+            if cname != "" {
+                call = cname + "(" + args + ")";
+            }
+            let mut out3: List[String] = list_new();
+            out3 = list_push(out3, p.to_string());
+            out3 = list_push(out3, call);
+            return out3;
+        }
+        let mut out4: List[String] = list_new();
+        out4 = list_push(out4, p.to_string());
+        out4 = list_push(out4, t);
+        return out4;
+    }
+    let mut out5: List[String] = list_new();
+    let p5 = p + 1;
+    out5 = list_push(out5, p5.to_string());
+    out5 = list_push(out5, t);
+    return out5;
+}
+
+pub fn c_emit_println(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos + 1;
+    // LPAREN
+    p = p + 1;
+    let pr = c_emit_primary_c(toks, p, n);
+    p = parse_int(list_get(pr, 0));
+    let arg = list_get(pr, 1);
+    // RPAREN SEMI
+    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
+        p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+    // Print: str_lit/char_at/str_slice → str; char_is_* → bool; else int.
+    let mut is_str = false;
+    let mut is_bool = false;
+    if chars_len(arg) >= 10 {
+        // oo_str_lit / oo_str_slice
+        if char_at(arg, 3) == "s" && char_at(arg, 4) == "t" && char_at(arg, 5) == "r" {
+            if char_at(arg, 6) == "_" {
+                if char_at(arg, 7) == "l" || char_at(arg, 7) == "s" {
+                    is_str = true;
+                }
+            }
+        }
+        // oo_char_at → str; oo_char_is_* → bool  (indices: oo_char_* at 7+)
+        if char_at(arg, 3) == "c" && char_at(arg, 4) == "h" && char_at(arg, 5) == "a" {
+            if chars_len(arg) >= 10 && char_at(arg, 8) == "a" {
+                is_str = true;
+            }
+            if chars_len(arg) >= 10 && char_at(arg, 8) == "i" {
+                is_bool = true;
+            }
+        }
+    }
+    if is_str {
+        println("  oo_print_str(" + arg + ");");
+    } else if is_bool {
+        println("  oo_print_bool(" + arg + ");");
+    } else {
+        println("  oo_print_int(" + arg + ");");
+    }
+    println("  oo_println();");
+    return p;
+}
+

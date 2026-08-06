@@ -12,6 +12,8 @@ struct Gen {
     c_main: bool,
     /// Current OODA function returns void (bare return;).
     fn_void: bool,
+    /// Current function's OODA return type (for returns inside if-as-expr).
+    fn_ret_ty: Type,
     /// Emit host FFI decls (only when program calls chs_build/host_*).
     with_host_ffi: bool,
 }

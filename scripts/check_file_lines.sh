@@ -32,7 +32,7 @@ is_excluded() {
   local f="$1"
   case "$f" in
     *'/.git/'*|*'target/'*|*'dist/'*) return 0 ;;
-    *.oo.c|*.oo.bin|*.c_native) return 0 ;;
+    *.oo.c|*.oo.bin|*.c_native|*.concat.oo|*.oo.concat.oo) return 0 ;;
     oodac/main.c|oodac/oodac2.c|./oodac/main.c|./oodac/oodac2.c) return 0 ;;
     */oodac/main.c|*/oodac/oodac2.c) return 0 ;;
     a.out|*/a.out|out.txt|*/out.txt) return 0 ;;

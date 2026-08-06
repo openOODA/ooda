@@ -10,6 +10,7 @@ impl Gen {
             tmp: 0,
             c_main: false,
             fn_void: false,
+            fn_ret_ty: Type::Void,
             with_host_ffi: false,
         }
     }
@@ -181,6 +182,7 @@ impl Gen {
     fn emit_function(&mut self, f: &FunctionDecl) -> Result<()> {
         self.c_main = false;
         self.fn_void = matches!(f.return_type, Type::Void);
+        self.fn_ret_ty = f.return_type.clone();
         let ret = self.c_ty(&f.return_type);
         let mut params = Vec::new();
         let mut env = HashMap::new();

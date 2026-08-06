@@ -39,9 +39,10 @@ echo "stage-1: $STAGE1"
 
 echo "=== fixed-point: stage-1 real-builds CHS smoke ==="
 rm -f "$SMOKE_BIN"
-# oodac build <src> <out>
+# oodac build <src> <out> — self-host emit via OODAC_BIN (not stage-0 ooda)
+export OODAC_BIN="$STAGE1"
 set +e
-"$STAGE1" build "$SMOKE_SRC" "$SMOKE_BIN" >"$TMPDIR/stage1_build_smoke.txt" 2>&1
+(cd "$ROOT" && "$STAGE1" build "$SMOKE_SRC" "$SMOKE_BIN" >"$TMPDIR/stage1_build_smoke.txt" 2>&1)
 rc=$?
 set -e
 cat "$TMPDIR/stage1_build_smoke.txt"

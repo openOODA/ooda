@@ -3,6 +3,7 @@ impl Gen {
     fn emit_main(&mut self, f: &FunctionDecl) -> Result<()> {
         self.c_main = true;
         self.fn_void = false;
+        self.fn_ret_ty = Type::Int;
         let mut env = HashMap::new();
         let mut code = String::from("int main(int argc, char **argv) {\n");
         // inject caps as dummy ints
@@ -143,6 +144,33 @@ impl Gen {
                 Ok(format!("{}  {} = {};\n", c, name, v))
             }
             Statement::Return(Some(e), _) => {
+                // Bare `return list_new()` must honor function List[String] vs List[Int]
+                // (default emit_expr list_new is OoIList — breaks pack_skip-style helpers).
+                // Inside if-as-expr, ret_ty is Custom("_ret"); use current fn return type.
+                if matches!(
+                    e,
+                    Expression::Call { name: n, args, .. } if n == "list_new" && args.is_empty()
+                ) {
+                    let effective = match ret_ty {
+                        Type::Custom(s) if s == "_ret" => &self.fn_ret_ty,
+                        other => other,
+                    };
+                    let cty = self.c_ty(effective);
+                    if cty == "OoSList" {
+                        let t = self.fresh("slr");
+                        return Ok(format!(
+                            "  OoSList {} = oo_slist_new();\n  return {};\n",
+                            t, t
+                        ));
+                    }
+                    if cty == "OoIList" {
+                        let t = self.fresh("ilr");
+                        return Ok(format!(
+                            "  OoIList {} = oo_ilist_new();\n  return {};\n",
+                            t, t
+                        ));
+                    }
+                }
                 let (c, v, _) = self.emit_expr(e, env)?;
                 match ret_ty {
                     Type::Void => Ok(format!("{}  return;\n", c)),
