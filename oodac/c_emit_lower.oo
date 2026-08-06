@@ -4,6 +4,7 @@
 // stage: emit
 
 // Map known call names to C runtime (empty string = unknown).
+
 pub fn c_lower_call_name(name: String) -> String {
     if name == "list_new" {
         return "oo_ilist_new";
@@ -38,10 +39,20 @@ pub fn c_lower_call_name(name: String) -> String {
     if name == "str_contains" {
         return "oo_str_contains";
     }
+    if name == "pack_skip" || name == "pack_tok" || name == "pack_err" {
+        return name;
+    }
+    if name == "Ok" {
+        return "/*Ok*/";
+    }
+    if name == "Err" {
+        return "/*Err*/";
+    }
     return "";
 }
 
 // C type for let-binding of a call result (heuristic for CHS smoke).
+
 pub fn c_lower_result_ty(name: String) -> String {
     if name == "list_new" || name == "list_push" {
         return "OoIList";
@@ -62,6 +73,7 @@ pub fn c_lower_result_ty(name: String) -> String {
 // Prints nothing — returns C expression string via println? No: we use a side channel:
 // pack into a single string by building it.
 
+
 pub fn c_emit_primary_c(toks: List[String], pos: Int, n: Int) -> List[String] {
     // returns [new_pos_str, c_text]
     let mut p = pos;
@@ -72,14 +84,29 @@ pub fn c_emit_primary_c(toks: List[String], pos: Int, n: Int) -> List[String] {
         let p1 = p + 1;
         out = list_push(out, p1.to_string());
         out = list_push(out, t + "LL");
-        return c_emit_maybe_binop(toks, out, n);
+        return out;
     }
     if k == "STRING" {
         let mut out2: List[String] = list_new();
         let p2 = p + 1;
         out2 = list_push(out2, p2.to_string());
-        out2 = list_push(out2, "oo_str_lit(\"" + t + "\")");
-        return c_emit_maybe_binop(toks, out2, n);
+        let esc = c_escape_str_text(t);
+        out2 = list_push(out2, "oo_str_lit(\"" + esc + "\")");
+        return out2;
+    }
+    if k == "KW_TRUE" {
+        let mut outt: List[String] = list_new();
+        let pt = p + 1;
+        outt = list_push(outt, pt.to_string());
+        outt = list_push(outt, "1");
+        return outt;
+    }
+    if k == "KW_FALSE" {
+        let mut outf: List[String] = list_new();
+        let pf = p + 1;
+        outf = list_push(outf, pf.to_string());
+        outf = list_push(outf, "0");
+        return outf;
     }
     if k == "IDENT" {
         p = p + 1;
@@ -116,109 +143,36 @@ pub fn c_emit_primary_c(toks: List[String], pos: Int, n: Int) -> List[String] {
             let mut out3: List[String] = list_new();
             out3 = list_push(out3, p.to_string());
             out3 = list_push(out3, call);
-            return c_emit_maybe_binop(toks, out3, n);
+            return out3;
         }
         let mut out4: List[String] = list_new();
         out4 = list_push(out4, p.to_string());
         out4 = list_push(out4, t);
-        return c_emit_maybe_binop(toks, out4, n);
+        return out4;
     }
     let mut out5: List[String] = list_new();
     let p5 = p + 1;
     out5 = list_push(out5, p5.to_string());
     out5 = list_push(out5, t);
-    return c_emit_maybe_binop(toks, out5, n);
+    return out5;
 }
 
-// If next token is a binary operator, fold one right primary: left OP right.
-pub fn c_emit_maybe_binop(toks: List[String], left_pack: List[String], n: Int) -> List[String] {
-    let mut p = parse_int(list_get(left_pack, 0));
-    let left = list_get(left_pack, 1);
-    if p >= n {
-        return left_pack;
+// Full expression: primary with left-assoc binary ops (no right-primary reentry of binop).
+pub fn c_emit_expr_c(toks: List[String], pos: Int, n: Int) -> List[String] {
+    let mut pack = c_emit_primary_c(toks, pos, n);
+    let mut guard = 0;
+    while guard < 32 {
+        let next = c_emit_maybe_binop(toks, pack, n);
+        let p0 = list_get(pack, 0);
+        let p1 = list_get(next, 0);
+        if p0 == p1 {
+            return next;
+        }
+        pack = next;
+        guard = guard + 1;
     }
-    let opk = field_at(list_get(toks, p), 0);
-    let opt = field_at(list_get(toks, p), 3);
-    if opk == "PLUS" || opk == "MINUS" || opk == "STAR" || opk == "SLASH"
-        || opk == "EQEQ" || opk == "NE" || opk == "LT" || opk == "GT"
-        || opk == "LE" || opk == "GE" || opk == "ANDAND" || opk == "OROR"
-        || opt == "+" || opt == "-" || opt == "*" || opt == "/"
-        || opt == "==" || opt == "!=" || opt == "<" || opt == ">"
-        || opt == "<=" || opt == ">="
-    {
-        p = p + 1;
-        let pr = c_emit_primary_c(toks, p, n);
-        p = parse_int(list_get(pr, 0));
-        let right = list_get(pr, 1);
-        let mut op = opt;
-        if opk == "PLUS" {
-            op = "+";
-        }
-        if opk == "MINUS" {
-            op = "-";
-        }
-        if opk == "EQEQ" {
-            op = "==";
-        }
-        if opk == "LT" {
-            op = "<";
-        }
-        if opk == "GT" {
-            op = ">";
-        }
-        let expr = "(" + left + " " + op + " " + right + ")";
-        let mut out: List[String] = list_new();
-        out = list_push(out, p.to_string());
-        out = list_push(out, expr);
-        return out;
-    }
-    return left_pack;
+    return pack;
 }
 
-pub fn c_emit_println(toks: List[String], pos: Int, n: Int) -> Int {
-    let mut p = pos + 1;
-    // LPAREN
-    p = p + 1;
-    let pr = c_emit_primary_c(toks, p, n);
-    p = parse_int(list_get(pr, 0));
-    let arg = list_get(pr, 1);
-    // RPAREN SEMI
-    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
-        p = p + 1;
-    }
-    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
-        p = p + 1;
-    }
-    // Print: str_lit/char_at/str_slice → str; char_is_* → bool; else int.
-    let mut is_str = false;
-    let mut is_bool = false;
-    if chars_len(arg) >= 10 {
-        // oo_str_lit / oo_str_slice
-        if char_at(arg, 3) == "s" && char_at(arg, 4) == "t" && char_at(arg, 5) == "r" {
-            if char_at(arg, 6) == "_" {
-                if char_at(arg, 7) == "l" || char_at(arg, 7) == "s" {
-                    is_str = true;
-                }
-            }
-        }
-        // oo_char_at → str; oo_char_is_* → bool  (indices: oo_char_* at 7+)
-        if char_at(arg, 3) == "c" && char_at(arg, 4) == "h" && char_at(arg, 5) == "a" {
-            if chars_len(arg) >= 10 && char_at(arg, 8) == "a" {
-                is_str = true;
-            }
-            if chars_len(arg) >= 10 && char_at(arg, 8) == "i" {
-                is_bool = true;
-            }
-        }
-    }
-    if is_str {
-        println("  oo_print_str(" + arg + ");");
-    } else if is_bool {
-        println("  oo_print_bool(" + arg + ");");
-    } else {
-        println("  oo_print_int(" + arg + ");");
-    }
-    println("  oo_println();");
-    return p;
-}
+// Escape .oo string token text into a C string body (no surrounding quotes).
 

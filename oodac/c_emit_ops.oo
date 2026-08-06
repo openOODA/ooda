@@ -1,0 +1,137 @@
+// job: lower CHS expr tokens to C snippets (list/string builtins)
+// in:  toks + start pos (at first expr token)
+// out: via side-effect helpers; c_emit_expr_c returns C text, advances via c_emit_expr_end
+// stage: emit
+
+// Map known call names to C runtime (empty string = unknown).
+
+pub fn c_escape_str_text(t: String) -> String {
+    let n = chars_len(t);
+    if n == 0 {
+        return "";
+    }
+    // Common single-char escapes first
+    if n == 1 {
+        let c = char_at(t, 0);
+        if c == "\n" {
+            return "\\n";
+        }
+        if c == "\t" {
+            return "\\t";
+        }
+        if c == "\"" {
+            return "\\\"";
+        }
+        if c == "\\" {
+            return "\\\\";
+        }
+        return t;
+    }
+    // Multi-char: escape backslash and quotes naively
+    let mut out = "";
+    let mut i = 0;
+    while i < n {
+        let c = char_at(t, i);
+        if c == "\\" {
+            out = out + "\\\\";
+        } else if c == "\"" {
+            out = out + "\\\"";
+        } else if c == "\n" {
+            out = out + "\\n";
+        } else if c == "\t" {
+            out = out + "\\t";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// True if C expr looks like OoStr-producing.
+
+pub fn c_expr_is_str(e: String) -> Bool {
+    if chars_len(e) < 6 {
+        return false;
+    }
+    if char_at(e, 0) == "o" && char_at(e, 1) == "o" && char_at(e, 2) == "_" {
+        if char_at(e, 3) == "s" && char_at(e, 4) == "t" {
+            return true;
+        }
+        if char_at(e, 3) == "c" && char_at(e, 4) == "h" {
+            // oo_char_at → str; oo_char_is → bool
+            if chars_len(e) >= 10 && char_at(e, 8) == "a" {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// If next token is a binary operator, fold one right primary: left OP right.
+
+pub fn c_emit_maybe_binop(toks: List[String], left_pack: List[String], n: Int) -> List[String] {
+    let mut p = parse_int(list_get(left_pack, 0));
+    let left = list_get(left_pack, 1);
+    if p >= n {
+        return left_pack;
+    }
+    let opk = field_at(list_get(toks, p), 0);
+    let opt = field_at(list_get(toks, p), 3);
+    if opk == "PLUS" || opk == "MINUS" || opk == "STAR" || opk == "SLASH"
+        || opk == "EQEQ" || opk == "NE" || opk == "LT" || opk == "GT"
+        || opk == "LE" || opk == "GE" || opk == "ANDAND" || opk == "OROR"
+        || opt == "+" || opt == "-" || opt == "*" || opt == "/"
+        || opt == "==" || opt == "!=" || opt == "<" || opt == ">"
+        || opt == "<=" || opt == ">=" || opt == "&&" || opt == "||"
+    {
+        p = p + 1;
+        // Right side is primary only (not full expr) to preserve || / && precedence left-assoc loop.
+        let pr = c_emit_primary_c(toks, p, n);
+        p = parse_int(list_get(pr, 0));
+        let right = list_get(pr, 1);
+        let mut expr = "";
+        // String equality → oo_str_eq
+        if (opk == "EQEQ" || opt == "==") && (c_expr_is_str(left) || c_expr_is_str(right)) {
+            expr = "oo_str_eq(" + left + ", " + right + ")";
+        } else if (opk == "NE" || opt == "!=") && (c_expr_is_str(left) || c_expr_is_str(right)) {
+            expr = "(!oo_str_eq(" + left + ", " + right + "))";
+        } else {
+            let mut op = opt;
+            if opk == "PLUS" {
+                op = "+";
+            }
+            if opk == "MINUS" {
+                op = "-";
+            }
+            if opk == "EQEQ" {
+                op = "==";
+            }
+            if opk == "LT" {
+                op = "<";
+            }
+            if opk == "GT" {
+                op = ">";
+            }
+            if opk == "ANDAND" {
+                op = "&&";
+            }
+            if opk == "OROR" {
+                op = "||";
+            }
+            // String + string → concat
+            if (opk == "PLUS" || op == "+") && (c_expr_is_str(left) || c_expr_is_str(right)) {
+                expr = "oo_str_concat(" + left + ", " + right + ")";
+            } else {
+                expr = "(" + left + " " + op + " " + right + ")";
+            }
+        }
+        let mut out: List[String] = list_new();
+        out = list_push(out, p.to_string());
+        out = list_push(out, expr);
+        return out;
+    }
+    return left_pack;
+}
+
+

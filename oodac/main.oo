@@ -72,7 +72,10 @@ import "tc_ann_binop.oo";
 import "tc_ann.oo";
 import "c_emit_preamble.oo";
 import "c_emit_skip.oo";
+import "c_emit_ops.oo";
 import "c_emit_lower.oo";
+import "c_emit_print.oo";
+import "c_emit_fn.oo";
 import "c_emit.oo";
 
 pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
@@ -93,21 +96,26 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
             out = list_get(args, 2);
         }
         let c_path = path + ".c";
-        // PURE ONLY: emit-c via OODAC_BIN/self + gcc + chs_rt. No $OODA host soft-pass.
-        // (sys_exec → system(last arg) only — one shell program string.)
+        // PURE ONLY — no $OODA host soft-pass.
+        // Multi-import mains: scripts/oodac_pure_build.sh (per-module emit + link).
+        // Single-file: emit-c + gcc.
         let build_sh = "set -e; path=\""
             + path
             + "\"; out=\""
             + out
-            + "\"; c_path=\""
+            + "\"; "
+            + "if grep -qE '^import ' \"$path\" 2>/dev/null; then "
+            + "OODAC_BIN=\"${OODAC_BIN:-./oodac/oodac}\" sh scripts/oodac_pure_build.sh \"$path\" \"$out\"; "
+            + "exit $?; fi; "
+            + "c_path=\""
             + c_path
             + "\"; rm -f \"$c_path\"; "
-            + "EM=\"\"; "
-            + "if [ -n \"$OODAC_BIN\" ] && [ -x \"$OODAC_BIN\" ]; then EM=\"$OODAC_BIN\"; "
-            + "elif [ -x ./oodac/oodac ]; then EM=./oodac/oodac; "
+            + "EM=\"${OODAC_BIN:-}\"; "
+            + "if [ -z \"$EM\" ] || [ ! -x \"$EM\" ]; then "
+            + "if [ -x ./oodac/oodac ]; then EM=./oodac/oodac; "
             + "elif [ -x ./oodac/main ]; then EM=./oodac/main; "
-            + "else echo ERR_NO_OODAC >&2; exit 1; fi; "
-            + "timeout 90 \"$EM\" emit-c \"$path\" > \"$c_path\" 2>/dev/null || true; "
+            + "else echo ERR_NO_OODAC >&2; exit 1; fi; fi; "
+            + "EMIT_NO_CONCAT=1 timeout 60 \"$EM\" emit-c \"$path\" > \"$c_path\" 2>/dev/null || true; "
             + "if [ ! -s \"$c_path\" ] || ! grep -qE 'int main|void ' \"$c_path\"; then "
             + "echo ERR_EMPTY_EMIT >&2; exit 1; fi; "
             + "if grep -qE $'^ERR\\tc_emit' \"$c_path\"; then echo ERR_EMIT >&2; exit 1; fi; "
@@ -142,15 +150,18 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
     };
 
     if cmd == "emit-c" {
-        // Concat imports to temp file then read (native system() cannot capture stdout).
-        let concat_tmp = path + ".concat.oo";
-        let concat_cmd = "sh scripts/oodac_concat.sh \""
+        // Multi-module pure build emits each file alone (EMIT_NO_CONCAT=1).
+        // Optional single-stream concat when EMIT_CONCAT=1 (slow on full oodac).
+        let concat_cmd = "if [ -n \"$EMIT_NO_CONCAT\" ]; then exit 1; fi; "
+            + "if [ -z \"$EMIT_CONCAT\" ]; then exit 1; fi; "
+            + "sh scripts/oodac_concat.sh \""
             + path
             + "\" > \""
-            + concat_tmp
-            + "\" 2>/dev/null";
+            + path
+            + ".concat.oo\" 2>/dev/null";
         let r_concat = sys_exec(sys, "sh", "-c", concat_cmd);
         if r_concat.is_ok() {
+            let concat_tmp = path + ".concat.oo";
             let cr = read_file(fs, concat_tmp);
             if cr.is_ok() {
                 src = match cr {

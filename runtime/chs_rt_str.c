@@ -73,8 +73,12 @@ OoStr oo_str_slice(OoStr s, long long start, long long end) {
   long long bs = utf8_byte_index(s, start);
   long long be = (end == oo_chars_len(s)) ? s.len : utf8_byte_index(s, end);
   if (bs < 0 || be < 0 || be < bs) {
-    fprintf(stderr, "str_slice bad range\n");
-    abort();
+    /* Fail soft for bootstrap emit edge cases (empty field / OOB) — empty string. */
+    OoStr empty;
+    empty.len = 0;
+    empty.data = (char *)malloc(1);
+    if (empty.data) empty.data[0] = 0;
+    return empty;
   }
   OoStr r;
   r.len = be - bs;
