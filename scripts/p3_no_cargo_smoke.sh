@@ -69,7 +69,11 @@ set +e
 "$OODA" check "$ROOT/fixtures/chs_list_string.oo" --json-errors >"$TMPDIR/p3_je.txt" 2>"$TMPDIR/p3_je.err"
 rj=$?
 set -e
-[[ $rj -ne 0 ]] && pass "json-errors fail-closed" || bad "json-errors accepted"
+if [[ $rj -eq 0 ]] && python3 -c 'import json,sys; v=json.loads(open(sys.argv[1]).read()); assert v==[]' "$TMPDIR/p3_je.txt" 2>/dev/null; then
+  pass "json-errors pass → []"
+else
+  bad "json-errors expected [] exit0 (got exit=$rj $(head -c 120 "$TMPDIR/p3_je.txt" 2>/dev/null))"
+fi
 
 # --- no OK_HOST ---
 if grep -rq 'OK_HOST' "$ROOT/oodac" "$ROOT/cli" --include='*.oo' 2>/dev/null; then

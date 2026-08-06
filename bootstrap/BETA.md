@@ -103,7 +103,8 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 |------|------------------------|----------|
 | Host Rust / Cargo product | any reintroduction | Forbidden (B0/B1) |
 | `build --target wasm` / `llvm` / `--emit-llvm` / `--release` (until promoted) | residual or beta-out | non-zero |
-| `--json-errors`, `--fuzz` (until promoted) | residual | non-zero |
+| `--fuzz` (until promoted) | residual | non-zero |
+| `--json-errors` | **promoted (BUILD_OUT P2)** — pure check path; see DIAG_CODES.md | 0 + `[]` on clean; non-zero + codes on fail |
 | Full DESIGN AI suite (`outline` / `reflect` / `patch` as product) | residual unless promoted into B.1 | non-zero or absent with docs |
 | Full SPEC beyond CHS + explicit promotions | post-beta | fail-closed or not advertised |
 | Non-`c` `--backend` (until F3+) | residual | `ERR backend …` |
