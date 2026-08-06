@@ -1,11 +1,26 @@
 # Zero-Rust todo map (alpha → beta)
 
+> ## HISTORICAL / SUPERSEDED ROADMAP
+>
+> **As of v0.182.1-alpha the zero-Rust product path has shipped.**  
+> - `RS_COUNT = 0` — no `.rs`, no `Cargo.toml`, no `src/` host spine  
+> - Pure product: `cli/main.oo` + `oodac/*.oo` + `runtime/chs_rt*.c`  
+> - Bootstrap: `scripts/bootstrap_no_cargo.sh` + pure seed (no cargo/rustc)  
+> - Rails: `fixed_point.sh` green (s1≡s2), `chs_parity`, `ci_no_rust`, emit-c, caps, …  
+> - Host dual-engine retired; product ≡ pure oodac  
+>
+> **Open P0/P1 checkboxes below are largely historical** — many items landed under
+> different names in BUILD_OUT / PROGRESS. Do **not** treat unchecked boxes as
+> current blockers without re-Observe. Living truth: monorepo `PROGRESS.md`,
+> `bootstrap/B0_B5_PROOF.md`, `bootstrap/BUILD_OUT.md`, `bootstrap/P4_DROPS.md`.  
+> Beta tag (P6) remains owner-only / not cut.
+
 **Constitution:** `DESIGN.md` unchanged. Exit bar: `bootstrap/BETA.md` **B0–B5**.  
 **CHS freeze:** `bootstrap/CHS.md`. **Entropy:** `TOOLS.md`. **Line lock:** `scripts/check_file_lines.sh`.  
-**Handoff:** monorepo `PROGRESS.md` — report `RS_COUNT` every pin until **0**.
+**Handoff:** monorepo `PROGRESS.md` — report `RS_COUNT` every pin (should stay **0**).
 
-**Goal:** product tree has **no `.rs`**; toolchain builds/ships **without Cargo/rustc**.  
-**Not the goal:** delete Rust early; hollow binary; DESIGN rewrite; beta theater.
+**Goal (achieved for product tree):** **no `.rs`**; toolchain builds/ships **without Cargo/rustc**.  
+**Not the goal:** hollow binary; DESIGN rewrite; beta theater; reintroducing host dual-engine.
 
 **Baseline (recompute each Observe):**
 

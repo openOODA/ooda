@@ -21,7 +21,12 @@ This is **not** a public tutorial pack. Prefer `bootstrap/corpus/` for pass/fail
 
 | File | Note |
 |------|------|
-| `list_*.oo`, `string_*.oo`, `for_range.oo`, `break_loop.oo` | WASM/host-era e2e; not Backend-C product claims |
+| `list_*.oo`, `string_*.oo`, `break_loop.oo` | WASM/host-era e2e; not Backend-C product claims |
+| `for_range.oo` (+ `.wat`) | **Residual:** range-for not lowered on Backend-C (`ERR\tc_emit\tfor residual`). Historical WASM/host only — see `bootstrap/FOR_MATCH_RESIDUAL.md` |
+| `*.wat` | **Archived** WASM text modules from host-era dual-engine; not built/run by pure product rails |
 | `em_demo.oo` | historical `ooda em` (command residual) |
 
+Keep `*.wat` (+ matching historical `.oo`) for archaeology only — do not reintroduce a WASM product path.
+
 **Product truth:** `ooda run` = native Backend-C build+exec. No interpreter / LLVM / WASM product path.
+Use `while` (not `for i in a..b`) and `if is_ok` (not stmt `match`) on the pure emit-c path.

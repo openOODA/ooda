@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # job: P1 beta CLI surface on pure native oodac (tokens|ast|check|build|emit-c)
-# fail-closed for out-of-surface commands. product ≡ pure oodac parity via chs_parity when native.
-# in:  OODAC_BIN (default ./oodac/oodac), stage-0 ooda for parity
+# fail-closed for out-of-surface commands. product ≡ pure oodac via chs_parity.
+# in:  OODAC_BIN (default ./oodac/oodac), bin/ooda product CLI
 # out: exit 0 if beta surface rails green
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -126,17 +126,17 @@ for rel in fixtures/chs_list_string.oo fixtures/while_count.oo bootstrap/corpus/
   fi
 done
 
-# --- dual-engine (stage-0 vs native oodac) ---
+# --- product ≡ pure oodac (tokens/ast/check + typecheck fail-closed) ---
 set +e
-(cd "$ROOT" && OODAC_MODE=native OODAC_BIN="$OODAC" OODA="$OODA" ./scripts/chs_parity.sh) >"$TMPDIR/beta_parity.log" 2>&1
+(cd "$ROOT" && OODAC_BIN="$OODAC" OODA="$OODA" ./scripts/chs_parity.sh) >"$TMPDIR/beta_parity.log" 2>&1
 rp=$?
 set -e
 if [[ $rp -ne 0 ]]; then
-  echo "FAIL chs_parity native" >&2
+  echo "FAIL chs_parity" >&2
   tail -20 "$TMPDIR/beta_parity.log" >&2 || true
   fail=1
 else
-  echo "OK chs_parity native (dual-engine tokens/ast/check)"
+  echo "OK chs_parity product≡oodac (tokens/ast/check)"
 fi
 
 if [[ $fail -ne 0 ]]; then

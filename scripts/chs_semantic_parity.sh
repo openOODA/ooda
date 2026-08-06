@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ===================================================================
-# CHS dual-engine semantic parity: `ooda run` vs `ooda build --target c`
+# CHS pure-path semantic parity: `ooda run` vs `ooda build --target c`
+# (same Backend-C product path — not host dual-engine).
 # Compares normalized stdout digests. Fail closed on missing fixtures.
 # ===================================================================
 set -euo pipefail
