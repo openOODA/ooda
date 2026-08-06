@@ -102,6 +102,35 @@ rz=$?
 set -e
 if [[ $rz -eq 0 ]]; then bad "test --fuzz accepted"; else pass "test --fuzz fail-closed"; fi
 
+# --- ooda test: real verify/assert_eq (P1 BUILD_OUT) ---
+set +e
+"$OODA" test "$ROOT/fixtures/verify_pass.oo" >"$TMPDIR/prod_test_ok.out" 2>"$TMPDIR/prod_test_ok.err"
+tp=$?
+set -e
+if [[ $tp -ne 0 ]] || ! grep -q "OK verify" "$TMPDIR/prod_test_ok.out"; then
+  bad "product test pass verify_pass exit=$tp"
+else
+  pass "product test verify_pass"
+fi
+set +e
+"$OODA" test "$ROOT/fixtures/verify_fail.oo" >"$TMPDIR/prod_test_bad.out" 2>"$TMPDIR/prod_test_bad.err"
+tf=$?
+set -e
+if [[ $tf -eq 0 ]]; then
+  bad "product test accepted verify_fail"
+else
+  pass "product test fail-closed verify_fail"
+fi
+set +e
+"$OODA" test --fuzz "$ROOT/fixtures/verify_pass.oo" >"$TMPDIR/prod_fuzz.out" 2>"$TMPDIR/prod_fuzz.err"
+tzz=$?
+set -e
+if [[ $tzz -eq 0 ]]; then
+  bad "product test --fuzz should residual"
+else
+  pass "product test --fuzz residual"
+fi
+
 # --- host modules + Rust shell gone (B0) ---
 if [[ -d "$ROOT/src" ]]; then
   bad "src/ still present"

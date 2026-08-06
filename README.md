@@ -19,6 +19,7 @@ export SEED_OODAC="${SEED_OODAC:-$PWD/oodac/oodac}"
 
 ./bin/ooda version
 ./bin/ooda check fixtures/chs_list_string.oo
+./bin/ooda test fixtures/verify_pass.oo   # check + verify/assert_eq
 ./bin/ooda run fixtures/chs_list_string.oo
 ./bin/ooda dump tokens fixtures/int_main.oo
 ./bin/ooda build --target c fixtures/while_count.oo
@@ -44,7 +45,7 @@ ooda version
 | `check` / `dump tokens\|ast\|check` | Real on pure path |
 | `build --target c\|chs\|native` | Real: emit-c + gcc + `runtime/chs_rt*.c` |
 | `run` | Real: pure native build+exec (not host interpreter) |
-| `test` | Pure check gate; `--fuzz` fail-closed residual |
+| `test` | **Real:** check + run `verify`/`assert_eq!` via Backend-C harness; `--fuzz` residual |
 | Fixed-point | `scripts/fixed_point.sh` pure seed → stage-1 → stage-2; digests s1≡s2; no OK_HOST |
 | Parity | `scripts/chs_parity.sh` product ≡ pure oodac |
 | Line lock | `scripts/check_file_lines.sh` O=0 |
@@ -57,7 +58,8 @@ ooda version
 | `--json-errors` / `--fuzz` / `--release` / `--emit-llvm` | Fail-closed residual |
 | `build --target wasm\|llvm` | Fail-closed (beta-out / residual) |
 | LSP / pkg / migrate / patch / bench | Removed from product |
-| Host interpreter / contracts on native | Residual — native does not lower requires/ensures |
+| Host interpreter / contracts on native | Residual — native does not lower requires/ensures; test strips them for harness |
+| `verify` body beyond `assert_eq!` | Residual — only `assert_eq!` lowered today |
 | Cold-start seed | Need prebuilt pure `oodac` once (`SEED_OODAC`) |
 
 ---
