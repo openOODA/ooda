@@ -15,7 +15,7 @@
 ## Explicit residuals (why no beta tag yet)
 
 1. Cold-start **SEED_OODAC** prebuilt binary still required.  
-2. GitHub **CI matrix without Rust** not wired (local `ci_no_rust.sh` only).  
+2. GitHub Actions workflow `.github/workflows/no_rust.yml` present (seed via bootstrap/seed or release asset).  
 3. Site/docs historical playground pins may lag (install pin v0.182.1-alpha updated for honesty note).  
 4. Residual product surface (fuzz/json-errors/wasm/llvm/contracts-on-native) fail-closed, not full SPEC.  
 5. Public **beta version tag + release notes** deliberately not cut on this pin.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # job: P1 beta CLI surface on pure native oodac (tokens|ast|check|build|emit-c)
-# fail-closed for out-of-surface commands. Dual-engine via chs_parity when native.
+# fail-closed for out-of-surface commands. product ≡ pure oodac parity via chs_parity when native.
 # in:  OODAC_BIN (default ./oodac/oodac), stage-0 ooda for parity
 # out: exit 0 if beta surface rails green
 set -euo pipefail

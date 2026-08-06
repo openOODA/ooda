@@ -117,6 +117,30 @@ dc=$?
 set -e
 if [[ $dc -eq 0 ]]; then bad "div-by-zero soft-pass"; else pass "div-by-zero fail-closed"; fi
 
+# --- 8) cap seal: param name FsCap must not grant ---
+set +e
+"$OODAC" check "$ROOT/bootstrap/corpus/check/fail/cap_name_not_type.oo" >/dev/null 2>&1
+cn=$?
+set -e
+if [[ $cn -eq 0 ]]; then bad "cap name bypass soft-pass"; else pass "cap name not type fail-closed"; fi
+set +e
+"$OODAC" check "$ROOT/bootstrap/corpus/check/fail/list_fscap_not_grant.oo" >/dev/null 2>&1
+cl=$?
+set -e
+if [[ $cl -eq 0 ]]; then bad "List[FsCap] grant soft-pass"; else pass "List[FsCap] not grant"; fi
+
+# --- 9) shell injection via product CLI path must not run attacker cmd ---
+rm -f /tmp/ooda_inject_marker_ph
+set +e
+"$OODA" check 'fixtures/int_main.oo"; touch /tmp/ooda_inject_marker_ph; echo "' \
+  >"$TMPDIR/ph/inj.out" 2>"$TMPDIR/ph/inj.err"
+set -e
+if [[ -e /tmp/ooda_inject_marker_ph ]]; then
+  bad "shell injection created marker file"
+else
+  pass "shell injection blocked (no marker)"
+fi
+
 if [[ $fail -ne 0 ]]; then
   echo "problem_hunt_smoke: FAILED" >&2
   exit 1

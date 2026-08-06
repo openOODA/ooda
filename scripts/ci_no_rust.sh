@@ -5,7 +5,7 @@
 #
 # Residual honesty:
 #  - Requires a prebuilt pure seed binary (cold start cannot invent a compiler from air).
-#  - Does not prove a remote GitHub Actions matrix (none in-tree); this is the local B1 rail.
+#  - Does not prove a remote GitHub Actions matrix (see .github/workflows/no_rust.yml); this is the local B1 rail.
 #  - Does not uninstall system cargo if present — only refuses to *invoke* it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

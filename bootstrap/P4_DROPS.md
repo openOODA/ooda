@@ -84,7 +84,7 @@ Until then: sequential CHS/Backend-C semantics only.
 | Item | Residual |
 |------|----------|
 | Cold-start seed | Prebuilt pure `oodac` once (`SEED_OODAC` / release asset) |
-| `--json-errors`, `--fuzz` | Fail-closed on pure path |
+| `--json-errors` on **run** only (check path is real), `--fuzz` | Fail-closed on pure path |
 | Non-`c` `--backend` | Fail-closed (`FLOOR.md`) |
 | Host preamble decls (`oo_host_*`) | Backend-C link residual, not a second backend |
 
