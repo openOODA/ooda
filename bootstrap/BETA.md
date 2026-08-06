@@ -114,7 +114,7 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 | **`for` / `match` stmt lower** | Backend-C residual | emit non-zero (`for residual` / `match residual`; use `while` / `if is_ok`) |
 | **Net ops** (`fetch` / friends) | sealed check only; no product runtime | emit `ERR … net residual` |
 | **Multi-arg `sys_exec`** | product lowers **`oo_sys_exec1`** (last-arg / single cmd) | multi-arg exec residual vs full argv |
-| **Runtime caps** | C path is **static check only** (cap tokens are compile placeholders; no runtime gate on C) | honesty residual (`CAPS_MATRIX.md`) |
+| **Runtime caps** | C path is **static-check only** — int placeholders; native **no re-check**; ambient libc lowers | honesty residual ([`STATIC_CAPS.md`](STATIC_CAPS.md)) |
 | Non-`c` `--backend` (until F3+) | residual | `ERR backend …` |
 | Full SPEC beyond CHS + explicit B.1 promotions | post-beta | fail-closed or not advertised |
 | `patch` line-range / AST node_id | residual | fail-closed / not shipped (`replace_fn` only is In) |

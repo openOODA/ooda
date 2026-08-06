@@ -108,6 +108,12 @@ Multi-module: `scripts/oodac_pure_build.sh`.
 
 ---
 
+## Residual: caps are static-only (not ABI object-caps)
+
+Sealed FS/env/sys ops are **checked at compile time** only. Backend-C drops cap args and calls ambient `oo_*` / libc; native binaries do **not** re-check capability tokens. Canonical residual: [`STATIC_CAPS.md`](STATIC_CAPS.md).
+
+---
+
 ## Anti-creep rules
 
 1. New `oo_*` used by emit → row in this file same change.  

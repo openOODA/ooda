@@ -60,7 +60,7 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Check seal: `is_sealed_{fs,sys,env,net}` incl. `env_get`, `path_exists`, `file_size`
   - Emit: real lower for read/write/path/size/env/sys; **net → ERR residual** (no silent stub)
   - Fixtures: `bootstrap/corpus/check/{pass,fail}/` per class; rail `scripts/caps_matrix_smoke.sh`
-  - Residual: net product runtime none; dynamic callees not sealed (method IDENT+LPAREN is sealed)
+  - Residual: **static-only** caps (no native runtime re-check) — `bootstrap/STATIC_CAPS.md`; net product none; dynamic callees residual
 - [x] **Richer `ooda run`** — **permanent pure native build+exec** (no host interpreter return)
   - Documented in README + help; clearer errors (missing file / build fail / no exe)
   - Residual: no JIT/interpret path on product surface

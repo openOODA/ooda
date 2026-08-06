@@ -68,6 +68,7 @@ ooda version
 | `verify` body | **`assert_eq!` / `assert_ne!` / `assert!`** lowered; other stmts fail-closed |
 | `patch` line-range / AST node_id | Residual — `replace_fn` only |
 | Cold-start seed | Need prebuilt pure `oodac` once (`SEED_OODAC`) |
+| Sealed caps (native) | **Static check only** — no runtime re-check; Backend-C erases cap tokens to ambient libc — see [`bootstrap/STATIC_CAPS.md`](bootstrap/STATIC_CAPS.md) |
 
 ---
 

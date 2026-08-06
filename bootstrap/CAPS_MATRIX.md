@@ -2,6 +2,7 @@
 
 **Purpose:** Map each sealed effect op through **check → emit-c → runtime → product**.  
 **Rules:** Default-deny. Unfinished = fail-closed, never silent ambient I/O. Net is residual — no silent network stub.  
+**Honesty residual:** caps are **static-check only** on native — no runtime re-check. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md).  
 **Sources:** `oodac/check_caps.oo`, `oodac/c_emit_lower.oo`, `runtime/chs_rt_fs.c`, preamble `oo_sys_exec1`.
 
 Status legend:
@@ -39,13 +40,15 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 - **Method form:** `fs.read_file(...)` is sealed — scan is IDENT + LPAREN, so the method name is caught (not only free calls). Residual: dynamic/computed callees not scanned.
 
 ### Emit (Backend-C)
-- Cap tokens compile to `int` placeholders; **no runtime gate on C** — security is static check + refuse net.
+- Cap tokens compile to `int` placeholders; leading cap args dropped on sealed lowers.
 - `write_file` / `read_file` / `env_get` / `path_exists` / `file_size` drop the leading cap arg when present.
 - Sealed **net** ops: `process_exit(1)` with `ERR\tc_emit\tnet residual` (never emit a fake socket).
 
-### Runtime
-- FS + env: `runtime/chs_rt_fs.c`.
-- Sys: inline `oo_sys_exec1` in emit preamble (`system`).
+### Runtime: static-only
+- **Canonical residual:** [`STATIC_CAPS.md`](STATIC_CAPS.md). Product does **not** re-check caps at native runtime.
+- Check is the only seal: deny without param; net fails at emit (no silent stub).
+- Backend-C lowers sealed FS/env/sys to **ambient libc** via `chs_rt` / preamble (`fopen` / `getenv` / `system`, …). Cap tokens are erased — **int placeholders**, not object-caps.
+- FS + env: `runtime/chs_rt_fs.c`. Sys: inline `oo_sys_exec1` in emit preamble (`system`).
 - Net: no symbols; do not add ambient curl/socket without a real NetCap product design.
 
 ---
