@@ -3,6 +3,10 @@
 Place an executable pure `oodac` here as `bootstrap/seed/oodac` for offline CI
 and cold machines that lack `oodac/oodac` in the working tree.
 
+The binary is **gitignored** (`/bootstrap/seed/oodac`). Commit only this README and
+optional checksum notes — never the secret-bearing paths or credentials used to
+obtain a seed.
+
 ## Resolution order (CI / bootstrap)
 
 1. `SEED_OODAC` environment variable  
@@ -10,7 +14,7 @@ and cold machines that lack `oodac/oodac` in the working tree.
 3. `oodac/oodac` or `oodac/oodac2` in the checkout (local builds; gitignored)  
 4. GitHub Release tarball for `install/BOOTSTRAP_PIN` (see `.github/workflows/no_rust.yml`)
 
-## How to populate
+## How to place `oodac`
 
 ```bash
 # From a tree that already bootstrapped:
@@ -20,9 +24,73 @@ chmod +x bootstrap/seed/oodac
 # Or extract from a release pack:
 tar -xzf dist/ooda-v*-linux-x86_64.tar.gz
 cp -a ooda-v*-linux-x86_64/oodac/oodac bootstrap/seed/oodac
+chmod +x bootstrap/seed/oodac
 ```
 
-Binary may be gitignored org-wide; committing it is optional. Remote CI uses the
-pinned release asset + `.sha256` when this file is absent.
-
 **Never** use a Cargo-built host as seed. Seed must be pure `.oo`+C product.
+
+## SHA-256 (integrity, not secrecy)
+
+Record a checksum so others can verify the same bytes. Prefer the release
+sidecar from `scripts/release.sh` (`dist/ooda-<pin>-linux-x86_64.tar.gz.sha256`).
+
+```bash
+# Hash the local seed binary (for your own notes / PR residual)
+sha256sum bootstrap/seed/oodac
+
+# Or verify a downloaded pin tarball against its published sidecar
+# (file format: "HASH  ooda-<pin>-linux-x86_64.tar.gz")
+sha256sum -c ooda-v0.182.1-alpha-linux-x86_64.tar.gz.sha256
+```
+
+Remote CI (`.github/workflows/no_rust.yml`) downloads the pin tarball **and**
+its `.sha256` sidecar when this directory has no executable seed. Keep
+`install/BOOTSTRAP_PIN`, the GitHub Release asset, and the sidecar coherent —
+see `bootstrap/RELEASE_CHECKLIST.md` and `bootstrap/GHA_NO_RUST.md`.
+
+Optional local sidecar next to the seed (not required by CI; also gitignored if
+named like a binary):
+
+```bash
+sha256sum bootstrap/seed/oodac > bootstrap/seed/oodac.sha256
+# verify later:
+#   (cd bootstrap/seed && sha256sum -c oodac.sha256)
+```
+
+Do **not** commit token files, private keys, or `.env` next to the seed. The
+checksum is public integrity data; secrets are not.
+
+## Never commit secrets
+
+| OK to commit | Never commit |
+|--------------|--------------|
+| This README | `bootstrap/seed/oodac` (binary; gitignored) |
+| Docs that name public release URLs | GitHub tokens, deploy keys, cookies |
+| Public `.sha256` values from Releases | Private mirrors / unauthenticated curl\|sh hosts |
+| Pin string in `install/BOOTSTRAP_PIN` | Hard-coded credentials in workflows |
+
+If you must share a seed privately, use org secret storage or a Release asset —
+not a committed binary with embedded credentials (product seed has none).
+
+## Offline dress rehearsals
+
+| Script | Role |
+|--------|------|
+| **`scripts/seed_dress_rehearsal.sh`** | Cold-start seed path: if seed present, run `bootstrap_no_cargo` with `SEED_OODAC`; if absent, honest residual (exit 0) unless `SEED_REQUIRED=1` |
+| **`scripts/install_dress_rehearsal.sh`** | Release **layout** dress rehearsal (tarball / staged tree / working-tree stage) — no network install |
+
+```bash
+# Seed path (this directory or SEED_OODAC)
+./scripts/seed_dress_rehearsal.sh
+SEED_REQUIRED=1 ./scripts/seed_dress_rehearsal.sh   # fail closed if no seed
+
+# Release layout (after scripts/release.sh or with RELEASE_TARBALL=...)
+./scripts/install_dress_rehearsal.sh
+```
+
+## Related
+
+- Workflow: `.github/workflows/no_rust.yml` (already in tree)
+- How to verify GHA green: `bootstrap/GHA_NO_RUST.md`
+- Local full B1 rail: `scripts/ci_no_rust.sh`
+- Rebuild: `SEED_OODAC=… ./scripts/bootstrap_no_cargo.sh`
