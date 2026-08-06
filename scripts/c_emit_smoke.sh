@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# job: pass fixtures for oodac emit-c (control-flow slice)
+# job: pass+fail fixtures for oodac emit-c
 # stage: test
-# in:  bootstrap/corpus/emit-c/pass/*.oo
-# out: exit 0 if each emits C, gcc-links with chs_rt, runs
+# in:  bootstrap/corpus/emit-c/{pass,fail}/*.oo
+# out: exit 0 if pass emit+gcc+run and fail produce ERR\tc_emit or non-zero
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODA="${OODA:-$ROOT/target/release/ooda}"
@@ -13,35 +13,72 @@ if [[ ! -x "$OODA" ]]; then
   (cd "$ROOT" && cargo build --release)
 fi
 
+run_emit() {
+  # writes C (or ERR) to $2; prints ooda exit code on stdout
+  local src="$1" out="$2" err="$3"
+  set +e
+  "$OODA" run "$ROOT/oodac/main.oo" -- emit-c "$src" >"$out" 2>"$err"
+  local rc=$?
+  set +e
+  printf '%s' "$rc"
+}
+
 PASS_DIR="$ROOT/bootstrap/corpus/emit-c/pass"
-n=0
+n_pass=0
 for src in "$PASS_DIR"/*.oo; do
   [[ -f "$src" ]] || continue
-  n=$((n + 1))
+  n_pass=$((n_pass + 1))
   base="$(basename "$src" .oo)"
   c_out="$TMPDIR/emit_${base}.c"
   bin_out="$TMPDIR/emit_${base}.bin"
-  # Host interpreter expands oodac multi-file imports for emit-c CLI.
-  "$OODA" run "$ROOT/oodac/main.oo" -- emit-c "$src" >"$c_out" 2>"$TMPDIR/emit_${base}.err" || {
-    echo "FAIL emit-c exit: $src" >&2
+  rc="$(run_emit "$src" "$c_out" "$TMPDIR/emit_${base}.err")"
+  if [[ "$rc" != "0" ]]; then
+    echo "FAIL emit-c exit $rc: $src" >&2
     cat "$TMPDIR/emit_${base}.err" >&2
     exit 1
-  }
+  fi
   if grep -E $'^ERR\t' "$c_out" >/dev/null 2>&1; then
     echo "FAIL emit-c ERR line: $src" >&2
     grep -E $'^ERR\t' "$c_out" >&2 || true
     exit 1
   fi
-  # Drop host runner banner lines if any leaked
   grep -v '🚀\|Running main' "$c_out" >"${c_out}.clean" || true
   mv "${c_out}.clean" "$c_out"
   gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$c_out" -o "$bin_out" -lm
   "$bin_out" >/dev/null
-  echo "OK emit-c $base"
+  echo "OK emit-c pass $base"
 done
 
-if [[ "$n" -eq 0 ]]; then
+if [[ "$n_pass" -eq 0 ]]; then
   echo "no pass fixtures under $PASS_DIR" >&2
   exit 1
 fi
-echo "c_emit_smoke: $n pass fixture(s) OK"
+
+FAIL_DIR="$ROOT/bootstrap/corpus/emit-c/fail"
+n_fail=0
+for src in "$FAIL_DIR"/*.oo; do
+  [[ -f "$src" ]] || continue
+  n_fail=$((n_fail + 1))
+  base="$(basename "$src" .oo)"
+  c_out="$TMPDIR/emit_fail_${base}.c"
+  err_out="$TMPDIR/emit_fail_${base}.err"
+  rc="$(run_emit "$src" "$c_out" "$err_out")"
+  if grep -E $'^ERR\tc_emit' "$c_out" "$err_out" >/dev/null 2>&1; then
+    echo "OK emit-c fail $base (ERR line)"
+    continue
+  fi
+  if [[ "$rc" != "0" ]]; then
+    echo "OK emit-c fail $base (exit $rc)"
+    continue
+  fi
+  echo "FAIL emit-c should reject: $src (exit 0, no ERR)" >&2
+  head -20 "$c_out" >&2
+  exit 1
+done
+
+if [[ "$n_fail" -eq 0 ]]; then
+  echo "no fail fixtures under $FAIL_DIR" >&2
+  exit 1
+fi
+
+echo "c_emit_smoke: $n_pass pass + $n_fail fail fixture(s) OK"
