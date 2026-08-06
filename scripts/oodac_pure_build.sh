@@ -14,14 +14,15 @@ OUT="${2:?out_bin}"
 OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
 TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/oodac_pure_$$"
 mkdir -p "$TMP"
-
+# Lifecycle: always reap temp tree (success or fail)
+cleanup_pure_tmp() { rm -rf "$TMP"; }
+trap cleanup_pure_tmp EXIT
 if [[ ! -x "$OODAC_BIN" ]]; then
   if [[ -x "$ROOT/oodac/oodac" ]]; then OODAC_BIN="$ROOT/oodac/oodac"
   elif [[ -x "$ROOT/oodac/main" ]]; then OODAC_BIN="$ROOT/oodac/main"
   else echo "ERR_NO_OODAC" >&2; exit 1
   fi
 fi
-
 if [[ ! -f "$MAIN" ]]; then
   if [[ -f "$ROOT/$MAIN" ]]; then MAIN="$ROOT/$MAIN"; fi
 fi
@@ -32,12 +33,10 @@ fi
 DIR="$(cd "$(dirname "$MAIN")" && pwd)"
 BASE="$(basename "$MAIN")"
 MAIN_ABS="$DIR/$BASE"
-
 # Collect modules (DFS, cycle/missing fail-closed). Order: deps first, main last.
 MODS=()
 declare -A SEEN=()
 declare -A STACK=()
-
 collect() {
   local path="$1"
   local abs
@@ -71,8 +70,22 @@ collect() {
   SEEN[$abs]=1
   MODS+=("$abs")
 }
-
 collect "$MAIN_ABS"
+
+# C1: single-module product builds run full check (import expand).
+# Multi-module self-host: emit rejects int/lit caps (c_arg_is_cap_ident); full
+# expanded typecheck of oodac (~410KiB) is not a pure_build gate (O hang).
+if [[ "${PURE_SKIP_CHECK:-}" != "1" && ${#MODS[@]} -eq 1 ]]; then
+  set +e
+  timeout 60 "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
+  main_ck=$?
+  set -e
+  if [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; then
+    echo "ERR_CHECK $MAIN_ABS" >&2
+    head -20 "$TMP/main_check.out" "$TMP/main_check.err" 2>/dev/null || true
+    exit 1
+  fi
+fi
 
 FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) \{'
 MCS=()

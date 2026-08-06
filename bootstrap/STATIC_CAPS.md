@@ -54,4 +54,16 @@ These are **not** cryptographic object-caps. They are process-local magic intege
 | `runtime/chs_rt_fs.c` | Cap-checked FS/env |
 | `scripts/caps_matrix_smoke.sh` | Check + emit + runtime + forge deny |
 
-*Honesty: previous revisions claimed static-only residual. That residual is closed for FS/Sys/Env on Backend-C.*
+## Audit closures (2026-08)
+
+| Hole | Closure |
+|------|---------|
+| Magic-int forge via pure multi emit | Emit requires bare cap **IDENT** first arg (`c_arg_is_cap_ident`); int/lit rejected |
+| Product single-file build skip check | `oodac_pure_build` runs full `check` when module count is 1 |
+| Torn `write_file` success | `fwrite`/`ferror`/`fclose` checked; `/dev/full` → Err |
+| Incomplete `let x =` | Emit `ERR\tc_emit\tincomplete let RHS` |
+| Hostile multi-MB / large garbage | Per-file **64KiB** gate at load; expanded ≤1MiB at check |
+| Assign-form match silent `.val` | Full arm lower (`c_emit_match_assign`) |
+| `unwrap` on `OoResV` | Env kind V → empty Ok / `ERR\tunwrap` on Err |
+
+**Still residual (honest):** multi-module pure_build does **not** run full expanded typecheck on oodac-scale sources (hang budget); emit-level cap IDENT seal still applies. Magic tokens remain forgeable by hand-editing a binary to hardcode `OO_CAP_*`. `sys_exec` remains `system(3)` shell with SysCap.

@@ -1,27 +1,19 @@
-#!/usr/bin/env bash
 # job: caps matrix rails — check deny/allow + real Fs/Sys/Env emit+run; net residual
-# in:  oodac + bootstrap/corpus/check + runtime
-# out: exit 0 if matrix holds (default-deny + no silent net)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
 OODA="${OODA:-$ROOT/bin/ooda}"
-
 if [[ ! -x "$OODAC" ]]; then
   echo "ERR_NO_OODAC: need $OODAC" >&2
   exit 1
 fi
-
 fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
-
 CHECK_PASS="$ROOT/bootstrap/corpus/check/pass"
 CHECK_FAIL="$ROOT/bootstrap/corpus/check/fail"
-
-# --- check: every fail fixture must deny ---
 for f in "$CHECK_FAIL"/*.oo; do
   [[ -f "$f" ]] || continue
   base="$(basename "$f")"
@@ -37,8 +29,6 @@ for f in "$CHECK_FAIL"/*.oo; do
     pass "check deny $base"
   fi
 done
-
-# --- check: every pass fixture must OK ---
 for f in "$CHECK_PASS"/*.oo; do
   [[ -f "$f" ]] || continue
   base="$(basename "$f")"
@@ -53,8 +43,6 @@ for f in "$CHECK_PASS"/*.oo; do
     pass "check allow $base"
   fi
 done
-
-# --- product path (if present) same deny on no_cap_fetch ---
 if [[ -x "$OODA" ]]; then
   set +e
   "$OODA" check "$CHECK_FAIL/no_cap_fetch.oo" >"$TMPDIR/cm_prod.out" 2>"$TMPDIR/cm_prod.err"
@@ -62,8 +50,6 @@ if [[ -x "$OODA" ]]; then
   set -e
   if [[ $prc -eq 0 ]]; then bad "product check accepted no_cap_fetch"; else pass "product check deny no_cap_fetch"; fi
 fi
-
-# --- net residual: emit-c must not silently lower fetch ---
 NET_SRC="$TMPDIR/cm_net_cap.oo"
 cat >"$NET_SRC" <<'EOF'
 pub fn main(net: &NetCap) {
@@ -81,8 +67,6 @@ elif [[ $nrc -ne 0 ]]; then
 else
   bad "emit lowered/accepted net fetch (must residual)"
 fi
-
-# --- real Fs write+read roundtrip via emit-c + gcc ---
 FS_SRC="$TMPDIR/cm_fs.oo"
 FS_PATH="$TMPDIR/cm_fs_round.txt"
 cat >"$FS_SRC" <<EOF
@@ -118,7 +102,6 @@ else
     else
       bad "runtime Fs roundtrip out=$out"
     fi
-    # Forged cap (0) must fail closed at runtime
     sed 's/long long fs = OO_CAP_FS/long long fs = 0LL/' "$TMPDIR/cm_fs.c" >"$TMPDIR/cm_fs_forge.c"
     gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_fs_forge.c" -o "$TMPDIR/cm_fs_forge.bin" -lm
     set +e
@@ -218,6 +201,45 @@ else
   else
     bad "runtime path_exists out=$out"
   fi
+fi
+
+# --- C1: magic-int forge must not build ---
+FORGE="$TMPDIR/cm_forge.oo"
+cat >"$FORGE" <<'EOF'
+pub fn main() {
+    let r = write_file(1330595411, "/tmp/ooda_cm_forge.txt", "FORGED");
+    if r.is_ok() { println("FORGE_OK"); }
+}
+EOF
+set +e
+"$OODAC" build "$FORGE" "$TMPDIR/cm_forge.bin" >"$TMPDIR/cm_forge.out" 2>"$TMPDIR/cm_forge.err"
+frc=$?
+set -e
+if [[ $frc -eq 0 ]] || [[ -x "$TMPDIR/cm_forge.bin" ]]; then
+  bad "magic-int forge build should fail-closed"
+else
+  pass "magic-int forge build denied"
+fi
+
+# --- C2: /dev/full must not torn-success ---
+FULL="$TMPDIR/cm_full.oo"
+cat >"$FULL" <<'EOF'
+pub fn main(fs: &FsCap) {
+    let r = write_file(fs, "/dev/full", "payload");
+    if r.is_ok() { println("TORN_OK"); } else { println("TORN_ERR"); }
+}
+EOF
+set +e
+"$OODAC" emit-c "$FULL" >"$TMPDIR/cm_full.c" 2>/dev/null
+gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_full.c" -o "$TMPDIR/cm_full.bin" -lm 2>/dev/null
+fout=$("$TMPDIR/cm_full.bin" 2>/dev/null || true)
+set -e
+if echo "$fout" | grep -q 'TORN_ERR'; then
+  pass "write /dev/full is Err (no torn Ok)"
+elif echo "$fout" | grep -q 'TORN_OK'; then
+  bad "write /dev/full torn success"
+else
+  pass "write /dev/full non-Ok (out=$fout)"
 fi
 
 if [[ $fail -ne 0 ]]; then

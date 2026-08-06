@@ -24,12 +24,35 @@ OoResS oo_read_file(long long cap, OoStr path) {
     r.val = oo_str_lit("read_file failed");
     return r;
   }
-  fseek(f, 0, SEEK_END);
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    r.ok = 0;
+    r.val = oo_str_lit("read_file failed");
+    return r;
+  }
   long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
+  if (sz < 0) {
+    fclose(f);
+    r.ok = 0;
+    r.val = oo_str_lit("read_file failed");
+    return r;
+  }
+  if (fseek(f, 0, SEEK_SET) != 0) {
+    fclose(f);
+    r.ok = 0;
+    r.val = oo_str_lit("read_file failed");
+    return r;
+  }
   char *buf = (char *)malloc((size_t)sz + 1);
   if (!buf) abort();
   size_t n = fread(buf, 1, (size_t)sz, f);
+  if (ferror(f)) {
+    free(buf);
+    fclose(f);
+    r.ok = 0;
+    r.val = oo_str_lit("read_file failed");
+    return r;
+  }
   buf[n] = 0;
   fclose(f);
   r.ok = 1;
@@ -47,8 +70,18 @@ OoResV oo_write_file(long long cap, OoStr path, OoStr content) {
     r.err = oo_str_lit("write_file failed");
     return r;
   }
-  fwrite(content.data, 1, (size_t)content.len, f);
-  fclose(f);
+  /* Torn-state seal: short write / ferror / fclose fail → Err, never ok=1. */
+  size_t want = content.data ? (size_t)content.len : 0;
+  size_t nw = want ? fwrite(content.data, 1, want, f) : 0;
+  int bad = (nw != want) || ferror(f);
+  if (fclose(f) != 0) {
+    bad = 1;
+  }
+  if (bad) {
+    r.ok = 0;
+    r.err = oo_str_lit("write_file failed");
+    return r;
+  }
   r.ok = 1;
   r.err = oo_str_lit("");
   return r;
