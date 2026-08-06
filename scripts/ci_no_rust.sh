@@ -81,7 +81,8 @@ for rail in \
   contracts_native_smoke.sh \
   json_errors_smoke.sh \
   outline_reflect_smoke.sh \
-  patch_smoke.sh
+  patch_smoke.sh \
+  std_smoke.sh
 do
   if [[ ! -x "$ROOT/scripts/$rail" ]]; then
     bad "missing rail $rail"

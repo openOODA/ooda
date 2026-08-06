@@ -1,24 +1,27 @@
 # fixtures/
 
-Harness inputs for **tests**, **CHS parity**, and **fixed-point** scripts.
+Harness inputs for **tests**, **CHS parity**, **fixed-point**, and product smokes.
 
-This is **not** a public tutorial pack. There is no `examples/` tree in the product
-surface; historical demos remain recoverable from git history
-(`git log -- examples/`, `git show <rev>:examples/hello.oo`).
+This is **not** a public tutorial pack. Prefer `bootstrap/corpus/` for pass/fail rails.
+
+## Pure product path (v0.182.1-alpha)
 
 | File | Used by |
 |------|---------|
-| `hello.oo` | golden tests, parity |
-| `while_count.oo` | parity, build smoke |
-| `int_main.oo` | host_api, fixed-point, parity |
-| `chs_list_string.oo` | fixed-point, host_api, semantic parity |
-| `chs_hello.oo` | semantic parity |
-| `chs_fs_roundtrip.oo` | dual-engine refuse goldens |
-| `unauthorized_io.oo` | capability JSON golden |
-| `em_demo.oo` | `ooda em` measured report golden |
-| `list_eq.oo` / `list_sum.oo` | WASM List[Int] host e2e |
-| `string_ops.oo` / `string_walk.oo` | WASM string methods host e2e |
-| `break_loop.oo` | while break/continue (interp + C + WASM + LLVM) |
-| `for_range.oo` | for lo..hi desugar (interp + C + WASM + LLVM) |
-| `str_concat.oo` | String + WASM bump-heap concat host e2e |
-| `list_string.oo` | List[String] push/len/get/for/content-eq WASM host e2e |
+| `hello.oo` / `int_main.oo` / `while_count.oo` | parity, build, contracts |
+| `chs_list_string.oo` / `chs_hello.oo` | fixed-point, semantic parity |
+| `chs_fs_roundtrip.oo` | FsCap write/read (no match; pure Backend-C) |
+| `verify_pass.oo` / `verify_fail.oo` | `ooda test` rails |
+| `outline_reflect_pass.oo` | outline/reflect smoke |
+| `patch_add.oo` (+ body txt) | patch smoke |
+| `std_{result,str,option}_main.oo` | `scripts/std_smoke.sh` |
+| `unauthorized_io.oo` | cap deny (manual / residual) |
+
+## Residual / historical (not pure-path claims)
+
+| File | Note |
+|------|------|
+| `list_*.oo`, `string_*.oo`, `for_range.oo`, `break_loop.oo` | WASM/host-era e2e; not Backend-C product claims |
+| `em_demo.oo` | historical `ooda em` (command residual) |
+
+**Product truth:** `ooda run` = native Backend-C build+exec. No interpreter / LLVM / WASM product path.
