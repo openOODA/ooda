@@ -1,8 +1,7 @@
-# Static caps residual (canonical)
+# Capability seals (static + runtime)
 
-**Status:** honesty residual (not a beta claim; DESIGN.md unchanged).  
-**Product rule:** never claim **runtime cap re-check** on native.  
-**Canonical residual:** sealed ops are **static-check only** on the pure Backend-C path.
+**Status:** product truth on pure Backend-C path.  
+**Product rule:** claim only what is implemented — static check **and** runtime magic-token re-check for sealed FS/Sys/Env ops.
 
 ---
 
@@ -11,19 +10,35 @@
 | Layer | Behavior |
 |-------|----------|
 | **Check** | `oodac/check_caps.oo` — default-deny sealed free/method names; require matching `&FsCap` / `&SysCap` / `&EnvCap` / `&NetCap` param |
-| **Emit (Backend-C)** | Cap params lower to **`int` placeholders**; leading cap args dropped on sealed calls |
-| **Runtime (`chs_rt`)** | FS/env/sys symbols are **ambient libc** (`fopen` / `getenv` / `system`, …) — **no token gate** |
-| **Native binary** | **No re-check** of caps at process runtime |
+| **Emit (Backend-C)** | Cap params lower to `long long`; sealed calls **pass the cap as first arg**; `main` injects `OO_CAP_FS` / `OO_CAP_SYS` / `OO_CAP_ENV` magic tokens |
+| **Runtime (`chs_rt`)** | `oo_cap_require(got, want, op)` gates `read_file` / `write_file` / `path_exists` / `file_size` / `env_get`; preamble `oo_sys_exec1` same for Sys |
+| **Native binary** | Forged or zero cap → `ERR\tcap\t…` + exit 1 (not ambient I/O) |
 
-Security for sealed I/O on the claimed path is **compile-time refuse** (missing cap → check fail; net product → emit residual). Once a program checks and links, the binary performs ambient OS I/O for lowered ops.
+Security for sealed I/O on the claimed path:
+
+1. **Compile-time refuse** — missing cap param → check fail  
+2. **Runtime seal** — wrong token → `oo_cap_require` exit  
+3. **Net** — still emit residual (no product network)
+
+Magic tokens (must match emit preamble + `runtime/chs_rt_fs.c`):
+
+| Cap | Value |
+|-----|-------|
+| `OO_CAP_FS` | `0x4F4F4653` (`OOFS`) |
+| `OO_CAP_SYS` | `0x4F4F5359` (`OOSY`) |
+| `OO_CAP_ENV` | `0x4F4F454E` (`OOEN`) |
+| `OO_CAP_NET` | `0x4F4F4E54` (`OONT`) — check only; no product runtime |
+
+These are **not** cryptographic object-caps. They are process-local magic integers injected into `main`. They stop accidental/forged ambient calls when code is lowered through Backend-C; they do not stop a hostile hand-edited binary that hardcodes the magic constant.
 
 ---
 
 ## What we do **not** claim
 
-- Runtime object-caps / re-validation of `FsCap` etc. in the native binary  
-- Interpreter-style runtime gates on Backend-C product path  
-- Net product I/O (fail-closed residual — see `CAPS_MATRIX.md`)
+- Cryptographic / unforgeable object capabilities across process trust boundaries  
+- Interpreter-style dynamic capability attenuation graphs  
+- Net product I/O (fail-closed residual — see `CAPS_MATRIX.md`)  
+- Multi-arg `sys_exec` full argv (product is `oo_sys_exec1` last/single cmd)
 
 ---
 
@@ -31,9 +46,12 @@ Security for sealed I/O on the claimed path is **compile-time refuse** (missing 
 
 | Path | Role |
 |------|------|
-| `bootstrap/CAPS_MATRIX.md` | Op matrix + **Runtime: static-only** section |
+| `bootstrap/CAPS_MATRIX.md` | Op matrix + runtime seal |
 | `oodac/check_caps.oo` | Static seal |
-| `oodac/c_emit_lower.oo` | Drop cap args; net residual |
-| `runtime/chs_rt_fs.c` | Ambient FS/env |
+| `oodac/c_emit_lower.oo` | Pass cap args; net residual |
+| `oodac/c_emit_preamble.oo` | `OO_CAP_*` + `oo_cap_require` + `oo_sys_exec1` |
+| `oodac/c_emit_fn.oo` | `main` injects magic tokens |
+| `runtime/chs_rt_fs.c` | Cap-checked FS/env |
+| `scripts/caps_matrix_smoke.sh` | Check + emit + runtime + forge deny |
 
-*Residual statement only. Expand sealed table via CAPS_MATRIX process; do not invent runtime token machinery without DESIGN + product work.*
+*Honesty: previous revisions claimed static-only residual. That residual is closed for FS/Sys/Env on Backend-C.*

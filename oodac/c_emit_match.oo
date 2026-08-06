@@ -1,0 +1,231 @@
+// package: backend-c — emit floor (see bootstrap/FLOOR.md)
+// job: lower match on Result (OoResS / OoResV) to if (ok) / else
+// stage: emit
+// Forms: match r { Ok(x) => { ... } Err(e) => { ... } }
+//        let n = match r { Ok(x) => expr Err(e) => expr };
+// Arm separators: optional COMMA after each arm. Fail-closed if shape wrong.
+
+// Skip optional COMMA arm separator.
+fn c_match_skip_comma(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    if p < n && field_at(list_get(toks, p), 0) == "COMMA" {
+        p = p + 1;
+    }
+    return p;
+}
+
+// pos at KW_MATCH. Returns [new_pos, env].
+pub fn c_emit_match_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
+    let mut p = pos + 1;
+    let pr = c_emit_expr_c(toks, p, n, env);
+    p = parse_int(list_get(pr, 0));
+    let scrut = list_get(pr, 1);
+    if p >= n || field_at(list_get(toks, p), 0) != "LBRACE" {
+        println("ERR\tc_emit\tmatch: expected { after scrutinee");
+        process_exit(1);
+    }
+    p = p + 1;
+    // Ok arm
+    if p >= n || field_at(list_get(toks, p), 0) != "IDENT"
+        || field_at(list_get(toks, p), 3) != "Ok"
+    {
+        println("ERR\tc_emit\tmatch: expected Ok(...) arm first");
+        process_exit(1);
+    }
+    p = p + 1;
+    if p >= n || field_at(list_get(toks, p), 0) != "LPAREN" {
+        println("ERR\tc_emit\tmatch: expected Ok(bind)");
+        process_exit(1);
+    }
+    p = p + 1;
+    let mut ok_bind = "_ok";
+    if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+        ok_bind = field_at(list_get(toks, p), 3);
+        p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
+        p = p + 1;
+    }
+    if p >= n || field_at(list_get(toks, p), 0) != "FATARROW" {
+        println("ERR\tc_emit\tmatch: expected => after Ok(...)");
+        process_exit(1);
+    }
+    p = p + 1;
+    // Result kind: R = OoResS (.val both arms), V = OoResV (.err on Err)
+    let mut rkind = "R";
+    if c_env_get(env, scrut) == "V" {
+        rkind = "V";
+    }
+    println("  {");
+    if rkind == "V" {
+        println("  OoResV __m = " + scrut + ";");
+    } else {
+        println("  OoResS __m = " + scrut + ";");
+    }
+    println("  if (__m.ok) {");
+    if rkind == "V" {
+        println("    (void)0; /* Ok arm: no payload on OoResV */");
+    } else {
+        println("    OoStr " + ok_bind + " = __m.val;");
+    }
+    let mut eok = env;
+    if rkind != "V" {
+        eok = c_env_put(env, ok_bind, "T");
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+        let br = c_emit_block(toks, p, n, eok);
+        p = parse_int(list_get(br, 0));
+    } else {
+        let st = c_emit_stmt(toks, p, n, eok);
+        p = parse_int(list_get(st, 0));
+    }
+    p = c_match_skip_comma(toks, p, n);
+    println("  } else {");
+    // Err arm
+    if p >= n || field_at(list_get(toks, p), 0) != "IDENT"
+        || field_at(list_get(toks, p), 3) != "Err"
+    {
+        println("ERR\tc_emit\tmatch: expected Err(...) arm");
+        process_exit(1);
+    }
+    p = p + 1;
+    if p >= n || field_at(list_get(toks, p), 0) != "LPAREN" {
+        println("ERR\tc_emit\tmatch: expected Err(bind)");
+        process_exit(1);
+    }
+    p = p + 1;
+    let mut err_bind = "_err";
+    if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+        err_bind = field_at(list_get(toks, p), 3);
+        p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
+        p = p + 1;
+    }
+    if p >= n || field_at(list_get(toks, p), 0) != "FATARROW" {
+        println("ERR\tc_emit\tmatch: expected => after Err(...)");
+        process_exit(1);
+    }
+    p = p + 1;
+    if rkind == "V" {
+        println("    OoStr " + err_bind + " = __m.err;");
+    } else {
+        println("    OoStr " + err_bind + " = __m.val;");
+    }
+    let eerr = c_env_put(env, err_bind, "T");
+    if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+        let br2 = c_emit_block(toks, p, n, eerr);
+        p = parse_int(list_get(br2, 0));
+    } else {
+        let st2 = c_emit_stmt(toks, p, n, eerr);
+        p = parse_int(list_get(st2, 0));
+    }
+    p = c_match_skip_comma(toks, p, n);
+    println("  }");
+    println("  }");
+    if p < n && field_at(list_get(toks, p), 0) == "RBRACE" {
+        p = p + 1;
+    }
+    return c_pack_pos_env(p, env);
+}
+
+// let name = match r { Ok(a) => expr Err(b) => expr };
+// Binds arm payloads so arm exprs can use a/b.
+pub fn c_emit_match_let(name: String, toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
+    let mut p = pos + 1;
+    let mut e = env;
+    let pr_m = c_emit_expr_c(toks, p, n, e);
+    p = parse_int(list_get(pr_m, 0));
+    let scrut = list_get(pr_m, 1);
+    let mut rkind = "R";
+    if c_env_get(e, scrut) == "V" {
+        rkind = "V";
+    }
+    if p >= n || field_at(list_get(toks, p), 0) != "LBRACE" {
+        println("ERR\tc_emit\tmatch-let expected {");
+        process_exit(1);
+    }
+    p = p + 1;
+    if p >= n || field_at(list_get(toks, p), 3) != "Ok" {
+        println("ERR\tc_emit\tmatch-let expected Ok");
+        process_exit(1);
+    }
+    p = p + 1;
+    let mut ok_bind = "_ok";
+    if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+            ok_bind = field_at(list_get(toks, p), 3);
+            p = p + 1;
+        }
+        if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
+            p = p + 1;
+        }
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "FATARROW" {
+        p = p + 1;
+    }
+    println("  OoStr " + name + ";");
+    println("  {");
+    if rkind == "V" {
+        println("  OoResV __ml = " + scrut + ";");
+    } else {
+        println("  OoResS __ml = " + scrut + ";");
+    }
+    println("  if (__ml.ok) {");
+    let mut eok = e;
+    if rkind != "V" {
+        println("    OoStr " + ok_bind + " = __ml.val;");
+        eok = c_env_put(e, ok_bind, "T");
+    }
+    let pr_ok = c_emit_expr_c(toks, p, n, eok);
+    p = parse_int(list_get(pr_ok, 0));
+    println("    " + name + " = " + list_get(pr_ok, 1) + ";");
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+    p = c_match_skip_comma(toks, p, n);
+    println("  } else {");
+    if p >= n || field_at(list_get(toks, p), 3) != "Err" {
+        println("ERR\tc_emit\tmatch-let expected Err");
+        process_exit(1);
+    }
+    p = p + 1;
+    let mut err_bind = "_err";
+    if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+            err_bind = field_at(list_get(toks, p), 3);
+            p = p + 1;
+        }
+        if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
+            p = p + 1;
+        }
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "FATARROW" {
+        p = p + 1;
+    }
+    if rkind == "V" {
+        println("    OoStr " + err_bind + " = __ml.err;");
+    } else {
+        println("    OoStr " + err_bind + " = __ml.val;");
+    }
+    let eerr = c_env_put(e, err_bind, "T");
+    let pr_er = c_emit_expr_c(toks, p, n, eerr);
+    p = parse_int(list_get(pr_er, 0));
+    println("    " + name + " = " + list_get(pr_er, 1) + ";");
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+    p = c_match_skip_comma(toks, p, n);
+    println("  }");
+    println("  }");
+    if p < n && field_at(list_get(toks, p), 0) == "RBRACE" {
+        p = p + 1;
+    }
+    e = c_env_put(e, name, "T");
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+    return c_pack_pos_env(p, e);
+}

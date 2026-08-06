@@ -110,11 +110,12 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 | Host Rust / Cargo product | any reintroduction | Forbidden (B0/B1) |
 | `build --target wasm` / `llvm` / `--emit-llvm` / `--release` | residual / P4 drop | non-zero (`P4_DROPS.md`) |
 | `ooda test --fuzz` | DESIGN deferral | non-zero exit 2 (`FUZZ_DEFER.md`) |
-| **ensures** + complex `requires` | not fully lowered on native | incomplete residual (simple `requires IDENT OP lit\|ident` only) |
-| **`for` / `match` stmt lower** | Backend-C residual | emit non-zero (`for residual` / `match residual`; use `while` / `if is_ok`) |
+| **ensures** + complex `requires` | not fully lowered on native | incomplete residual (simple `requires`/`ensures` only where rails prove) |
+| **`for` non-INT bounds** | only `INT..INT` range-for lowered | emit `for residual` (use `while`) |
+| **`match` non-Result / incomplete** | Result Ok/Err stmt + match-let **In** | other shapes fail-closed (`FOR_MATCH_RESIDUAL.md`) |
 | **Net ops** (`fetch` / friends) | sealed check only; no product runtime | emit `ERR … net residual` |
 | **Multi-arg `sys_exec`** | product lowers **`oo_sys_exec1`** (last-arg / single cmd) | multi-arg exec residual vs full argv |
-| **Runtime caps** | C path is **static-check only** — int placeholders; native **no re-check**; ambient libc lowers | honesty residual ([`STATIC_CAPS.md`](STATIC_CAPS.md)) |
+| **Object-caps / unforgeable tokens** | magic-int runtime seal only | not cryptographic caps ([`STATIC_CAPS.md`](STATIC_CAPS.md)) |
 | Non-`c` `--backend` (until F3+) | residual | `ERR backend …` |
 | Full SPEC beyond CHS + explicit B.1 promotions | post-beta | fail-closed or not advertised |
 | `patch` line-range / AST node_id | residual | fail-closed / not shipped (`replace_fn` only is In) |
@@ -164,7 +165,7 @@ public notes match In/Out tables
 | B4 honesty | **PASS process** — Out rows fail-closed; alpha pin; **no beta tag cut** |
 | B5 org | **PASS** product-critical siblings no Rust; editors optional |
 | Part B.1 In surface | **Table promoted** to real alpha (check/dump/build/run/test asserts/json-errors/outline/reflect/patch replace_fn/`--backend c`); rails exist — still not “owner freezes beta forever” |
-| Part B.2 Out surface | **Documented** fuzz, wasm/llvm, ensures incomplete, for/match residual, net residual, multi-arg exec residual, runtime caps static-only |
+| Part B.2 Out surface | **Documented** fuzz, wasm/llvm, ensures incomplete, non-INT for residual, non-Result match residual, net residual, multi-arg exec residual; FS/Sys/Env **runtime magic-token seal In** |
 | Public beta tag | **Not claimed** |
 
 Live notes: monorepo `PROGRESS.md`, `bootstrap/B0_B5_PROOF.md`.

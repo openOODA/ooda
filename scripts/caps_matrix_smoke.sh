@@ -106,8 +106,10 @@ if [[ $frc -ne 0 ]] || grep -qE $'^ERR\t' "$TMPDIR/cm_fs.c"; then
 else
   if ! grep -q 'oo_write_file' "$TMPDIR/cm_fs.c" || ! grep -q 'oo_read_file' "$TMPDIR/cm_fs.c"; then
     bad "emit fs missing oo_read/write"
-  elif grep -qE 'oo_write_file\(fs,' "$TMPDIR/cm_fs.c"; then
-    bad "emit write_file still passes cap token"
+  elif ! grep -qE 'oo_write_file\(fs,' "$TMPDIR/cm_fs.c"; then
+    bad "emit write_file must pass cap as first arg (runtime seal)"
+  elif ! grep -qE 'oo_read_file\(fs,' "$TMPDIR/cm_fs.c"; then
+    bad "emit read_file must pass cap as first arg (runtime seal)"
   else
     gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_fs.c" -o "$TMPDIR/cm_fs.bin" -lm
     out=$("$TMPDIR/cm_fs.bin" || true)
@@ -115,6 +117,18 @@ else
       pass "runtime Fs write+read"
     else
       bad "runtime Fs roundtrip out=$out"
+    fi
+    # Forged cap (0) must fail closed at runtime
+    sed 's/long long fs = OO_CAP_FS/long long fs = 0LL/' "$TMPDIR/cm_fs.c" >"$TMPDIR/cm_fs_forge.c"
+    gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_fs_forge.c" -o "$TMPDIR/cm_fs_forge.bin" -lm
+    set +e
+    forge_out=$("$TMPDIR/cm_fs_forge.bin" 2>&1)
+    forge_rc=$?
+    set -e
+    if [[ $forge_rc -ne 0 ]] && echo "$forge_out" | grep -qE $'ERR[\t ]*cap'; then
+      pass "runtime Fs forged cap deny"
+    else
+      bad "runtime forge cap should deny out=$forge_out rc=$forge_rc"
     fi
   fi
 fi
@@ -138,8 +152,8 @@ if [[ $erc -ne 0 ]] || grep -qE $'^ERR\t' "$TMPDIR/cm_env.c"; then
 else
   if ! grep -q 'oo_env_get' "$TMPDIR/cm_env.c"; then
     bad "emit env_get not lowered to oo_env_get"
-  elif grep -qE 'oo_env_get\(env' "$TMPDIR/cm_env.c"; then
-    bad "emit env_get still passes cap token"
+  elif ! grep -qE 'oo_env_get\(env,' "$TMPDIR/cm_env.c"; then
+    bad "emit env_get must pass cap as first arg (runtime seal)"
   else
     gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_env.c" -o "$TMPDIR/cm_env.bin" -lm
     out=$("$TMPDIR/cm_env.bin" || true)

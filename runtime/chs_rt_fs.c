@@ -1,6 +1,22 @@
 #include "chs_rt.h"
 
-OoResS oo_read_file(OoStr path) {
+/* Capability tokens (must match emit preamble + main inject). */
+#ifndef OO_CAP_FS
+#define OO_CAP_FS  0x4F4F4653LL /* OOFS */
+#define OO_CAP_SYS 0x4F4F5359LL /* OOSY */
+#define OO_CAP_ENV 0x4F4F454ELL /* OOEN */
+#define OO_CAP_NET 0x4F4F4E54LL /* OONT */
+#endif
+
+static void oo_cap_require(long long got, long long want, const char *op) {
+  if (got != want) {
+    fprintf(stderr, "ERR\tcap\t%s: missing or forged capability (static+runtime seal)\n", op);
+    exit(1);
+  }
+}
+
+OoResS oo_read_file(long long cap, OoStr path) {
+  oo_cap_require(cap, OO_CAP_FS, "read_file");
   OoResS r;
   FILE *f = fopen(path.data, "rb");
   if (!f) {
@@ -22,7 +38,8 @@ OoResS oo_read_file(OoStr path) {
   return r;
 }
 
-OoResV oo_write_file(OoStr path, OoStr content) {
+OoResV oo_write_file(long long cap, OoStr path, OoStr content) {
+  oo_cap_require(cap, OO_CAP_FS, "write_file");
   OoResV r;
   FILE *f = fopen(path.data, "wb");
   if (!f) {
@@ -37,7 +54,8 @@ OoResV oo_write_file(OoStr path, OoStr content) {
   return r;
 }
 
-int oo_path_exists(OoStr path) {
+int oo_path_exists(long long cap, OoStr path) {
+  oo_cap_require(cap, OO_CAP_FS, "path_exists");
   FILE *f = fopen(path.data, "rb");
   if (f) {
     fclose(f);
@@ -46,7 +64,8 @@ int oo_path_exists(OoStr path) {
   return 0;
 }
 
-long long oo_file_size(OoStr path) {
+long long oo_file_size(long long cap, OoStr path) {
+  oo_cap_require(cap, OO_CAP_FS, "file_size");
   FILE *f = fopen(path.data, "rb");
   if (!f) return -1;
   fseek(f, 0, SEEK_END);
@@ -55,7 +74,8 @@ long long oo_file_size(OoStr path) {
   return sz;
 }
 
-OoResS oo_env_get(OoStr key) {
+OoResS oo_env_get(long long cap, OoStr key) {
+  oo_cap_require(cap, OO_CAP_ENV, "env_get");
   OoResS r;
   char *val = getenv(key.data);
   if (val) {
@@ -67,4 +87,3 @@ OoResS oo_env_get(OoStr key) {
   }
   return r;
 }
-

@@ -72,7 +72,7 @@ A **backend** is a triple:
 | Piece | Responsibility |
 |-------|----------------|
 | **Emit** | CHS program (post-check) → artifact(s) (today: C source on stdout) |
-| **Runtime** | Implement the **Runtime ABI** (values + builtins + sealed I/O as ambient floor ops; caps are **static-check only** on Backend-C — see `STATIC_CAPS.md`) |
+| **Runtime** | Implement the **Runtime ABI** (values + builtins + sealed I/O with magic-token cap re-check on Backend-C — see `STATIC_CAPS.md`) |
 | **Link** | Artifact + runtime → executable (or loadable module) |
 
 Frontends (**tokens / ast / check**) must not import backend modules.
@@ -277,7 +277,7 @@ You can honestly say the floor is lowerable when:
 | `scripts/fixed_point.sh` | Self-host referee (Backend-C today) |
 | `bootstrap/BETA.md` | Zero-Rust beta gates (C allowed) |
 | `bootstrap/CHS.md` | CHS surface freeze |
-| `bootstrap/STATIC_CAPS.md` | Sealed caps: static-check only (no native re-check) |
+| `bootstrap/STATIC_CAPS.md` | Sealed caps: static check + runtime magic-token seal |
 
 ---
 

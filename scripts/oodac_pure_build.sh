@@ -106,7 +106,123 @@ done
 
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
 
-if ! grep -q 'int main' "$TMP/all.c"; then
+# Bridge seed-era 1-arg sealed runtime calls → cap-checked 2-arg ABI (OO_CAP_*).
+# Seed emit may still drop caps; product emit passes them. Self-host must link either.
+python3 - "$TMP/all.c" <<'PY'
+import re, sys
+path = sys.argv[1]
+t = open(path, encoding="utf-8", errors="replace").read()
+# only rewrite calls that have a single argument (no comma at depth 1)
+def rewrite(fn, cap, s):
+    """Insert cap on single-arg CALLS only; never inside string literals."""
+    out = []
+    i = 0
+    key = fn + "("
+    n = len(s)
+    in_str = False
+    while i < n:
+        c = s[i]
+        if in_str:
+            out.append(c)
+            if c == "\\" and i + 1 < n:
+                out.append(s[i+1])
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if s.startswith(key, i) and (i == 0 or not (s[i-1].isalnum() or s[i-1] == "_")):
+            k = i + len(key)
+            depth = 1
+            start_a = k
+            comma = False
+            while k < n and depth:
+                ch = s[k]
+                if ch == '"':
+                    k += 1
+                    while k < n:
+                        if s[k] == "\\":
+                            k += 2
+                            continue
+                        if s[k] == '"':
+                            k += 1
+                            break
+                        k += 1
+                    continue
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif ch == "," and depth == 1:
+                    comma = True
+                k += 1
+            args = s[start_a:k]
+            a = args.strip()
+            if (not comma) and a and not a.startswith("OoStr") and not a.startswith("long long") and not a.startswith("int "):
+                out.append(f"{fn}({cap}, {args})")
+            else:
+                out.append(s[i:k+1])
+            i = k + 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+t = rewrite("oo_read_file", "OO_CAP_FS", t)
+t = rewrite("oo_write_file", "OO_CAP_FS", t)
+t = rewrite("oo_path_exists", "OO_CAP_FS", t)
+t = rewrite("oo_file_size", "OO_CAP_FS", t)
+t = rewrite("oo_env_get", "OO_CAP_ENV", t)
+t = rewrite("oo_sys_exec1", "OO_CAP_SYS", t)
+# main inject legacy zero → magic tokens
+t = t.replace("int fs = 0; int sys = 0;",
+              "long long fs = OO_CAP_FS; long long sys = OO_CAP_SYS; long long env = OO_CAP_ENV;")
+t = t.replace("long long fs = 0; long long sys = 0;",
+              "long long fs = OO_CAP_FS; long long sys = OO_CAP_SYS; long long env = OO_CAP_ENV;")
+caps = (
+    "#define OO_CAP_FS  0x4F4F4653LL\n"
+    "#define OO_CAP_SYS 0x4F4F5359LL\n"
+    "#define OO_CAP_ENV 0x4F4F454ELL\n"
+    "#define OO_CAP_NET 0x4F4F4E54LL\n"
+)
+# Always prepend (body may contain the text inside string literals from emit)
+t = caps + t
+# Fix seed-era 1-arg prototypes to 2-arg cap ABI
+for a,b in [
+    ("OoResS oo_read_file(OoStr);", "OoResS oo_read_file(long long,OoStr);"),
+    ("OoResV oo_write_file(OoStr,OoStr);", "OoResV oo_write_file(long long,OoStr,OoStr);"),
+    ("int oo_path_exists(OoStr);", "int oo_path_exists(long long,OoStr);"),
+    ("long long oo_file_size(OoStr);", "long long oo_file_size(long long,OoStr);"),
+    ("OoResS oo_env_get(OoStr);", "OoResS oo_env_get(long long,OoStr);"),
+    ("static inline OoResS oo_sys_exec1(OoStr cmd)", "static inline OoResS oo_sys_exec1(long long cap, OoStr cmd)"),
+]:
+    t = t.replace(a,b)
+
+# Repair bad rewrites of prototypes (if any)
+t = t.replace("OoResS oo_read_file(OO_CAP_FS, OoStr);", "OoResS oo_read_file(long long,OoStr);")
+t = t.replace("int oo_path_exists(OO_CAP_FS, OoStr);", "int oo_path_exists(long long,OoStr);")
+t = t.replace("long long oo_file_size(OO_CAP_FS, OoStr);", "long long oo_file_size(long long,OoStr);")
+t = t.replace("OoResS oo_env_get(OO_CAP_ENV, OoStr);", "OoResS oo_env_get(long long,OoStr);")
+t = t.replace("static inline OoResS oo_sys_exec1(OO_CAP_SYS, OoStr cmd)", "static inline OoResS oo_sys_exec1(long long cap, OoStr cmd)")
+# ensure sys_exec body has require if missing
+if "oo_cap_require(cap, OO_CAP_SYS" not in t and "oo_sys_exec1(long long cap" in t:
+    t = t.replace(
+        "static inline OoResS oo_sys_exec1(long long cap, OoStr cmd) {\n  OoResS r;",
+        "static inline OoResS oo_sys_exec1(long long cap, OoStr cmd) {\n  oo_cap_require(cap, OO_CAP_SYS, \"sys_exec\");\n  OoResS r;",
+    )
+
+open(path, "w", encoding="utf-8").write(t)
+PY
+
+if ! grep -q 'int main\|long long main' "$TMP/all.c" && ! grep -q 'main(int argc' "$TMP/all.c"; then
   echo "ERR_NO_MAIN" >&2
   exit 1
 fi

@@ -41,9 +41,9 @@
 | `oo_ilist_new` / `push` / `get` / `len` | list int | `chs_rt_list.c` |
 | `oo_slist_new` / `push` / `get` / `len` | list str | `chs_rt_list.c` |
 | `oo_print_str` / `oo_print_int` / `oo_print_bool` / `oo_println` | print | `chs_rt_print.c` |
-| `oo_read_file` / `oo_write_file` | fs | `chs_rt_fs.c` |
-| `oo_path_exists` / `oo_file_size` | fs | `chs_rt_fs.c` |
-| `oo_env_get` | env | `chs_rt_fs.c` (or host split) |
+| `oo_read_file(long long cap, OoStr)` / `oo_write_file(long long cap, OoStr, OoStr)` | fs + runtime cap | `chs_rt_fs.c` |
+| `oo_path_exists(long long cap, OoStr)` / `oo_file_size(long long cap, OoStr)` | fs + runtime cap | `chs_rt_fs.c` |
+| `oo_env_get(long long cap, OoStr)` | env + runtime cap | `chs_rt_fs.c` |
 
 ### Host residual — **not** in pure emit preamble (removed)
 
@@ -63,7 +63,9 @@ product emit must not reference them. Residual: optional host FFI path only.
 | Symbol | Notes |
 |--------|--------|
 | `oo_process_exit` | `static inline` → `exit` |
-| `oo_sys_exec1` | `static inline` → `system` |
+| `oo_cap_require` | `static inline` — magic token gate |
+| `oo_sys_exec1(long long cap, OoStr)` | `static inline` → require Sys + `system` |
+| `OO_CAP_FS` / `SYS` / `ENV` / `NET` | `#define` magic tokens (`0x4F4F…`) |
 
 ### Internal only (runtime, not for emit surface)
 
@@ -108,9 +110,11 @@ Multi-module: `scripts/oodac_pure_build.sh`.
 
 ---
 
-## Residual: caps are static-only (not ABI object-caps)
+## Caps: static check + runtime magic-token seal
 
-Sealed FS/env/sys ops are **checked at compile time** only. Backend-C drops cap args and calls ambient `oo_*` / libc; native binaries do **not** re-check capability tokens. Canonical residual: [`STATIC_CAPS.md`](STATIC_CAPS.md).
+Sealed FS/env/sys ops are checked at compile time **and** re-checked at runtime via
+`oo_cap_require` + `OO_CAP_*` magic tokens (injected in `main`). Not cryptographic
+object-caps across hostile binary rewrite. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md).
 
 ---
 
