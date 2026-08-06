@@ -39,7 +39,7 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 
 - [x] Pure rails stay green: `fixed_point`, `chs_parity`, `c_emit_smoke`, product smokes, `bootstrap_no_cargo` / `ci_no_rust` — *standing — verified by CI*
 - [x] `RS_COUNT=0`; no Cargo product path — *standing — verified by CI* (shadow cargo in `ci_no_rust` + GHA)
-- [ ] Line lock \(O=0\) — *standing rail* (`scripts/check_file_lines.sh`); residual O≥1 tracked in `SPLIT_PLAN.md` (e.g. `cli/main.oo`) until split
+- [x] Line lock \(O=0\) — *standing rail* (`scripts/check_file_lines.sh`); O=0 on main (re-check every pin)
 
 ### P1 — Core systems development loop
 - [x] **Contracts on native path** — Backend-C **skips** `requires`/`ensures` to LBRACE (real token skip in `c_emit_skip_contracts`); bodies emit correctly
@@ -98,7 +98,9 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Residual: no line-range op yet; no AST node_id path
 - [x] **Stable diagnostic codes** for agent routing (aligned with DESIGN intent)
   - `E_CAP` | `E_TC` | `E_PARSE` | `E_LEX` | `E_CHECK` | `E_LOAD` | … — `bootstrap/DIAG_CODES.md`
-- [ ] Optional: agent-oriented “fix suggestion” without reintroducing host bloat
+- [x] Optional: agent-oriented “fix suggestion” without reintroducing host bloat
+  - `fix_hint` field on `--json-errors` objects (`diag_fix_hint`); no AST rewrite / no host bloat
+  - Residual: not surgical AST patches (see `ooda patch` for edits)
 
 ### P3 — Platform & ship
 - [x] **std growth** — modules real programs need (aligned with caps)
@@ -108,7 +110,10 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 - [x] **Install / pin dress rehearsal** — `scripts/install_dress_rehearsal.sh` validates release layout offline (tarball / staged tree / working-tree stage); residual: full XDG `install.oo` network fetch not exercised offline
 - [x] **Remote CI no-Rust** — `.github/workflows/no_rust.yml` runs `ci_no_rust` with cargo/rustc shadowed; seed = `bootstrap/seed/oodac` or pinned GitHub Release tarball+sha256 (no rustup/cargo install)
 - [x] **Release notes + pin lock** every ship — `bootstrap/RELEASE_CHECKLIST.md` + `release.sh` sha256 sidecar + notes reminder; habit not auto-beta
-- [ ] **FLOOR F3** — second backend MVP when owner prioritizes freedom over features
+- [x] **FLOOR F3** — second backend MVP when owner prioritizes freedom over features
+  - Prep: `bootstrap/BACKEND_F3_PREP.md` + `FLOOR.md` + `RUNTIME_ABI_v0.md`
+  - Product: only `--backend c` allowlisted; non-c fail-closed (scaffold door)
+  - Residual: no second emit/runtime/link package yet (owner prioritizes when ready)
 - [x] Shrink emit preamble **host residual** decls (`oo_host_*`) on pure path when safe
   - Pure preamble no longer declares `ooda_host_*` / `oo_host_*` / `oo_chs_build`
   - `runtime/chs_rt_host.c` kept for optional `OODA_WITH_HOST_FFI` only (not pure link)

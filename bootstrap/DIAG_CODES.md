@@ -12,13 +12,15 @@ Agents should branch on **`code`**, not free-text `msg`.
     "line": 2,
     "col": 13,
     "msg": "…",
-    "path": "fixtures/example.oo"
+    "path": "fixtures/example.oo",
+    "fix_hint": "Add matching &FsCap/… capability param."
   }
 ]
 ```
 
 - **Pass (no diagnostics):** `[]` and exit 0.  
 - **Fail:** non-empty array and exit non-zero.  
+- **`fix_hint`:** code-keyed agent guidance only (not AST rewrite; not host AiDiagnostic).  
 - **Security:** payloads are diagnostics only. `path` / `msg` are JSON-escaped strings (not filesystem open APIs). Do not treat `msg` as a path to open.
 
 ## Code table
