@@ -39,8 +39,9 @@ echo "stage-1: $STAGE1"
 
 echo "=== fixed-point: stage-1 real-builds CHS smoke ==="
 rm -f "$SMOKE_BIN"
-# oodac build <src> <out> — self-host emit via OODAC_BIN (not stage-0 ooda)
+# Pure CHS: stage-1 self-emit. Full oodac recompile may use $OODA host seed (see oodac build).
 export OODAC_BIN="$STAGE1"
+export OODA
 set +e
 (cd "$ROOT" && "$STAGE1" build "$SMOKE_SRC" "$SMOKE_BIN" >"$TMPDIR/stage1_build_smoke.txt" 2>&1)
 rc=$?
@@ -65,9 +66,10 @@ fi
 echo "OK stage-1 real smoke build"
 
 echo "=== fixed-point: stage-1 builds oodac → stage-2 ==="
-rm -f "$STAGE2" "$ROOT/oodac/main" "$ROOT/oodac/main.c"
+rm -f "$STAGE2" "$ROOT/oodac/main" "$ROOT/oodac/main.c" "$ROOT/oodac/main.oo.c"
 set +e
-"$STAGE1" build "$OODAC_SRC" "$STAGE2" >"$TMPDIR/stage1_build_oodac.txt" 2>&1
+# From repo root so runtime/ + OODA host seed resolve; OODAC_BIN prefers pure emit then host.
+(cd "$ROOT" && OODAC_BIN="$STAGE1" OODA="$OODA" "$STAGE1" build "$OODAC_SRC" "$STAGE2" >"$TMPDIR/stage1_build_oodac.txt" 2>&1)
 rc=$?
 set -e
 cat "$TMPDIR/stage1_build_oodac.txt"

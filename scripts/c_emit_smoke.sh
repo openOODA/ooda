@@ -45,7 +45,11 @@ for src in "$PASS_DIR"/*.oo; do
   grep -v '🚀\|Running main' "$c_out" >"${c_out}.clean" || true
   mv "${c_out}.clean" "$c_out"
   gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$c_out" -o "$bin_out" -lm
-  "$bin_out" >/dev/null
+  # Bound runaway loops from incomplete while-emit (fail closed if hangs).
+  timeout 3 "$bin_out" >/dev/null || {
+    echo "FAIL emit-c run/timeout: $src" >&2
+    exit 1
+  }
   echo "OK emit-c pass $base"
 done
 

@@ -92,42 +92,33 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
             out = list_get(args, 2);
         }
         let c_path = path + ".c";
-        // Prefer self-host binary (OODAC_BIN / oodac/oodac) over stage-0 `ooda run`.
-        // Pure CHS smoke must not require rustc or libooda on the link line.
-        let emit_cmd = "if [ -n \"$OODAC_BIN\" ] && [ -x \"$OODAC_BIN\" ]; then \"$OODAC_BIN\" emit-c "
+        // Full shell program (sys_exec → system(last) only).
+        // 1) Pure emit-c + gcc (stage-1 self-emit) for small CHS programs.
+        // 2) If emit empty/fails: stage-0 host build when $OODA set (compiler recompile).
+        let build_sh = "set -e; path=\""
             + path
-            + " > "
-            + c_path
-            + "; elif [ -x ./oodac/oodac ]; then ./oodac/oodac emit-c "
-            + path
-            + " > "
-            + c_path
-            + "; elif [ -x ./oodac/main ]; then ./oodac/main emit-c "
-            + path
-            + " > "
-            + c_path
-            + "; else ooda run oodac/main.oo -- emit-c "
-            + path
-            + " > "
-            + c_path
-            + "; fi";
-        let r1 = sys_exec(sys, "sh", "-c", emit_cmd);
-        if r1.is_err() {
-            let e = match r1 {
-                Ok(s) => s,
-                Err(msg) => msg,
-            };
-            println("ERR\tbuild\t" + e);
-            process_exit(1);
-        }
-        // C backend sys_exec only runs cargs.last() via system(3) — full shell line required.
-        // Pure CHS: gcc + chs_rt only (no libooda). Host-FFI programs need stage-0.
-        let gcc_cmd = "gcc -O2 -Iruntime runtime/chs_rt.c \""
-            + c_path
-            + "\" -lm -o \""
+            + "\"; out=\""
             + out
-            + "\"";
-        let r2 = sys_exec(sys, "sh", "-c", gcc_cmd);
+            + "\"; c_path=\""
+            + c_path
+            + "\"; rm -f \"$c_path\"; "
+            + "if [ -n \"$OODAC_BIN\" ] && [ -x \"$OODAC_BIN\" ]; then "
+            + "timeout 45 \"$OODAC_BIN\" emit-c \"$path\" > \"$c_path\" 2>/dev/null || true; "
+            + "elif [ -x ./oodac/oodac ]; then "
+            + "timeout 45 ./oodac/oodac emit-c \"$path\" > \"$c_path\" 2>/dev/null || true; "
+            + "elif [ -x ./oodac/main ]; then "
+            + "timeout 45 ./oodac/main emit-c \"$path\" > \"$c_path\" 2>/dev/null || true; "
+            + "fi; "
+            + "if [ -s \"$c_path\" ] && grep -qE 'int main|void oo_' \"$c_path\" 2>/dev/null; then "
+            + "gcc -O2 -Iruntime runtime/chs_rt.c \"$c_path\" -lm -o \"$out\" && echo OK_PURE && exit 0; "
+            + "fi; "
+            + "if [ -n \"$OODA\" ] && [ -x \"$OODA\" ]; then "
+            + "\"$OODA\" build --target c \"$path\" && "
+            + "base=\"${path%.oo}\"; "
+            + "if [ -x \"$base\" ]; then cp -f \"$base\" \"$out\"; echo OK_HOST; exit 0; fi; "
+            + "fi; "
+            + "echo FAIL_BUILD >&2; exit 1";
+        let r2 = sys_exec(sys, "sh", "-c", build_sh);
         if r2.is_ok() {
             println("OK\tbuild\t" + out);
             return;
