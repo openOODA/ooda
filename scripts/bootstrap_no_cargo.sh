@@ -51,7 +51,7 @@ fi
 # 3) Smoke product CLI without cargo
 echo "=== smoke product bin/ooda ==="
 "$CLI_OUT" version | tee "$TMPDIR/bootstrap_ver.txt"
-grep -q '0.182.0-alpha' "$TMPDIR/bootstrap_ver.txt"
+grep -q '0.182.1-alpha' "$TMPDIR/bootstrap_ver.txt"
 "$CLI_OUT" check "$ROOT/fixtures/chs_list_string.oo" | tee "$TMPDIR/bootstrap_chk.txt"
 grep -qE '^OK' "$TMPDIR/bootstrap_chk.txt"
 "$CLI_OUT" run "$ROOT/fixtures/chs_list_string.oo" | tee "$TMPDIR/bootstrap_run.txt"

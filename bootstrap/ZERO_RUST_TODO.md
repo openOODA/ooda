@@ -15,7 +15,7 @@ OO_COUNT=$(find . -name '*.oo' -not -path './.git/*' -not -path './target/*' | w
 ./scripts/check_file_lines.sh   # O=0 required always
 ```
 
-As of v0.182.0-alpha honesty pin: **RS_COUNT = 0**, pure `cli/main.oo` + `oodac`, fixed_point **green** (pure seed), emit-c rails green. Recompute baseline each Observe.
+As of v0.182.1-alpha honesty pin: **RS_COUNT = 0**, pure `cli/main.oo` + `oodac`, fixed_point **green** (pure seed), emit-c rails green. Recompute baseline each Observe.
 
 ---
 
@@ -329,7 +329,7 @@ As of v0.182.0-alpha honesty pin: **RS_COUNT = 0**, pure `cli/main.oo` + `oodac`
 
 - [ ] **P6.1** All B0–B5 checked with proof logs — pack written; **public beta tag not cut**  
 - [ ] **P6.2** Version: first beta tag scheme (e.g. `0.1.0-beta` / policy forward-only)  
-- [ ] **P6.3** GitHub Release + install pin for **beta** (alpha pin remains v0.182.0-alpha)  
+- [ ] **P6.3** GitHub Release + install pin for **beta** (alpha pin remains v0.182.1-alpha)  
 - [ ] **P6.4** Public notes: self-hosted; **no Rust in tree**; CHS/beta surface listed  
 - [x] **P6.5** PROGRESS: RS_COUNT=0; residual non-beta debt listed  
 - [x] **P6.6** Do **not** call alpha “beta”  

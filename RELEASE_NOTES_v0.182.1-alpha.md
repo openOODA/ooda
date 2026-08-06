@@ -1,4 +1,4 @@
-# v0.182.0-alpha
+# v0.182.1-alpha
 
 **Not beta.** Owner-gated beta criteria live in `bootstrap/BETA.md`.
 
@@ -17,11 +17,11 @@
 ```bash
 export SEED_OODAC="${SEED_OODAC:-./oodac/oodac}"
 ./scripts/bootstrap_no_cargo.sh
-./bin/ooda version   # ooda 0.182.0-alpha (pure .oo CLI)
+./bin/ooda version   # ooda 0.182.1-alpha (pure .oo CLI)
 ```
 
 Requires: bash, gcc, trusted seed binary. Does not require cargo/rustc.
 
 ## Pin
 
-`install/BOOTSTRAP_PIN` = `v0.182.0-alpha`
+`install/BOOTSTRAP_PIN` = `v0.182.1-alpha`

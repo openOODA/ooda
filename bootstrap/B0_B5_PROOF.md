@@ -1,4 +1,4 @@
-# B0–B5 proof pack (v0.182.0-alpha) — honesty, not a beta tag
+# B0–B5 proof pack (v0.182.1-alpha) — honesty, not a beta tag
 
 **Date pin:** product tree zero-Rust pure CLI path.  
 **Rule:** each gate needs a one-line proof or residual. **Do not tag beta** until all are PASS with public release notes.
@@ -16,7 +16,7 @@
 
 1. Cold-start **SEED_OODAC** prebuilt binary still required.  
 2. GitHub **CI matrix without Rust** not wired (local `ci_no_rust.sh` only).  
-3. Site/docs historical playground pins may lag (install pin v0.182.0-alpha updated for honesty note).  
+3. Site/docs historical playground pins may lag (install pin v0.182.1-alpha updated for honesty note).  
 4. Residual product surface (fuzz/json-errors/wasm/llvm/contracts-on-native) fail-closed, not full SPEC.  
 5. Public **beta version tag + release notes** deliberately not cut on this pin.
 
