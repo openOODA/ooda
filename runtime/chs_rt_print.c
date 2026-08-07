@@ -1,9 +1,11 @@
 #include "chs_rt.h"
 
 void oo_print_str(OoStr s) { fwrite(s.data, 1, (size_t)s.len, stdout); }
+void oo_eprint_str(OoStr s) { fwrite(s.data, 1, (size_t)s.len, stderr); }
 void oo_print_int(long long n) { printf("%lld", n); }
 void oo_print_bool(int b) { fputs(b ? "true" : "false", stdout); }
 void oo_println(void) { fputc('\n', stdout); }
+void oo_eprintln(void) { fputc('\n', stderr); }
 
 int oo_str_eq(OoStr a, OoStr b) {
   if (a.len != b.len) return 0;

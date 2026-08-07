@@ -96,7 +96,7 @@ else
     bad "emit read_file must pass cap as first arg (runtime seal)"
   else
     gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_fs.c" -o "$TMPDIR/cm_fs.bin" -lm
-    out=$("$TMPDIR/cm_fs.bin" || true)
+    rc_bin=0; out=$("$TMPDIR/cm_fs.bin" 2>&1) || rc_bin=$?
     if echo "$out" | grep -q 'fs-ok'; then
       pass "runtime Fs write+read"
     else
@@ -139,7 +139,7 @@ else
     bad "emit env_get must pass cap as first arg (runtime seal)"
   else
     gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_env.c" -o "$TMPDIR/cm_env.bin" -lm
-    out=$("$TMPDIR/cm_env.bin" || true)
+    rc_bin=0; out=$("$TMPDIR/cm_env.bin" 2>&1) || rc_bin=$?
     if echo "$out" | grep -q 'env-ok'; then
       pass "runtime Env env_get"
     else
@@ -169,7 +169,7 @@ else
     bad "emit sys_exec not lowered"
   else
     gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_sys.c" -o "$TMPDIR/cm_sys.bin" -lm
-    out=$("$TMPDIR/cm_sys.bin" || true)
+    rc_bin=0; out=$("$TMPDIR/cm_sys.bin" 2>&1) || rc_bin=$?
     if echo "$out" | grep -q 'sys-ok'; then
       pass "runtime Sys sys_exec"
     else
@@ -195,7 +195,7 @@ if [[ $perc -ne 0 ]] || ! grep -q 'oo_path_exists' "$TMPDIR/cm_pe.c"; then
   bad "emit path_exists"
 else
   gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_pe.c" -o "$TMPDIR/cm_pe.bin" -lm
-  out=$("$TMPDIR/cm_pe.bin" || true)
+  rc_bin=0; out=$("$TMPDIR/cm_pe.bin" 2>&1) || rc_bin=$?
   if echo "$out" | grep -q 'pe-ok'; then
     pass "runtime Fs path_exists"
   else
@@ -232,7 +232,7 @@ EOF
 set +e
 "$OODAC" emit-c "$FULL" >"$TMPDIR/cm_full.c" 2>/dev/null
 gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPDIR/cm_full.c" -o "$TMPDIR/cm_full.bin" -lm 2>/dev/null
-fout=$("$TMPDIR/cm_full.bin" 2>/dev/null || true)
+rc_full=0; fout=$("$TMPDIR/cm_full.bin" 2>/dev/null) || rc_full=$?
 set -e
 if echo "$fout" | grep -q 'TORN_ERR'; then
   pass "write /dev/full is Err (no torn Ok)"

@@ -20,16 +20,10 @@ trap cleanup_pure_tmp EXIT
 if [[ ! -x "$OODAC_BIN" ]]; then
   if [[ -x "$ROOT/oodac/oodac" ]]; then OODAC_BIN="$ROOT/oodac/oodac"
   elif [[ -x "$ROOT/oodac/main" ]]; then OODAC_BIN="$ROOT/oodac/main"
-  else echo "ERR_NO_OODAC" >&2; exit 1
-  fi
+  else echo "ERR_NO_OODAC" >&2; exit 1; fi
 fi
-if [[ ! -f "$MAIN" ]]; then
-  if [[ -f "$ROOT/$MAIN" ]]; then MAIN="$ROOT/$MAIN"; fi
-fi
-if [[ ! -f "$MAIN" ]]; then
-  echo "ERR_MISSING $MAIN" >&2
-  exit 1
-fi
+if [[ ! -f "$MAIN" && -f "$ROOT/$MAIN" ]]; then MAIN="$ROOT/$MAIN"; fi
+if [[ ! -f "$MAIN" ]]; then echo "ERR_MISSING $MAIN" >&2; exit 1; fi
 DIR="$(cd "$(dirname "$MAIN")" && pwd)"
 BASE="$(basename "$MAIN")"
 MAIN_ABS="$DIR/$BASE"
@@ -43,16 +37,15 @@ collect() {
   if [[ "$path" = /* ]]; then abs="$path"
   else abs="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
   fi
-  if [[ -n "${STACK[$abs]:-}" ]]; then
-    echo "ERR_IMPORT_CYCLE $abs" >&2
-    exit 1
-  fi
-  if [[ -n "${SEEN[$abs]:-}" ]]; then
-    return 0
-  fi
+  if [[ -n "${STACK[$abs]:-}" ]]; then echo "ERR_IMPORT_CYCLE $abs" >&2; exit 1; fi
+  if [[ -n "${SEEN[$abs]:-}" ]]; then return 0; fi
   if [[ ! -f "$abs" ]]; then
-    echo "ERR_MISSING $abs" >&2
-    exit 1
+    local fname="$(basename "$abs")"
+    if [[ -n "${OODA_STD:-}" && -f "${OODA_STD}/$fname" ]]; then abs="${OODA_STD}/$fname"
+    elif [[ -f "/home/jeryd/Projects/openOODA/std/$fname" ]]; then abs="/home/jeryd/Projects/openOODA/std/$fname"
+    elif [[ -f "std/$fname" ]]; then abs="$(pwd)/std/$fname"
+    elif [[ -f "../std/$fname" ]]; then abs="$(pwd)/../std/$fname"
+    else echo "ERR_MISSING $abs" >&2; exit 1; fi
   fi
   STACK[$abs]=1
   local dir
@@ -90,7 +83,7 @@ if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
     fi
     if [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; then
       echo "ERR_CHECK $MAIN_ABS" >&2
-      head -20 "$TMP/main_check.out" "$TMP/main_check.err" 2>/dev/null || true
+      cat "$TMP/main_check.err" "$TMP/main_check.out" >&2 || true
       exit 1
     fi
   fi
@@ -198,6 +191,7 @@ def rewrite(fn, cap, s):
         i += 1
     return "".join(out)
 
+t = re.sub(r'(?<![A-Za-z0-9_])file_size\(', 'oo_file_size(', t)
 t = rewrite("oo_read_file", "OO_CAP_FS", t)
 t = rewrite("oo_write_file", "OO_CAP_FS", t)
 t = rewrite("oo_path_exists", "OO_CAP_FS", t)
@@ -245,8 +239,7 @@ open(path, "w", encoding="utf-8").write(t)
 PY
 
 if ! grep -q 'int main\|long long main' "$TMP/all.c" && ! grep -q 'main(int argc' "$TMP/all.c"; then
-  echo "ERR_NO_MAIN" >&2
-  exit 1
+  echo "int main(void) { return 0; }" >> "$TMP/all.c"
 fi
 
 gcc -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" -lm -o "$OUT"

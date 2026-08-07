@@ -22,21 +22,39 @@ fn c_contract_op_mode(k: String) -> Int {
 }
 
 fn c_try_emit_requires_clause(toks: List[String], start: Int, end: Int) -> Bool {
-    if start + 2 >= end { return false; }
-    if field_at(list_get(toks, start), 0) != "IDENT" { return false; }
-    let left: String = field_at(list_get(toks, start), 3);
-    let op: String = c_contract_op(field_at(list_get(toks, start + 1), 0));
-    if op == "" { return false; }
-    let rk: String = field_at(list_get(toks, start + 2), 0);
-    let mut right: String = "";
-    if rk == "INT" { right = field_at(list_get(toks, start + 2), 3); }
-    else if rk == "IDENT" { right = field_at(list_get(toks, start + 2), 3); }
-    else { return false; }
-    if start + 3 != end { return false; }
-    let msg: String = "ERR\tcontract\trequires " + left + " " + op + " " + right;
-    println("  if (!(" + left + " " + op + " " + right + ")) {");
-    println("    oo_print_str(oo_str_lit(\"" + msg + "\"));");
-    println("    oo_println();");
+    if start >= end { return false; }
+    let mut cond: String = "";
+    let mut i = start;
+    while i < end {
+        let k = field_at(list_get(toks, i), 0);
+        let txt = field_at(list_get(toks, i), 3);
+        let op: String = c_contract_op(k);
+        if op != "" {
+            cond = cond + " " + op + " ";
+        } else if k == "AMPAMP" || k == "LOGAND" || txt == "&&" {
+            cond = cond + " && ";
+        } else if k == "INT" || k == "FLOAT" {
+            cond = cond + txt;
+        } else if k == "IDENT" {
+            if i + 2 < end && field_at(list_get(toks, i + 1), 0) == "DOT" && field_at(list_get(toks, i + 2), 3) == "len" {
+                cond = cond + "oo_str_len(" + txt + ")";
+                i = i + 4;
+            } else {
+                cond = cond + txt;
+            }
+        } else if k == "DOT" {
+            cond = cond + ".";
+        } else if k == "LPAREN" || k == "RPAREN" {
+            cond = cond + txt;
+        } else {
+            cond = cond + " " + txt + " ";
+        }
+        i = i + 1;
+    }
+    if cond == "" { return false; }
+    let msg: String = "ERR\\tcontract\\tPrecondition violation: requires " + cond;
+    println("  if (!(" + cond + ")) {");
+    println("    fprintf(stderr, \"" + msg + "\\n\");");
     println("    oo_process_exit(1);");
     println("  }");
     return true;
@@ -46,14 +64,25 @@ fn c_try_emit_ensures_setup(toks: List[String], start: Int, end: Int) -> Bool {
     if start + 2 >= end { return false; }
     if field_at(list_get(toks, start), 0) != "IDENT" { return false; }
     if field_at(list_get(toks, start), 3) != "result" { return false; }
-    let mode = c_contract_op_mode(field_at(list_get(toks, start + 1), 0));
+    let mut op_idx = start + 1;
+    if field_at(list_get(toks, start + 1), 0) == "DOT" {
+        op_idx = start + 5;
+    }
+    if op_idx + 1 >= end { return false; }
+    let mode = c_contract_op_mode(field_at(list_get(toks, op_idx), 0));
     if mode == 0 { return false; }
-    let rk: String = field_at(list_get(toks, start + 2), 0);
+    let rk: String = field_at(list_get(toks, op_idx + 1), 0);
     let mut right: String = "";
-    if rk == "INT" { right = field_at(list_get(toks, start + 2), 3); }
-    else if rk == "IDENT" { right = field_at(list_get(toks, start + 2), 3); }
+    if rk == "INT" || rk == "IDENT" { right = field_at(list_get(toks, op_idx + 1), 3); }
     else { return false; }
-    if start + 3 != end { return false; }
+    if right == "old" {
+        if op_idx + 3 < end {
+            right = field_at(list_get(toks, op_idx + 3), 3);
+            if op_idx + 5 < end && field_at(list_get(toks, op_idx + 5), 0) == "PLUS" {
+                right = right + " + " + field_at(list_get(toks, op_idx + 6), 3);
+            }
+        }
+    }
     println("  __oo_ens_mode = " + mode.to_string() + ";");
     println("  __oo_ens_rhs = " + right + ";");
     return true;
@@ -74,6 +103,23 @@ pub fn c_lower_ensures_return(expr: String) {
     println("    if (__oo_ens_mode == 6 && !(__result != __oo_ens_rhs)) {");
     println("      oo_print_str(oo_str_lit(\"ERR\\tcontract\\tensures\")); oo_println(); oo_process_exit(1); }");
     println("    return __result; }");
+}
+
+pub fn c_lower_ensures_return_str(expr: String) {
+    println("  { OoStr __res_str = " + expr + "; long long __result = oo_str_len(__res_str);");
+    println("    if (__oo_ens_mode == 1 && !(__result >= __oo_ens_rhs)) {");
+    println("      oo_print_str(oo_str_lit(\"ERR\\tcontract\\tensures\")); oo_println(); oo_process_exit(1); }");
+    println("    if (__oo_ens_mode == 2 && !(__result <= __oo_ens_rhs)) {");
+    println("      oo_print_str(oo_str_lit(\"ERR\\tcontract\\tensures\")); oo_println(); oo_process_exit(1); }");
+    println("    if (__oo_ens_mode == 3 && !(__result > __oo_ens_rhs)) {");
+    println("      oo_print_str(oo_str_lit(\"ERR\\tcontract\\tensures\")); oo_println(); oo_process_exit(1); }");
+    println("    if (__oo_ens_mode == 4 && !(__result < __oo_ens_rhs)) {");
+    println("      oo_print_str(oo_str_lit(\"ERR\\tcontract\\tensures\")); oo_println(); oo_process_exit(1); }");
+    println("    if (__oo_ens_mode == 5 && !(__result == __oo_ens_rhs)) {");
+    println("      oo_print_str(oo_str_lit(\"ERR\\tcontract\\tensures\")); oo_println(); oo_process_exit(1); }");
+    println("    if (__oo_ens_mode == 6 && !(__result != __oo_ens_rhs)) {");
+    println("      oo_print_str(oo_str_lit(\"ERR\\tcontract\\tensures\")); oo_println(); oo_process_exit(1); }");
+    println("    return __res_str; }");
 }
 
 pub fn c_lower_contracts(toks: List[String], pos: Int, n: Int) -> Int {

@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <time.h>
+
+long long oo_monotonic_us(void);
 
 typedef struct {
   char *data;

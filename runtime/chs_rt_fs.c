@@ -120,3 +120,10 @@ OoResS oo_env_get(long long cap, OoStr key) {
   }
   return r;
 }
+
+long long oo_monotonic_us(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  long long us = (long long)ts.tv_sec * 1000000LL + (long long)ts.tv_nsec / 1000LL;
+  return us > 0LL ? us : 1LL;
+}

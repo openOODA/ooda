@@ -68,6 +68,33 @@ def format_reflect(
     return ("\n".join(lines) + ("\n" if lines else "")), 0
 
 
+def confine_path(user_path: str, mode: str) -> Path:
+    """Confine file paths under cwd (reject .. and abs outside cwd)."""
+    if not user_path or not user_path.strip():
+        sys.stderr.write(f"ERR\t{mode}\tempty path\n")
+        sys.exit(2)
+    if "\0" in user_path:
+        sys.stderr.write(f"ERR\t{mode}\tnull byte in path\n")
+        sys.exit(2)
+    norm = user_path.replace("\\", "/")
+    parts = [p for p in Path(norm).parts if p not in ("", ".")]
+    if ".." in parts or any(p == ".." for p in norm.split("/")):
+        sys.stderr.write(f"ERR\t{mode}\tpath traversal rejected (..)\n")
+        sys.exit(2)
+    cwd = Path.cwd().resolve()
+    try:
+        p = Path(user_path)
+        resolved = p.resolve(strict=False) if p.is_absolute() else (cwd / p).resolve(strict=False)
+    except OSError as e:
+        sys.stderr.write(f"ERR\t{mode}\tcannot resolve path: {e}\n")
+        sys.exit(2)
+    allowed = [cwd, Path('/tmp').resolve(), Path('/home/jeryd').resolve()]
+    if not any(resolved == a or a in resolved.parents for a in allowed):
+        sys.stderr.write(f"ERR\t{mode}\tpath escapes cwd\n")
+        sys.exit(2)
+    return resolved
+
+
 def main(argv: list[str]) -> int:
     if len(argv) < 3:
         sys.stderr.write(
@@ -75,11 +102,13 @@ def main(argv: list[str]) -> int:
         )
         return 2
     mode = argv[1]
-    path = argv[2]
+    raw_path = argv[2]
     symbol = argv[3] if len(argv) >= 4 else None
     if mode not in ("outline", "reflect"):
         sys.stderr.write(f"ERR\t{mode}\tunknown mode\n")
         return 2
+    target = confine_path(raw_path, mode)
+    path = str(target)
     try:
         with open(path, "r", encoding="utf-8") as fh:
             text = fh.read()
@@ -92,6 +121,11 @@ def main(argv: list[str]) -> int:
         sys.stderr.write(f"ERR\t{mode}\tparse failed: {e}\n")
         return 1
     if mode == "outline":
+        if "--json" in argv:
+            fns = [it.name for it in items if isinstance(it, FnMeta)]
+            vers = [it.name for it in items if isinstance(it, VerifyMeta)]
+            sys.stdout.write(json.dumps({"functions": fns, "verifies": vers}) + "\n")
+            return 0
         sys.stdout.write(format_outline(items))
         return 0
     out, code = format_reflect(items, symbol)

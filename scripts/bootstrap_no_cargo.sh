@@ -17,6 +17,8 @@ if [[ -z "$SEED_SRC" || ! -x "$SEED_SRC" ]]; then
     SEED_SRC="$ROOT/oodac/oodac2"
   elif [[ -x "$ROOT/oodac/oodac" ]]; then
     SEED_SRC="$ROOT/oodac/oodac"
+  elif [[ -x "$ROOT/dist/ooda-v0.182.1-alpha-linux-x86_64/oodac/oodac" ]]; then
+    SEED_SRC="$ROOT/dist/ooda-v0.182.1-alpha-linux-x86_64/oodac/oodac"
   else
     echo "ERR_NO_SEED: set SEED_OODAC to a pure oodac binary" >&2
     echo "  (first seed: obtain prebuilt oodac; host Rust seed retired)" >&2

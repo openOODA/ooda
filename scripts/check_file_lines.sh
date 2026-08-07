@@ -10,7 +10,11 @@
 # Owned source: .oo .rs .c .h .sh .py under repo root, excluding generated/noise.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if git rev-parse --show-toplevel >/dev/null 2>&1; then
+  ROOT="$(git rev-parse --show-toplevel)"
+else
+  ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+fi
 cd "$ROOT"
 
 MAX_LINES="${MAX_LINES:-256}"
@@ -31,7 +35,7 @@ done
 is_excluded() {
   local f="$1"
   case "$f" in
-    *'/.git/'*|*'target/'*|*'dist/'*) return 0 ;;
+    *'/.git/'*|*'target/'*|*'dist/'*|*'/.agents/'*) return 0 ;;
     *.oo.c|*.oo.bin|*.c_native|*.concat.oo|*.oo.concat.oo) return 0 ;;
     oodac/main.c|oodac/oodac2.c|./oodac/main.c|./oodac/oodac2.c) return 0 ;;
     */oodac/main.c|*/oodac/oodac2.c) return 0 ;;

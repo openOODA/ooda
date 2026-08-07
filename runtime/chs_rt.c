@@ -3,4 +3,5 @@
 #include "chs_rt_list.c"
 #include "chs_rt_fs.c"
 #include "chs_rt_print.c"
+#include "chs_rt_crypto.c"
 #include "chs_rt_host.c"

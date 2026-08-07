@@ -61,13 +61,24 @@ if [[ $rl -eq 0 ]]; then bad "product dump tokens accepted bad_char"; else pass 
 
 # --- pure build-c ---
 cp "$BUILD_SRC" "$TMPDIR/smoke.oo"
-"$OODA" build --target c "$TMPDIR/smoke.oo" >"$TMPDIR/build.out" 2>"$TMPDIR/build.err" || true
-if [[ -x "$TMPDIR/smoke" ]]; then
-  out=$("$TMPDIR/smoke" | tr '\n' ',' | head -c 80)
-  if echo "$out" | grep -q '2'; then
-    pass "product pure build-c smoke ($out)"
+set +e
+"$OODA" build --target c "$TMPDIR/smoke.oo" >"$TMPDIR/build.out" 2>"$TMPDIR/build.err"
+brc=$?
+set -e
+if [[ -x "$TMPDIR/smoke" && $brc -eq 0 ]]; then
+  set +e
+  raw_smoke_out="$("$TMPDIR/smoke" 2>&1)"
+  sm_rc=$?
+  set -e
+  if [[ $sm_rc -ne 0 ]]; then
+    bad "product pure build-c execution failed exit=$sm_rc"
   else
-    bad "product pure build odd output: $out"
+    out=$(echo "$raw_smoke_out" | tr '\n' ',' | head -c 80)
+    if echo "$out" | grep -q '2'; then
+      pass "product pure build-c smoke ($out)"
+    else
+      bad "product pure build odd output: $out"
+    fi
   fi
   rm -f "$TMPDIR/smoke"
 else

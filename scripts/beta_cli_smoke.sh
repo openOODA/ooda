@@ -121,8 +121,17 @@ for rel in fixtures/chs_list_string.oo fixtures/while_count.oo bootstrap/corpus/
     head -8 "$TMPDIR/beta_build_${base}.log" >&2 || true
     fail=1
   else
-    out=$("$bin" 2>/dev/null | tr -d '\r' | head -3 | tr '\n' ',')
-    echo "OK pure build $rel -> $out"
+    set +e
+    raw_bin_out="$("$bin" 2>/dev/null)"
+    bin_rc=$?
+    set -e
+    if [[ $bin_rc -ne 0 ]]; then
+      echo "FAIL pure build run $rel exit=$bin_rc" >&2
+      fail=1
+    else
+      out=$(echo "$raw_bin_out" | tr -d '\r' | head -3 | tr '\n' ',')
+      echo "OK pure build $rel -> $out"
+    fi
   fi
 done
 

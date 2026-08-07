@@ -121,8 +121,26 @@ echo "OK stage-2 binary pure-built by stage-1"
 
 echo "=== fixed-point: digests stage-1 ≡ stage-2 tokens (N vs N+1) ==="
 CORPUS="$ROOT/fixtures/int_main.oo"
-"$STAGE1" tokens "$CORPUS" | grep $'\t' | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s1.sha"
-"$STAGE2" tokens "$CORPUS" | grep $'\t' | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s2.sha"
+set +e
+s1_tok="$("$STAGE1" tokens "$CORPUS" 2>&1)"
+s1_rc=$?
+set -e
+if [[ $s1_rc -ne 0 ]]; then
+  echo "FAIL: stage-1 tokens exit=$s1_rc" >&2
+  exit 1
+fi
+echo "$s1_tok" | grep $'\t' | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s1.sha"
+
+set +e
+s2_tok="$("$STAGE2" tokens "$CORPUS" 2>&1)"
+s2_rc=$?
+set -e
+if [[ $s2_rc -ne 0 ]]; then
+  echo "FAIL: stage-2 tokens exit=$s2_rc" >&2
+  exit 1
+fi
+echo "$s2_tok" | grep $'\t' | sha256sum | awk '{print $1}' >"$TMPDIR/fp_s2.sha"
+
 echo "s1 $(cat $TMPDIR/fp_s1.sha)"
 echo "s2 $(cat $TMPDIR/fp_s2.sha)"
 if ! diff -q "$TMPDIR/fp_s1.sha" "$TMPDIR/fp_s2.sha" >/dev/null; then
@@ -134,9 +152,23 @@ echo "OK token digests s1≡s2"
 echo "=== fixed-point: stage-2 real-builds smoke ==="
 SMOKE2="$TMPDIR/chs_smoke_from_s2"
 rm -f "$SMOKE2"
-"$STAGE2" build "$SMOKE_SRC" "$SMOKE2" >"$TMPDIR/stage2_build_smoke.txt" 2>&1
-test -x "$SMOKE2"
-out2=$("$SMOKE2" | tr -d '\r')
+set +e
+(cd "$ROOT" && "$STAGE2" build "$SMOKE_SRC" "$SMOKE2" >"$TMPDIR/stage2_build_smoke.txt" 2>&1)
+s2b_rc=$?
+set -e
+if [[ $s2b_rc -ne 0 ]] || [[ ! -x "$SMOKE2" ]]; then
+  echo "FAIL: stage-2 build smoke exit=$s2b_rc" >&2
+  exit 1
+fi
+set +e
+raw_out2="$("$SMOKE2" 2>&1)"
+sm2_rc=$?
+set -e
+if [[ $sm2_rc -ne 0 ]]; then
+  echo "FAIL: stage-2 smoke binary execution exit=$sm2_rc" >&2
+  exit 1
+fi
+out2=$(echo "$raw_out2" | tr -d '\r')
 echo "stage2_smoke=$out2"
 echo "$out2" | grep -q '2'
 echo "OK stage-2 builds smoke"

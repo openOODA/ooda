@@ -8,7 +8,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
-SRC="${1:-}"
+SRC=""
+for arg in "$@"; do
+  if [[ "$arg" != -* ]]; then
+    SRC="$arg"
+  fi
+done
 if [[ -z "$SRC" || ! -f "$SRC" ]]; then
   echo "ERR	test	missing source file" >&2
   exit 2

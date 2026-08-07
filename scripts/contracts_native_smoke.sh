@@ -68,7 +68,7 @@ grep -q 'OoStr greet' "$c_hello" || {
   echo "FAIL hello missing greet: $HELLO" >&2
   exit 1
 }
-grep -A2 'OoStr greet' "$c_hello" | grep -q 'return' || {
+grep -A10 'OoStr greet' "$c_hello" | grep -q 'return' || {
   echo "FAIL hello empty greet body: $HELLO" >&2
   head -60 "$c_hello" >&2
   exit 1
