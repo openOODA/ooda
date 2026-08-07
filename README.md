@@ -120,7 +120,7 @@ Builder needs **gcc + seed binary only**. See `scripts/bootstrap_no_cargo.sh`.
 
 **Do not call this beta** until a public beta tag + install pin + notes are deliberately cut. This is **v0.182.1-alpha** with a zero-Rust product tree.
 
-Proof logs: monorepo `PROGRESS.md`; bootstrap checklist `bootstrap/ZERO_RUST_TODO.md`; criteria `bootstrap/BETA.md`.
+Proof / status: monorepo `PROGRESS.md`; criteria `bootstrap/BETA.md`; latest ship notes `RELEASE_NOTES_v0.182.1-alpha.md`.
 
 ---
 

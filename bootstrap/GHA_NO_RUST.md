@@ -121,4 +121,4 @@ gh run list -R openOODA/ooda -w no-rust --limit 3
 - `scripts/install_dress_rehearsal.sh` — offline release layout  
 - `scripts/ci_no_rust.sh` — local B1 rail  
 - `bootstrap/RELEASE_CHECKLIST.md` — pin + asset + sha256 coherence  
-- `bootstrap/B0_B5_PROOF.md` — gate honesty (no beta force)
+- monorepo `PROGRESS.md` / latest release notes — gate honesty (no beta force)

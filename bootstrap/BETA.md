@@ -40,7 +40,7 @@ Beta is **not** automatic when the checklist is green.
 | **`CHS.md`** | Frozen **compiler-host subset** for self-host. Beta surface ⊇ CHS (at least enough to build the compiler). |
 | **`FLOOR.md`** | Native **backend policy** (Backend-C today; other backends later). C allowed at beta. |
 | **`BETA.md` (this file)** | **Definition of done for a beta tag** + in/out surface + proof. |
-| **`B0_B5_PROOF.md`** | Live proof log for purity gates (update when re-verifying). |
+| **Proof log** | Record B0–B5 pass/fail in monorepo `PROGRESS.md` or latest `RELEASE_NOTES_*.md` when re-verifying. |
 
 ```text
 DESIGN     →  long-term language vision
@@ -130,7 +130,7 @@ for each row in B.1:
   fail fixtures non-zero where meaningful
 for each row in B.2:
   documented + non-zero (or explicitly “not shipped”)
-B0–B5 green with proof log (B0_B5_PROOF.md or release notes)
+B0–B5 green with proof log (PROGRESS.md or latest RELEASE_NOTES_*.md)
 public notes match In/Out tables
 ```
 
@@ -168,7 +168,7 @@ public notes match In/Out tables
 | Part B.2 Out surface | **Documented** fuzz, wasm/llvm, ensures incomplete, non-INT for residual, non-Result match residual, net residual, multi-arg exec residual; FS/Sys/Env **runtime magic-token seal In** |
 | Public beta tag | **Not claimed** |
 
-Live notes: monorepo `PROGRESS.md`, `bootstrap/B0_B5_PROOF.md`.
+Live notes: monorepo `PROGRESS.md`, latest `RELEASE_NOTES_*.md`.
 
 ---
 
@@ -222,7 +222,7 @@ Pre-beta with green gates: **still fine** — owner may keep improving without t
 RS_COUNT=$(find . -name '*.rs' -not -path './.git/*' -not -path './target/*' | wc -l)
 OO_COUNT=$(find . -name '*.oo' -not -path './.git/*' -not -path './target/*' | wc -l)
 # O=0 via scripts/check_file_lines.sh
-# B0..B5 and Part B: pass/fail in PROGRESS or B0_B5_PROOF.md
+# B0..B5 and Part B: pass/fail in PROGRESS or latest RELEASE_NOTES_*.md
 ```
 
 **Alpha** may still improve surface. **Beta tag** requires this document’s Definition of done (Part A **and** Part B).
