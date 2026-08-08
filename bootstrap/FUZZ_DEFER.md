@@ -1,46 +1,49 @@
-# `ooda test --fuzz` — Native Contract Fuzzer
+# `ooda test --fuzz` — Contract Fuzzer Honesty
 
-**Status:** Active & un-gated (Milestone M3). `ooda test --fuzz [iterations]` executes contract fuzzer harness.
+**Status (v0.183.0-alpha):** CLI **un-gated**. Implementation is a **Python residual**, not a pure-`.oo` native fuzzer.
 
-**Claimed:** Built-in contract fuzzer with PRNG input domain generation, precondition filtering, postcondition/assertion checking, and counterexample reporting on the pure product path.
+## Product path (honest)
 
-## Why deferred
+```
+ooda test <file.oo> --fuzz [iterations]
+  → scripts/ooda_product.sh test
+  → scripts/ooda_test_verify.sh (OODA_TEST_FUZZ*)
+  → python3 scripts/ooda_test_harness.py (+ ooda_fuzz_scan.py / ooda_fuzz_emit.py)
+  → Backend-C harness build + exec
+```
 
-DESIGN / SPEC describe automated fuzzing (boundary inputs, `#[auto_fuzz]`). The pure product path today is:
+| Claim | Reality |
+|-------|---------|
+| CLI accepts `--fuzz` | Yes |
+| Pure-`.oo` fuzzer in `oodac` | **No** — `fuzz_gen.oo` is dead (not imported) |
+| Zero-Python product path | **No** — harness is Python |
+| Safe for all contract shapes | **No** — residual; string ARC / bool emit can still break builds |
 
-1. **`ooda test`** — typecheck + lower `assert_eq!` in `verify` → Backend-C harness build+exec  
-2. **No host interpreter** — native build+exec only (`ooda run` permanent path)  
-3. **Contracts not runtime-enforced** on Backend-C  
+## Residuals (do not market as sealed)
 
-A real fuzzer needs at least one of:
+1. **Python harness** — not self-hosted pure path  
+2. **M2 ARC interaction** — string concat / reassign under harness still hostile  
+3. **`fuzz_gen.oo`** — orphan; not on product path  
+4. Self-host **`PURE_NO_ARC`** may affect harness emit stability when using tree `oodac`
 
-| Prerequisite | Why |
-|---|---|
-| Pure integer-domain generator + harness emit | Safe only for pure arithmetic `assert_eq` targets |
-| Contract/refinement lowering or check-phase oracle | Otherwise fuzz cannot score requires/ensures |
-| Cap-aware sandbox for effectful code | Avoid ambient I/O while fuzzing |
-| Stable API for `#[auto_fuzz]` (or CLI filter) | Agent-discoverable surface |
+## When to claim “native”
 
-Shipping a “fake fuzz” that only re-runs fixed asserts would raise \(W\) (hand-wave) and \(U\) (untested claim). Prefer **exit 2 + this note**.
+Only when **all** hold:
 
-## When to implement (MVP gate)
-
-Implement only when **all** hold:
-
-1. Pure path stays zero-Rust; module ≤256 lines; fail-closed on unsupported surfaces  
-2. Scope is **explicit**: e.g. pure `Int` params + `assert_eq!` expected values only  
-3. Pass **and** fail rails (seeded domain that finds a known bug; rejects non-pure targets)  
-4. No shell/eval of user fixtures beyond the existing Backend-C build pipeline  
-5. Document residual (strings, caps, contracts still out)
+1. Pure path zero-Rust; modules ≤256; no Python on fuzz path  
+2. Explicit domain (e.g. pure `Int` params) with pass **and** fail rails  
+3. Cap-aware sandbox for effectful fixtures  
+4. `FUZZ_DEFER.md` updated and honesty probes match
 
 ## Interim agent guidance
 
-- Use `ooda test <file.oo>` for verify/`assert_eq!`  
-- Use corpus + `ooda check` for negative type/cap rails  
-- Do not treat exit 2 on `--fuzz` as a product bug — it is intentional honesty  
+- Use `ooda test <file.oo>` for verify / `assert_eq!`  
+- Treat `--fuzz` as **MVP Python residual**, not beta surface  
+- Do not document exit-2 residual for `--fuzz` (un-gated)  
 
 ## Related
 
-- `bootstrap/BUILD_OUT.md` — P1 item  
-- `scripts/ooda_test_verify.sh` — real test path  
-- DESIGN § self-testing / fuzz pillars (north star; not auto-promoted to beta)
+- `scripts/ooda_test_verify.sh` — real test + fuzz entry  
+- `scripts/ooda_fuzz_*.py` — residual harness  
+- `qa/probe_honesty_tests.sh` — K2 expects un-gated + residual honesty  
+- DESIGN § self-testing / fuzz (north star; not auto-promoted to beta)
