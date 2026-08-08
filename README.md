@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.182.1-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.183.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
 
@@ -38,7 +38,7 @@ ooda version
 
 ---
 
-## What's real in v0.182.1-alpha (pure product)
+## What's real in v0.183.0-alpha (pure product)
 
 | Capability | Status |
 |---|---|
@@ -100,7 +100,7 @@ SEED_OODAC=./oodac/oodac ./scripts/bootstrap_no_cargo.sh
 ./scripts/ci_no_rust.sh   # B1-style: asserts no cargo on product path
 
 # Release tarball (no cargo)
-./scripts/release.sh v0.182.1-alpha
+./scripts/release.sh v0.183.0-alpha
 ```
 
 Builder needs **gcc + seed binary only**. See `scripts/bootstrap_no_cargo.sh`.
@@ -118,9 +118,9 @@ Builder needs **gcc + seed binary only**. See `scripts/bootstrap_no_cargo.sh`.
 | **B4** honesty / fail-closed residual | PASS process; **no beta tag** until public review |
 | **B5** org siblings non-Rust product | PASS for product-critical siblings (std/qa/docs …); editors optional |
 
-**Do not call this beta** until a public beta tag + install pin + notes are deliberately cut. This is **v0.182.1-alpha** with a zero-Rust product tree.
+**Do not call this beta** until a public beta tag + install pin + notes are deliberately cut. This is **v0.183.0-alpha** with a zero-Rust product tree.
 
-Proof / status: monorepo `PROGRESS.md`; criteria `bootstrap/BETA.md`; latest ship notes `RELEASE_NOTES_v0.182.1-alpha.md`.
+Proof / status: monorepo `PROGRESS.md`; criteria `bootstrap/BETA.md`; latest ship notes `RELEASE_NOTES_v0.183.0-alpha.md`.
 
 ---
 

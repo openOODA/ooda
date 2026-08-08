@@ -1,0 +1,252 @@
+// job: Bytecode VM in-memory execution engine for `ooda run`
+// stage: vm
+
+import "vm_val.oo";
+import "vm_stack.oo";
+import "vm_ops.oo";
+import "vm_builtin.oo";
+import "vm_exec_parse.oo";
+
+pub fn vm_run_bytecode(bc: String) -> Int {
+    let fs = oo_cap_grant_fs();
+    let sys = oo_cap_grant_sys();
+    return vm_run_bytecode_caps(fs, sys, bc);
+}
+
+pub fn vm_run_bytecode_caps(fs: &FsCap, sys: &SysCap, bc: String) -> Int {
+    let code: List[String] = parse_bytecode_code(bc);
+    let fn_info: List[String] = parse_bytecode_fn_info(bc);
+    let labels: List[String] = parse_bytecode_labels(bc);
+
+    let code_len = list_len(code);
+    if code_len == 0 {
+        return 0;
+    }
+
+    let mut ip = 0;
+    let mut cur_fn_name = "main";
+    let mut num_locals = 0;
+    let mut found_main = false;
+    let num_fns = list_len(fn_info);
+    let mut fi = 0;
+    while fi < num_fns {
+        let entry = list_get(fn_info, fi);
+        let mut f_name = "";
+        let mut f_ip = 0;
+        let mut f_locs = 0;
+        let mut p_idx = 0;
+        let entry_n = chars_len(entry);
+        let mut start_p = 0;
+        let mut cp = 0;
+        while cp <= entry_n {
+            let e_entry = (cp == entry_n);
+            let mut is_tab = false;
+            if !e_entry { if char_at(entry, cp) == "\t" { is_tab = true; } }
+            if e_entry || is_tab {
+                let part = str_slice(entry, start_p, cp);
+                if p_idx == 0 { f_name = part; }
+                else if p_idx == 1 { f_ip = parse_int(part); }
+                else if p_idx == 3 { f_locs = parse_int(part); }
+                p_idx = p_idx + 1;
+                start_p = cp + 1;
+            }
+            cp = cp + 1;
+        }
+        if f_name == "main" {
+            cur_fn_name = "main";
+            ip = f_ip;
+            num_locals = f_locs;
+            found_main = true;
+        }
+        fi = fi + 1;
+    }
+    if !found_main && num_fns > 0 {
+        ip = 0;
+    }
+
+    let mut op_stack: List[String] = stack_new();
+    let mut locals: List[String] = locals_new(num_locals);
+    let mut call_stack_ip: List[String] = list_new();
+    let mut call_stack_fn: List[String] = list_new();
+    let mut call_stack_loc: List[String] = list_new();
+
+    while ip >= 0 && ip < code_len {
+        let inst = list_get(code, ip);
+        let inst_len = chars_len(inst);
+        let mut opcode = inst;
+        let mut arg1 = "";
+        let mut arg2 = "";
+        let mut sp_pos = 0;
+        while sp_pos < inst_len {
+            if char_at(inst, sp_pos) == " " {
+                opcode = str_slice(inst, 0, sp_pos);
+                let rest = str_slice(inst, sp_pos + 1, inst_len);
+                arg1 = rest;
+                if opcode != "PUSH_STR" {
+                    let rest_len = chars_len(rest);
+                    let mut r_sp = 0;
+                    while r_sp < rest_len {
+                        if char_at(rest, r_sp) == " " {
+                            arg1 = str_slice(rest, 0, r_sp);
+                            arg2 = str_slice(rest, r_sp + 1, rest_len);
+                            break;
+                        }
+                        r_sp = r_sp + 1;
+                    }
+                }
+                break;
+            }
+            sp_pos = sp_pos + 1;
+        }
+
+        if opcode == "PUSH_INT" { op_stack = stack_push(op_stack, val_int(parse_int(arg1))); }
+        else if opcode == "PUSH_STR" { op_stack = stack_push(op_stack, val_str(arg1)); }
+        else if opcode == "PUSH_BOOL" { op_stack = stack_push(op_stack, val_bool(arg1 == "1" || arg1 == "true")); }
+        else if opcode == "PUSH_VOID" { op_stack = stack_push(op_stack, val_void()); }
+        else if opcode == "POP" { op_stack = stack_pop(op_stack); }
+        else if opcode == "LOAD_LOCAL" {
+            let slot = parse_int(arg1);
+            op_stack = stack_push(op_stack, locals_get(locals, slot));
+        } else if opcode == "STORE_LOCAL" {
+            let slot = parse_int(arg1);
+            let top_val: String = stack_top(op_stack);
+            op_stack = stack_pop(op_stack);
+            locals = locals_set(locals, slot, top_val);
+        } else if opcode == "ADD" || opcode == "SUB" || opcode == "MUL" || opcode == "DIV" || opcode == "MOD"
+            || opcode == "EQ" || opcode == "NE" || opcode == "LT" || opcode == "LE" || opcode == "GT"
+            || opcode == "GE" || opcode == "AND" || opcode == "OR"
+        {
+            let b_val: String = stack_top(op_stack); op_stack = stack_pop(op_stack);
+            let a_val: String = stack_top(op_stack); op_stack = stack_pop(op_stack);
+            op_stack = stack_push(op_stack, eval_vm_binop(opcode, a_val, b_val));
+        } else if opcode == "NOT" || opcode == "NEG" {
+            let a_val: String = stack_top(op_stack); op_stack = stack_pop(op_stack);
+            op_stack = stack_push(op_stack, eval_vm_unop(opcode, a_val));
+        } else if opcode == "JUMP" {
+            ip = find_label_ip(labels, cur_fn_name + ":" + arg1);
+            continue;
+        } else if opcode == "JUMP_IF_FALSE" {
+            let cond: String = stack_top(op_stack); op_stack = stack_pop(op_stack);
+            if !val_is_truthy(cond) {
+                ip = find_label_ip(labels, cur_fn_name + ":" + arg1);
+                continue;
+            }
+        } else if opcode == "JUMP_IF_TRUE" {
+            let cond: String = stack_top(op_stack); op_stack = stack_pop(op_stack);
+            if val_is_truthy(cond) {
+                ip = find_label_ip(labels, cur_fn_name + ":" + arg1);
+                continue;
+            }
+        } else if opcode == "CALL" {
+            let fn_target = arg1;
+            let argc = parse_int(arg2);
+            if is_vm_builtin(fn_target) {
+                op_stack = exec_vm_builtin(fs, sys, fn_target, argc, op_stack);
+            } else {
+                let mut target_ip = 0;
+                let mut target_locs = 0;
+                let mut found_fn = false;
+                let num_f = list_len(fn_info);
+                let mut fj = 0;
+                while fj < num_f {
+                    let f_item = list_get(fn_info, fj);
+                    let mut f_n = "";
+                    let mut f_i = 0;
+                    let mut f_l = 0;
+                    let mut p_i = 0;
+                    let f_item_n = chars_len(f_item);
+                    let mut st_p = 0;
+                    let mut cp_i = 0;
+                    while cp_i <= f_item_n {
+                        let e_fi = (cp_i == f_item_n);
+                        let mut is_t = false;
+                        if !e_fi { if char_at(f_item, cp_i) == "\t" { is_t = true; } }
+                        if e_fi || is_t {
+                            let part = str_slice(f_item, st_p, cp_i);
+                            if p_i == 0 { f_n = part; }
+                            else if p_i == 1 { f_i = parse_int(part); }
+                            else if p_i == 3 { f_l = parse_int(part); }
+                            p_i = p_i + 1;
+                            st_p = cp_i + 1;
+                        }
+                        cp_i = cp_i + 1;
+                    }
+                    if f_n == fn_target {
+                        target_ip = f_i;
+                        target_locs = f_l;
+                        found_fn = true;
+                    }
+                    fj = fj + 1;
+                }
+                if found_fn {
+                    let next_ip = ip + 1;
+                    call_stack_ip = stack_push(call_stack_ip, next_ip.to_string());
+                    call_stack_fn = list_push(call_stack_fn, cur_fn_name);
+                    let mut loc_enc = "";
+                    let n_loc = list_len(locals);
+                    let mut li = 0;
+                    while li < n_loc {
+                        if li > 0 { loc_enc = loc_enc + "\t"; }
+                        loc_enc = loc_enc + list_get(locals, li);
+                        li = li + 1;
+                    }
+                    call_stack_loc = list_push(call_stack_loc, loc_enc);
+
+                    let mut call_args: List[String] = list_new();
+                    let mut ai = 0;
+                    while ai < argc {
+                        call_args = list_push(call_args, stack_top(op_stack));
+                        op_stack = stack_pop(op_stack);
+                        ai = ai + 1;
+                    }
+
+                    locals = locals_new(target_locs);
+                    ai = 0;
+                    while ai < argc {
+                        let arg_v = list_get(call_args, argc - 1 - ai);
+                        locals = locals_set(locals, ai, arg_v);
+                        ai = ai + 1;
+                    }
+                    cur_fn_name = fn_target;
+                    ip = target_ip;
+                    continue;
+                }
+            }
+        } else if opcode == "RETURN" {
+            let ret_val: String = stack_top(op_stack);
+            op_stack = stack_pop(op_stack);
+            let cs_len = list_len(call_stack_ip);
+            if cs_len == 0 {
+                return val_to_int(ret_val);
+            }
+            let pre_ip_str: String = list_get(call_stack_ip, cs_len - 1);
+            let pre_ip: Int = parse_int(pre_ip_str);
+            let pre_fn: String = list_get(call_stack_fn, cs_len - 1);
+            let pre_loc: String = list_get(call_stack_loc, cs_len - 1);
+            call_stack_ip = stack_pop(call_stack_ip);
+            call_stack_fn = stack_pop(call_stack_fn);
+            call_stack_loc = stack_pop(call_stack_loc);
+            let mut prev_locs: List[String] = list_new();
+            let enc_len = chars_len(pre_loc);
+            let mut st_l = 0;
+            let mut cp_l = 0;
+            while cp_l <= enc_len {
+                let e_enc = (cp_l == enc_len);
+                let mut is_t = false;
+                if !e_enc { if char_at(pre_loc, cp_l) == "\t" { is_t = true; } }
+                if e_enc || is_t {
+                    prev_locs = list_push(prev_locs, str_slice(pre_loc, st_l, cp_l));
+                    st_l = cp_l + 1;
+                }
+                cp_l = cp_l + 1;
+            }
+            ip = pre_ip;
+            cur_fn_name = pre_fn;
+            locals = prev_locs;
+            op_stack = stack_push(op_stack, ret_val);
+            continue;
+        }
+        ip = ip + 1;
+    }
+    return 0;
+}

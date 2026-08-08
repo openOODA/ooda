@@ -1,22 +1,62 @@
 #include "chs_rt.h"
 
+char *oo_str_alloc_payload(size_t len) {
+  OoStrHeader *hdr = (OoStrHeader *)malloc(sizeof(OoStrHeader) + len + 1);
+  if (!hdr) abort();
+  hdr->ref_count = 1;
+  hdr->flags = 0;
+  char *data = (char *)(hdr + 1);
+  data[len] = 0;
+  return data;
+}
+
+void oo_str_retain(OoStr s) {
+  if (!s.data) return;
+  OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
+  if (hdr->ref_count == 0 || hdr->ref_count == UINT32_MAX || (hdr->flags & OO_FLAG_STATIC)) {
+    return;
+  }
+  hdr->ref_count++;
+}
+
+void oo_str_release(OoStr s) {
+  if (!s.data) return;
+  OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
+  if (hdr->ref_count == 0 || hdr->ref_count == UINT32_MAX || (hdr->flags & OO_FLAG_STATIC)) {
+    return;
+  }
+  if (hdr->ref_count > 0) {
+    hdr->ref_count--;
+    if (hdr->ref_count == 0) {
+      free(hdr);
+    }
+  }
+}
+
 OoStr oo_str_lit(const char *s) {
   OoStr r;
+  if (!s) {
+    r.len = 0;
+    r.data = oo_str_alloc_payload(0);
+    return r;
+  }
   r.len = (long long)strlen(s);
-  r.data = (char *)malloc((size_t)r.len + 1);
-  if (!r.data) abort();
-  memcpy(r.data, s, (size_t)r.len + 1);
+  r.data = oo_str_alloc_payload((size_t)r.len);
+  memcpy(r.data, s, (size_t)r.len);
   return r;
 }
 
+/* Non-consuming concat: borrows a/b (M2: s=s+t safe with reassign_arc). */
 OoStr oo_str_concat(OoStr a, OoStr b) {
   OoStr r;
   r.len = a.len + b.len;
-  r.data = (char *)malloc((size_t)r.len + 1);
-  if (!r.data) abort();
-  memcpy(r.data, a.data, (size_t)a.len);
-  memcpy(r.data + a.len, b.data, (size_t)b.len);
-  r.data[r.len] = 0;
+  r.data = oo_str_alloc_payload((size_t)r.len);
+  if (a.data && a.len > 0) {
+    memcpy(r.data, a.data, (size_t)a.len);
+  }
+  if (b.data && b.len > 0) {
+    memcpy(r.data + a.len, b.data, (size_t)b.len);
+  }
   return r;
 }
 
@@ -63,9 +103,8 @@ OoStr oo_char_at(OoStr s, long long idx) {
   else if (c >= 0xC0) nbytes = 2;
   OoStr r;
   r.len = nbytes;
-  r.data = (char *)malloc((size_t)nbytes + 1);
+  r.data = oo_str_alloc_payload((size_t)nbytes);
   memcpy(r.data, s.data + b, (size_t)nbytes);
-  r.data[nbytes] = 0;
   return r;
 }
 
@@ -76,15 +115,13 @@ OoStr oo_str_slice(OoStr s, long long start, long long end) {
     /* Fail soft for bootstrap emit edge cases (empty field / OOB) — empty string. */
     OoStr empty;
     empty.len = 0;
-    empty.data = (char *)malloc(1);
-    if (empty.data) empty.data[0] = 0;
+    empty.data = oo_str_alloc_payload(0);
     return empty;
   }
   OoStr r;
   r.len = be - bs;
-  r.data = (char *)malloc((size_t)r.len + 1);
+  r.data = oo_str_alloc_payload((size_t)r.len);
   memcpy(r.data, s.data + bs, (size_t)r.len);
-  r.data[r.len] = 0;
   return r;
 }
 
@@ -97,4 +134,3 @@ int oo_char_is_alpha(OoStr s) {
 int oo_char_is_space(OoStr s) {
   return s.len == 1 && isspace((unsigned char)s.data[0]);
 }
-

@@ -3,115 +3,25 @@
 from __future__ import annotations
 import re
 import sys
+from ooda_fuzz_scan import collect_fuzz_targets
+from ooda_fuzz_emit import emit_fuzz_harness
+from ooda_test_parse_util import (
+    skip_ws,
+    match_kw,
+    skip_balanced,
+    skip_paren_group,
+    parse_assert_eq_args,
+    bal,
+)
+
 def collect_verifies(text: str) -> tuple[list[str], list[tuple], int]:
     n = len(text)
-    def skip_ws(j: int) -> int:
-        while j < n and text[j] in " \t\r\n":
-            j += 1
-        return j
-    def match_kw(j: int, kw: str) -> int:
-        if text.startswith(kw, j):
-            end = j + len(kw)
-            if end >= n or not (text[end].isalnum() or text[end] == "_"):
-                return end
-        return -1
-    def skip_balanced(j: int, open_c: str = "{", close_c: str = "}") -> int:
-        if j >= n or text[j] != open_c:
-            raise ValueError(f"expected {open_c} at {j}")
-        depth = 0
-        in_str = False
-        esc = False
-        while j < n:
-            c = text[j]
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == "\\":
-                    esc = True
-                elif c == '"':
-                    in_str = False
-                j += 1
-                continue
-            if c == '"':
-                in_str = True
-                j += 1
-                continue
-            if c == open_c:
-                depth += 1
-            elif c == close_c:
-                depth -= 1
-                j += 1
-                if depth == 0:
-                    return j
-                continue
-            j += 1
-        raise ValueError("unbalanced braces")
-    def skip_paren_group(j: int) -> int:
-        return skip_balanced(j, "(", ")")
-    def parse_assert_eq_args(inner: str) -> tuple[str, str]:
-        depth = 0
-        in_str = False
-        esc = False
-        for k, c in enumerate(inner):
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == "\\":
-                    esc = True
-                elif c == '"':
-                    in_str = False
-                continue
-            if c == '"':
-                in_str = True
-                continue
-            if c in "([{":
-                depth += 1
-            elif c in ")]}":
-                depth -= 1
-            elif c == "," and depth == 0:
-                lhs = inner[:k].strip()
-                rhs = inner[k + 1 :].strip()
-                if not lhs or not rhs:
-                    raise ValueError("empty assert_eq arg")
-                return lhs, rhs
-        raise ValueError("assert_eq needs two args")
-    def bal(s: str, j0: int, open_c: str = "(", close_c: str = ")") -> int:
-        j = j0
-        depth = 0
-        in_str = False
-        esc = False
-        ln = len(s)
-        while j < ln:
-            c = s[j]
-            if in_str:
-                if esc:
-                    esc = False
-                elif c == "\\":
-                    esc = True
-                elif c == '"':
-                    in_str = False
-                j += 1
-                continue
-            if c == '"':
-                in_str = True
-                j += 1
-                continue
-            if c == open_c:
-                depth += 1
-            elif c == close_c:
-                depth -= 1
-                j += 1
-                if depth == 0:
-                    return j
-                continue
-            j += 1
-        raise ValueError("unbalanced")
     asserts: list[tuple] = []
     fns: list[str] = []
     verify_count = 0
     i = 0
     while i < n:
-        i = skip_ws(i)
+        i = skip_ws(text, i, n)
         if i >= n:
             break
         if text.startswith("//", i):
@@ -125,50 +35,50 @@ def collect_verifies(text: str) -> tuple[list[str], list[tuple], int]:
             i = end + 2
             continue
         start_item = i
-        j = match_kw(i, "pub")
+        j = match_kw(text, i, n, "pub")
         if j >= 0:
-            i = skip_ws(j)
+            i = skip_ws(text, j, n)
 
-        j = match_kw(i, "fn")
+        j = match_kw(text, i, n, "fn")
         if j >= 0:
-            i = skip_ws(j)
+            i = skip_ws(text, j, n)
             m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[i:])
             if not m:
                 raise ValueError("fn without name")
             fname = m.group(0)
             i += len(fname)
-            i = skip_ws(i)
+            i = skip_ws(text, i, n)
             if i >= n or text[i] != "(":
                 raise ValueError(f"fn {fname}: expected (")
-            i = skip_paren_group(i)
-            i = skip_ws(i)
+            i = skip_paren_group(text, i, n)
+            i = skip_ws(text, i, n)
             if text.startswith("->", i):
-                i = skip_ws(i + 2)
+                i = skip_ws(text, i + 2, n)
                 while i < n and text[i] != "{":
                     i += 1
-            i = skip_ws(i)
+            i = skip_ws(text, i, n)
             if i >= n or text[i] != "{":
                 raise ValueError(f"fn {fname}: expected body {{")
-            i = skip_balanced(i, "{", "}")
+            i = skip_balanced(text, i, n, "{", "}")
             chunk = text[start_item:i]
             if fname != "main":
                 fns.append(chunk.rstrip() + "\n")
             continue
 
         i = start_item
-        j = match_kw(i, "verify")
+        j = match_kw(text, i, n, "verify")
         if j >= 0:
-            i = skip_ws(j)
+            i = skip_ws(text, j, n)
             m = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[i:])
             if not m:
                 raise ValueError("verify without name")
             vname = m.group(0)
             i += len(vname)
-            i = skip_ws(i)
+            i = skip_ws(text, i, n)
             if i >= n or text[i] != "{":
                 raise ValueError(f"verify {vname}: expected {{")
             body_start = i + 1
-            i = skip_balanced(i, "{", "}")
+            i = skip_balanced(text, i, n, "{", "}")
             body = text[body_start : i - 1]
             verify_count += 1
             b = body
@@ -219,13 +129,13 @@ def collect_verifies(text: str) -> tuple[list[str], list[tuple], int]:
                     pos += 1
             continue
 
-        j = match_kw(i, "type")
-        if j < 0: j = match_kw(i, "import")
+        j = match_kw(text, i, n, "type")
+        if j < 0: j = match_kw(text, i, n, "import")
         if j >= 0:
             start_i = i
             while i < n and text[i] != ";": i += 1
             if i < n: i += 1
-            if match_kw(start_i, "import") >= 0: fns.append(text[start_i:i])
+            if match_kw(text, start_i, n, "import") >= 0: fns.append(text[start_i:i])
             continue
 
         snippet = text[i : i + 40].replace("\n", " ")

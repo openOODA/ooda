@@ -4,7 +4,7 @@ Harness inputs for **tests**, **CHS parity**, **fixed-point**, and product smoke
 
 This is **not** a public tutorial pack. Prefer `bootstrap/corpus/` for pass/fail rails.
 
-## Pure product path (v0.182.1-alpha+)
+## Pure product path (v0.183.0-alpha+)
 
 | File | Used by |
 |------|---------|
@@ -19,6 +19,7 @@ This is **not** a public tutorial pack. Prefer `bootstrap/corpus/` for pass/fail
 | `result_unwrap_err.oo` | Result `.unwrap()` Err → `ERR\tunwrap` + exit 1 |
 | `ensures_simple.oo` / `ensures_fail.oo` | ensures runtime rails |
 | `unauthorized_io.oo` | static cap deny (check) |
+| `em_demo.oo` | measured `ooda em` (In — parse/cap/typecheck µs + weight; no fake drag-%) |
 
 Corpus (primary rails):
 
@@ -38,7 +39,6 @@ Corpus (primary rails):
 | `list_*.oo`, `string_*.oo`, `break_loop.oo` | WASM/host-era e2e; not Backend-C product claims |
 | `for_range.oo` (+ `.wat`) | Demo only; product lowers **INT..INT** only — non-INT → residual (`FOR_MATCH_RESIDUAL.md`) |
 | `*.wat` | **Archived** WASM text modules from host-era dual-engine; not built/run by pure product rails |
-| `em_demo.oo` | historical `ooda em` (command residual) |
 
 Keep `*.wat` (+ matching historical `.oo`) for archaeology only — do not reintroduce a WASM product path.
 

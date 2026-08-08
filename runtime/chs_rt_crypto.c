@@ -158,12 +158,12 @@ OoResS json_parse_internal(OoStr raw) {
 OoStr json_stringify_internal(OoStr obj) { return obj; }
 
 OoStr async_spawn_internal(long long sys, OoStr name) {
-  oo_cap_require(sys, OO_CAP_SYS, "async_spawn");
+  oo_cap_require_sys(sys, "async_spawn");
   return oo_str_concat(oo_str_lit("thread#"), name);
 }
 
 OoResS async_join_internal(long long sys, OoStr handle) {
-  oo_cap_require(sys, OO_CAP_SYS, "async_join");
+  oo_cap_require_sys(sys, "async_join");
   OoResS r;
   if (handle.len >= 7 && memcmp(handle.data, "thread#", 7) == 0) {
     r.ok = 1; r.val = oo_str_concat(oo_str_lit("task_done:"), oo_str_slice(handle, 7, handle.len));
@@ -174,6 +174,6 @@ OoResS async_join_internal(long long sys, OoStr handle) {
 }
 
 OoResS python_embed_internal(long long sys, OoStr model) {
-  oo_cap_require(sys, OO_CAP_SYS, "python_embed");
+  oo_cap_require_sys(sys, "python_embed");
   (void)model; OoResS r; r.ok = 0; r.val = oo_str_lit("Err (Not Implemented)"); return r;
 }

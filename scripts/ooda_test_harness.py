@@ -14,13 +14,25 @@ _sysdir = Path(__file__).resolve().parent
 if str(_sysdir) not in sys.path:
     sys.path.insert(0, str(_sysdir))
 
-from ooda_test_scan import collect_verifies, emit_harness
+from ooda_test_scan import collect_verifies, emit_harness, collect_fuzz_targets, emit_fuzz_harness
 
 
 def main() -> int:
     src_path = os.environ["OODA_TEST_SRC"]
     out_path = os.environ["OODA_TEST_HARNESS"]
+    fuzz_mode = os.environ.get("OODA_TEST_FUZZ", "0") == "1"
+    fuzz_iters = int(os.environ.get("OODA_TEST_FUZZ_ITERS", "100"))
+    fuzz_seed = int(os.environ.get("OODA_TEST_FUZZ_SEED", "42"))
+    fuzz_verbose = os.environ.get("OODA_TEST_FUZZ_VERBOSE", "0") == "1"
+
     raw = open(src_path, "r", encoding="utf-8").read()
+
+    if fuzz_mode:
+        fns, fuzz_targets, has_contracts = collect_fuzz_targets(raw)
+        code = emit_fuzz_harness(fns, fuzz_targets, has_contracts, fuzz_iters, fuzz_seed, fuzz_verbose)
+        open(out_path, "w", encoding="utf-8").write(code)
+        return 0
+
     lines = []
     for line in raw.splitlines(keepends=True):
         s = line.lstrip()

@@ -4,6 +4,9 @@
 # out: oodac/oodac, bin/ooda (pure .oo CLI)
 # Anti: never invokes cargo/rustc; never OK_HOST host soft-pass
 set -euo pipefail
+# Seed-emitted ARC heap-corrupts self-host; strip until M2 closed (SPRINT.md).
+export PURE_NO_ARC="${PURE_NO_ARC:-1}"
+export PURE_SKIP_CHECK="${PURE_SKIP_CHECK:-1}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
 mkdir -p "$TMPDIR" "$ROOT/bin" "$ROOT/oodac"
@@ -17,8 +20,8 @@ if [[ -z "$SEED_SRC" || ! -x "$SEED_SRC" ]]; then
     SEED_SRC="$ROOT/oodac/oodac2"
   elif [[ -x "$ROOT/oodac/oodac" ]]; then
     SEED_SRC="$ROOT/oodac/oodac"
-  elif [[ -x "$ROOT/dist/ooda-v0.182.1-alpha-linux-x86_64/oodac/oodac" ]]; then
-    SEED_SRC="$ROOT/dist/ooda-v0.182.1-alpha-linux-x86_64/oodac/oodac"
+  elif [[ -x "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac" ]]; then
+    SEED_SRC="$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac"
   else
     echo "ERR_NO_SEED: set SEED_OODAC to a pure oodac binary" >&2
     echo "  (first seed: obtain prebuilt oodac; host Rust seed retired)" >&2
@@ -27,6 +30,7 @@ if [[ -z "$SEED_SRC" || ! -x "$SEED_SRC" ]]; then
 fi
 # Always copy seed aside so rm STAGE1 cannot unlink the live seed.
 SEED="$TMPDIR/bootstrap_seed_oodac"
+rm -f "$SEED"
 cp -a "$SEED_SRC" "$SEED"
 chmod +x "$SEED"
 echo "bootstrap_no_cargo: seed=$SEED (from $SEED_SRC)"
@@ -53,7 +57,7 @@ fi
 # 3) Smoke product CLI without cargo
 echo "=== smoke product bin/ooda ==="
 "$CLI_OUT" version | tee "$TMPDIR/bootstrap_ver.txt"
-grep -q '0.182.1-alpha' "$TMPDIR/bootstrap_ver.txt"
+grep -q '0.183.0-alpha' "$TMPDIR/bootstrap_ver.txt"
 "$CLI_OUT" check "$ROOT/fixtures/chs_list_string.oo" | tee "$TMPDIR/bootstrap_chk.txt"
 grep -qE '^OK' "$TMPDIR/bootstrap_chk.txt"
 "$CLI_OUT" run "$ROOT/fixtures/chs_list_string.oo" | tee "$TMPDIR/bootstrap_run.txt"

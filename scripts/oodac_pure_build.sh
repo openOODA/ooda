@@ -65,25 +65,36 @@ collect() {
 }
 collect "$MAIN_ABS"
 
-# C1 check gate (import-expanded main):
-# - always when 1 module
-# - small multi (≤8 modules): try check, timeout 90s fail-closed
-# - large multi (compiler ~86 mods): skip full check — residual; emit still
-#   rejects int/lit caps (c_arg_is_cap_ident). See bootstrap/AUDIT_RESIDUAL.md
+# Check gate always runs (R4). Fail-closed.
+# Small programs: full import-expand check.
+# Large graphs (e.g. oodac self-host): per-module check with signature stubs
+# (avoids whole-program concat OOM; still typechecks every module body).
 if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
   nmods=${#MODS[@]}
-  if [[ $nmods -eq 1 ]] || [[ $nmods -le 8 ]]; then
+  if [[ $nmods -le 12 ]]; then
+    ck_to=$((90 + nmods * 10))
     set +e
-    timeout 90 "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
+    timeout "$ck_to" "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
     main_ck=$?
     set -e
     if [[ $main_ck -eq 124 ]]; then
-      echo "ERR_CHECK_TIMEOUT $MAIN_ABS (nmods=$nmods)" >&2
+      echo "ERR_CHECK_TIMEOUT $MAIN_ABS (nmods=$nmods timeout=${ck_to}s)" >&2
       exit 1
     fi
     if [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; then
       echo "ERR_CHECK $MAIN_ABS" >&2
       cat "$TMP/main_check.err" "$TMP/main_check.out" >&2 || true
+      exit 1
+    fi
+  else
+    set +e
+    python3 "$ROOT/scripts/oodac_module_check.py" "$MAIN_ABS" "$OODAC_BIN" \
+      >"$TMP/mod_check.out" 2>"$TMP/mod_check.err"
+    main_ck=$?
+    set -e
+    if [[ $main_ck -ne 0 ]]; then
+      echo "ERR_MODULE_CHECK $MAIN_ABS (nmods=$nmods)" >&2
+      cat "$TMP/mod_check.err" "$TMP/mod_check.out" >&2 || true
       exit 1
     fi
   fi
@@ -108,135 +119,56 @@ done
 
 # Preamble = lines before first function def in first module
 awk "/$FN_DEF/{exit} {print}" "${MCS[0]}" >"$TMP/preamble.c"
-# Forward prototypes from ALL modules (use-before-def across modules)
-: >"$TMP/protos.c"
-for mc in "${MCS[@]}"; do
-  grep -E "$FN_DEF" "$mc" | sed 's/ {$/;/' >>"$TMP/protos.c" || true
-done
-# Function bodies from ALL modules
-: >"$TMP/bodies.c"
-for mc in "${MCS[@]}"; do
-  awk "/$FN_DEF/{p=1} p" "$mc" >>"$TMP/bodies.c"
-done
+# Forward prototypes + bodies: first definition of each symbol wins.
+# (Guard against accidental double-emit / import expansion doubles — was
+#  redefining main/llvm_* and thrashing gcc on self-host.)
+python3 - "$TMP" "${MCS[@]}" <<'PY'
+import re, sys
+from pathlib import Path
+tmp = Path(sys.argv[1])
+mcs = [Path(p) for p in sys.argv[2:]]
+fn_start = re.compile(
+    r"^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) "
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*\(.*\)\s*\{\s*$"
+)
+protos: list[str] = []
+bodies: list[str] = []
+seen: set[str] = set()
+for mc in mcs:
+    text = mc.read_text(errors="replace").splitlines(keepends=True)
+    i = 0
+    n = len(text)
+    while i < n:
+        m = fn_start.match(text[i].rstrip("\n"))
+        if not m:
+            i += 1
+            continue
+        name = m.group(2)
+        # collect body until next top-level fn or EOF
+        j = i + 1
+        while j < n and not fn_start.match(text[j].rstrip("\n")):
+            j += 1
+        chunk = text[i:j]
+        if name not in seen:
+            seen.add(name)
+            # prototype: "ret name(args) {" -> "ret name(args);"
+            line = text[i].rstrip()
+            if line.endswith("{"):
+                line = line[:-1].rstrip() + ";"
+            protos.append(line + "\n")
+            bodies.extend(chunk)
+        i = j
+# stable order already = first-seen module order
+(tmp / "protos.c").write_text("".join(protos))
+(tmp / "bodies.c").write_text("".join(bodies))
+print(f"pure_build: unique_fns={len(seen)} from_modules={len(mcs)}", flush=True)
+PY
 
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
 
-# Bridge seed-era 1-arg sealed runtime calls → cap-checked 2-arg ABI (OO_CAP_*).
-# Seed emit may still drop caps; product emit passes them. Self-host must link either.
-python3 - "$TMP/all.c" <<'PY'
-import re, sys
-path = sys.argv[1]
-t = open(path, encoding="utf-8", errors="replace").read()
-# only rewrite calls that have a single argument (no comma at depth 1)
-def rewrite(fn, cap, s):
-    """Insert cap on single-arg CALLS only; never inside string literals."""
-    out = []
-    i = 0
-    key = fn + "("
-    n = len(s)
-    in_str = False
-    while i < n:
-        c = s[i]
-        if in_str:
-            out.append(c)
-            if c == "\\" and i + 1 < n:
-                out.append(s[i+1])
-                i += 2
-                continue
-            if c == '"':
-                in_str = False
-            i += 1
-            continue
-        if c == '"':
-            in_str = True
-            out.append(c)
-            i += 1
-            continue
-        if s.startswith(key, i) and (i == 0 or not (s[i-1].isalnum() or s[i-1] == "_")):
-            k = i + len(key)
-            depth = 1
-            start_a = k
-            comma = False
-            while k < n and depth:
-                ch = s[k]
-                if ch == '"':
-                    k += 1
-                    while k < n:
-                        if s[k] == "\\":
-                            k += 2
-                            continue
-                        if s[k] == '"':
-                            k += 1
-                            break
-                        k += 1
-                    continue
-                if ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                elif ch == "," and depth == 1:
-                    comma = True
-                k += 1
-            args = s[start_a:k]
-            a = args.strip()
-            if (not comma) and a and not a.startswith("OoStr") and not a.startswith("long long") and not a.startswith("int "):
-                out.append(f"{fn}({cap}, {args})")
-            else:
-                out.append(s[i:k+1])
-            i = k + 1
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
-
-t = re.sub(r'(?<![A-Za-z0-9_])file_size\(', 'oo_file_size(', t)
-t = rewrite("oo_read_file", "OO_CAP_FS", t)
-t = rewrite("oo_write_file", "OO_CAP_FS", t)
-t = rewrite("oo_path_exists", "OO_CAP_FS", t)
-t = rewrite("oo_file_size", "OO_CAP_FS", t)
-t = rewrite("oo_env_get", "OO_CAP_ENV", t)
-t = rewrite("oo_sys_exec1", "OO_CAP_SYS", t)
-# main inject legacy zero → magic tokens
-t = t.replace("int fs = 0; int sys = 0;",
-              "long long fs = OO_CAP_FS; long long sys = OO_CAP_SYS; long long env = OO_CAP_ENV;")
-t = t.replace("long long fs = 0; long long sys = 0;",
-              "long long fs = OO_CAP_FS; long long sys = OO_CAP_SYS; long long env = OO_CAP_ENV;")
-caps = (
-    "#define OO_CAP_FS  0x4F4F4653LL\n"
-    "#define OO_CAP_SYS 0x4F4F5359LL\n"
-    "#define OO_CAP_ENV 0x4F4F454ELL\n"
-    "#define OO_CAP_NET 0x4F4F4E54LL\n"
-)
-# Always prepend (body may contain the text inside string literals from emit)
-t = caps + t
-# Fix seed-era 1-arg prototypes to 2-arg cap ABI
-for a,b in [
-    ("OoResS oo_read_file(OoStr);", "OoResS oo_read_file(long long,OoStr);"),
-    ("OoResV oo_write_file(OoStr,OoStr);", "OoResV oo_write_file(long long,OoStr,OoStr);"),
-    ("int oo_path_exists(OoStr);", "int oo_path_exists(long long,OoStr);"),
-    ("long long oo_file_size(OoStr);", "long long oo_file_size(long long,OoStr);"),
-    ("OoResS oo_env_get(OoStr);", "OoResS oo_env_get(long long,OoStr);"),
-    ("static inline OoResS oo_sys_exec1(OoStr cmd)", "static inline OoResS oo_sys_exec1(long long cap, OoStr cmd)"),
-]:
-    t = t.replace(a,b)
-
-# Repair bad rewrites of prototypes (if any)
-t = t.replace("OoResS oo_read_file(OO_CAP_FS, OoStr);", "OoResS oo_read_file(long long,OoStr);")
-t = t.replace("int oo_path_exists(OO_CAP_FS, OoStr);", "int oo_path_exists(long long,OoStr);")
-t = t.replace("long long oo_file_size(OO_CAP_FS, OoStr);", "long long oo_file_size(long long,OoStr);")
-t = t.replace("OoResS oo_env_get(OO_CAP_ENV, OoStr);", "OoResS oo_env_get(long long,OoStr);")
-t = t.replace("static inline OoResS oo_sys_exec1(OO_CAP_SYS, OoStr cmd)", "static inline OoResS oo_sys_exec1(long long cap, OoStr cmd)")
-# ensure sys_exec body has require if missing
-if "oo_cap_require(cap, OO_CAP_SYS" not in t and "oo_sys_exec1(long long cap" in t:
-    t = t.replace(
-        "static inline OoResS oo_sys_exec1(long long cap, OoStr cmd) {\n  OoResS r;",
-        "static inline OoResS oo_sys_exec1(long long cap, OoStr cmd) {\n  oo_cap_require(cap, OO_CAP_SYS, \"sys_exec\");\n  OoResS r;",
-    )
-
-open(path, "w", encoding="utf-8").write(t)
-PY
+# Bridge seed-era sealed calls → process-local grants + chs_rt (no system(3)).
+# PURE_NO_ARC=1: strip seed-emitted retain/release (self-host residual; see SPRINT.md).
+python3 "$ROOT/scripts/oodac_pure_rewrite.py" "$TMP/all.c"
 
 if ! grep -q 'int main\|long long main' "$TMP/all.c" && ! grep -q 'main(int argc' "$TMP/all.c"; then
   echo "int main(void) { return 0; }" >> "$TMP/all.c"

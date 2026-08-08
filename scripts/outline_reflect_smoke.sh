@@ -8,7 +8,6 @@ export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 OODA="${OODA:-$ROOT/bin/ooda}"
 FIX="$ROOT/fixtures/outline_reflect_pass.oo"
-PY="$ROOT/scripts/ooda_outline_reflect.py"
 
 fail=0
 pass() { echo "OK $*"; }
@@ -16,10 +15,6 @@ bad() { echo "FAIL $*" >&2; fail=1; }
 
 if [[ ! -x "$OODA" ]]; then
   echo "ERR_NO_OODA: $OODA" >&2
-  exit 1
-fi
-if [[ ! -f "$PY" ]]; then
-  echo "ERR_NO_HELPER: $PY" >&2
   exit 1
 fi
 if [[ ! -f "$FIX" ]]; then
@@ -51,23 +46,35 @@ else
   fi
 fi
 
-# --- outline fail: unreadable ---
+# --- outline pass: --json flag ---
+set +e
+"$OODA" outline "$FIX" --json >"$TMPDIR/or_outline_json.out" 2>"$TMPDIR/or_outline_json.err"
+roj=$?
+set -e
+if [[ $roj -ne 0 ]]; then
+  bad "outline --json pass exit=$roj"
+  cat "$TMPDIR/or_outline_json.err" >&2 || true
+else
+  if ! grep -q '"functions":' "$TMPDIR/or_outline_json.out"; then
+    bad "outline --json missing functions key"
+  elif ! grep -q '"verifies":' "$TMPDIR/or_outline_json.out"; then
+    bad "outline --json missing verifies key"
+  else
+    pass "outline --json pass"
+  fi
+fi
+
+# --- outline fail: unreadable (exit 2) ---
 set +e
 "$OODA" outline "$TMPDIR/no_such_outline_$$.oo" >"$TMPDIR/or_ol_miss.out" 2>"$TMPDIR/or_ol_miss.err"
 rm=$?
 set -e
-if [[ $rm -eq 0 ]]; then
-  bad "outline accepted missing file"
-elif ! grep -qE $'^ERR\toutline\t' "$TMPDIR/or_ol_miss.err" "$TMPDIR/or_ol_miss.out" 2>/dev/null; then
-  # product may surface via stderr only
-  if grep -q 'unreadable\|missing' "$TMPDIR/or_ol_miss.err" "$TMPDIR/or_ol_miss.out" 2>/dev/null; then
-    pass "outline fail-closed missing file"
-  else
-    bad "outline missing-file no ERR (exit=$rm)"
-    head -5 "$TMPDIR/or_ol_miss.err" "$TMPDIR/or_ol_miss.out" >&2 || true
-  fi
+if [[ $rm -ne 2 ]]; then
+  bad "outline unreadable file expected exit 2, got $rm"
+elif ! grep -q 'ERR'$'\t''outline'$'\t''unreadable file:' "$TMPDIR/or_ol_miss.out" "$TMPDIR/or_ol_miss.err" 2>/dev/null; then
+  bad "outline unreadable file missing ERR output"
 else
-  pass "outline fail-closed missing file"
+  pass "outline fail-closed missing file (exit 2)"
 fi
 
 # --- reflect pass: contracts + caps + verify ---
@@ -113,38 +120,30 @@ else
   pass "reflect symbol filter"
 fi
 
-# --- reflect fail: bad symbol ---
+# --- reflect fail: bad symbol (exit 1) ---
 set +e
 "$OODA" reflect "$FIX" no_such_symbol_xyz >"$TMPDIR/or_badsym.out" 2>"$TMPDIR/or_badsym.err"
 rb=$?
 set -e
-if [[ $rb -eq 0 ]]; then
-  bad "reflect accepted unknown symbol"
+if [[ $rb -ne 1 ]]; then
+  bad "reflect unknown symbol expected exit 1, got $rb"
+elif ! grep -q 'ERR'$'\t''reflect'$'\t''symbol not found: no_such_symbol_xyz' "$TMPDIR/or_badsym.out" "$TMPDIR/or_badsym.err" 2>/dev/null; then
+  bad "reflect unknown symbol missing ERR output"
 else
-  pass "reflect fail-closed unknown symbol"
+  pass "reflect fail-closed unknown symbol (exit 1)"
 fi
 
-# --- reflect fail: unreadable ---
+# --- reflect fail: unreadable (exit 2) ---
 set +e
-"$OODA" reflect /no/such/reflect_$$.oo >"$TMPDIR/or_rf_miss.out" 2>"$TMPDIR/or_rf_miss.err"
+"$OODA" reflect "$TMPDIR/no_such_reflect_$$.oo" >"$TMPDIR/or_rf_miss.out" 2>"$TMPDIR/or_rf_miss.err"
 rx=$?
 set -e
-if [[ $rx -eq 0 ]]; then
-  bad "reflect accepted missing file"
+if [[ $rx -ne 2 ]]; then
+  bad "reflect unreadable file expected exit 2, got $rx"
+elif ! grep -q 'ERR'$'\t''reflect'$'\t''unreadable file:' "$TMPDIR/or_rf_miss.out" "$TMPDIR/or_rf_miss.err" 2>/dev/null; then
+  bad "reflect unreadable file missing ERR output"
 else
-  pass "reflect fail-closed missing file"
-fi
-
-# --- security: helper must not invoke oodac build/run ---
-if grep -nE 'oodac|subprocess|os\.system|Popen' "$PY" | grep -vE 'outline_reflect|test_harness|#' >/dev/null 2>&1; then
-  # allow only comments / docstrings mentioning oodac as forbidden
-  if grep -nE 'subprocess|os\.system|Popen|oodac build|oodac run' "$PY" | grep -vE 'never|not |No |#|"""' >/dev/null 2>&1; then
-    bad "helper may execute user code"
-  else
-    pass "helper parse-only (no exec APIs)"
-  fi
-else
-  pass "helper parse-only (no exec APIs)"
+  pass "reflect fail-closed missing file (exit 2)"
 fi
 
 if [[ $fail -ne 0 ]]; then

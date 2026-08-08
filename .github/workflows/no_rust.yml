@@ -2,8 +2,8 @@
 # Does NOT install rustup, cargo, or rustc. Does NOT claim beta.
 # Seed strategy (first hit wins):
 #   1) bootstrap/seed/oodac if executable in checkout
-#   2) SEED_OODAC env (workflow_dispatch input)
-#   3) GitHub Release tarball for install/BOOTSTRAP_PIN (pinned tag + sha256 sidecar)
+#   2) SEED_OODAC env
+#   3) GitHub Release for install/BOOTSTRAP_PIN via gh (authenticated — private repos OK)
 name: no-rust
 
 on:
@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       seed_url:
-        description: "Optional override URL for ooda-*-linux-x86_64.tar.gz (must have matching .sha256)"
+        description: "Optional override URL (must be this repo's release tarball)"
         required: false
         default: ""
 
@@ -34,12 +34,12 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq build-essential
-          # Refuse rust product path if someone adds it later
           if command -v rustup >/dev/null 2>&1; then
             echo "NOTE: rustup present on runner image; will shadow cargo/rustc"
           fi
           command -v gcc
           command -v bash
+          command -v gh
 
       - name: Shadow cargo/rustc on PATH
         run: |
@@ -52,10 +52,11 @@ jobs:
           echo "$SHADOW" >>"$GITHUB_PATH"
           echo "PATH_SHADOW=$SHADOW" >>"$GITHUB_ENV"
 
-      - name: Resolve SEED_OODAC (pin / local / release)
+      - name: Resolve SEED_OODAC (local seed / env / authenticated release)
         id: seed
         env:
           INPUT_SEED_URL: ${{ github.event.inputs.seed_url || '' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           ROOT="$GITHUB_WORKSPACE"
@@ -72,34 +73,28 @@ jobs:
             SEED="$SEED_OODAC"
             echo "seed: SEED_OODAC env"
           else
-            # Fetch pinned release asset (HTTPS + sha256 sidecar — no curl|sh)
             DL="$RUNNER_TEMP/seed_dl"
             mkdir -p "$DL"
             if [[ -n "$INPUT_SEED_URL" ]]; then
-              # Allowlist: only this repo's GitHub Releases tarball (+ .sha256)
               case "$INPUT_SEED_URL" in
                 "https://github.com/${{ github.repository }}/releases/download/"*"/${NAME}.tar.gz")
-                  URL="$INPUT_SEED_URL"
+                  echo "seed: override URL (still uses gh for private)"
                   ;;
                 *)
-                  echo "ERR: seed_url must match https://github.com/${{ github.repository }}/releases/download/<tag>/${NAME}.tar.gz" >&2
+                  echo "ERR: seed_url must match this repo release tarball ${NAME}.tar.gz" >&2
                   exit 1
                   ;;
               esac
-            else
-              URL="https://github.com/${{ github.repository }}/releases/download/${PIN}/${NAME}.tar.gz"
             fi
-            SHA_URL="${URL}.sha256"
-            echo "seed: download $URL"
-            curl -fsSL "$URL" -o "$DL/${NAME}.tar.gz"
-            curl -fsSL "$SHA_URL" -o "$DL/${NAME}.tar.gz.sha256" || {
-              echo "ERR: missing .sha256 sidecar for pin $PIN" >&2
-              exit 1
-            }
-            # Normalize sha file to "HASH  file" in $DL
+            # Authenticated download — works for private org repos (curl without token 404s).
+            echo "seed: gh release download ${PIN} asset ${NAME}.tar.gz"
+            gh release download "$PIN" \
+              --repo "${{ github.repository }}" \
+              --pattern "${NAME}.tar.gz" \
+              --pattern "${NAME}.tar.gz.sha256" \
+              --dir "$DL"
             (
               cd "$DL"
-              # Accept "HASH  path" or bare HASH
               HASH="$(awk '{print $1}' "${NAME}.tar.gz.sha256" | head -1)"
               echo "${HASH}  ${NAME}.tar.gz" >"_check.sha256"
               sha256sum -c "_check.sha256"
@@ -107,12 +102,11 @@ jobs:
             tar -C "$DL" -xzf "$DL/${NAME}.tar.gz"
             SEED="$DL/${NAME}/oodac/oodac"
             [[ -x "$SEED" ]] || { echo "ERR: oodac missing in release tarball" >&2; exit 1; }
-            echo "seed: release $PIN"
+            echo "seed: release $PIN (authenticated gh)"
           fi
 
           echo "SEED_OODAC=$SEED" >>"$GITHUB_ENV"
           echo "seed_path=$SEED" >>"$GITHUB_OUTPUT"
-          "$SEED" --help >/dev/null 2>&1 || true
           ls -la "$SEED"
 
       - name: Prove cargo/rustc shadowed
@@ -131,7 +125,6 @@ jobs:
       - name: Anti — workflow must not install rust product path
         run: |
           set -euo pipefail
-          # Fail if steps would *install or invoke* a Rust product toolchain.
           if grep -nE 'uses:.*(rust-toolchain|actions-rs)|rustup (install|update|default)|cargo (install|build|test|check)' \
             .github/workflows/*.yml 2>/dev/null; then
             echo "FAIL: workflow has cargo/rust product path" >&2
@@ -151,7 +144,6 @@ jobs:
         run: |
           set -euo pipefail
           export SEED_OODAC
-          # Prefer release tarball if we downloaded one; else working-tree stage
           if [[ -d "${RUNNER_TEMP}/seed_dl" ]]; then
             TB=$(ls "${RUNNER_TEMP}/seed_dl"/ooda-*.tar.gz 2>/dev/null | head -1 || true)
             if [[ -n "${TB:-}" && -f "$TB" ]]; then

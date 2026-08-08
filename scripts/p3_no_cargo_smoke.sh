@@ -63,7 +63,7 @@ set +e
 "$OODA" test "$ROOT/fixtures/chs_list_string.oo" --fuzz >"$TMPDIR/p3_fuzz.txt" 2>"$TMPDIR/p3_fuzz.err"
 rf=$?
 set -e
-[[ $rf -ne 0 ]] && pass "fuzz fail-closed" || bad "fuzz accepted"
+[[ $rf -eq 0 ]] && pass "fuzz active" || bad "fuzz failed"
 
 set +e
 "$OODA" check "$ROOT/fixtures/chs_list_string.oo" --json-errors >"$TMPDIR/p3_je.txt" 2>"$TMPDIR/p3_je.err"

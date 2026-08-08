@@ -30,19 +30,37 @@ OoStr oo_int_to_str(long long n) {
 }
 
 OoStr oo_str_trim(OoStr s) {
+  if (!s.data || s.len == 0) {
+    OoStr empty;
+    empty.len = 0;
+    empty.data = oo_str_alloc_payload(0);
+    return empty;
+  }
   long long start = 0;
   while (start < s.len && isspace((unsigned char)s.data[start])) start++;
   long long end = s.len;
   while (end > start && isspace((unsigned char)s.data[end - 1])) end--;
-  /* Zero-copy view into s (chs_rt does not free OoStr buffers). W ↓ for slices. */
+  long long tlen = end - start;
+  if (tlen <= 0) {
+    OoStr empty;
+    empty.len = 0;
+    empty.data = oo_str_alloc_payload(0);
+    return empty;
+  }
   OoStr r;
-  r.data = s.data + start;
-  r.len = end - start;
+  r.len = tlen;
+  r.data = oo_str_alloc_payload((size_t)tlen);
+  memcpy(r.data, s.data + start, (size_t)tlen);
   return r;
 }
 
 OoStr oo_str_to_lowercase(OoStr s) {
-  /* Fast path: already lowercase ASCII — return same view (no alloc). */
+  if (!s.data || s.len == 0) {
+    OoStr empty;
+    empty.len = 0;
+    empty.data = oo_str_alloc_payload(0);
+    return empty;
+  }
   int needs = 0;
   for (long long i = 0; i < s.len; i++) {
     unsigned char c = (unsigned char)s.data[i];
@@ -52,16 +70,14 @@ OoStr oo_str_to_lowercase(OoStr s) {
     }
   }
   if (!needs) {
+    oo_str_retain(s);
     return s;
   }
   OoStr r;
   r.len = s.len;
-  r.data = (char *)malloc((size_t)r.len + 1);
-  if (!r.data) abort();
+  r.data = oo_str_alloc_payload((size_t)r.len);
   for (long long i = 0; i < s.len; i++) {
     r.data[i] = (char)tolower((unsigned char)s.data[i]);
   }
-  r.data[r.len] = 0;
   return r;
 }
-

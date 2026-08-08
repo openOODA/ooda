@@ -40,6 +40,10 @@ resolve_em() {
       EM="$(readlink -f oodac/oodac 2>/dev/null || echo oodac/oodac)"
     elif [[ -x "$ROOT/../ooda/oodac/oodac" ]]; then
       EM="$(readlink -f "$ROOT/../ooda/oodac/oodac" 2>/dev/null || echo "$ROOT/../ooda/oodac/oodac")"
+    elif [[ -x "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac" ]]; then
+      EM="$(readlink -f "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac" 2>/dev/null || echo "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac")"
+    elif [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then
+      EM="$(readlink -f "$ROOT/bootstrap/seed/oodac" 2>/dev/null || echo "$ROOT/bootstrap/seed/oodac")"
     else
       echo ERR_NO_OODAC >&2
       exit 1
@@ -58,6 +62,7 @@ case "$MODE" in
     resolve_em
     target="c"
     file=""
+    out=""
     extra=()
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -65,18 +70,49 @@ case "$MODE" in
           target="$2"
           shift 2
           ;;
+        --target=*)
+          target="${1#--target=}"
+          shift
+          ;;
+        --emit-llvm)
+          target="llvm"
+          shift
+          ;;
+        -o)
+          out="$2"
+          shift 2
+          ;;
+        -o=*)
+          out="${1#-o=}"
+          shift
+          ;;
         *)
           if [[ -z "$file" ]]; then file="$1"; else extra+=("$1"); fi
           shift
           ;;
       esac
     done
-    if [[ "$target" == "wasm" ]]; then
-      echo -e "ERR\tcli\ttarget wasm residual" >&2
-      exit 2
+    if [[ "$target" == "wasm" || "$target" == "llvm" ]]; then
+      [[ -n "$file" ]] || { echo -e "ERR\tbuild\tmissing file" >&2; exit 2; }
+      ext="wat"; cmd="emit-wasm"; msg="WebAssembly text module"
+      [[ "$target" == "llvm" ]] && { ext="ll"; cmd="emit-llvm"; msg="LLVM IR emitted"; }
+      [[ -z "$out" ]] && { out="${file%.oo}.$ext"; [[ "$file" == *.oo ]] || out="${file}.$ext"; }
+      tmp_out="${TMPDIR:-/tmp}/${target}_out_$$.$ext"
+      if ! "$EM" "$cmd" "$file" > "$tmp_out"; then rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
+      if ! cp "$tmp_out" "$out" 2>/dev/null; then echo -e "ERR\tbuild\tfailed to write output file: $out" >&2; rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
+      rm -f "$tmp_out" 2>/dev/null || true
+      test -s "$out"
+      echo "🚀 [openOODA pure oodac] $msg: $out"
+      exit 0
     fi
-    out="${file%.oo}"
-    [[ "$file" == *.oo ]] || out="${file}.bin"
+    if [[ -z "$out" ]]; then
+      if [[ ${#extra[@]} -gt 0 && -n "${extra[0]:-}" ]]; then
+        out="${extra[0]}"
+      else
+        out="${file%.oo}"
+        [[ "$file" == *.oo ]] || out="${file}.bin"
+      fi
+    fi
     "$EM" build --backend c "$file" "$out" "${extra[@]}"
     test -x "$out"
     echo "🚀 [openOODA pure oodac] Native executable: $out"
@@ -189,27 +225,10 @@ case "$MODE" in
     ;;
   run)
     resolve_em
-    file="${1:?missing file}"
-    shift || true
-    out="${TMPDIR:-/tmp}/ooda_run_$$_bin"
-    cleanup_run() { rm -f "$out"; }
-    trap cleanup_run EXIT
-    "$EM" build "$file" "$out" >/dev/null
-    test -x "$out"
-    set +e
-    "$out" "$@"
-    ec=$?
-    set -e
-    exit "$ec"
+    exec "$EM" run "$@"
     ;;
   test)
     resolve_em
-    for arg in "$@"; do
-      if [[ "$arg" == "--fuzz" ]]; then
-        echo -e "ERR\tcli\t--fuzz residual" >&2
-        exit 2
-      fi
-    done
     S="$ROOT/scripts/ooda_test_verify.sh"
     [[ -x "$S" ]] || S=./scripts/ooda_test_verify.sh
     [[ -x "$S" ]] || { echo ERR_NO_TEST_SCRIPT >&2; exit 1; }
@@ -222,10 +241,8 @@ case "$MODE" in
     exec "$S" "$@"
     ;;
   outline|reflect)
-    P="$ROOT/scripts/ooda_outline_reflect.py"
-    [[ -f "$P" ]] || P=./scripts/ooda_outline_reflect.py
-    [[ -f "$P" ]] || { echo ERR_NO_OUTLINE_HELPER >&2; exit 1; }
-    exec python3 "$P" "$MODE" "$@"
+    resolve_em
+    exec "$EM" "$MODE" "$@"
     ;;
   *)
     echo "ERR_UNKNOWN_MODE $MODE" >&2

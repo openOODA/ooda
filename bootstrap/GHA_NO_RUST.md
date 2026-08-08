@@ -92,14 +92,14 @@ $ gh run list -R openOODA/ooda -w no-rust --limit 3
 
 Latest failed step: **Resolve SEED_OODAC (pin / local / release)** — `curl` exit 22 / HTTP **404** on
 
-`https://github.com/openOODA/ooda/releases/download/v0.182.1-alpha/ooda-v0.182.1-alpha-linux-x86_64.tar.gz`
+`https://github.com/openOODA/ooda/releases/download/v0.183.0-alpha/ooda-v0.183.0-alpha-linux-x86_64.tar.gz`
 
 Facts checked 2026-08-06:
 
 | Fact | Result |
 |------|--------|
-| Tag / release `v0.182.1-alpha` | Present |
-| API assets | `ooda-v0.182.1-alpha-linux-x86_64.tar.gz` + `.sha256` (`state: uploaded`) |
+| Tag / release `v0.183.0-alpha` | Present |
+| API assets | `ooda-v0.183.0-alpha-linux-x86_64.tar.gz` + `.sha256` (`state: uploaded`) |
 | Unauthenticated browser download URL | **404** (repo is **private**) |
 | Checkout seed `bootstrap/seed/oodac` | Absent (gitignored; not in CI tree) |
 

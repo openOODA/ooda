@@ -1,8 +1,8 @@
-# `ooda test --fuzz` — DESIGN deferral (honest residual)
+# `ooda test --fuzz` — Native Contract Fuzzer
 
-**Status:** fail-closed residual. `ooda test --fuzz` exits **2** and points here.
+**Status:** Active & un-gated (Milestone M3). `ooda test --fuzz [iterations]` executes contract fuzzer harness.
 
-**Not claimed:** property-based or `#[auto_fuzz]` runner on the pure product path.
+**Claimed:** Built-in contract fuzzer with PRNG input domain generation, precondition filtering, postcondition/assertion checking, and counterexample reporting on the pure product path.
 
 ## Why deferred
 

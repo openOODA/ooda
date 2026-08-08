@@ -75,6 +75,7 @@ for rail in \
   chs_parity.sh \
   beta_cli_smoke.sh \
   c_emit_smoke.sh \
+  wasm_emit_smoke.sh \
   problem_hunt_smoke.sh \
   caps_matrix_smoke.sh \
   import_load_smoke.sh \

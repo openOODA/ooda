@@ -106,17 +106,15 @@ else
   pass "product pure run native"
 fi
 
-# --- test --fuzz DESIGN deferral ---
+# --- test --fuzz native contract fuzzer ---
 set +e
 "$OODA" test "$BUILD_SRC" --fuzz >"$TMPDIR/fuzz.out" 2>"$TMPDIR/fuzz.err"
 rz=$?
 set -e
-if [[ $rz -eq 0 ]]; then
-  bad "test --fuzz accepted"
-elif grep -qE 'FUZZ_DEFER|DESIGN deferral' "$TMPDIR/fuzz.err" "$TMPDIR/fuzz.out" 2>/dev/null; then
-  pass "test --fuzz DESIGN deferral"
+if [[ $rz -eq 0 ]] && grep -qE 'openOODA Fuzzer|passed' "$TMPDIR/fuzz.out"; then
+  pass "test --fuzz native contract fuzzer active"
 else
-  pass "test --fuzz fail-closed (exit=$rz)"
+  bad "test --fuzz failed exit=$rz"
 fi
 
 # --- ooda test: real verify/assert_eq (P1 BUILD_OUT) ---
@@ -139,13 +137,13 @@ else
   pass "product test fail-closed verify_fail"
 fi
 set +e
-"$OODA" test --fuzz "$ROOT/fixtures/verify_pass.oo" >"$TMPDIR/prod_fuzz.out" 2>"$TMPDIR/prod_fuzz.err"
+"$OODA" test "$ROOT/fixtures/verify_pass.oo" --fuzz >"$TMPDIR/prod_fuzz.out" 2>"$TMPDIR/prod_fuzz.err"
 tzz=$?
 set -e
-if [[ $tzz -eq 0 ]]; then
-  bad "product test --fuzz should residual"
+if [[ $tzz -eq 0 ]] && grep -qE 'openOODA Fuzzer|passed' "$TMPDIR/prod_fuzz.out"; then
+  pass "product test --fuzz active"
 else
-  pass "product test --fuzz residual"
+  bad "product test --fuzz failed exit=$tzz"
 fi
 
 # --- ooda patch replace_fn (P2 SAFE) ---

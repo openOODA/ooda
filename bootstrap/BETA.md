@@ -86,7 +86,7 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 #### B.1 In for beta (must work)
 
 *Edit this table only when deliberately changing beta scope—not casually per feature PR.*  
-*Pin reference for this freeze of the real alpha surface: **v0.182.1-alpha** (BUILD_OUT sweep). Still **not** a beta tag.*
+*Pin reference for this freeze of the real alpha surface: **v0.183.0-alpha** (BUILD_OUT sweep). Still **not** a beta tag.*
 
 | Area | In-beta requirement | Proof rails (examples) |
 |------|---------------------|-------------------------|
@@ -153,10 +153,10 @@ public notes match In/Out tables
 
 ## Current status (recompute each Observe — not a beta claim)
 
-**Observe pin: v0.182.1-alpha** (BUILD_OUT 8-agent sweep; B.1 table edited to match real alpha surface).  
+**Observe pin: v0.183.0-alpha** (BUILD_OUT 8-agent sweep; B.1 table edited to match real alpha surface).  
 **Public beta tag: not claimed. Owner-only.**
 
-| Piece | Status @ v0.182.1-alpha |
+| Piece | Status @ v0.183.0-alpha |
 |-------|-------------------------|
 | B0 RS=0, no Cargo.toml | **PASS** (`RS_COUNT=0`; no `src/`, no `Cargo.toml`) |
 | B1 no-Cargo build scripts | **PASS** local + GHA `no_rust.yml` (cargo/rustc shadowed); seed required |

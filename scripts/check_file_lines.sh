@@ -35,7 +35,7 @@ done
 is_excluded() {
   local f="$1"
   case "$f" in
-    *'/.git/'*|*'target/'*|*'dist/'*|*'/.agents/'*) return 0 ;;
+    *'.git/'*|*'target/'*|*'dist/'*|*'.agents/'*) return 0 ;;
     *.oo.c|*.oo.bin|*.c_native|*.concat.oo|*.oo.concat.oo) return 0 ;;
     oodac/main.c|oodac/oodac2.c|./oodac/main.c|./oodac/oodac2.c) return 0 ;;
     */oodac/main.c|*/oodac/oodac2.c) return 0 ;;
@@ -51,6 +51,7 @@ mapfile -t ALL < <(
     -not -path './.git/*' \
     -not -path './target/*' \
     -not -path './dist/*' \
+    -not -path './.agents/*' \
     2>/dev/null | sed 's|^\./||' | sort
 )
 
