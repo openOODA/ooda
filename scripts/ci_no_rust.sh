@@ -76,6 +76,8 @@ for rail in \
   beta_cli_smoke.sh \
   c_emit_smoke.sh \
   wasm_emit_smoke.sh \
+  llvm_token_align_smoke.sh \
+  bc_vm_smoke.sh \
   problem_hunt_smoke.sh \
   caps_matrix_smoke.sh \
   import_load_smoke.sh \

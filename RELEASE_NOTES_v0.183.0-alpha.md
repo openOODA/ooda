@@ -29,7 +29,7 @@ Requires: bash, gcc, trusted seed binary. Does not require cargo/rustc.
 
 ## Residual honesty
 
-- **M2 ARC:** seed-emitted retain/release still unsafe for self-host without `PURE_NO_ARC`; `c_emit_ret_arc` not wired.
+- **M2 ARC:** seed-emitted retain/release still unsafe for self-host without `PURE_NO_ARC`. Post-release tree WIP: env last-wins + `c_emit_ret_arc` stash-before-release (see `bootstrap/ARC_M2_RESIDUAL.md`); stage2 ARC-on still deferred.
 - **M3 fuzz:** product `--fuzz` path still uses Python harness (`ooda_fuzz_*.py`); `fuzz_gen.oo` not on product path.
 - **M4–M6:** emit surfaces work; full clang/wasmtime/product rails and “JIT” claim not closed.
 - **Seed:** cold start still needs prebuilt pure `oodac` once.
