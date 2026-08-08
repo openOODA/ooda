@@ -104,9 +104,13 @@ FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) 
 MCS=()
 for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
-  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>/dev/null || true
-  if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
-    echo "ERR_EMIT $src" >&2
+  set +e
+  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>/dev/null
+  em_ec=$?
+  set -e
+  # Fail closed on SEGV/timeout/empty — do not link preamble-only corpses.
+  if [[ $em_ec -ne 0 ]] || [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
+    echo "ERR_EMIT $src (exit=$em_ec)" >&2
     exit 1
   fi
   if grep -qE $'^ERR\tc_emit' "$mc"; then
