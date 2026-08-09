@@ -101,37 +101,12 @@ if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
 fi
 
 FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) \{'
-# Optional fallback emit host (cold seed) when primary host flakes/SEGVs.
-SEED_FALLBACK="${OODAC_EMIT_FALLBACK:-}"
-if [[ -z "$SEED_FALLBACK" && -x "$ROOT/bootstrap/seed/oodac" ]]; then
-  SEED_FALLBACK="$ROOT/bootstrap/seed/oodac"
-fi
 MCS=()
 for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
-  em_ec=1
-  # Retry: tree host can intermittently SEGV under PURE_NO_ARC (heap flake).
-  for attempt in 1 2 3; do
-    set +e
-    EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>/dev/null
-    em_ec=$?
-    set -e
-    if [[ $em_ec -eq 0 && -s "$mc" ]] && grep -qE "$FN_DEF" "$mc"; then
-      break
-    fi
-  done
-  # Fall back to seed emit host if primary still fails.
-  if [[ $em_ec -ne 0 || ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
-    if [[ -n "$SEED_FALLBACK" && -x "$SEED_FALLBACK" && "$SEED_FALLBACK" != "$OODAC_BIN" ]]; then
-      set +e
-      EMIT_NO_CONCAT=1 timeout 60 "$SEED_FALLBACK" emit-c "$src" >"$mc" 2>/dev/null
-      em_ec=$?
-      set -e
-    fi
-  fi
-  # Fail closed on SEGV/timeout/empty — do not link preamble-only corpses.
-  if [[ $em_ec -ne 0 ]] || [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
-    echo "ERR_EMIT $src (exit=$em_ec)" >&2
+  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>/dev/null || true
+  if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
+    echo "ERR_EMIT $src" >&2
     exit 1
   fi
   if grep -qE $'^ERR\tc_emit' "$mc"; then
