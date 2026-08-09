@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# job: offline install dress rehearsal — validate release layout (clean-machine sim)
+# job: pure-product offline install dress rehearsal — validate release layout
 # in:  RELEASE_TARBALL | RELEASE_TREE | auto-pick dist/ from BOOTSTRAP_PIN / release.sh
 # out: exit 0 if layout green; optional binary smoke when executables present
-# Does not require network. Does not invoke cargo/rustc. Does not tag beta.
+# Offline clean-machine sim; pure product layout only; does not tag beta.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"

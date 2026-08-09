@@ -6,8 +6,8 @@
 |---|---|
 | **`install/install.oo`** | Full installer — story, XDG layout, download, place, config, verify |
 | **Website `install` / `install.sh`** | Chapter 0 bootstrap only (fetch prebuilt binary, then hand off) |
-| **`scripts/release.sh`** | Packages pure `bin/ooda` + `oodac` + `install/install.oo` + `share/` + runtime C (**no cargo**); writes `.sha256` |
-| **`scripts/bootstrap_no_cargo.sh`** | Rebuild product from pure seed + gcc (no rustc) |
+| **`scripts/release.sh`** | Packages pure `bin/ooda` + `oodac` + `install/install.oo` + `share/` + runtime C; writes `.sha256` |
+| **`scripts/bootstrap_no_cargo.sh`** | Rebuild pure product from seed + gcc |
 | **`scripts/install_dress_rehearsal.sh`** | Offline layout dress rehearsal of release tarball / staged tree |
 | **`bootstrap/RELEASE_CHECKLIST.md`** | Pin lock + release notes habit (not beta gate) |
 
@@ -30,7 +30,7 @@ Shell cannot be eliminated for a **first** install (no `ooda` yet). Everything a
 # First time (bootstrap → install.oo)
 curl -fsSL https://openOODA.github.io/install | sh
 
-# From a pure checkout (no Rust)
+# From a pure checkout (seed + gcc)
 export SEED_OODAC="${SEED_OODAC:-$PWD/oodac/oodac}"
 ./scripts/bootstrap_no_cargo.sh
 ./bin/ooda version
@@ -43,4 +43,4 @@ export SEED_OODAC="${SEED_OODAC:-$PWD/oodac/oodac}"
 ./scripts/release.sh v0.183.0-alpha
 ```
 
-Does **not** run `cargo` or `rustc`. Requires pure seed + gcc to rebuild if binaries missing.
+Pure product pack: requires seed + gcc to rebuild if binaries missing.

@@ -25,7 +25,7 @@ Agents, rails, and collaborators may report “gates green” or “gaps remain.
 
 ## One-line goal
 
-**First beta** = pure self-hosted toolchain (no Rust product host) **and** a **named, proven product surface** that works end-to-end; everything else **fail-closed** and documented as out-of-beta — **and** the owner chooses to tag.
+**First beta** = pure self-hosted `.oo` product toolchain **and** a **named, proven product surface** that works end-to-end; everything else **fail-closed** and documented as out-of-beta — **and** the owner chooses to tag.
 
 Beta is **not** “DESIGN.md fully implemented.”  
 Beta is **not** automatic when the checklist is green.
@@ -59,14 +59,14 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 
 | # | Gate | Proof |
 |---|------|--------|
-| **B0** | **No `.rs` in product tree** | `find . -name '*.rs' -not -path './.git/*' -not -path './target/*' \| wc -l` → **0** |
-| **B1** | **No Cargo product build** | No `Cargo.toml` / `Cargo.lock` as supported path; build/install without `rustc`/`cargo` (script and/or CI) |
+| **B0** | **Product purity — no `.rs` in product tree** | `find . -name '*.rs' -not -path './.git/*' -not -path './target/*' \| wc -l` → **0** |
+| **B1** | **No Cargo product build** | No `Cargo.toml` / `Cargo.lock` as supported path; pure build/install (seed + gcc; script and/or CI) |
 | **B2** | **Self-host fixed-point on beta surface** | Compiler in `.oo` builds itself: stage-N vs N+1 digests match for the **beta surface** (see rails below); pure path only (no host soft-pass) |
-| **B3** | **Ship path without stage-0 Rust** | Release tarball / install ships `ooda` (and seed compiler as needed) from `.oo`+C pipeline only |
+| **B3** | **Ship pure `.oo`+C path** | Release tarball / install ships `ooda` (and seed compiler as needed) from pure product pipeline only |
 | **B4** | **Honesty** | Out-of-beta features **fail non-zero**; no “self-hosted” or “beta” claims that contradict residual list |
-| **B5** | **Org consistency** | Product-critical siblings (`std`, `qa`, `install`, docs/site pins) do not **require** Rust for the beta product path |
+| **B5** | **Org consistency** | Product-critical siblings (`std`, `qa`, `install`, docs/site pins) do not **require** a foreign host toolchain for the beta product path |
 
-**Allowed at beta (not Rust):**
+**Allowed at beta (product purity):**
 
 - Thin **C** runtime / link glue (`runtime/chs_rt*`) — Backend-C floor (`FLOOR.md`).
 - Chapter-0 **shell** install that fetches a prebuilt binary then hands off to `install.oo`.
@@ -75,7 +75,7 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 
 **Not allowed at beta:**
 
-- Shipping or requiring product `src/**/*.rs`, `Cargo.toml`, or `cargo build` as the supported toolchain path.
+- Shipping or requiring product `src/**/*.rs`, `Cargo.toml`, or `cargo build` as the supported product path (breaks B0/B1 purity).
 - A beta tag while any of B0–B5 or Part B lacks captured proof.
 - Claiming full DESIGN (LLVM production path, full AI suite, full net/async, …) unless those items are **in** the frozen surface below and proven.
 
@@ -99,15 +99,15 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 | **Compiler** | Pure `oodac`: tokens, ast, check, emit-c, multi-module pure build | `fixed_point`, `c_emit_smoke`, `chs_parity` |
 | **Language** | At least **CHS** surface (see `CHS.md`) on check + native C path | CHS fixtures + emit pass/fail |
 | **Caps (static)** | Default-deny sealed I/O at check; CHS-supported Fs/Sys/Env lowered on C; Net fail-closed at emit | `caps_matrix_smoke`, corpus `no_cap_*` |
-| **Self-host** | Seed + pure rebuild of compiler + product CLI without Rust | `bootstrap_no_cargo`, `fixed_point` |
+| **Self-host** | Seed + pure rebuild of compiler + product CLI (product purity) | `bootstrap_no_cargo`, `fixed_point` |
 | **Install / pin** | Single pin string: BOOTSTRAP_PIN ↔ release ↔ site install ↔ `ooda version` | release extract smoke + install dry-run |
-| **Docs** | README + release notes: In list, Out list, seed+gcc, no cargo primary path | review checklist |
+| **Docs** | README + release notes: In list, Out list, seed+gcc pure product path | review checklist |
 
 #### B.2 Out of beta (must fail closed — not “missing quietly”)
 
 | Area | Out-of-beta | Behavior |
 |------|-------------|----------|
-| Host Rust / Cargo product | any reintroduction | Forbidden (B0/B1) |
+| Host Cargo / `.rs` product path | any reintroduction | Forbidden (B0/B1 product purity) |
 | `build --target wasm` / `llvm` / `--emit-llvm` / `--release` | residual / P4 drop | non-zero (`P4_DROPS.md`) |
 | `ooda test --fuzz` | DESIGN deferral | non-zero exit 2 (`FUZZ_DEFER.md`) |
 | **ensures** + complex `requires` | not fully lowered on native | incomplete residual (simple `requires`/`ensures` only where rails prove) |

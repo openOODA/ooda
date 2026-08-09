@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# job: offline cold-start seed dress rehearsal
+# job: pure-product offline cold-start seed dress rehearsal
 # in:  bootstrap/seed/oodac or SEED_OODAC (optional); gcc + sources when seed present
 # out: exit 0 if seed present and bootstrap_no_cargo green; or honest skip residual
 #      exit 1 if bootstrap fails, or if SEED_REQUIRED=1 and no seed
-# Anti: never cargo/rustc; never network; never beta tag
+# Product path only (seed + gcc); offline; never beta tag
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"

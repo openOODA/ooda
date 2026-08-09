@@ -41,7 +41,7 @@ export SEED_OODAC="\${SEED_OODAC:-./oodac/oodac}"
 ./bin/ooda version
 \`\`\`
 
-Requires: bash, gcc, trusted seed binary. Does not require cargo/rustc.
+Requires: bash, gcc, trusted seed binary (pure product rebuild).
 
 ## Pin
 
@@ -55,14 +55,14 @@ Requires: bash, gcc, trusted seed binary. Does not require cargo/rustc.
 
 ---
 
-## 3. Pack + verify (no cargo)
+## 3. Pack + verify (pure product)
 
 ```bash
 # 1) Pure rebuild
 export SEED_OODAC="${SEED_OODAC:-./oodac/oodac}"
 ./scripts/bootstrap_no_cargo.sh
 
-# 2) Rails (local)
+# 2) Product rails (local)
 ./scripts/ci_product.sh
 ./scripts/check_file_lines.sh   # O=0 when claimed
 
@@ -88,7 +88,7 @@ RELEASE_TARBALL=dist/ooda-<tag>-linux-x86_64.tar.gz \
 
 ## 5. Anti-checklist
 
-- [ ] No `Cargo.toml` / no product `.rs`
+- [ ] Product purity: no `Cargo.toml` / no product `.rs` (B0/B1)
 - [ ] No secrets in workflows or release notes
 - [ ] No `curl | sh` to unpinned hosts in CI
 - [ ] Residual features stay fail-closed (`P4_DROPS.md`), not soft-pass

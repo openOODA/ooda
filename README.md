@@ -1,15 +1,16 @@
 # OODA Programming Language (`.oo`)
 **openOODA Project** — `https://github.com/openOODA` — **Version `v0.183.0-alpha`**
 
-OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.
+OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.  
+**Product path:** pure `.oo` compiler + CLI, thin C runtime floor, trusted seed binary (bash + gcc to rebuild).
 
 > **DESIGN.md** is the north star (unchanged by alpha releases).  
-> Product tree is **zero `.rs`** (B0). Build/ship path uses pure `.oo` + C runtime + a trusted seed binary — **no Cargo/rustc**.  
+> **Product purity (B0/B1):** zero `.rs` / no Cargo product build in this tree.  
 > **Not a beta tag:** residual seed bootstrap, residual fail-closed features, org pin polish remain. See [`bootstrap/BETA.md`](bootstrap/BETA.md).
 
 ---
 
-## Quick start (no Rust)
+## Quick start
 
 ```bash
 git clone https://github.com/openOODA/ooda.git && cd ooda
@@ -27,7 +28,7 @@ export SEED_OODAC="${SEED_OODAC:-$PWD/oodac/oodac}"
 # ./bin/ooda patch file.oo --replace-fn add --with body.txt [--check]
 ```
 
-Requires: **bash, gcc, seed binary**. Does **not** require `cargo`, `rustc`, or `rustup`.
+Requires: **bash, gcc, seed binary**. Pure product rebuild — no host language toolchain.
 
 Install story (fetch prebuilt release + `install.oo`):
 
@@ -52,7 +53,7 @@ ooda version
 | Fixed-point | `scripts/fixed_point.sh` pure seed → stage-1 → stage-2; digests s1≡s2; no OK_HOST |
 | Parity | `scripts/chs_parity.sh` product ≡ pure oodac |
 | Line lock | `scripts/check_file_lines.sh` O=0 |
-| Zero `.rs` in product tree | **B0** (`RS_COUNT=0`; no `src/`, no `Cargo.toml`) |
+| Product purity | **B0/B1** — pure `.oo` tree (`RS_COUNT=0`; no `Cargo.toml` product path) |
 
 ### Residual fail-closed (non-zero; not beta surface)
 
@@ -75,17 +76,17 @@ ooda version
 ## Floor / backends (freedom later)
 
 Product self-host today uses **Backend-C** (`emit-c` + `runtime/chs_rt*` + `gcc`).  
-That is an intentional thin OS floor, **not** a Rust host and **not** required to stay the only floor forever.
+That is an intentional thin OS floor under a pure `.oo` product — **not** required to stay the only floor forever.
 
 - Policy + roadmap: [`bootstrap/FLOOR.md`](bootstrap/FLOOR.md)  
 - Runtime ABI sketch: [`bootstrap/RUNTIME_ABI_v0.md`](bootstrap/RUNTIME_ABI_v0.md)  
 
 Frontend (lex/parse/check) stays backend-neutral; lowering the floor means new emit/runtime/link packages, not rewriting the language.
 
-## Bootstrap & release (no Cargo)
+## Bootstrap & release (pure product)
 
 ```bash
-# Rebuild product from seed (no rustc)
+# Rebuild product from seed (pure .oo + gcc)
 SEED_OODAC=./oodac/oodac ./scripts/bootstrap_no_cargo.sh
 
 # Self-host referee
@@ -99,7 +100,7 @@ SEED_OODAC=./oodac/oodac ./scripts/bootstrap_no_cargo.sh
 ./scripts/c_emit_smoke.sh
 ./scripts/ci_product.sh   # product rails: seed bootstrap + smokes + fixed_point
 
-# Release tarball (no cargo)
+# Release tarball (pure product pack)
 ./scripts/release.sh v0.183.0-alpha
 ```
 
@@ -111,14 +112,14 @@ Builder needs **gcc + seed binary only**. See `scripts/bootstrap_no_cargo.sh`.
 
 | Gate | Status (this pin) |
 |---|---|
-| **B0** no `.rs` | PASS |
+| **B0** product purity — no `.rs` | PASS |
 | **B1** no Cargo product build | PASS (scripts; CI matrix optional residual) |
 | **B2** pure fixed-point surface | PASS (oodac) |
-| **B3** ship without stage-0 Rust | PASS path (`release.sh` + seed) |
+| **B3** ship pure `.oo`+C path | PASS path (`release.sh` + seed) |
 | **B4** honesty / fail-closed residual | PASS process; **no beta tag** until public review |
-| **B5** org siblings non-Rust product | PASS for product-critical siblings (std/qa/docs …); editors optional |
+| **B5** org siblings pure product path | PASS for product-critical siblings (std/qa/docs …); editors optional |
 
-**Do not call this beta** until a public beta tag + install pin + notes are deliberately cut. This is **v0.183.0-alpha** with a zero-Rust product tree.
+**Do not call this beta** until a public beta tag + install pin + notes are deliberately cut. This is **v0.183.0-alpha** pure `.oo` product.
 
 Proof / status: monorepo `PROGRESS.md`; criteria `bootstrap/BETA.md`; latest ship notes `RELEASE_NOTES_v0.183.0-alpha.md`.
 
