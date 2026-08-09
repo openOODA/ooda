@@ -63,7 +63,7 @@ export SEED_OODAC="${SEED_OODAC:-./oodac/oodac}"
 ./scripts/bootstrap_no_cargo.sh
 
 # 2) Rails (local)
-./scripts/ci_no_rust.sh
+./scripts/ci_product.sh
 ./scripts/check_file_lines.sh   # O=0 when claimed
 
 # 3) Tarball
@@ -80,7 +80,7 @@ RELEASE_TARBALL=dist/ooda-<tag>-linux-x86_64.tar.gz \
 ## 4. Publish (optional this pin)
 
 - Upload tarball **and** `.sha256` to GitHub Releases for the pin tag.
-- Remote CI (`.github/workflows/no_rust.yml`) downloads that pin as seed when
+- Remote CI (`.github/workflows/product.yml`) downloads that pin as seed when
   `bootstrap/seed/oodac` is absent — **keep pin + asset + sha256 coherent**.
 - Do **not** force a beta tag. Alpha/rc is fine indefinitely.
 

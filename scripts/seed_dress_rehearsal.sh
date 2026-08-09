@@ -59,5 +59,5 @@ echo "seed_dress_rehearsal: PASSED"
 echo "  seed: $SEED"
 echo "  oodac: $ROOT/oodac/oodac"
 echo "  ooda:  $ROOT/bin/ooda"
-echo "related: scripts/install_dress_rehearsal.sh (release layout); bootstrap/GHA_NO_RUST.md (remote CI)"
+echo "related: scripts/install_dress_rehearsal.sh (release layout); bootstrap/GHA_PRODUCT.md (remote CI)"
 exit 0

@@ -12,7 +12,7 @@ obtain a seed.
 1. `SEED_OODAC` environment variable  
 2. `bootstrap/seed/oodac` (this directory)  
 3. `oodac/oodac` or `oodac/oodac2` in the checkout (local builds; gitignored)  
-4. GitHub Release tarball for `install/BOOTSTRAP_PIN` (see `.github/workflows/no_rust.yml`)
+4. GitHub Release tarball for `install/BOOTSTRAP_PIN` (see `.github/workflows/product.yml`)
 
 ## How to place `oodac`
 
@@ -43,10 +43,10 @@ sha256sum bootstrap/seed/oodac
 sha256sum -c ooda-v0.182.1-alpha-linux-x86_64.tar.gz.sha256
 ```
 
-Remote CI (`.github/workflows/no_rust.yml`) downloads the pin tarball **and**
+Remote CI (`.github/workflows/product.yml`) downloads the pin tarball **and**
 its `.sha256` sidecar when this directory has no executable seed. Keep
 `install/BOOTSTRAP_PIN`, the GitHub Release asset, and the sidecar coherent —
-see `bootstrap/RELEASE_CHECKLIST.md` and `bootstrap/GHA_NO_RUST.md`.
+see `bootstrap/RELEASE_CHECKLIST.md` and `bootstrap/GHA_PRODUCT.md`.
 
 Optional local sidecar next to the seed (not required by CI; also gitignored if
 named like a binary):
@@ -90,7 +90,7 @@ SEED_REQUIRED=1 ./scripts/seed_dress_rehearsal.sh   # fail closed if no seed
 
 ## Related
 
-- Workflow: `.github/workflows/no_rust.yml` (already in tree)
-- How to verify GHA green: `bootstrap/GHA_NO_RUST.md`
-- Local full B1 rail: `scripts/ci_no_rust.sh`
+- Workflow: `.github/workflows/product.yml` (already in tree)
+- How to verify GHA green: `bootstrap/GHA_PRODUCT.md`
+- Local full product rail: `scripts/ci_product.sh`
 - Rebuild: `SEED_OODAC=… ./scripts/bootstrap_no_cargo.sh`

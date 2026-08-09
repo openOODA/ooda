@@ -1,14 +1,14 @@
-# GitHub Actions: no-rust workflow (already in tree)
+# GitHub Actions: product workflow (already in tree)
 
-**Workflow file:** [`.github/workflows/no_rust.yml`](../.github/workflows/no_rust.yml)  
-**Display name:** `no-rust`  
-**Job:** `ci_no_rust (no cargo)`
+**Workflow file:** [`.github/workflows/product.yml`](../.github/workflows/product.yml)  
+**Display name:** `product`  
+**Job:** `product rails`
 
-This is the remote B1 rail. It does **not** install rustup, cargo, or rustc.
+This is the remote product rail. It does **not** install rustup, cargo, or rustc.
 It shadows `cargo`/`rustc` on `PATH`, resolves a pure `SEED_OODAC`, then runs
-`scripts/ci_no_rust.sh` and an offline `scripts/install_dress_rehearsal.sh`.
+`scripts/ci_product.sh` and an offline `scripts/install_dress_rehearsal.sh`.
 
-**Not a beta gate.** Green here proves the no-Cargo product path on a clean
+**Not a beta gate.** Green here proves the pure product path on a clean
 runner; it does not authorize a beta tag (`bootstrap/BETA.md`).
 
 ## Seed strategy (first hit wins)
@@ -24,19 +24,19 @@ runner; it does not authorize a beta tag (`bootstrap/BETA.md`).
 
 ### On GitHub (UI)
 
-1. Open https://github.com/openOODA/ooda/actions/workflows/no_rust.yml  
-2. Latest run on `main` (or your PR) should show **success** for job `ci_no_rust (no cargo)`.  
-3. Open the run log: seed step should print `seed: local …`, `seed: SEED_OODAC env`, or `seed: release <pin>`; rails end with `ci_no_rust: PASSED`.
+1. Open https://github.com/openOODA/ooda/actions/workflows/product.yml  
+2. Latest run on `main` (or your PR) should show **success** for job `product rails`.  
+3. Open the run log: seed step should print `seed: local …`, `seed: SEED_OODAC env`, or `seed: release <pin>`; rails end with `ci_product: PASSED`.
 
 ### CLI (`gh`)
 
-Workflow **file** is `no_rust.yml`; display **name** is `no-rust`. Prefer file or display name accordingly:
+Workflow **file** is `product.yml`; display **name** is `product`. Prefer file or display name accordingly:
 
 ```bash
 # Last 3 runs of this workflow
-gh run list -R openOODA/ooda -w no-rust --limit 3
+gh run list -R openOODA/ooda -w product --limit 3
 # equivalent:
-gh run list -R openOODA/ooda --workflow=no_rust.yml --limit 3
+gh run list -R openOODA/ooda --workflow=product.yml --limit 3
 
 # Inspect a run
 gh run view <run-id> -R openOODA/ooda
@@ -50,7 +50,7 @@ Expect `conclusion: success` when the pin asset (or in-tree seed) is coherent.
 ```bash
 export SEED_OODAC="${SEED_OODAC:-$PWD/oodac/oodac}"
 # or: cp -a oodac/oodac bootstrap/seed/oodac && chmod +x bootstrap/seed/oodac
-./scripts/ci_no_rust.sh
+./scripts/ci_product.sh
 ./scripts/seed_dress_rehearsal.sh          # seed path only
 ./scripts/install_dress_rehearsal.sh       # release layout
 ```
@@ -79,7 +79,8 @@ public CI path).
 Command (2026-08-06 UTC):
 
 ```text
-$ gh run list -R openOODA/ooda -w no-rust --limit 3
+$ gh run list -R openOODA/ooda -w product --limit 3
+# (formerly workflow display name: no-rust / file: no_rust.yml)
 ```
 
 | Status | Title (abbrev) | Branch | Event | Run ID | Created (UTC) | URL |
@@ -111,7 +112,7 @@ job without committing secrets. Purely documenting here — do not force a beta 
 Re-check after residual fix:
 
 ```bash
-gh run list -R openOODA/ooda -w no-rust --limit 3
+gh run list -R openOODA/ooda -w product --limit 3
 # want: conclusion success on latest main push / workflow_dispatch
 ```
 ## Related
@@ -119,6 +120,6 @@ gh run list -R openOODA/ooda -w no-rust --limit 3
 - `bootstrap/seed/README.md` — place seed, sha256, never commit secrets  
 - `scripts/seed_dress_rehearsal.sh` — offline seed → `bootstrap_no_cargo`  
 - `scripts/install_dress_rehearsal.sh` — offline release layout  
-- `scripts/ci_no_rust.sh` — local B1 rail  
+- `scripts/ci_product.sh` — local product rail  
 - `bootstrap/RELEASE_CHECKLIST.md` — pin + asset + sha256 coherence  
 - monorepo `PROGRESS.md` / latest release notes — gate honesty (no beta force)

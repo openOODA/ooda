@@ -35,10 +35,10 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 ## Open items (start from current pure product)
 
 ### P0 — Keep the runway green
-> **Standing rails** — not one-shot ships. When GHA is green, treat as *standing — verified by CI* (re-check on every pin / red PR). Local: `scripts/ci_no_rust.sh`. Remote: `.github/workflows/no_rust.yml`.
+> **Standing rails** — not one-shot ships. When GHA is green, treat as *standing — verified by CI* (re-check on every pin / red PR). Local: `scripts/ci_product.sh`. Remote: `.github/workflows/product.yml`.
 
-- [x] Pure rails stay green: `fixed_point`, `chs_parity`, `c_emit_smoke`, product smokes, `bootstrap_no_cargo` / `ci_no_rust` — *standing — verified by CI*
-- [x] `RS_COUNT=0`; no Cargo product path — *standing — verified by CI* (shadow cargo in `ci_no_rust` + GHA)
+- [x] Pure rails stay green: `fixed_point`, `chs_parity`, `c_emit_smoke`, product smokes, `bootstrap_no_cargo` / `ci_product` — *standing — verified by CI*
+- [x] `RS_COUNT=0`; no Cargo product path — *standing — verified by CI* (shadow cargo in `ci_product` + GHA)
 - [x] Line lock \(O=0\) — *standing rail* (`scripts/check_file_lines.sh`); O=0 on main (re-check every pin)
 
 ### P1 — Core systems development loop
@@ -109,7 +109,7 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Fixtures: `fixtures/std_{result,str,option}_main.oo` (pure multi-build); library `oodac check`
   - Residual: no ambient FS/net; `Option[T]` sum emit not pure-lowered (Result encoding); multi-file check residual; generic Result beyond String residual; org-sibling json/crypto/fs/net not pure floor
 - [x] **Install / pin dress rehearsal** — `scripts/install_dress_rehearsal.sh` validates release layout offline (tarball / staged tree / working-tree stage); residual: full XDG `install.oo` network fetch not exercised offline
-- [x] **Remote CI no-Rust** — `.github/workflows/no_rust.yml` runs `ci_no_rust` with cargo/rustc shadowed; seed = `bootstrap/seed/oodac` or pinned GitHub Release tarball+sha256 (no rustup/cargo install)
+- [x] **Remote CI product rail** — `.github/workflows/product.yml` runs `ci_product` with cargo/rustc shadowed; seed = `bootstrap/seed/oodac` or pinned GitHub Release tarball+sha256 (no rustup/cargo install)
 - [x] **Release notes + pin lock** every ship — `bootstrap/RELEASE_CHECKLIST.md` + `release.sh` sha256 sidecar + notes reminder; habit not auto-beta
 - [x] **FLOOR F3** — second backend MVP when owner prioritizes freedom over features
   - Prep: `bootstrap/BACKEND_F3_PREP.md` + `FLOOR.md` + `RUNTIME_ABI_v0.md`

@@ -16,8 +16,9 @@ Seed-era emit inserts retain/release that heap-corrupts rebuilt `oodac`/`bin/ood
 | **`c_emit_ret_arc` stash-before-release** | Non-void expr always stashed into `__ret_val` **before** local releases (no UAF on expr return) |
 | **Named local return** | Retain-before-release still used when returning a named local of kind T/S/I |
 | **Emit-order probe** | `fixtures/arc_smoke/early_return_string.oo` emit order **PASS** after pure rebuild under residual path |
+| **Untyped str-concat let** | `c_emit_let.oo`: early-out `oo_str_lit`/`oo_str_concat` → `OoStr` (avoids PURE_NO_ARC SEGV in `c_rhs_call_name`/mega-table). `cli/product_sh.oo` also annotates `let sh: String`. |
 
-Related sources: `oodac/c_emit_env.oo`, `oodac/c_emit_arc.oo`, `oodac/c_emit_stmt.oo`.
+Related sources: `oodac/c_emit_env.oo`, `oodac/c_emit_arc.oo`, `oodac/c_emit_stmt.oo`, `oodac/c_emit_let.oo`.
 
 ---
 
@@ -27,6 +28,7 @@ Related sources: `oodac/c_emit_env.oo`, `oodac/c_emit_arc.oo`, `oodac/c_emit_stm
 2. **Full ARC proof suite run-green** — not only emit-order; execute smokes under ARC-on emit (`fixtures/arc_smoke/*`, string concat reassign, early return, lists).
 3. **println of bare String-returning calls** — `println(make(1))` still may lower to `oo_print_int`; bind via `let s: String = make(1)` (as in updated early_return fixture) for `oo_print_str`.
 4. **Default flip** — `bootstrap_no_cargo.sh` / pure_build must keep `PURE_NO_ARC=1` until success criteria below hold.
+5. **Stage-1 as emit host for full CLI** — `emit-c cli/product_sh.oo` is green after the str-concat early-out, but stage-1 `EMIT_NO_CONCAT` of `cli/main.oo` still mis-lowers a later `list_push` on `List[String]` to `oo_ilist_push` (outline/reflect `sym` path) so gcc fails. Bootstrap therefore keeps **cold seed as emit host** for both oodac and CLI pure builds; stage-1 is still the product `oodac` binary.
 
 `RELEASE_NOTES_v0.183.0-alpha.md` residual line predates stash-before-release wiring; this file is the live honesty note for M2 ARC.
 
@@ -36,12 +38,12 @@ Related sources: `oodac/c_emit_env.oo`, `oodac/c_emit_arc.oo`, `oodac/c_emit_stm
 
 ```bash
 # From ooda/ — seed host emit, strip seed ARC, pure multi-module link
-export SEED_OODAC="${SEED_OODAC:-./bootstrap/seed/oodac}"
 export PURE_NO_ARC="${PURE_NO_ARC:-1}"
 export PURE_SKIP_CHECK="${PURE_SKIP_CHECK:-1}"
-# Prefer seed as emit host when rebuilding compiler (tree oodac may still be hostile on some paths):
-OODAC_BIN=seed PURE_NO_ARC=1 ./scripts/oodac_pure_build.sh
-# Full product path:
+# Prefer cold seed as emit host (not a half-built tree oodac/oodac):
+OODAC_BIN=./bootstrap/seed/oodac PURE_NO_ARC=1 \
+  bash scripts/oodac_pure_build.sh oodac/main.oo oodac/oodac
+# Full product path (bootstrap prefers bootstrap/seed/oodac when SEED_OODAC unset):
 ./scripts/bootstrap_no_cargo.sh
 ```
 

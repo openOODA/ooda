@@ -6,7 +6,7 @@
 
 - **Zero Rust product tree** (B0): no `src/`, no `Cargo.toml`; pure `.oo` + C runtime + seed.
 - **Pure product CLI** (`cli/main.oo` → `bin/ooda`) and pure `oodac` self-host.
-- **Bootstrap without rustc:** `scripts/bootstrap_no_cargo.sh`, `scripts/ci_no_rust.sh`, `scripts/release.sh`.
+- **Product bootstrap rails:** `scripts/bootstrap_no_cargo.sh`, `scripts/ci_product.sh` (formerly `ci_no_rust.sh`), `scripts/release.sh`.
 - **Fixed-point** pure seed path (no OK_HOST soft-pass).
 - **BETA.md** redesigned: Part A (B0–B5) + Part B (frozen In/Out surface); **only owner tags beta**.
 - **Floor freedom:** `bootstrap/FLOOR.md`, measured `RUNTIME_ABI_v0.md`, `--backend c` allowlist (non-c fail-closed); F3 prep only.

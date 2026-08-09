@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# job: B1-style proof — product rails without cargo/rustc on the critical path
-# in:  SEED_OODAC (or existing pure oodac) + gcc + bash
-# out: exit 0 if bootstrap + fixed_point + product smokes green without invoking cargo/rustc
+# job: local product rails (seed bootstrap + smokes + fixed_point)
+# in:  SEED_OODAC (or bootstrap/seed/oodac) + gcc + bash
+# out: exit 0 if product pure path green
 #
 # Residual honesty:
 #  - Requires a prebuilt pure seed binary (cold start cannot invent a compiler from air).
-#  - Does not prove a remote GitHub Actions matrix (see .github/workflows/no_rust.yml); this is the local B1 rail.
+#  - Does not prove a remote GitHub Actions matrix (see .github/workflows/product.yml); this is the local product rail.
 #  - Does not uninstall system cargo if present — only refuses to *invoke* it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,19 +16,19 @@ fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
 
-# --- anti: product scripts must not shell out to cargo/rustc as commands ---
-# Allow comments/docs; flag bare command lines only.
+# --- product scripts must not shell out to host toolchain ---
+# Allow comments/docs; flag bare cargo/rustc command lines only (anti-regression).
 for s in "$ROOT/scripts/bootstrap_no_cargo.sh" "$ROOT/scripts/fixed_point.sh" \
          "$ROOT/scripts/release.sh"; do
   if grep -nE '^[[:space:]]*(cargo|rustc)([[:space:]]|$)' "$s" | grep -vE '^\s*#'; then
-    bad "script invokes cargo/rustc: $s"
+    bad "script invokes host toolchain: $s"
   else
-    pass "no cargo/rustc command in $(basename "$s")"
+    pass "product script clean: $(basename "$s")"
   fi
 done
 
-# Shadow cargo/rustc so accidental PATH use fails closed
-SHADOW="$TMPDIR/ci_no_rust_shadow_$$"
+# Shadow host cargo/rustc if present (refuse accidental PATH use)
+SHADOW="$TMPDIR/ci_product_shadow_$$"
 mkdir -p "$SHADOW"
 cat >"$SHADOW/cargo" <<'EOF'
 #!/bin/sh
@@ -43,22 +43,23 @@ EOF
 chmod +x "$SHADOW/cargo" "$SHADOW/rustc"
 export PATH="$SHADOW:$PATH"
 
-# Prove cargo would fail if called
 if cargo version >/dev/null 2>&1; then
-  bad "shadow cargo did not intercept"
+  bad "host toolchain shadow did not intercept"
 else
-  pass "cargo shadowed (exit non-zero if called)"
+  pass "host toolchain shadowed"
 fi
 
-# B0 tree facts
+# Product tree purity
 RS=$(find "$ROOT" -name '*.rs' -not -path '*/.git/*' -not -path '*/target/*' | wc -l)
 echo "RS_COUNT=$RS"
-[[ "$RS" -eq 0 ]] && pass "B0 RS=0" || bad "B0 RS=$RS"
-[[ ! -f "$ROOT/Cargo.toml" ]] && pass "no Cargo.toml" || bad "Cargo.toml present"
-[[ ! -d "$ROOT/src" ]] && pass "no src/" || bad "src/ present"
+[[ "$RS" -eq 0 ]] && pass "product tree purity: RS=0" || bad "product tree purity: RS=$RS"
+[[ ! -f "$ROOT/Cargo.toml" ]] && pass "product tree purity: no Cargo.toml" || bad "Cargo.toml present"
+[[ ! -d "$ROOT/src" ]] && pass "product tree purity: no src/" || bad "src/ present"
 
-# Product path
-if ! SEED_OODAC="${SEED_OODAC:-$ROOT/oodac/oodac}" "$ROOT/scripts/bootstrap_no_cargo.sh" \
+# Product path — default cold seed (not tree oodac; bootstrap rm's STAGE1).
+_SEED_DEFAULT="$ROOT/bootstrap/seed/oodac"
+if [[ ! -x "$_SEED_DEFAULT" ]]; then _SEED_DEFAULT="$ROOT/oodac/oodac"; fi
+if ! SEED_OODAC="${SEED_OODAC:-$_SEED_DEFAULT}" "$ROOT/scripts/bootstrap_no_cargo.sh" \
   >"$TMPDIR/ci_boot.out" 2>"$TMPDIR/ci_boot.err"; then
   bad "bootstrap_no_cargo"
   cat "$TMPDIR/ci_boot.err" | tail -20
@@ -112,18 +113,18 @@ else
   fi
 fi
 
-# Ensure shadow was never hit
-if grep -rq 'cargo invoked on no-Rust' "$TMPDIR"/ci_*.err "$TMPDIR"/ci_*.out 2>/dev/null; then
-  bad "a rail tried to invoke cargo"
+# Ensure host-toolchain shadow was never hit
+if grep -rq 'cargo invoked on no-Rust\|ERR_SHADOW_CARGO\|ERR_SHADOW_RUSTC' "$TMPDIR"/ci_*.err "$TMPDIR"/ci_*.out 2>/dev/null; then
+  bad "a rail tried to invoke host toolchain"
 else
-  pass "no rail invoked shadowed cargo"
+  pass "no rail invoked host toolchain"
 fi
 
 if [[ $fail -ne 0 ]]; then
-  echo "ci_no_rust: FAILED" >&2
+  echo "ci_product: FAILED" >&2
   exit 1
 fi
-echo "ci_no_rust: PASSED"
+echo "ci_product: PASSED"
 echo "residual: prebuilt SEED_OODAC required (bootstrap/seed, tree oodac, or pin release asset)"
-echo "remote: .github/workflows/no_rust.yml runs this rail without installing cargo"
+echo "remote: .github/workflows/product.yml"
 exit 0

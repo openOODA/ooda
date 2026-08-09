@@ -8,7 +8,7 @@
 #  6) intentional digest drift fails
 #
 # Residual: first bootstrap needs a seed binary (SEED_OODAC or existing
-# oodac/oodac|oodac2). Host Rust C backend is NOT used on this path.
+# oodac/oodac|oodac2).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
@@ -22,15 +22,17 @@ SMOKE_BIN="$TMPDIR/chs_smoke_real"
 
 # Capture seed BEFORE removing stage binaries (always copy aside —
 # never use STAGE1 path as SEED so rm STAGE1 cannot unlink the seed).
+# Prefer cold seed: pure-rebuilt tree oodac is hostile as emit host for some modules.
 SEED_SRC="${SEED_OODAC:-}"
 if [[ -z "$SEED_SRC" || ! -x "$SEED_SRC" ]]; then
-  if [[ -x "$ROOT/oodac/oodac2" ]]; then
+  if [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then
+    SEED_SRC="$ROOT/bootstrap/seed/oodac"
+  elif [[ -x "$ROOT/oodac/oodac2" ]]; then
     SEED_SRC="$ROOT/oodac/oodac2"
   elif [[ -x "$ROOT/oodac/oodac" ]]; then
     SEED_SRC="$ROOT/oodac/oodac"
   else
-    echo "FAIL: no pure SEED_OODAC (set SEED_OODAC or provide oodac/oodac)" >&2
-    echo "Residual bootstrap: obtain a pure seed binary; host FORCE_HOST seed retired." >&2
+    echo "FAIL: no pure SEED_OODAC (set SEED_OODAC or provide bootstrap/seed/oodac)" >&2
     exit 1
   fi
 fi

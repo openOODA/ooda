@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# openOODA release packager — pure .oo + C path (no cargo/rustc)
+# openOODA release packager — pure .oo product path
 # Builds: ooda-<tag>-linux-x86_64/{bin/ooda,oodac/oodac,install,share,runtime}
 # Habit: bootstrap/RELEASE_CHECKLIST.md (pin → notes → rails → pack → dress)
 # Does not force beta tag.
@@ -28,7 +28,7 @@ NOTES="$ROOT/RELEASE_NOTES_${TAG}.md"
 # filename uses tag without forcing v-prefix mismatch: RELEASE_NOTES_vX…
 NOTES_ALT="$ROOT/RELEASE_NOTES_${TAG#v}.md"
 
-echo "[openOODA Release] Building ${TAG} without cargo…"
+echo "[openOODA Release] Building ${TAG}…"
 if [[ ! -f "$NOTES" && ! -f "$NOTES_ALT" ]]; then
   echo "NOTE: missing RELEASE_NOTES for ${TAG} — see bootstrap/RELEASE_CHECKLIST.md" >&2
 fi
@@ -78,13 +78,13 @@ cp README.md "$DIST_DIR/share/README.md" 2>/dev/null || true
 cat > "$DIST_DIR/README.md" <<EOF
 # openOODA ${TAG} (${ARCH})
 
-Pure self-hosted release (no Rust/Cargo in product). **Not beta** unless owner tagged.
+Pure self-hosted .oo product release. **Not beta** unless owner tagged.
 
 ## Binaries
 - \`bin/ooda\` — product CLI (pure .oo)
 - \`oodac/oodac\` — compiler (pure .oo)
 
-## Rebuild without rustc
+## Rebuild from seed
 \`\`\`
 export SEED_OODAC=\$PWD/oodac/oodac
 ./scripts/bootstrap_no_cargo.sh
@@ -110,5 +110,5 @@ if [[ -x "$ROOT/scripts/install_dress_rehearsal.sh" ]]; then
     || echo "NOTE: dress rehearsal failed — fix before publish" >&2
 fi
 
-echo "release: PASSED (no cargo)"
+echo "release: PASSED"
 echo "next: bootstrap/RELEASE_CHECKLIST.md (publish optional; no beta force)"

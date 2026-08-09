@@ -97,7 +97,7 @@ SEED_OODAC=./oodac/oodac ./scripts/bootstrap_no_cargo.sh
 ./scripts/chs_parity.sh
 ./scripts/beta_cli_smoke.sh
 ./scripts/c_emit_smoke.sh
-./scripts/ci_no_rust.sh   # B1-style: asserts no cargo on product path
+./scripts/ci_product.sh   # product rails: seed bootstrap + smokes + fixed_point
 
 # Release tarball (no cargo)
 ./scripts/release.sh v0.183.0-alpha

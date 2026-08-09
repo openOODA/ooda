@@ -159,7 +159,7 @@ public notes match In/Out tables
 | Piece | Status @ v0.183.0-alpha |
 |-------|-------------------------|
 | B0 RS=0, no Cargo.toml | **PASS** (`RS_COUNT=0`; no `src/`, no `Cargo.toml`) |
-| B1 no-Cargo build scripts | **PASS** local + GHA `no_rust.yml` (cargo/rustc shadowed); seed required |
+| B1 no-Cargo build scripts | **PASS** local + GHA `product.yml` (cargo/rustc shadowed); seed required |
 | B2 pure fixed_point | **PASS** (`fixed_point.sh`; s1≡s2; no OK_HOST) |
 | B3 release/install path | **PASS path** (`release.sh` packs pure bins + runtime C); dress rehearsal offline OK; cold seed residual |
 | B4 honesty | **PASS process** — Out rows fail-closed; alpha pin; **no beta tag cut** |
@@ -178,7 +178,7 @@ Live notes: monorepo `PROGRESS.md`, latest `RELEASE_NOTES_*.md`.
 |------|------|
 | `scripts/check_file_lines.sh` | O=0 |
 | `scripts/fixed_point.sh` | B2 pure self-host |
-| `scripts/bootstrap_no_cargo.sh` / `ci_no_rust.sh` | B1 path |
+| `scripts/bootstrap_no_cargo.sh` / `ci_product.sh` | B1 path |
 | `scripts/chs_parity.sh` | product ≡ pure oodac |
 | `scripts/c_emit_smoke.sh` | emit pass+fail |
 | `scripts/product_pure_dispatch_smoke.sh` / `beta_cli_smoke.sh` | CLI surface |
