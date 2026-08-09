@@ -2,7 +2,7 @@
 
 **Product:** [`DESIGN.md`](./DESIGN.md) · **Beta:** [`bootstrap/BETA.md`](bootstrap/BETA.md)  
 **Protocol:** home `loop - openOODA.md` · **Status:** monorepo [`PM.md`](../PM.md) · **Sprint:** monorepo [`SPRINT.md`](../SPRINT.md)  
-**Research (process):** [`openOODA/docs` → `research/tools/`](https://github.com/openOODA/docs/tree/main/research/tools)
+**Research (process):** [`research/tools/`](https://github.com/openOODA/docs/tree/main/research/tools) · **Why this file:** [`DOC-tools`](https://github.com/openOODA/docs/blob/main/research/meta/DOC-tools.md)
 
 Rotations **build openOODA quickly** and **save tokens**. Real-world science
 is the teacher. Tools rank *work* — they do not edit language architecture (DESIGN).
