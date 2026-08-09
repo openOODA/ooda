@@ -112,17 +112,41 @@ else
   bad "product pure run failed exit=$rr"
 fi
 
-# --- test --fuzz: un-gated CLI; Python harness residual (FUZZ_DEFER.md) ---
+# --- test --fuzz: pure Int-domain path (FUZZ_DEFER.md); no Python on --fuzz ---
+FUZZ_INT="$ROOT/fixtures/fuzz_int_domain.oo"
 set +e
-"$OODA" test "$BUILD_SRC" --fuzz >"$TMPDIR/fuzz.out" 2>"$TMPDIR/fuzz.err"
-rz=$?
-set -e
-if [[ $rz -eq 2 ]] && grep -qE 'ERR.*--fuzz residual' "$TMPDIR/fuzz.out" "$TMPDIR/fuzz.err" 2>/dev/null; then
-  bad "test --fuzz still residual-gated"
-elif grep -qiE 'python|ooda_fuzz|harness|fuzz|Fuzzer|passed|ERR' "$TMPDIR/fuzz.out" "$TMPDIR/fuzz.err" 2>/dev/null; then
-  pass "test --fuzz un-gated (Python residual; rc=$rz)"
+if [[ -f "$FUZZ_INT" ]]; then
+  "$OODA" test "$FUZZ_INT" --fuzz 5 >"$TMPDIR/fuzz.out" 2>"$TMPDIR/fuzz.err"
+  rz=$?
+  set -e
+  if [[ $rz -eq 0 ]] && grep -qiE 'pure int domain|Fuzzer pure' "$TMPDIR/fuzz.out" "$TMPDIR/fuzz.err" 2>/dev/null; then
+    pass "test --fuzz pure Int-domain (rc=$rz)"
+  else
+    bad "test --fuzz pure Int-domain failed (rc=$rz)"
+  fi
 else
-  bad "test --fuzz unexpected exit=$rz"
+  "$OODA" test "$BUILD_SRC" --fuzz >"$TMPDIR/fuzz.out" 2>"$TMPDIR/fuzz.err"
+  rz=$?
+  set -e
+  if [[ $rz -eq 2 ]] && grep -qE 'ERR.*--fuzz residual' "$TMPDIR/fuzz.out" "$TMPDIR/fuzz.err" 2>/dev/null; then
+    bad "test --fuzz still residual-gated"
+  elif grep -qiE 'FUZZ_DOMAIN|fail-closed|fuzz|Fuzzer|ERR' "$TMPDIR/fuzz.out" "$TMPDIR/fuzz.err" 2>/dev/null; then
+    pass "test --fuzz un-gated surface (rc=$rz)"
+  else
+    bad "test --fuzz unexpected exit=$rz"
+  fi
+fi
+# Non-int source must not claim pure multi-type; fail-closed domain message is OK.
+set +e
+"$OODA" test "$BUILD_SRC" --fuzz 2 >"$TMPDIR/fuzz_nonint.out" 2>"$TMPDIR/fuzz_nonint.err"
+rn=$?
+set -e
+if grep -qiE 'FUZZ_DOMAIN: int|fail-closed|pure path supports only' "$TMPDIR/fuzz_nonint.out" "$TMPDIR/fuzz_nonint.err" 2>/dev/null; then
+  pass "test --fuzz non-int fail-closed domain (rc=$rn)"
+elif [[ $rn -ne 0 ]]; then
+  pass "test --fuzz non-int non-zero (rc=$rn)"
+else
+  bad "test --fuzz non-int should fail-closed or non-zero (rc=$rn)"
 fi
 
 # --- ooda test: real verify/assert_eq (P1 BUILD_OUT) ---
@@ -145,13 +169,14 @@ else
   pass "product test fail-closed verify_fail"
 fi
 set +e
+# verify_pass is not Int-domain marked → fail-closed domain message (not Python).
 "$OODA" test "$ROOT/fixtures/verify_pass.oo" --fuzz >"$TMPDIR/prod_fuzz.out" 2>"$TMPDIR/prod_fuzz.err"
 tzz=$?
 set -e
 if [[ $tzz -eq 2 ]] && grep -qE 'ERR.*--fuzz residual' "$TMPDIR/prod_fuzz.out" "$TMPDIR/prod_fuzz.err" 2>/dev/null; then
   bad "product test --fuzz still residual-gated"
-elif grep -qiE 'python|ooda_fuzz|harness|fuzz|Fuzzer|passed|ERR|OK' "$TMPDIR/prod_fuzz.out" "$TMPDIR/prod_fuzz.err" 2>/dev/null; then
-  pass "product test --fuzz un-gated (Python residual; rc=$tzz)"
+elif grep -qiE 'FUZZ_DOMAIN: int|fail-closed|pure path supports only|pure int domain|Fuzzer' "$TMPDIR/prod_fuzz.out" "$TMPDIR/prod_fuzz.err" 2>/dev/null; then
+  pass "product test --fuzz domain surface (rc=$tzz; pure Int or fail-closed)"
 else
   bad "product test --fuzz unexpected exit=$tzz"
 fi

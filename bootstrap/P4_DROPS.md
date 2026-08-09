@@ -83,7 +83,7 @@ Until then: sequential CHS/Backend-C semantics only.
 |------|----------|
 | Cold-start seed | Prebuilt pure `oodac` once (`SEED_OODAC` / release asset) |
 | `--json-errors` on **run** | Fail-closed residual (check path is real) |
-| `--fuzz` | **Un-gated** → Python harness residual (`FUZZ_DEFER.md`); not pure-native |
+| `--fuzz` | **Un-gated pure Int-domain** (`ooda_fuzz_pure.sh`; no Python on that path); multi-type residual (`FUZZ_DEFER.md`) |
 | `oodac --backend llvm\|wasm` | Accepted for emit scaffolding; product **self-host** remains Backend-C |
 | Host preamble decls (`oo_host_*`) | Backend-C link residual, not a second backend |
 
