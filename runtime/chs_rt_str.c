@@ -33,8 +33,8 @@ void oo_str_release(OoStr s) {
   OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    /* Do not free: seed-era emit still over-releases / use-after-free.
-       Leaking is preferred to heap corruption until emit ARC is complete. */
+    /* Depth residual: free still unsafe for seed-emitted self-host (UAF after
+       formal strip). Leak until alias/get-retain complete. Formals strip helps. */
     (void)hdr;
   }
 }

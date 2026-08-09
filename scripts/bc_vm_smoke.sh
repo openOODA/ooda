@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
 # job: M6 bytecode VM smoke — emit-bc + run (interpreter, not JIT)
 # in:  oodac/oodac (or OODAC_BIN); optional bin/ooda; fixtures that BC subset supports
-# out: exit 0 if ≥2 distinct fixtures emit-bc + run with asserted output
+# out: exit 0 if ≥3 distinct fixtures emit-bc + run with asserted output
+#
+# Language surface proven on the bytecode interpreter (emit-bc + oodac run):
+#   - println(int) / println(string)
+#   - int binops (+ * with precedence), unary ! / -
+#   - let / let mut, local load/store, assignment (`=` token kind EQ)
+#   - while loops (LABEL / JUMP / JUMP_IF_FALSE)
+#   - if-expression value form (if/else if/else as RHS of let) — single-expr blocks
+#
+# Residual (honest, not claimed green here):
+#   - multi-statement value blocks in if-expr keep first expr only
+#   - for-range / match / struct / list / string method surface not smoked
+#   - product `bin/ooda run` may still be Backend-C build+exec (not always BC VM);
+#     when present it is checked for output parity only
+#   - never claim JIT — this path is a stack bytecode interpreter only
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
@@ -15,11 +29,13 @@ if [[ ! -x "$OODAC" ]]; then
   exit 1
 fi
 
-# Inline string fixture (println literal — BC subset; no let/fn residual)
+# Inline string fixture (println literal — BC subset)
 printf 'pub fn main() {\n  println("Hello World");\n}\n' >"$TMP/hello_str.oo"
+# Inline int arithmetic (binops + precedence; no let)
+printf 'pub fn main() {\n  println(2 + 3 * 4);\n}\n' >"$TMP/arith_int.oo"
+# Inline while + let mut + assign (smallest loop surface)
+printf 'pub fn main() {\n  let mut i = 0;\n  while i < 3 {\n    i = i + 1;\n  }\n  println(i);\n}\n' >"$TMP/while_simple.oo"
 
-# Prefer existing fixtures when emit-bc + oodac run already support them.
-# Each entry: name  src  expected_stdout  emit_bc_grep (ERE)
 n=0
 fail=0
 pass() { echo "OK $*"; }
@@ -90,13 +106,19 @@ run_fixture() {
 run_fixture "chs_hello" "$ROOT/fixtures/chs_hello.oo" "1" '\.func main|PUSH_INT 1|CALL println'
 # 2) string println (inline; distinct from int-only hello)
 run_fixture "hello_str" "$TMP/hello_str.oo" "Hello World" '\.func main|PUSH_STR Hello World|CALL println'
+# 3) int arithmetic with precedence (real language binops on VM)
+run_fixture "arith_int" "$TMP/arith_int.oo" "14" 'PUSH_INT 2|PUSH_INT 3|PUSH_INT 4|MUL|ADD|CALL println'
+# 4) while + let mut + assign (STORE_LOCAL / JUMP_IF_FALSE loop)
+run_fixture "while_simple" "$TMP/while_simple.oo" "3" 'STORE_LOCAL|LABEL|JUMP_IF_FALSE|LOAD_LOCAL'
+# 5) full fixtures/while_count.oo — while + unary ! + if-expr else-if (language surface)
+run_fixture "while_count" "$ROOT/fixtures/while_count.oo" "3" 'JUMP_IF_FALSE|STORE_LOCAL|CALL println'
 
 if [[ $fail -ne 0 ]]; then
   echo "bc_vm_smoke: FAILED" >&2
   exit 1
 fi
-if [[ $n -lt 2 ]]; then
-  echo "bc_vm_smoke: need ≥2 fixtures, got $n" >&2
+if [[ $n -lt 3 ]]; then
+  echo "bc_vm_smoke: need ≥3 fixtures, got $n" >&2
   exit 1
 fi
 

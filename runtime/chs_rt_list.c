@@ -38,8 +38,7 @@ void oo_ilist_release(OoIList l) {
   OoListHeader *hdr = ((OoListHeader *)l.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    /* Leak-not-free: see oo_str_release. */
-    (void)hdr;
+    (void)hdr; /* leak-safe residual — see oo_str_release */
   }
 }
 
@@ -88,8 +87,7 @@ void oo_slist_release(OoSList l) {
   OoListHeader *hdr = ((OoListHeader *)l.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    /* Leak-not-free: see oo_str_release. */
-    (void)hdr;
+    (void)hdr; /* leak-safe residual — see oo_str_release */
   }
 }
 
