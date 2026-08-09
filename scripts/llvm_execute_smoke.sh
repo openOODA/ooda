@@ -19,6 +19,7 @@ if [[ ! -x "$OODAC" && ! -x "$OODA" ]]; then
 fi
 
 # Tiny int fixture — emit-llvm currently lowers println(42) cleanly to oo_print_int
+# Residual: multi-op binop IR has empty mul operands (2+3*4 not execute-proven)
 EXPECTED="42"
 FIX_SRC="$TMP/hello_llvm.oo"
 OUT_LL="$TMP/hello_llvm.ll"

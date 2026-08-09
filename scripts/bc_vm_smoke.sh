@@ -122,6 +122,8 @@ run_fixture "bc_unary_not" "$ROOT/fixtures/bc_unary_not.oo" "1" 'NOT|EQ|JUMP_IF_
 run_fixture "bc_compare_logic" "$ROOT/fixtures/bc_compare_logic.oo" "1" 'GT|LT|AND|JUMP_IF_FALSE'
 # 9) nested for-range 3*2 → 6
 run_fixture "bc_nested_for" "$ROOT/fixtures/bc_nested_for.oo" "6" 'PUSH_INT 3|PUSH_INT 2|LT|JUMP_IF_FALSE'
+# 10) SUB/DIV — (20/4)-1 = 4 (no % — lexer residual)
+run_fixture "bc_arith_ops" "$ROOT/fixtures/bc_arith_ops.oo" "4" 'DIV|SUB|CALL println'
 
 if [[ $fail -ne 0 ]]; then
   echo "bc_vm_smoke: FAILED" >&2
