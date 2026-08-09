@@ -21,15 +21,25 @@ void oo_ilist_retain(OoIList l) {
   hdr->ref_count++;
 }
 
+static int oo_list_hdr_ok(void *data, long long len, long long cap) {
+  if (!data) return 0;
+  if (len < 0 || cap < 0 || len > (1LL << 28) || cap > (1LL << 28)) return 0;
+  if (cap > 0 && len > cap) return 0;
+  if (((uintptr_t)data) < sizeof(OoListHeader) + 8) return 0;
+  OoListHeader *hdr = ((OoListHeader *)data) - 1;
+  if (hdr->ref_count == 0 || hdr->ref_count == UINT32_MAX) return 0;
+  if (hdr->ref_count > 1000000u) return 0;
+  if (hdr->flags & 1) return 0;
+  return 1;
+}
+
 void oo_ilist_release(OoIList l) {
-  if (!l.data) return;
+  if (!oo_list_hdr_ok(l.data, l.len, l.cap)) return;
   OoListHeader *hdr = ((OoListHeader *)l.data) - 1;
-  if (hdr->ref_count == 0 || hdr->ref_count == UINT32_MAX || (hdr->flags & 1)) return;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    if (hdr->ref_count == 0) {
-      free(hdr);
-    }
+    /* Leak-not-free: see oo_str_release. */
+    (void)hdr;
   }
 }
 
@@ -74,17 +84,12 @@ void oo_slist_retain(OoSList l) {
 }
 
 void oo_slist_release(OoSList l) {
-  if (!l.data) return;
+  if (!oo_list_hdr_ok(l.data, l.len, l.cap)) return;
   OoListHeader *hdr = ((OoListHeader *)l.data) - 1;
-  if (hdr->ref_count == 0 || hdr->ref_count == UINT32_MAX || (hdr->flags & 1)) return;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    if (hdr->ref_count == 0) {
-      for (long long i = 0; i < l.len; i++) {
-        oo_str_release(l.data[i]);
-      }
-      free(hdr);
-    }
+    /* Leak-not-free: see oo_str_release. */
+    (void)hdr;
   }
 }
 

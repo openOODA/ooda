@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # job: M6 bytecode VM smoke — emit-bc + run (interpreter, not JIT)
-# in:  oodac/oodac (or OODAC_BIN); optional bin/ooda
-# out: exit 0 if hello works without residual
+# in:  oodac/oodac (or OODAC_BIN); optional bin/ooda; fixtures that BC subset supports
+# out: exit 0 if ≥2 distinct fixtures emit-bc + run with asserted output
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
@@ -15,48 +15,90 @@ if [[ ! -x "$OODAC" ]]; then
   exit 1
 fi
 
-printf 'pub fn main() {\n  println("Hello World");\n}\n' >"$TMP/hello.oo"
+# Inline string fixture (println literal — BC subset; no let/fn residual)
+printf 'pub fn main() {\n  println("Hello World");\n}\n' >"$TMP/hello_str.oo"
 
-echo "== emit-bc =="
-set +e
-timeout 20 "$OODAC" emit-bc "$TMP/hello.oo" >"$TMP/hello.bc" 2>"$TMP/hello.bc.err"
-ec=$?
-set -e
-if [[ $ec -ne 0 ]]; then
-  echo "FAIL emit-bc exit=$ec" >&2
-  cat "$TMP/hello.bc.err" >&2 || true
-  exit 1
-fi
-grep -qE '\.func main|CALL println|PUSH_STR' "$TMP/hello.bc" || {
-  echo "FAIL emit-bc missing expected ops" >&2
-  cat "$TMP/hello.bc" >&2
-  exit 1
-}
-echo "OK emit-bc"
+# Prefer existing fixtures when emit-bc + oodac run already support them.
+# Each entry: name  src  expected_stdout  emit_bc_grep (ERE)
+n=0
+fail=0
+pass() { echo "OK $*"; }
+bad() { echo "FAIL $*" >&2; fail=1; }
 
-echo "== oodac run =="
-set +e
-out=$(timeout 20 "$OODAC" run "$TMP/hello.oo" 2>&1)
-ec=$?
-set -e
-if [[ $ec -ne 0 ]] || ! echo "$out" | grep -q 'Hello World'; then
-  echo "FAIL oodac run (ec=$ec out=$out)" >&2
-  exit 1
-fi
-echo "OK oodac run (interpreter)"
+run_fixture() {
+  local name="$1" src="$2" expect="$3" grep_pat="$4"
+  local bc="$TMP/${name}.bc" err="$TMP/${name}.err" out
 
-if [[ -x "$OODA" ]]; then
-  echo "== product ooda run =="
-  set +e
-  out2=$(timeout 20 "$OODA" run "$TMP/hello.oo" 2>&1)
-  ec2=$?
-  set -e
-  if [[ $ec2 -ne 0 ]] || ! echo "$out2" | grep -q 'Hello World'; then
-    echo "FAIL product run (ec=$ec2 out=$out2)" >&2
-    exit 1
+  if [[ ! -f "$src" ]]; then
+    bad "$name: missing source $src"
+    return
   fi
-  echo "OK product ooda run"
+
+  echo "== emit-bc $name =="
+  set +e
+  timeout 20 "$OODAC" emit-bc "$src" >"$bc" 2>"$err"
+  local ec=$?
+  set -e
+  if [[ $ec -ne 0 ]]; then
+    bad "emit-bc $name exit=$ec"
+    cat "$err" >&2 || true
+    return
+  fi
+  if ! grep -qE "$grep_pat" "$bc"; then
+    bad "emit-bc $name missing expected ops ($grep_pat)"
+    cat "$bc" >&2 || true
+    return
+  fi
+  pass "emit-bc $name"
+
+  echo "== oodac run $name =="
+  set +e
+  out=$(timeout 20 "$OODAC" run "$src" 2>&1)
+  ec=$?
+  set -e
+  if [[ $ec -ne 0 ]]; then
+    bad "oodac run $name exit=$ec out=$(printf '%q' "$out")"
+    return
+  fi
+  if [[ "$out" != "$expect" ]]; then
+    bad "oodac run $name output want $(printf '%q' "$expect") got $(printf '%q' "$out")"
+    return
+  fi
+  pass "oodac run $name (interpreter)"
+
+  if [[ -x "$OODA" ]]; then
+    echo "== product ooda run $name =="
+    set +e
+    out=$(timeout 20 "$OODA" run "$src" 2>&1)
+    ec=$?
+    set -e
+    if [[ $ec -ne 0 ]]; then
+      bad "product run $name exit=$ec out=$(printf '%q' "$out")"
+      return
+    fi
+    if [[ "$out" != "$expect" ]]; then
+      bad "product run $name output want $(printf '%q' "$expect") got $(printf '%q' "$out")"
+      return
+    fi
+    pass "product ooda run $name"
+  fi
+
+  n=$((n + 1))
+}
+
+# 1) existing int println fixture
+run_fixture "chs_hello" "$ROOT/fixtures/chs_hello.oo" "1" '\.func main|PUSH_INT 1|CALL println'
+# 2) string println (inline; distinct from int-only hello)
+run_fixture "hello_str" "$TMP/hello_str.oo" "Hello World" '\.func main|PUSH_STR Hello World|CALL println'
+
+if [[ $fail -ne 0 ]]; then
+  echo "bc_vm_smoke: FAILED" >&2
+  exit 1
+fi
+if [[ $n -lt 2 ]]; then
+  echo "bc_vm_smoke: need ≥2 fixtures, got $n" >&2
+  exit 1
 fi
 
-echo "bc_vm_smoke: PASSED (bytecode interpreter — not JIT)"
+echo "bc_vm_smoke: PASSED ($n fixtures; bytecode interpreter — not JIT)"
 exit 0

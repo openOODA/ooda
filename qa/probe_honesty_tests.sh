@@ -41,18 +41,20 @@ else
   bad "K1 --emit-llvm product path (rc=$rc1, out=$out1)"
 fi
 
-# K2: --fuzz is un-gated but NOT pure-oo native — must not claim residual exit 2
-# Honesty: harness is Python (ooda_test_verify → ooda_fuzz_*). Accept non-2, or
-# explicit residual naming of python/harness if fail-closed later.
+# K2: --fuzz pure int-domain path (no Python). Use marked fixture.
+FUZZ_FIX="$ROOT/fixtures/fuzz_int_domain.oo"
+if [[ ! -f "$FUZZ_FIX" ]]; then FUZZ_FIX="$FIX"; fi
 set +e
-out2=$("$OODA" test "$FIX" --fuzz 2 2>&1)
+out2=$("$OODA" test "$FUZZ_FIX" --fuzz 5 2>&1)
 rc2=$?
 set -e
 if [[ $rc2 -eq 2 ]] && echo "$out2" | grep -qE 'ERR.*--fuzz residual'; then
-  bad "K2 --fuzz still residual-gated (docs claim un-gated; rc=2 residual)"
+  bad "K2 --fuzz still residual-gated (rc=2 residual)"
+elif echo "$out2" | grep -qiE 'pure int domain|Fuzzer pure' && [[ $rc2 -eq 0 ]]; then
+  pass "K2 --fuzz pure int-domain path (rc=$rc2)"
 elif echo "$out2" | grep -qiE 'python|ooda_fuzz|harness|fuzz' \
   || [[ $rc2 -eq 0 ]] || [[ $rc2 -eq 1 ]]; then
-  pass "K2 --fuzz un-gated (Python harness residual; rc=$rc2)"
+  pass "K2 --fuzz un-gated surface (rc=$rc2)"
 else
   bad "K2 --fuzz unexpected (rc=$rc2, out=$out2)"
 fi

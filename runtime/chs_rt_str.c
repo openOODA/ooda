@@ -10,26 +10,32 @@ char *oo_str_alloc_payload(size_t len) {
   return data;
 }
 
-void oo_str_retain(OoStr s) {
-  if (!s.data) return;
+static int oo_str_hdr_ok(OoStr s) {
+  if (!s.data) return 0;
+  if (s.len < 0 || s.len > (1LL << 28)) return 0;
+  /* Payload must be after a heap header we allocated. */
+  if (((uintptr_t)s.data) < sizeof(OoStrHeader) + 8) return 0;
   OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
-  if (hdr->ref_count == 0 || hdr->ref_count == UINT32_MAX || (hdr->flags & OO_FLAG_STATIC)) {
-    return;
-  }
+  if (hdr->ref_count == 0 || hdr->ref_count == UINT32_MAX) return 0;
+  if (hdr->ref_count > 1000000u) return 0;
+  if (hdr->flags & OO_FLAG_STATIC) return 0;
+  return 1;
+}
+
+void oo_str_retain(OoStr s) {
+  if (!oo_str_hdr_ok(s)) return;
+  OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
   hdr->ref_count++;
 }
 
 void oo_str_release(OoStr s) {
-  if (!s.data) return;
+  if (!oo_str_hdr_ok(s)) return;
   OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
-  if (hdr->ref_count == 0 || hdr->ref_count == UINT32_MAX || (hdr->flags & OO_FLAG_STATIC)) {
-    return;
-  }
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    if (hdr->ref_count == 0) {
-      free(hdr);
-    }
+    /* Do not free: seed-era emit still over-releases / use-after-free.
+       Leaking is preferred to heap corruption until emit ARC is complete. */
+    (void)hdr;
   }
 }
 
@@ -49,13 +55,15 @@ OoStr oo_str_lit(const char *s) {
 /* Non-consuming concat: borrows a/b (M2: s=s+t safe with reassign_arc). */
 OoStr oo_str_concat(OoStr a, OoStr b) {
   OoStr r;
-  r.len = a.len + b.len;
+  long long al = (a.data && a.len > 0 && a.len < (1LL << 28)) ? a.len : 0;
+  long long bl = (b.data && b.len > 0 && b.len < (1LL << 28)) ? b.len : 0;
+  r.len = al + bl;
   r.data = oo_str_alloc_payload((size_t)r.len);
-  if (a.data && a.len > 0) {
-    memcpy(r.data, a.data, (size_t)a.len);
+  if (al > 0) {
+    memcpy(r.data, a.data, (size_t)al);
   }
-  if (b.data && b.len > 0) {
-    memcpy(r.data + a.len, b.data, (size_t)b.len);
+  if (bl > 0) {
+    memcpy(r.data + al, b.data, (size_t)bl);
   }
   return r;
 }

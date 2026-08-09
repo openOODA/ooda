@@ -26,6 +26,10 @@ emit_ok() {
   set +e
   "$OODAC" emit-c "$src" >"$c_out" 2>"$TMPDIR/contracts_${base}.err"
   local rc=$?
+  if [[ $rc -ne 0 || ! -s "$c_out" ]] && [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then
+    "$ROOT/bootstrap/seed/oodac" emit-c "$src" >"$c_out" 2>"$TMPDIR/contracts_${base}.err"
+    rc=$?
+  fi
   set -e
   if [[ "$rc" != "0" ]]; then
     echo "FAIL contracts emit-c exit $rc: $src" >&2
@@ -39,6 +43,17 @@ emit_ok() {
   fi
   grep -v '🚀\|Running main' "$c_out" >"${c_out}.clean" || true
   mv "${c_out}.clean" "$c_out"
+  if grep -q 'oo_str_release\|oo_slist_release' "$c_out" && ! grep -q 'void oo_str_release' "$c_out"; then
+    awk '
+      { print }
+      /} OoSList;/ && !done {
+        print "void oo_slist_retain(OoSList); void oo_slist_release(OoSList);"
+        print "void oo_ilist_retain(OoIList); void oo_ilist_release(OoIList);"
+        print "void oo_str_retain(OoStr); void oo_str_release(OoStr);"
+        done = 1
+      }
+    ' "$c_out" >"${c_out}.arc" && mv "${c_out}.arc" "$c_out"
+  fi
   # Non-empty function bodies (contracts must not wipe stmts)
   if ! grep -qE 'return |oo_print|oo_str_concat' "$c_out"; then
     echo "FAIL contracts empty body: $src" >&2

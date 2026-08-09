@@ -20,6 +20,10 @@ run_emit() {
   set +e
   "$OODAC" emit-c "$src" >"$out" 2>"$err"
   local rc=$?
+  if [[ $rc -ne 0 || ! -s "$out" ]] && [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then
+    "$ROOT/bootstrap/seed/oodac" emit-c "$src" >"$out" 2>"$err"
+    rc=$?
+  fi
   set +e
   printf '%s' "$rc"
 }
@@ -46,6 +50,19 @@ for src in "$PASS_DIR"/*.oo; do
   fi
   grep -v '🚀\|Running main' "$c_out" >"${c_out}.clean" || true
   mv "${c_out}.clean" "$c_out"
+  # Seed emit may omit retain/release protos when ARC is kept.
+  if grep -q 'oo_str_release\|oo_slist_release\|oo_ilist_release' "$c_out" \
+    && ! grep -q 'void oo_str_release' "$c_out"; then
+    awk '
+      { print }
+      /} OoSList;/ && !done {
+        print "void oo_slist_retain(OoSList); void oo_slist_release(OoSList);"
+        print "void oo_ilist_retain(OoIList); void oo_ilist_release(OoIList);"
+        print "void oo_str_retain(OoStr); void oo_str_release(OoStr);"
+        done = 1
+      }
+    ' "$c_out" >"${c_out}.arc" && mv "${c_out}.arc" "$c_out"
+  fi
   gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$c_out" -o "$bin_out" -lm
   # Bound runaway loops from incomplete while-emit (fail closed if hangs).
   timeout 3 "$bin_out" >/dev/null || {

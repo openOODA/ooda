@@ -4,7 +4,9 @@
 # out: oodac/oodac, bin/ooda (pure .oo CLI)
 set -euo pipefail
 # Residual: seed-emitted ARC heap-corrupts self-host; strip until M2 closed (SPRINT.md).
-export PURE_NO_ARC="${PURE_NO_ARC:-1}"
+# Default 0: keep retain/release in pure-built C. Runtime release is leak-safe
+# (does not free) until seed/tree emit ARC is reclaim-correct; strip is optional.
+export PURE_NO_ARC="${PURE_NO_ARC:-0}"
 export PURE_SKIP_CHECK="${PURE_SKIP_CHECK:-1}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"

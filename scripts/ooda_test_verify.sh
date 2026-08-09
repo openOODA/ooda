@@ -85,10 +85,11 @@ fi
 
 # --- 2) lower verify blocks / contract fuzz loop → harness .oo ---
 HARNESS="$TMPDIR/ooda_test_$$_harness.oo"
+HARNESS_C="$TMPDIR/ooda_test_$$_harness.c"
 OUTBIN="$TMPDIR/ooda_test_$$_bin"
 cleanup_test() {
   if [[ -z "${OODA_TEST_KEEP:-}" ]]; then
-    rm -f "$HARNESS" "$OUTBIN" "$HARNESS.c" 2>/dev/null || true
+    rm -f "$HARNESS" "$OUTBIN" "$HARNESS_C" "$HARNESS.c" 2>/dev/null || true
   fi
 }
 trap cleanup_test EXIT
@@ -99,17 +100,33 @@ export OODA_TEST_FUZZ_ITERS="$FUZZ_ITERS"
 export OODA_TEST_FUZZ_SEED="$FUZZ_SEED"
 export OODA_TEST_FUZZ_VERBOSE="$FUZZ_VERBOSE"
 
-PY="$ROOT/scripts/ooda_test_harness.py"
-if [[ ! -f "$PY" ]]; then
-  echo "ERR	test	missing $PY" >&2
-  exit 1
-fi
-set +e
-python3 "$PY"
-py=$?
-set -e
-if [[ $py -ne 0 ]]; then
-  exit "$py"
+if [[ $FUZZ_MODE -eq 1 ]]; then
+  # Pure Int-domain path only — never python3 / ooda_fuzz_*.py / ooda_test_harness.py
+  PURE="$ROOT/scripts/ooda_fuzz_pure.sh"
+  if [[ ! -x "$PURE" ]]; then
+    echo "ERR	test	missing pure fuzz generator: $PURE" >&2
+    exit 1
+  fi
+  set +e
+  "$PURE"
+  pure_rc=$?
+  set -e
+  if [[ $pure_rc -ne 0 ]]; then
+    exit "$pure_rc"
+  fi
+else
+  PY="$ROOT/scripts/ooda_test_harness.py"
+  if [[ ! -f "$PY" ]]; then
+    echo "ERR	test	missing $PY" >&2
+    exit 1
+  fi
+  set +e
+  python3 "$PY"
+  py=$?
+  set -e
+  if [[ $py -ne 0 ]]; then
+    exit "$py"
+  fi
 fi
 
 # No verify blocks and no fuzzing → check-only success
@@ -118,16 +135,71 @@ if [[ ! -s "$HARNESS" ]]; then
 fi
 
 # --- 3) build harness ---
-set +e
-OODAC_BIN="$OODAC" "$OODAC" build "$HARNESS" "$OUTBIN" \
-  >"$TMPDIR/ooda_test_build.out" 2>"$TMPDIR/ooda_test_build.err"
-br=$?
-set -e
-if [[ $br -ne 0 || ! -x "$OUTBIN" ]]; then
-  cat "$TMPDIR/ooda_test_build.out" 2>/dev/null || true
-  cat "$TMPDIR/ooda_test_build.err" >&2 2>/dev/null || true
-  echo "ERR	test	harness build failed" >&2
-  exit 1
+if [[ $FUZZ_MODE -eq 1 ]]; then
+  # Pure single-module link: emit-c + ARC decl inject + gcc (no python3 / pure_build)
+  fuzz_emit() {
+    local em="$1"
+    # timeout absorbs SEGV without noisy shell job messages; fail-closed on non-zero.
+    set +e
+    EMIT_NO_CONCAT=1 timeout 60 "$em" emit-c "$HARNESS" \
+      >"$HARNESS_C" 2>"$TMPDIR/ooda_test_build.err"
+    local ec=$?
+    set -e
+    if [[ $ec -ne 0 || ! -s "$HARNESS_C" ]]; then
+      return 1
+    fi
+    if ! grep -qE '^(void|int|long long|OoStr) ' "$HARNESS_C"; then
+      return 1
+    fi
+    return 0
+  }
+  # Prefer seed for multi-fn harness stability when present; else tree OODAC.
+  EMIT_OK=0
+  if [[ -x "$ROOT/bootstrap/seed/oodac" ]] && fuzz_emit "$ROOT/bootstrap/seed/oodac"; then
+    EMIT_OK=1
+  elif fuzz_emit "$OODAC"; then
+    EMIT_OK=1
+  fi
+  if [[ $EMIT_OK -ne 1 ]]; then
+    cat "$TMPDIR/ooda_test_build.err" >&2 2>/dev/null || true
+    echo "ERR	test	pure fuzz emit-c failed" >&2
+    exit 1
+  fi
+  # Seed emit may use oo_*_release without decls — inject after OoSList typedef (bash only).
+  TMPC="$TMPDIR/ooda_test_$$_harness_link.c"
+  awk '
+    { print }
+    /} OoSList;/ && !done {
+      print "void oo_slist_retain(OoSList); void oo_slist_release(OoSList);"
+      print "void oo_ilist_retain(OoIList); void oo_ilist_release(OoIList);"
+      print "void oo_str_retain(OoStr); void oo_str_release(OoStr);"
+      done = 1
+    }
+  ' "$HARNESS_C" >"$TMPC"
+  set +e
+  gcc -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMPC" -lm -o "$OUTBIN" \
+    >"$TMPDIR/ooda_test_build.out" 2>"$TMPDIR/ooda_test_build.err"
+  br=$?
+  set -e
+  rm -f "$TMPC" 2>/dev/null || true
+  if [[ $br -ne 0 || ! -x "$OUTBIN" ]]; then
+    cat "$TMPDIR/ooda_test_build.out" 2>/dev/null || true
+    cat "$TMPDIR/ooda_test_build.err" >&2 2>/dev/null || true
+    echo "ERR	test	pure fuzz harness gcc failed" >&2
+    exit 1
+  fi
+else
+  set +e
+  OODAC_BIN="$OODAC" "$OODAC" build "$HARNESS" "$OUTBIN" \
+    >"$TMPDIR/ooda_test_build.out" 2>"$TMPDIR/ooda_test_build.err"
+  br=$?
+  set -e
+  if [[ $br -ne 0 || ! -x "$OUTBIN" ]]; then
+    cat "$TMPDIR/ooda_test_build.out" 2>/dev/null || true
+    cat "$TMPDIR/ooda_test_build.err" >&2 2>/dev/null || true
+    echo "ERR	test	harness build failed" >&2
+    exit 1
+  fi
 fi
 
 # --- 4) run harness ---
