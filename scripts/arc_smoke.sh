@@ -101,6 +101,14 @@ PY
       continue
     fi
   fi
+  if [[ "$base" == "arc_list_push_get" ]]; then
+    got="$(cat "$TMPDIR/arc_${base}.out")"
+    exp=$'a\nb'
+    if [[ "$got" != "$exp" ]]; then
+      bad "arc_list_push_get output want a/b got: $(printf '%q' "$got")"
+      continue
+    fi
+  fi
   pass "$base ($used)"
 done
 

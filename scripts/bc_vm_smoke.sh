@@ -10,6 +10,7 @@
 #   - while loops (LABEL / JUMP / JUMP_IF_FALSE)
 #   - if-expression value form (if/else if/else as RHS of let) — single-expr blocks
 #   - for-range `for i in lo..hi` (desugars to while-like JUMP loop)
+#   - unary ! , compare (>/<), && , nested for
 #
 # Residual (honest, not claimed green here):
 #   - multi-statement value blocks in if-expr keep first expr only
@@ -115,6 +116,12 @@ run_fixture "while_simple" "$TMP/while_simple.oo" "3" 'STORE_LOCAL|LABEL|JUMP_IF
 run_fixture "while_count" "$ROOT/fixtures/while_count.oo" "3" 'JUMP_IF_FALSE|STORE_LOCAL|CALL println'
 # 6) for-range sum 0..5 → 10 (BC desugar already in bc_emit_stmt)
 run_fixture "for_range" "$ROOT/fixtures/for_range.oo" "10" 'PUSH_INT 0|PUSH_INT 5|LT|JUMP_IF_FALSE|ADD|STORE_LOCAL'
+# 7) unary ! + if
+run_fixture "bc_unary_not" "$ROOT/fixtures/bc_unary_not.oo" "1" 'NOT|EQ|JUMP_IF_FALSE|CALL println'
+# 8) compare + && 
+run_fixture "bc_compare_logic" "$ROOT/fixtures/bc_compare_logic.oo" "1" 'GT|LT|AND|JUMP_IF_FALSE'
+# 9) nested for-range 3*2 → 6
+run_fixture "bc_nested_for" "$ROOT/fixtures/bc_nested_for.oo" "6" 'PUSH_INT 3|PUSH_INT 2|LT|JUMP_IF_FALSE'
 
 if [[ $fail -ne 0 ]]; then
   echo "bc_vm_smoke: FAILED" >&2

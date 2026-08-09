@@ -33,9 +33,8 @@ void oo_str_release(OoStr s) {
   OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    /* Residual: free(hdr) still UAF/tcache-corrupt for seed pure multi of oodac
-       even with formal strip + slist_get retain. Leak-safe until tree emit owns
-       pure multi or seed ownership is complete. Fixtures alone free-OK historically. */
+    /* Residual: free still UAF for seed pure multi even with formals+alias softener.
+       Leak-safe product default. Softeners stay for next reclaim. */
     (void)hdr;
   }
 }

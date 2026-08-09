@@ -202,6 +202,8 @@ def main() -> int:
     t = fix_mismatched_releases(t)
     from pure_rewrite_formals import strip_formal_param_releases
     t = strip_formal_param_releases(t)
+    from pure_rewrite_alias_retain import inject_alias_retains
+    t = inject_alias_retains(t)
     t = re.sub(r"(?<![A-Za-z0-9_])file_size\(", "oo_file_size(", t)
     for fn, cap in [
         ("oo_read_file", "oo_cap_grant_fs()"), ("oo_write_file", "oo_cap_grant_fs()"),
