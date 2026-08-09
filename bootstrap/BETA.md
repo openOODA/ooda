@@ -109,7 +109,7 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 |------|-------------|----------|
 | Host Cargo / `.rs` product path | any reintroduction | Forbidden (B0/B1 product purity) |
 | Full LLVM/WASM **product floor** (link/run/optimize) | emit smoke ≠ floor | do not claim production backends (`P4_DROPS.md`); `--release` fail-closed |
-| `ooda test --fuzz` as pure-native fuzzer | CLI un-gated | **Python harness residual** (`FUZZ_DEFER.md`) — not beta-native |
+| `ooda test --fuzz` as full multi-type pure fuzzer | CLI un-gated; **Int-domain pure path shipped** | Only `// FUZZ_DOMAIN: int` markers; other domains fail closed (`FUZZ_DEFER.md`) — not full multi-type fuzzer |
 | **ensures** + complex `requires` | not fully lowered on native | incomplete residual (simple `requires`/`ensures` only where rails prove) |
 | **`for` non-INT bounds** | only `INT..INT` range-for lowered | emit `for residual` (use `while`) |
 | **`match` non-Result / incomplete** | Result Ok/Err stmt + match-let **In** | other shapes fail-closed (`FOR_MATCH_RESIDUAL.md`) |
@@ -159,12 +159,12 @@ public notes match In/Out tables
 |-------|-------------------------|
 | B0 RS=0, no Cargo.toml | **PASS** (`RS_COUNT=0`; no `src/`, no `Cargo.toml`) |
 | B1 no-Cargo build scripts | **PASS local** (`ci_product` / cargo shadow); remote GHA residual — private-asset / seed download historically red (`GHA_PRODUCT.md`) |
-| B2 pure fixed_point | **PASS under residual** (`fixed_point.sh`; s1≡s2; no OK_HOST; **`PURE_NO_ARC=1`** default — not ARC-on stage2) |
+| B2 pure fixed_point | **PASS** (`fixed_point.sh`; s1≡s2; no OK_HOST; default **`PURE_NO_ARC=0`**; runtime release leak-safe — see `ARC_M2_RESIDUAL.md`) |
 | B3 release/install path | **PASS path** (`release.sh` packs pure bins + runtime C); dress rehearsal offline OK; cold seed residual |
 | B4 honesty | **PASS process** — Out rows fail-closed; alpha pin; **no beta tag cut** |
 | B5 org | **PASS** product-critical siblings no Rust; editors optional |
 | Part B.1 In surface | **Table promoted** to real alpha (check/dump/build/run/test asserts/json-errors/outline/reflect/patch replace_fn/`--backend c`); rails exist — still not “owner freezes beta forever” |
-| Part B.2 Out surface | **Documented** Python fuzz residual, LLVM/WASM **floor** out (emit smoke only), ensures incomplete, non-INT for residual, non-Result match residual, non-`fetch` net residual; FS/Sys/Env **runtime magic-token seal In** |
+| Part B.2 Out surface | **Documented** multi-type fuzz residual (Int pure path In), LLVM/WASM **floor** out (emit+execute smoke only), ensures incomplete, non-INT for residual, non-Result match residual, non-`fetch` net residual; FS/Sys/Env **runtime magic-token seal In** |
 | Public beta tag | **Not claimed** |
 
 Live notes: monorepo `PROGRESS.md`, latest `RELEASE_NOTES_*.md`.
