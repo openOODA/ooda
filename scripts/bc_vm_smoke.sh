@@ -11,6 +11,7 @@
 #   - if-expression value form (if/else if/else as RHS of let) — single-expr blocks
 #   - for-range `for i in lo..hi` (desugars to while-like JUMP loop)
 #   - unary ! , compare (>/<), && , nested for
+#   - SUB/DIV/MOD (`%` → PERCENT → MOD opcode)
 #
 # Residual (honest, not claimed green here):
 #   - multi-statement value blocks in if-expr keep first expr only
@@ -122,8 +123,10 @@ run_fixture "bc_unary_not" "$ROOT/fixtures/bc_unary_not.oo" "1" 'NOT|EQ|JUMP_IF_
 run_fixture "bc_compare_logic" "$ROOT/fixtures/bc_compare_logic.oo" "1" 'GT|LT|AND|JUMP_IF_FALSE'
 # 9) nested for-range 3*2 → 6
 run_fixture "bc_nested_for" "$ROOT/fixtures/bc_nested_for.oo" "6" 'PUSH_INT 3|PUSH_INT 2|LT|JUMP_IF_FALSE'
-# 10) SUB/DIV — (20/4)-1 = 4 (no % — lexer residual)
+# 10) SUB/DIV — (20/4)-1 = 4
 run_fixture "bc_arith_ops" "$ROOT/fixtures/bc_arith_ops.oo" "4" 'DIV|SUB|CALL println'
+# 11) MOD via %
+run_fixture "bc_mod_ops" "$ROOT/fixtures/bc_mod_ops.oo" "1" 'MOD|CALL println|PUSH_INT 10'
 
 if [[ $fail -ne 0 ]]; then
   echo "bc_vm_smoke: FAILED" >&2

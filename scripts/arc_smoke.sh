@@ -109,6 +109,14 @@ PY
       continue
     fi
   fi
+  if [[ "$base" == "nested_scope_str" ]]; then
+    got="$(cat "$TMPDIR/arc_${base}.out")"
+    exp=$'i\no'
+    if [[ "$got" != "$exp" ]]; then
+      bad "nested_scope_str output want i/o got: $(printf '%q' "$got")"
+      continue
+    fi
+  fi
   pass "$base ($used)"
 done
 
