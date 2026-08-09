@@ -38,7 +38,8 @@ void oo_ilist_release(OoIList l) {
   OoListHeader *hdr = ((OoListHeader *)l.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    (void)hdr; /* leak-safe residual — see oo_str_release */
+    /* list free residual: str free first; list free still unsafe for seed self-host */
+    (void)hdr;
   }
 }
 
@@ -87,7 +88,8 @@ void oo_slist_release(OoSList l) {
   OoListHeader *hdr = ((OoListHeader *)l.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    (void)hdr; /* leak-safe residual — see oo_str_release */
+    /* list free residual: str free first; list free still unsafe for seed self-host */
+    (void)hdr;
   }
 }
 
@@ -118,6 +120,8 @@ OoStr oo_slist_get(OoSList l, long long i) {
     fprintf(stderr, "slist_get OOB\n");
     abort();
   }
+  /* Return an owned ref so let s = list_get(...) is free-safe. */
+  oo_str_retain(l.data[i]);
   return l.data[i];
 }
 

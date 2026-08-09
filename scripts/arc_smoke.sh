@@ -48,6 +48,25 @@ for src in "$DIR"/*.oo; do
     head -12 "$err_out" 2>/dev/null || true
     continue
   fi
+  # Seed preamble may omit ARC protos while still emitting retain/release calls.
+  if ! grep -q 'void oo_str_release' "$c_out" 2>/dev/null; then
+    python3 - "$c_out" <<'PY'
+import sys
+path = sys.argv[1]
+t = open(path, encoding="utf-8", errors="replace").read()
+decls = (
+    "void oo_str_retain(OoStr); void oo_str_release(OoStr);\n"
+    "void oo_slist_retain(OoSList); void oo_slist_release(OoSList);\n"
+    "void oo_ilist_retain(OoIList); void oo_ilist_release(OoIList);\n"
+)
+mark = "typedef struct { int ok; OoStr err; } OoResV;"
+if mark in t:
+    t = t.replace(mark, mark + "\n" + decls, 1)
+else:
+    t = decls + t
+open(path, "w", encoding="utf-8").write(t)
+PY
+  fi
   set +e
   gcc -O0 -I"$INC" "$RT" "$c_out" -o "$bin_out" -lm >"$TMPDIR/arc_${base}.gcc" 2>&1
   grc=$?

@@ -9,10 +9,11 @@
 #   - let / let mut, local load/store, assignment (`=` token kind EQ)
 #   - while loops (LABEL / JUMP / JUMP_IF_FALSE)
 #   - if-expression value form (if/else if/else as RHS of let) — single-expr blocks
+#   - for-range `for i in lo..hi` (desugars to while-like JUMP loop)
 #
 # Residual (honest, not claimed green here):
 #   - multi-statement value blocks in if-expr keep first expr only
-#   - for-range / match / struct / list / string method surface not smoked
+#   - match / struct / list / string method surface not smoked
 #   - product `bin/ooda run` may still be Backend-C build+exec (not always BC VM);
 #     when present it is checked for output parity only
 #   - never claim JIT — this path is a stack bytecode interpreter only
@@ -112,6 +113,8 @@ run_fixture "arith_int" "$TMP/arith_int.oo" "14" 'PUSH_INT 2|PUSH_INT 3|PUSH_INT
 run_fixture "while_simple" "$TMP/while_simple.oo" "3" 'STORE_LOCAL|LABEL|JUMP_IF_FALSE|LOAD_LOCAL'
 # 5) full fixtures/while_count.oo — while + unary ! + if-expr else-if (language surface)
 run_fixture "while_count" "$ROOT/fixtures/while_count.oo" "3" 'JUMP_IF_FALSE|STORE_LOCAL|CALL println'
+# 6) for-range sum 0..5 → 10 (BC desugar already in bc_emit_stmt)
+run_fixture "for_range" "$ROOT/fixtures/for_range.oo" "10" 'PUSH_INT 0|PUSH_INT 5|LT|JUMP_IF_FALSE|ADD|STORE_LOCAL'
 
 if [[ $fail -ne 0 ]]; then
   echo "bc_vm_smoke: FAILED" >&2

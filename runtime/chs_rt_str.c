@@ -33,8 +33,9 @@ void oo_str_release(OoStr s) {
   OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    /* Depth residual: free still unsafe for seed-emitted self-host (UAF after
-       formal strip). Leak until alias/get-retain complete. Formals strip helps. */
+    /* Residual: free(hdr) still UAF/tcache-corrupt for seed pure multi of oodac
+       even with formal strip + slist_get retain. Leak-safe until tree emit owns
+       pure multi or seed ownership is complete. Fixtures alone free-OK historically. */
     (void)hdr;
   }
 }
