@@ -37,8 +37,8 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 ### P0 — Keep the runway green
 > **Standing rails** — not one-shot ships. When GHA is green, treat as *standing — verified by CI* (re-check on every pin / red PR). Local: `scripts/ci_product.sh`. Remote: `.github/workflows/product.yml`.
 
-- [x] Pure rails stay green: `fixed_point`, `chs_parity`, `c_emit_smoke`, product smokes, `bootstrap_no_cargo` / `ci_product` — *standing — verified by CI*
-- [x] `RS_COUNT=0`; no Cargo product path — *standing — verified by CI* (shadow cargo in `ci_product` + GHA)
+- [x] Pure rails stay green **locally**: `fixed_point`, `chs_parity`, `c_emit_smoke`, product smokes, `bootstrap_no_cargo` / `ci_product` — *standing local rail; remote GHA residual per `GHA_PRODUCT.md`*
+- [x] `RS_COUNT=0`; no Cargo product path — *standing local* (shadow cargo in `ci_product`; GHA when seed resolvable)
 - [x] Line lock \(O=0\) — *standing rail* (`scripts/check_file_lines.sh`); O=0 on main (re-check every pin)
 
 ### P1 — Core systems development loop
@@ -51,17 +51,17 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Pure path: check → lower `assert_eq!` in `verify` → Backend-C harness build+run
   - Scripts: `scripts/ooda_test_verify.sh` + `ooda_test_harness.py`; CLI `ooda test`
   - Fixtures: `fixtures/verify_pass.oo` / `verify_fail.oo`; product smoke rails
-  - Residual: `--fuzz` (DESIGN deferral); ensures not runtime; verify supports `assert_eq!`/`assert_ne!`/`assert!` only
-- [x] **`ooda test --fuzz`** — fail-closed DESIGN deferral (exit 2)
-  - Message points to `bootstrap/FUZZ_DEFER.md` (when/gates for real integer-domain MVP)
-  - Prefer honest residual over fake fuzz; product smoke expects non-zero
+  - Residual: `--fuzz` un-gated Python harness (`FUZZ_DEFER.md`); ensures not runtime; verify supports `assert_eq!`/`assert_ne!`/`assert!` only
+- [ ] **`ooda test --fuzz` pure-native** — CLI un-gated; harness still Python (`FUZZ_DEFER.md`); not sealed pure path
+  - Do **not** claim fail-closed exit 2 or pure-`.oo` fuzzer until criteria in FUZZ_DEFER hold
+  - Prefer residual honesty over marketing “native fuzz”
 - [x] **Caps completeness on claimed path** — Fs/Sys/Env/(Net) matrix: lower or fail-closed consistently; expand sealed C allowlist with fixtures
-  - Matrix: `bootstrap/CAPS_MATRIX.md`
+  - Matrix: `bootstrap/CAPS_MATRIX.md` (keep matrix honest vs `AUDIT_RESIDUAL` — `fetch` may lower)
   - Check seal: `is_sealed_{fs,sys,env,net}` incl. `env_get`, `path_exists`, `file_size`
-  - Emit: real lower for read/write/path/size/env/sys; **net → ERR residual** (no silent stub)
+  - Emit: real lower for read/write/path/size/env/sys; **`fetch` → `oo_fetch`** (AUDIT R9); other net names residual
   - Fixtures: `bootstrap/corpus/check/{pass,fail}/` per class; rail `scripts/caps_matrix_smoke.sh`
   - Runtime seal: magic tokens + `oo_cap_require` on FS/Sys/Env (`STATIC_CAPS.md`); forge deny in `caps_matrix_smoke`
-  - Residual: net product none; dynamic callees residual; not cryptographic object-caps
+  - Residual: other net ops residual; dynamic callees residual; not cryptographic object-caps
 - [x] **Richer `ooda run`** — **permanent pure native build+exec** (no host interpreter return)
   - Documented in README + help; clearer errors (missing file / build fail / no exe)
   - Residual: no JIT/interpret path on product surface
@@ -83,13 +83,13 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Codes: `bootstrap/DIAG_CODES.md`; smoke: `scripts/json_errors_smoke.sh`
   - Residual: no suggested_fix / timings (not host AiDiagnostic)
 - [x] **`ooda outline`** — token-cheap API summary
-  - Parse-only: `scripts/ooda_outline_reflect.py`; CLI `ooda outline`
+  - Pure path: `oodac outline` via product CLI (M1); not Python helper
   - One line per `pub fn` (params, ret, `caps=…`); fail-closed unreadable
   - Format: `bootstrap/OUTLINE_REFLECT.md`; rail `scripts/outline_reflect_smoke.sh`
-  - Residual: python helper (not full AST); no type/import outline lines yet
+  - Residual: not full typed AST outline; no import graph lines yet
 - [x] **`ooda reflect`** — symbol/contract/cap metadata
   - NDJSON: fn (requires/ensures/caps) + verify names; optional symbol filter
-  - Same helper + smoke; never executes user code
+  - Pure `oodac reflect` + smoke; never executes user code
 - [x] **`ooda patch`** — surgical `replace_fn` for agents (SAFE)
   - CLI: `ooda patch <file.oo> --replace-fn <name> --with <body_file> [--check]`
   - Or JSON stdin `{"op":"replace_fn","name":…,"body":…}` only (unknown op fail-closed)
@@ -121,8 +121,8 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Residual: optional host FFI path; programs that need host dumps must opt into FFI
 
 ### P4 — Stretch (DESIGN or aligned)
-- [x] LLVM / production optimize path — **permanent fail-closed product claim** (Backend-C only); see `bootstrap/P4_DROPS.md`
-- [x] WASM product path — **permanent fail-closed** until F3 MVP; `build --target wasm` / oodac `wasm` residual; `P4_DROPS.md`
+- [x] LLVM production floor — **not claimed**; textual `emit-llvm` smoke only (M5 partial); see `bootstrap/P4_DROPS.md`
+- [x] WASM product run floor — **not claimed**; `.wat` emit smoke only (M4 partial); `P4_DROPS.md`
 - [x] Packaging/registry — **fail-closed residual** (no product registry; ship = tarball+pin only); `P4_DROPS.md`
 - [x] Concurrency / async — **not in product**; DESIGN-aligned future only; `P4_DROPS.md`
 

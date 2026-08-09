@@ -1,7 +1,8 @@
 # `ooda outline` / `ooda reflect` (agent tooling)
 
 **Status:** product CLI (alpha). **Security:** parse-only — never executes user `.oo`.  
-**Residual:** implementation is `scripts/ooda_outline_reflect.py` (same helper class as `ooda_test_harness.py`); not a full oodac AST yet.
+**Implementation:** pure `oodac outline` / `oodac reflect` via product CLI (M1).  
+**Residual:** not a full typed AST / import graph; not a substitute for `check`.
 
 ## Commands
 

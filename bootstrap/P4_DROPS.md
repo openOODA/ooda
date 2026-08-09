@@ -15,18 +15,17 @@ not soft-pass, not “OK_HOST”.
 
 | Claim | Status |
 |-------|--------|
-| Product LLVM backend | **No** |
-| `--emit-llvm`, `--release` optimize path | **Fail-closed** on pure CLI |
-| `ooda build --target llvm` | **Fail-closed** (`ERR cli … residual/beta-out`) |
+| Product LLVM **floor** (link/run/optimize) | **No** — Backend-C remains product self-host floor |
+| `oodac emit-llvm` / `ooda build --target llvm` / `--emit-llvm` | **Emit smoke** (textual IR written; `llvm_token_align_smoke`) — **not** clang/llc product rails |
+| `--release` optimize path | **Fail-closed** residual on pure CLI |
 
-**Permanent product claim until reversed:** openOODA ships **Backend-C only**
-(FLOOR). LLVM is **not** a supported floor. Optional host clang link of C output
-is incidental, not an LLVM product backend.
+**Honest product claim:** openOODA **self-hosts on Backend-C**. LLVM IR **emit**
+exists as a partial M5 surface; do **not** market full LLVM backend, optimize,
+or production link. Optional host clang link of **C** output is incidental.
 
-**Re-open only with:** FLOOR F3-style MVP + rails + DESIGN-aligned notes — not a
-drive-by flag.
+**Close full LLVM product only with:** FLOOR F3-style MVP + rails + DESIGN-aligned notes.
 
-See: `cli/main.oo`, `bootstrap/FLOOR.md`, `bootstrap/BACKEND_F3_PREP.md`.
+See: `cli/main.oo`, `scripts/ooda_product.sh`, `bootstrap/FLOOR.md`, `BACKEND_F3_PREP.md`.
 
 ---
 
@@ -34,17 +33,16 @@ See: `cli/main.oo`, `bootstrap/FLOOR.md`, `bootstrap/BACKEND_F3_PREP.md`.
 
 | Claim | Status |
 |-------|--------|
-| Product WASM emit/run | **No** |
-| `ooda build --target wasm` | **Fail-closed** |
-| oodac `wasm` command | **Fail-closed** (beta-out surface) |
+| Product WASM **run** (wasmtime/WASI host rails) | **No** |
+| `ooda build --target wasm` / `oodac emit-wasm` | **Emit smoke** (`.wat` text; `wasm_emit_smoke`) — not product execute path |
+| Full second-backend self-host on WASM | **No** |
 
-**Permanent product claim until reversed:** WASM is **out of product**. Demos or
-fixture `*.wat` leftovers are not a product path.
+**Honest product claim:** WASM **text emit** is partial M4; not a shipped WASM
+runtime product. Fixture `*.wat` leftovers are demos, not a floor.
 
-**Re-open only with:** second-backend MVP (F3 candidate **W**) + runtime pin +
-smoke rails. Until then residual is intentional.
+**Close full WASM product only with:** F3 candidate **W** + runtime pin + run rails.
 
-Rails: `scripts/p3_no_cargo_smoke.sh`, `scripts/beta_cli_smoke.sh`.
+Rails today: `scripts/wasm_emit_smoke.sh` (emit only).
 
 ---
 
@@ -84,8 +82,9 @@ Until then: sequential CHS/Backend-C semantics only.
 | Item | Residual |
 |------|----------|
 | Cold-start seed | Prebuilt pure `oodac` once (`SEED_OODAC` / release asset) |
-| `--json-errors` on **run** only (check path is real), `--fuzz` | Fail-closed on pure path |
-| Non-`c` `--backend` | Fail-closed (`FLOOR.md`) |
+| `--json-errors` on **run** | Fail-closed residual (check path is real) |
+| `--fuzz` | **Un-gated** → Python harness residual (`FUZZ_DEFER.md`); not pure-native |
+| `oodac --backend llvm\|wasm` | Accepted for emit scaffolding; product **self-host** remains Backend-C |
 | Host preamble decls (`oo_host_*`) | Backend-C link residual, not a second backend |
 
 ---

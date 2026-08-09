@@ -48,28 +48,30 @@ ooda version
 | `check` / `dump tokens\|ast\|check` | Real on pure path |
 | `build --target c\|chs\|native` | Real: emit-c + gcc + `runtime/chs_rt*.c` |
 | `run` | **Permanent pure native build+exec** (no host interpreter; product path) |
-| `test` | **Real:** check + run `verify`/`assert_eq!` via Backend-C harness; `--fuzz` DESIGN-deferred |
+| `test` | **Real:** check + run `verify`/`assert_eq!` via Backend-C harness; `--fuzz` un-gated **Python residual** (not pure-`.oo` native) |
 | `patch` | **Real:** structured `replace_fn` (CLI flags or JSON stdin); atomic write; path-safe |
-| Fixed-point | `scripts/fixed_point.sh` pure seed → stage-1 → stage-2; digests s1≡s2; no OK_HOST |
+| Fixed-point | `scripts/fixed_point.sh` pure seed → stage-1 → stage-2 under **`PURE_NO_ARC=1` strip**; digests s1≡s2; no OK_HOST |
 | Parity | `scripts/chs_parity.sh` product ≡ pure oodac |
 | Line lock | `scripts/check_file_lines.sh` O=0 |
 | Product purity | **B0/B1** — pure `.oo` tree (`RS_COUNT=0`; no `Cargo.toml` product path) |
 
-### Residual fail-closed (non-zero; not beta surface)
+### Residual / partial (not full product claims)
 
 | Item | Behavior |
 |---|---|
 | `--json-errors` | **Real on check:** JSON diags + codes — see [`bootstrap/DIAG_CODES.md`](bootstrap/DIAG_CODES.md) |
-| `--release` / `--emit-llvm` | Fail-closed residual |
-| `--fuzz` | Fail-closed DESIGN deferral — see [`bootstrap/FUZZ_DEFER.md`](bootstrap/FUZZ_DEFER.md) |
-| `build --target wasm\|llvm` | Fail-closed (beta-out / residual) |
+| `--release` | Fail-closed residual (exit 2) |
+| `--emit-llvm` / `build --target llvm` | **Emit smoke only** (textual IR); not a production LLVM floor / optimize path — see [`bootstrap/P4_DROPS.md`](bootstrap/P4_DROPS.md) |
+| `build --target wasm` | **Emit smoke only** (`.wat`); not wasmtime/product run rails |
+| `--fuzz` | **Un-gated** CLI → Python harness residual — see [`bootstrap/FUZZ_DEFER.md`](bootstrap/FUZZ_DEFER.md); do not claim pure-native fuzzer |
 | LSP / pkg / migrate / bench | Removed from product |
 | Host interpreter | **Permanent product choice:** `ooda run` = native only (no interpret return) |
 | contracts on native | **Simple `requires IDENT OP lit/ident` runtime-enforced** on Backend-C; **ensures** + complex requires still residual (not lowered); test harness strips contracts for verify harness |
 | `verify` body | **`assert_eq!` / `assert_ne!` / `assert!`** lowered; other stmts fail-closed |
 | `patch` line-range / AST node_id | Residual — `replace_fn` only |
-| Cold-start seed | Need prebuilt pure `oodac` once (`SEED_OODAC`) |
-| Sealed caps (native) | **Static check only** — no runtime re-check; Backend-C erases cap tokens to ambient libc — see [`bootstrap/STATIC_CAPS.md`](bootstrap/STATIC_CAPS.md) |
+| Cold-start seed | Need prebuilt pure `oodac` once (`SEED_OODAC`); bootstrap uses cold seed as emit host |
+| Self-host ARC | Default **`PURE_NO_ARC=1`** strips seed retain/release — ARC-on stage2 not proven — [`bootstrap/ARC_M2_RESIDUAL.md`](bootstrap/ARC_M2_RESIDUAL.md) |
+| Sealed caps (native) | Static check **plus** process-local **magic-token** runtime re-check for FS/Sys/Env; not cryptographic object-caps — see [`bootstrap/STATIC_CAPS.md`](bootstrap/STATIC_CAPS.md) |
 
 ---
 
@@ -113,8 +115,8 @@ Builder needs **gcc + seed binary only**. See `scripts/bootstrap_no_cargo.sh`.
 | Gate | Status (this pin) |
 |---|---|
 | **B0** product purity — no `.rs` | PASS |
-| **B1** no Cargo product build | PASS (scripts; CI matrix optional residual) |
-| **B2** pure fixed-point surface | PASS (oodac) |
+| **B1** no Cargo product build | PASS local scripts; remote GHA residual (seed/private assets) |
+| **B2** pure fixed-point surface | PASS under `PURE_NO_ARC=1` residual (not ARC-on stage2) |
 | **B3** ship pure `.oo`+C path | PASS path (`release.sh` + seed) |
 | **B4** honesty / fail-closed residual | PASS process; **no beta tag** until public review |
 | **B5** org siblings pure product path | PASS for product-critical siblings (std/qa/docs …); editors optional |

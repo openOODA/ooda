@@ -87,7 +87,8 @@ for rail in \
   outline_reflect_smoke.sh \
   patch_smoke.sh \
   std_smoke.sh \
-  shell_safety_smoke.sh
+  shell_safety_smoke.sh \
+  arc_smoke.sh
 do
   if [[ ! -x "$ROOT/scripts/$rail" ]]; then
     bad "missing rail $rail"

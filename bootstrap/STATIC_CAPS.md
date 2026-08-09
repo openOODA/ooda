@@ -18,7 +18,7 @@ Security for sealed I/O on the claimed path:
 
 1. **Compile-time refuse** — missing cap param → check fail  
 2. **Runtime seal** — wrong token → `oo_cap_require` exit  
-3. **Net** — still emit residual (no product network)
+3. **Net** — `fetch` product-lowered + runtime (`oo_fetch`); other net names still emit residual
 
 Magic tokens (must match emit preamble + `runtime/chs_rt_fs.c`):
 
@@ -37,8 +37,8 @@ These are **not** cryptographic object-caps. They are process-local magic intege
 
 - Cryptographic / unforgeable object capabilities across process trust boundaries  
 - Interpreter-style dynamic capability attenuation graphs  
-- Net product I/O (fail-closed residual — see `CAPS_MATRIX.md`)  
-- Multi-arg `sys_exec` full argv (product is `oo_sys_exec1` last/single cmd)
+- Full net surface beyond `fetch` (other names residual — see `CAPS_MATRIX.md`)  
+- Cryptographic net/object caps (magic tokens only)
 
 ---
 

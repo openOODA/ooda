@@ -1,7 +1,7 @@
 # Capability matrix (claimed pure path)
 
 **Purpose:** Map each sealed effect op through **check → emit-c → runtime → product**.  
-**Rules:** Default-deny. Unfinished = fail-closed, never silent ambient I/O. Net is residual — no silent network stub.  
+**Rules:** Default-deny. Unfinished = fail-closed, never silent ambient I/O. `fetch` is product-lowered; other net names residual.  
 **Runtime seal:** sealed FS/Sys/Env ops re-check magic capability tokens at native runtime. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md).  
 **Sources:** `oodac/check_caps.oo`, `oodac/c_emit_lower.oo`, `runtime/chs_rt_fs.c`, preamble `oo_sys_exec1`.
 
@@ -23,9 +23,10 @@ Status legend:
 | `write_file` | `&FsCap` | sealed free call | `oo_write_file(cap, path, content)` | `oo_write_file` + require | **real** (static+runtime) |
 | `path_exists` | `&FsCap` | sealed free call | `oo_path_exists(cap, path)` | require + fopen probe | **real** |
 | `file_size` | `&FsCap` | sealed free call | `oo_file_size(cap, path)` | require + ftell | **real** |
-| `sys_exec` | `&SysCap` | sealed free call + arg-flow | `oo_sys_exec1(cap, last_arg)` string-aware | preamble require + `system(3)` shell residual | **real** (shell residual: see `AUDIT_RESIDUAL.md` R2/R3) |
+| `sys_exec` | `&SysCap` | sealed free call + arg-flow | multi-arg → `oo_sys_exec`; single → `oo_sys_exec1` | `fork`+`execvp` (AUDIT R2/R3 closed; not `system(3)`) | **real** |
 | `env_get` | `&EnvCap` | sealed free call | `oo_env_get(cap, key)` | require + getenv | **real** |
-| `fetch` / `http_get` / `net_get` / `net_connect` / `downloadData` / `query_remote_api` | `&NetCap` | sealed free call; allow only with `NetCap` | **explicit `ERR\tc_emit\tnet residual`** | none | **fail-closed residual** (no silent stub) |
+| `fetch` | `&NetCap` | sealed free call; allow only with `NetCap` | `oo_fetch(cap, url)` | `chs_rt_sys.c` + net cap require; HTTP/1.0 GET | **real** (AUDIT R9) |
+| `http_get` / `net_get` / `net_connect` / `downloadData` / `query_remote_api` | `&NetCap` | sealed free call | **explicit `ERR\tc_emit\tnet residual`** | none | **fail-closed residual** |
 | `process_exit` | none (ambient) | not sealed | `oo_process_exit` | `exit` | **real** (not a cap class) |
 
 Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn_process`/`async_spawn_internal` (Sys), `env_set`/`getenv` (Env) — check deny without cap; emit leaves name as-is → link fail if used (fail-closed residual).
