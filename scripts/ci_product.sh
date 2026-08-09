@@ -90,7 +90,8 @@ for rail in \
   patch_smoke.sh \
   std_smoke.sh \
   shell_safety_smoke.sh \
-  arc_smoke.sh
+  arc_smoke.sh \
+  residual_honesty_smoke.sh
 do
   if [[ ! -x "$ROOT/scripts/$rail" ]]; then
     bad "missing rail $rail"

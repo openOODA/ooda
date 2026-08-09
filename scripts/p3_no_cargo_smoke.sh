@@ -78,17 +78,41 @@ else
   bad "wasm product path failed"
 fi
 
-# Fuzz CLI un-gated; harness is Python residual (may fail build under PURE_NO_ARC).
+# Fuzz: pure Int-domain path (no Python on --fuzz). Multi-type residual only.
+FUZZ_INT="$ROOT/fixtures/fuzz_int_domain.oo"
 set +e
-"$OODA" test "$ROOT/fixtures/chs_list_string.oo" --fuzz >"$TMPDIR/p3_fuzz.txt" 2>"$TMPDIR/p3_fuzz.err"
-rf=$?
-set -e
-if [[ $rf -eq 2 ]] && grep -qE 'ERR.*--fuzz residual' "$TMPDIR/p3_fuzz.txt" "$TMPDIR/p3_fuzz.err" 2>/dev/null; then
-  bad "fuzz still residual-gated"
-elif grep -qiE 'python|ooda_fuzz|harness|fuzz|Fuzzer|passed|ERR' "$TMPDIR/p3_fuzz.txt" "$TMPDIR/p3_fuzz.err" 2>/dev/null; then
-  pass "fuzz un-gated (Python residual; rc=$rf)"
+if [[ -f "$FUZZ_INT" ]]; then
+  "$OODA" test "$FUZZ_INT" --fuzz 5 >"$TMPDIR/p3_fuzz.txt" 2>"$TMPDIR/p3_fuzz.err"
+  rf=$?
+  set -e
+  if [[ $rf -eq 0 ]] && grep -qiE 'pure int domain|Fuzzer pure' "$TMPDIR/p3_fuzz.txt" "$TMPDIR/p3_fuzz.err" 2>/dev/null; then
+    pass "fuzz pure Int-domain (rc=$rf)"
+  else
+    bad "fuzz pure Int-domain failed (rc=$rf)"
+  fi
 else
-  bad "fuzz unexpected (rc=$rf)"
+  "$OODA" test "$ROOT/fixtures/chs_list_string.oo" --fuzz >"$TMPDIR/p3_fuzz.txt" 2>"$TMPDIR/p3_fuzz.err"
+  rf=$?
+  set -e
+  if [[ $rf -eq 2 ]] && grep -qE 'ERR.*--fuzz residual' "$TMPDIR/p3_fuzz.txt" "$TMPDIR/p3_fuzz.err" 2>/dev/null; then
+    bad "fuzz still residual-gated"
+  elif grep -qiE 'FUZZ_DOMAIN|fail-closed|fuzz|Fuzzer|ERR' "$TMPDIR/p3_fuzz.txt" "$TMPDIR/p3_fuzz.err" 2>/dev/null; then
+    pass "fuzz un-gated domain surface (rc=$rf)"
+  else
+    bad "fuzz unexpected (rc=$rf)"
+  fi
+fi
+# Non-int fixture must fail-closed on Int-domain gate.
+set +e
+"$OODA" test "$ROOT/fixtures/chs_list_string.oo" --fuzz 2 >"$TMPDIR/p3_fuzz_ni.txt" 2>"$TMPDIR/p3_fuzz_ni.err"
+rn=$?
+set -e
+if grep -qiE 'FUZZ_DOMAIN: int|fail-closed|pure path supports only' "$TMPDIR/p3_fuzz_ni.txt" "$TMPDIR/p3_fuzz_ni.err" 2>/dev/null; then
+  pass "fuzz non-int fail-closed domain (rc=$rn)"
+elif [[ $rn -ne 0 ]]; then
+  pass "fuzz non-int non-zero (rc=$rn)"
+else
+  bad "fuzz non-int should fail-closed (rc=$rn)"
 fi
 
 set +e
