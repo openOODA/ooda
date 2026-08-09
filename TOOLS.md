@@ -1,7 +1,8 @@
 # TOOLS.md — Science-informed lenses (build fast, spend few tokens)
 
 **Product:** [`DESIGN.md`](./DESIGN.md) · **Beta:** [`bootstrap/BETA.md`](bootstrap/BETA.md)  
-**Protocol:** home `loop - openOODA.md` · **Handoff:** monorepo `PROGRESS.md`
+**Protocol:** home `loop - openOODA.md` · **Status:** monorepo [`PM.md`](../PM.md) · **Sprint:** monorepo [`SPRINT.md`](../SPRINT.md)  
+**Research (process):** [`openOODA/docs` → `research/tools/`](https://github.com/openOODA/docs/tree/main/research/tools)
 
 Rotations **build openOODA quickly** and **save tokens**. Real-world science
 is the teacher. Tools rank *work* — they do not edit language architecture (DESIGN).
@@ -21,6 +22,7 @@ is the teacher. Tools rank *work* — they do not edit language architecture (DE
 | **No hand-waves** | Chemistry / purity | Unfinished → fail-closed. Stuck → Blockers. |
 | **`.oo` product** | — | No new Rust-only surface. Thin C glue OK. |
 | **Feedback** | Control / OODA | Shorten observe→signal (faster true fail/pass). |
+| **ASD-STE100** | Linguistics / clarity | Simplified Technical English is the standard for all writing. |
 
 ---
 
