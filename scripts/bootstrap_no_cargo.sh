@@ -38,11 +38,9 @@ cp -a "$SEED_SRC" "$SEED"
 chmod +x "$SEED"
 echo "bootstrap: seed=$SEED (from $SEED_SRC)"
 
-# Residual honesty: stage-1 pure oodac can SEGV as *emit host* on some CLI
-# modules (e.g. cli/product_sh.oo → c_emit_let/oo_str_concat). Cold seed is the
-# trusted emit host under PURE_NO_ARC until M2 stage2 is green. Stage-1 is still
-# the product oodac binary (tokens/ast/check/emit for fixtures that work).
-# stage1 `run` is char_at/ARC-hostile under PURE_NO_ARC — native prove = build+exec.
+# Residual honesty: tree stage-1 can still SEGV as *emit host* on some modules.
+# Cold seed remains the trusted emit host for pure multi. Stage-1 is the product
+# oodac binary. Native prove = build+exec (not interpreter run).
 #
 # 1) Rebuild oodac from sources (pure multi) — seed is emit host
 rm -f "$STAGE1"
