@@ -2,8 +2,8 @@
 
 **Purpose:** Map each sealed effect op through **check → emit-c → runtime → product**.  
 **Rules:** Default-deny. Unfinished = fail-closed, never silent ambient I/O. `fetch` is product-lowered; other net names residual.  
-**Runtime seal:** sealed FS/Sys/Env ops re-check magic capability tokens at native runtime. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md).  
-**Sources:** `oodac/check_caps.oo`, `oodac/c_emit_lower.oo`, `runtime/chs_rt_fs.c`, preamble `oo_sys_exec1`.
+**Runtime seal:** sealed FS/Sys/Env/Net/Time/Rand/Alloc ops re-check process-local capability tokens at native runtime. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md).  
+**Sources:** `oodac/check_caps.oo`, `oodac/c_emit_lower.oo`, `runtime/chs_rt_fs.c`, `runtime/chs_rt_sys.c`, `chs_rt_time_rand.c`, `chs_rt_alloc.c`.
 
 Status legend:
 
@@ -27,7 +27,14 @@ Status legend:
 | `env_get` | `&EnvCap` | sealed free call | `oo_env_get(cap, key)` | require + getenv | **real** |
 | `fetch` | `&NetCap` | sealed free call; allow only with `NetCap` | `oo_fetch(cap, url)` | `chs_rt_sys.c` + net cap require; HTTP/1.0 GET | **real** (AUDIT R9) |
 | `http_get` / `net_get` / `net_connect` / `downloadData` / `query_remote_api` | `&NetCap` | sealed free call | **explicit `ERR\tc_emit\tnet residual`** | none | **fail-closed residual** |
+| `now_ms` | `&TimeCap` | sealed free call | `oo_now_ms(cap)` | `chs_rt_sys.c` + time require; `CLOCK_REALTIME` ms | **real** (M12) |
+| `sleep_ms` | `&TimeCap` | sealed free call | `oo_sleep_ms(cap, ms)` | time require + `nanosleep` | **real** (M12) |
+| `random` | `&RandCap` | sealed free call | `oo_random(cap)` | rand require + host entropy / LCG fallback (not crypto claim) | **real** (M12) |
+| `seed` | `&RandCap` | sealed free call | `oo_seed(cap, s)` | rand require; seeds process LCG | **real** (M12) |
+| `alloc_bytes` | `&AllocCap` | sealed free call | `oo_alloc_bytes(cap, n)` | alloc require; returns n as smoke size token (not real heap sandbox) | **real** (M17) |
+| `free_bytes` | `&AllocCap` | sealed free call | `oo_free_bytes(cap, p)` | alloc require; no-op free by handle | **real** (M17) |
 | `process_exit` | none (ambient) | not sealed | `oo_process_exit` | `exit` | **real** (not a cap class) |
+| `list_new` / `list_push` / string concat | **none (ambient residual)** | not sealed | ambient CHS | no AllocCap gate | **intentional alpha residual** — sealing would brick pure compiler |
 
 Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn_process`/`async_spawn_internal` (Sys), `env_set`/`getenv` (Env) — check deny without cap; emit leaves name as-is → link fail if used (fail-closed residual).
 
@@ -36,23 +43,25 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 ## Layer notes
 
 ### Check
-- Free-call scan inside each `fn` body: `IDENT` + `LPAREN` matched against `is_sealed_{net,fs,sys,env}`.
-- Cap **param** grant only for type after `COLON` + `AMP` + Cap IDENT (e.g. `fs: &FsCap`).
+- Free-call scan inside each `fn` body: `IDENT` + `LPAREN` matched against `sealed_kind_of` / `is_sealed_{net,fs,sys,env,time,rand,alloc}`.
+- Cap **param** grant only for type after `COLON` + `AMP` + Cap IDENT (e.g. `fs: &FsCap`, `time: &TimeCap`, `alloc: &AllocCap`).
 - Cap **arg-flow (F01):** free call first arg (or method receiver `fs.read_file`) must be an IDENT naming a param of that cap class — not merely “param present somewhere.”
 - Fixtures: `check/fail/cap_arg_not_passed.oo`, `cap_arg_wrong_name.oo`; pass method: `check/pass/ok_method_fs_read.oo`.
-- Residual: dynamic/computed callees not scanned; cap only as param name (not expression).
+- Residual: dynamic/computed callees not scanned; cap only as param name (not expression). Ambient `list_new` not sealed.
 
 ### Emit (Backend-C)
-- Cap tokens compile to `long long`; `main` injects `OO_CAP_FS` / `OO_CAP_SYS` / `OO_CAP_ENV`.
-- Sealed FS/Env/Sys lowers **pass the leading cap arg** (2-arg ABI with runtime).
-- Sealed **net** ops: `process_exit(1)` with `ERR\tc_emit\tnet residual` (never emit a fake socket).
+- Cap tokens compile to `long long`; `main` injects `oo_cap_grant_fs/sys/env/net/time/rand/alloc()` (process-local; grant idents `fs`/`sys`/`env`/`net`/`time`/`rand`/`alloc`).
+- Sealed FS/Env/Sys/Net/Time/Rand/Alloc lowers **pass the leading cap arg** (ABI with runtime).
+- Sealed **net** ops other than `fetch`: `process_exit(1)` with `ERR\tc_emit\tnet residual` (never emit a fake socket).
+- Non-IDENT first arg on sealed ops: `ERR\tc_emit\t… requires &…Cap` (fail-closed).
 
-### Runtime: magic-token seal
+### Runtime: process-local token seal
 - **Canonical:** [`STATIC_CAPS.md`](STATIC_CAPS.md).
-- Each lowered sealed op calls `oo_cap_require(got, want, op)` before ambient libc.
-- Forged / zero token → non-zero exit + `ERR\tcap\t…` (not ambient I/O).
-- Not unforgeable object-caps across hostile binary rewrite of the magic constant.
-- Net: no symbols; do not add ambient curl/socket without a real NetCap product design.
+- Each lowered sealed op calls `oo_cap_require_*` before ambient libc/clock/entropy/explicit alloc helper.
+- Forged / zero / classic `0x4F4F*` token → non-zero exit + `ERR\tcap\t…` (not ambient effect).
+- Not unforgeable object-caps across hostile binary rewrite; not crypto CSPRNG / attested time / OS rlimit heap isolation.
+- Net: only `fetch` product-lowered; do not add ambient curl/socket without a real design.
+- Alloc: smoke returns size token / no-op free — **not** a claim of heap sandboxing.
 
 ---
 
@@ -66,18 +75,21 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 | Fs path | `check/pass/ok_path_exists.oo` | `check/fail/no_cap_path_exists.oo` |
 | Sys | `check/pass/ok_sys_exec.oo` | `check/fail/no_cap_sys_exec.oo` |
 | Env | `check/pass/ok_env_get.oo` | `check/fail/no_cap_env_get.oo` |
+| Time | `check/pass/ok_now_ms.oo` | `check/fail/no_cap_now_ms.oo` |
+| Rand | `check/pass/ok_random.oo` | `check/fail/no_cap_random.oo` |
+| Alloc | `check/pass/ok_alloc_bytes.oo` | `check/fail/no_cap_alloc_bytes.oo` |
 | Pure no-effect | `check/pass/ok_main.oo` | — |
 | Runtime seal | `emit-c/pass/cap_runtime_read.oo` + forge deny in smoke | — |
 
-Runtime round-trip: `fixtures/chs_fs_roundtrip.oo` (Fs). Smoke: `scripts/caps_matrix_smoke.sh` (includes forge-cap deny).
+Runtime round-trip: `fixtures/chs_fs_roundtrip.oo` (Fs). Smoke: `scripts/caps_matrix_smoke.sh` (Fs/Sys/Env/Net/Time/Rand) + `scripts/alloc_cap_smoke.sh` (Alloc + forge-cap deny).
 
 ---
 
 ## Expanding the sealed table
 
-1. Add name to `is_sealed_*` in `check_caps.oo`.
+1. Add name to `is_sealed_*` / `sealed_kind_of` in `check_cap_util.oo`.
 2. Add **pass + fail** check fixtures.
 3. Either lower in `c_emit_lower.oo` + runtime symbol with `oo_cap_require`, **or** explicit emit residual (like net).
-4. Never widen allow without re-running deny fixtures.
+4. Never widen allow without re-running deny fixtures. Do **not** seal ambient `list_new` without a full compiler redesign.
 
 *P1 BUILD_OUT: Caps completeness on claimed path.*

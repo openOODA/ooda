@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# job: native Backend-C contracts smoke (pass + fail + simple requires runtime)
+# job: native Backend-C contracts smoke (requires + simple ensures + complex ensures fail-closed)
 # stage: test
-# residual: ensures + complex requires not lowered; simple requires IDENT OP lit|ident are runtime
+# residual: complex requires may still be best-effort; simple ensures are runtime
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
@@ -15,6 +15,9 @@ fi
 
 PASS="$ROOT/bootstrap/corpus/emit-c/pass/fn_contracts_add.oo"
 FAIL="$ROOT/bootstrap/corpus/emit-c/fail/contract_no_brace.oo"
+ENS_PASS="$ROOT/fixtures/ensures_simple.oo"
+ENS_FAIL="$ROOT/fixtures/ensures_fail.oo"
+ENS_CX="$ROOT/bootstrap/corpus/emit-c/fail/ensures_complex.oo"
 # Real fixtures that emptied bodies without contract skip:
 IM="$ROOT/fixtures/int_main.oo"
 HELLO="$ROOT/fixtures/hello.oo"
@@ -116,5 +119,62 @@ echo "$outb" | grep -q '42' || {
   exit 1
 }
 echo "OK contracts build int_main"
+
+# --- M9 simple ensures: pass runtime ---
+if [[ -f "$ENS_PASS" ]]; then
+  c_ens="$(emit_ok "$ENS_PASS")"
+  if ! grep -q '__oo_ens_mode\|__result' "$c_ens"; then
+    echo "FAIL ensures_simple missing ensures lower" >&2
+    head -80 "$c_ens" >&2
+    exit 1
+  fi
+  bin_ens="$TMPDIR/ensures_simple.bin"
+  gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$c_ens" -o "$bin_ens" -lm
+  out_ens="$(timeout 3 "$bin_ens")"
+  echo "$out_ens" | grep -qE '2' || {
+    echo "FAIL ensures_simple run expected 2 got: $out_ens" >&2
+    exit 1
+  }
+  echo "OK ensures pass ensures_simple"
+fi
+
+# --- M9 simple ensures: fail runtime ---
+if [[ -f "$ENS_FAIL" ]]; then
+  c_ef="$(emit_ok "$ENS_FAIL")"
+  bin_ef="$TMPDIR/ensures_fail.bin"
+  gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$c_ef" -o "$bin_ef" -lm
+  set +e
+  out_ef="$(timeout 3 "$bin_ef" 2>&1)"
+  efrc=$?
+  set -e
+  if [[ $efrc -eq 0 ]]; then
+    echo "FAIL ensures_fail should non-zero out=$out_ef" >&2
+    exit 1
+  fi
+  if ! echo "$out_ef" | grep -qiE 'contract|ensures'; then
+    echo "FAIL ensures_fail missing contract/ensures needle out=$out_ef" >&2
+    exit 1
+  fi
+  echo "OK ensures fail ensures_fail (rc=$efrc)"
+fi
+
+# --- M9 complex ensures: emit fail-closed ---
+if [[ -f "$ENS_CX" ]]; then
+  c_cx="$TMPDIR/ensures_complex.c"
+  err_cx="$TMPDIR/ensures_complex.err"
+  set +e
+  "$OODAC" emit-c "$ENS_CX" >"$c_cx" 2>"$err_cx"
+  cxrc=$?
+  set -e
+  if grep -qE $'^ERR\tc_emit\tensures residual' "$c_cx" "$err_cx" 2>/dev/null; then
+    echo "OK ensures complex fail-closed (ERR residual)"
+  elif [[ $cxrc -ne 0 ]]; then
+    echo "OK ensures complex fail-closed (exit $cxrc)"
+  else
+    echo "FAIL ensures complex should fail-closed at emit" >&2
+    head -20 "$c_cx" "$err_cx" >&2
+    exit 1
+  fi
+fi
 
 echo "contracts_native_smoke: pass+fail OK"

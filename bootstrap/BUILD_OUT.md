@@ -52,8 +52,8 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Scripts: `scripts/ooda_test_verify.sh` + `ooda_test_harness.py`; CLI `ooda test`
   - Fixtures: `fixtures/verify_pass.oo` / `verify_fail.oo`; product smoke rails
   - Residual: ensures not runtime; verify supports `assert_eq!`/`assert_ne!`/`assert!` only; non-fuzz verify may still use Python harness
-- [x] **`ooda test --fuzz` pure Int-domain** — CLI un-gated; **`ooda_fuzz_pure.sh`** (no Python on `--fuzz` path); fixtures `fuzz_int_domain.oo` / `fuzz_int_fail.oo`
-  - Residual: multi-type / multi-param pure fuzzer **not** shipped; non-`// FUZZ_DOMAIN: int` sources fail closed (`FUZZ_DEFER.md`)
+- [x] **`ooda test --fuzz` pure Int/Bool/String/List domains** — CLI un-gated; **`ooda_fuzz_pure.sh`** (no Python on `--fuzz` path); fixtures `fuzz_{int,bool,string,list}_{domain,fail}.oo`
+  - Residual: multi-param pure fuzzer **not** shipped; other domains fail closed (`FUZZ_DEFER.md`)
   - Do **not** claim full multi-type pure-native fuzzer
 - [x] **Caps completeness on claimed path** — Fs/Sys/Env/(Net) matrix: lower or fail-closed consistently; expand sealed C allowlist with fixtures
   - Matrix: `bootstrap/CAPS_MATRIX.md` (keep matrix honest vs `AUDIT_RESIDUAL` — `fetch` may lower)

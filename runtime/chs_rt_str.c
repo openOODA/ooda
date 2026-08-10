@@ -19,6 +19,7 @@ static int oo_str_hdr_ok(OoStr s) {
   if (hdr->ref_count == 0 || hdr->ref_count == UINT32_MAX) return 0;
   if (hdr->ref_count > 1000000u) return 0;
   if (hdr->flags & OO_FLAG_STATIC) return 0;
+  if (hdr->flags == 0xFFFFFFFFu) return 0;
   return 1;
 }
 
@@ -33,9 +34,10 @@ void oo_str_release(OoStr s) {
   OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    /* Residual: free still UAF for seed pure multi even with formals+alias softener.
-       Leak-safe product default. Softeners stay for next reclaim. */
-    (void)hdr;
+    if (hdr->ref_count == 0) {
+      hdr->flags = 0xFFFFFFFFu;
+      free(hdr);
+    }
   }
 }
 

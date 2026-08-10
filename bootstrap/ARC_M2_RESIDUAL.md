@@ -1,43 +1,47 @@
-# M2 ARC residual (honest)
+# M2 ARC (honest status)
 
-**Status:** free reclaim **blocked for product self-host**. Softeners + nested-block ARC land; runtime free **leak-safe**. Not beta.
+**Status:** free reclaim **shipped** for product self-host (stage-2 fixed-point under free). Nested-scope + shadow + while-mut rebind fixed. Not beta.
 
-## Shipped (re-runnable)
+## Shipped
 
 | Piece | Behavior |
 |-------|----------|
-| `PURE_NO_ARC=0` default | Pure rebuild keeps retain/release in C |
-| Runtime release | **decrement only** (no `free` on ref 0) for str + lists |
-| Formal softener | `pure_rewrite_formals.py` — formal-param releases + formal reassign `__tmp` |
-| Alias softener | `pure_rewrite_alias_retain.py` — retain after bare `OoT x = y` |
-| `oo_slist_get` | retains returned string |
-| Tree alias retain | `c_emit_let_alias_retain` for `let x = y` |
-| Nested bare blocks | `c_emit_stmt` → `c_emit_block` + C `{`/`}` + scope releases |
-| `arc_smoke.sh` | 4 fixtures: early_return, concat reassign, list push/get, nested_scope_str |
-| ARC-on self-host | seed pure multi + leak-safe → working `oodac` / `bin/ooda` |
+| `PURE_NO_ARC=0` default | Retain/release kept in pure C |
+| Runtime release | **free on ref 0** for str + ilist + slist (slist releases elements first) |
+| Poison | `flags = 0xFFFFFFFFu` before free; hdr_ok rejects poisoned/static |
+| Nested bare blocks | `c_emit_stmt` LBRACE → `c_emit_block` only (no all-scope UAF) |
+| Top-frame `c_env_put` | `let` shadow binds only in top `{;` frame |
+| Reassign `c_env_put_last` | Updates last binding in any frame — while/if mut rebind no longer top-appends |
+| Headered crypto strings | `oo_str_alloc_payload` for sha256/hmac/json_format_string |
+| `arc_smoke.sh` | 6 fixtures incl. nested_scope + nested_shadow |
+| Self-host free | stage-2 digests match; list-push stress 1000 under free |
 
-## Free reclaim attempts
+## Root causes closed this cycle
 
-Formals + reassign strip + alias retain issues have been resolved. `free` is now fully supported.
+1. **While/if mut UAF:** reassignment used top-frame `c_env_put`, so `scope_exit` freed outer `mut` each iteration.
+2. **Nested bare block:** `c_emit_all_scope_releases` freed outer locals at `}`.
+3. **Headerless malloc strings:** crypto/json free of `data-8` corrupted heap.
 
-## Still residual
+## Residual (not M2 gate)
 
-1. Seed still pure-multi emit host
-2. Softeners are regex — not full ownership
-3. Not beta
+1. Seed cold bootstrap may still mis-type newer modules — prefer tree host for pure multi.
+2. Softeners (`pure_rewrite_*.py`) still residual regex, not full ownership analysis.
+3. Temp `oo_str_lit` in `slist_push` args may over-retain (leak of +1), not free-unsound.
+4. Not beta.
 
 ## Rebuild
 
 ```bash
 export PURE_NO_ARC=0 PURE_SKIP_CHECK=1
-OODAC_BIN=./bootstrap/seed/oodac bash scripts/oodac_pure_build.sh oodac/main.oo oodac/oodac
-./scripts/bootstrap_no_cargo.sh
+# Prefer tree host (seed may lag):
+OODAC_BIN=./oodac/oodac bash scripts/oodac_pure_build.sh oodac/main.oo oodac/oodac
+# fixed-point
+OODAC_BIN=./oodac/oodac bash scripts/oodac_pure_build.sh oodac/main.oo /tmp/oodac_s2
 bash scripts/arc_smoke.sh
 ```
 
 ## Related
 
-- `runtime/chs_rt_str.c`, `chs_rt_list.c`
-- `scripts/pure_rewrite_formals.py`, `pure_rewrite_alias_retain.py` (ARC softeners residual)
-- `scripts/oodac_pure_rewrite.py` **retired** → caps live in native `c_emit`
-- `oodac/c_emit_let.oo`, `c_emit_arc.oo`, `c_emit_stmt.oo`
+- `runtime/chs_rt_str.c`, `chs_rt_list.c`, `chs_rt_crypto.c`
+- `oodac/c_emit_env.oo` (`c_env_put` / `c_env_put_last`)
+- `oodac/c_emit_stmt.oo`, `oodac/c_emit_ident.oo`

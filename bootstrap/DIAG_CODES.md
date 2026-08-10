@@ -13,31 +13,31 @@ Agents should branch on **`code`**, not free-text `msg`.
     "col": 13,
     "msg": "…",
     "path": "fixtures/example.oo",
-    "fix_hint": "Add matching &FsCap/… capability param."
+    "fix_hint": "Add matching &FsCap/…/&AllocCap param; sealed ops need a capability."
   }
 ]
 ```
 
 - **Pass (no diagnostics):** `[]` and exit 0.  
 - **Fail:** non-empty array and exit non-zero.  
-- **`fix_hint`:** code-keyed agent guidance only (not AST rewrite; not host AiDiagnostic).  
+- **`fix_hint`:** code-keyed **narrative** agent guidance from `diag_fix_hint(code)` only (not AST rewrite / auto-apply; not host AiDiagnostic). Depth covers E_CAP (Fs/Sys/Env/Net/Time/Rand/**Alloc**), E_TC, E_PARSE (brace/token), E_CHECK (structural), E_LEX, E_LOAD, E_EMIT, E_CLI, E_BUILD, E_BACKEND.  
 - **Security:** payloads are diagnostics only. `path` / `msg` are JSON-escaped strings (not filesystem open APIs). Do not treat `msg` as a path to open.
 
 ## Code table
 
-| Code | ERR kind (human) | Meaning |
-|------|------------------|---------|
-| `E_CAP` | `capability` | Capability seal violation (missing NetCap/FsCap/SysCap) |
-| `E_TC` | `type` | Typecheck / name / refinement failure |
-| `E_PARSE` | `parse` | Parse unexpected token / structure |
-| `E_LEX` | `lex` | Lexer failure |
-| `E_CHECK` | `check` | Check-stage structural (empty, no_fn, …) |
-| `E_LOAD` | `load` | Source load / missing file |
-| `E_BUILD` | `build` | Build / link failure |
-| `E_BACKEND` | `backend` | Unsupported `--backend` |
-| `E_EMIT` | `c_emit` | Backend-C emit failure |
-| `E_CLI` | `cli` | Product CLI residual / usage |
-| `E_OTHER` | *(unknown)* | Unclassified line in capture |
+| Code | ERR kind (human) | Meaning | Hint focus |
+|------|------------------|---------|------------|
+| `E_CAP` | `capability` | Capability seal violation (missing NetCap/FsCap/SysCap/Env/Time/Rand/**Alloc**) | add matching `&*Cap` param |
+| `E_TC` | `type` | Typecheck / name / refinement failure | define symbol / arity / annotations |
+| `E_PARSE` | `parse` | Parse unexpected token / structure | balance braces/parens; fix token near loc |
+| `E_LEX` | `lex` | Lexer failure | remove/escape bad character |
+| `E_CHECK` | `check` | Check-stage structural (empty, no_fn, …) | non-empty source + at least one fn |
+| `E_LOAD` | `load` | Source load / missing file | path exists and readable |
+| `E_BUILD` | `build` | Build / link failure | inspect compile/link output |
+| `E_BACKEND` | `backend` | Unsupported `--backend` | product floor is `--backend c` |
+| `E_EMIT` | `c_emit` | Backend-C emit failure | simplify residual / emit-c corpus |
+| `E_CLI` | `cli` | Product CLI residual / usage | `ooda help` + flags/paths |
+| `E_OTHER` | *(unknown)* | Unclassified line in capture | see this doc |
 
 ## CLI
 
@@ -51,5 +51,8 @@ Human mode (default) still prints `ERR\t<kind>\t<message>` tab lines.
 
 ## Rails
 
-- `scripts/json_errors_smoke.sh` — pass (`[]`) + fail (cap, undefined var) shape checks  
-- Corpus: `bootstrap/corpus/check/pass|fail`, `bootstrap/corpus/typecheck/fail/undefined_var.oo`
+- `scripts/json_errors_smoke.sh` — pass (`[]`) + fail shape checks:
+  - **E_CAP** — non-empty `fix_hint` with capability guidance (AllocCap path included in table)
+  - **E_TC** — non-empty `fix_hint` (undefined var)
+  - **E_PARSE** — non-empty `fix_hint` with parse/brace/token guidance (`corpus/parse/fail/missing_brace.oo`)
+- Corpus: `bootstrap/corpus/check/pass|fail`, `bootstrap/corpus/typecheck/fail/undefined_var.oo`, `bootstrap/corpus/parse/fail/`

@@ -191,7 +191,11 @@ case "$MODE" in
     ;;
   run)
     resolve_em
-    exec "$EM" run "$@"
+    export EM
+    S="$ROOT/scripts/ooda_product_run.sh"
+    [[ -x "$S" ]] || S=./scripts/ooda_product_run.sh
+    [[ -x "$S" ]] || { echo ERR_NO_RUN_SCRIPT >&2; exit 1; }
+    exec "$S" "$@"
     ;;
   test)
     resolve_em

@@ -1,4 +1,4 @@
-# job: caps matrix rails — check deny/allow + real Fs/Sys/Env emit+run; net/fetch
+# job: caps matrix rails — check deny/allow + Fs/Sys/Env/Net/Time/Rand (+Alloc corpus via glob)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
@@ -45,9 +45,18 @@ for f in "$CHECK_PASS"/*.oo; do
     cat "$TMPDIR/cm_p_${base}.out" "$TMPDIR/cm_p_${base}.err" | head -5 || true
   else pass "check allow $base"; fi
 done
+# Product static deny ×7 families (M8 + M12 Time/Rand + M17 Alloc)
 if [[ -x "$OODA" ]]; then
-  set +e; "$OODA" check "$CHECK_FAIL/no_cap_fetch.oo" >"$TMPDIR/cm_prod.out" 2>"$TMPDIR/cm_prod.err"; prc=$?; set -e
-  if [[ $prc -eq 0 ]]; then bad "product check accepted no_cap_fetch"; else pass "product check deny no_cap_fetch"; fi
+  for base in no_cap_read_file no_cap_sys_exec no_cap_env_get no_cap_fetch no_cap_now_ms no_cap_random no_cap_alloc_bytes; do
+    ff="$CHECK_FAIL/${base}.oo"
+    [[ -f "$ff" ]] || continue
+    set +e
+    "$OODA" check "$ff" >"$TMPDIR/cm_prod_${base}.out" 2>"$TMPDIR/cm_prod_${base}.err"
+    prc=$?
+    set -e
+    if [[ $prc -eq 0 ]]; then bad "product check accepted $base"
+    else pass "product check deny $base"; fi
+  done
 fi
 # fetch without &NetCap first arg must fail-closed at emit
 cat >"$TMPDIR/cm_net.oo" <<'EOF'
@@ -58,6 +67,15 @@ if grep -qE $'^ERR\tc_emit\t(fetch requires|net residual)' "$TMPDIR/cm_net.c" "$
   pass "emit fetch without NetCap arg fail-closed"
 elif [[ $nrc -ne 0 ]]; then pass "emit fetch without NetCap arg non-zero exit"
 else bad "emit lowered fetch without NetCap arg (must fail-closed)"; fi
+# M12: now_ms without cap IDENT must fail-closed at emit
+cat >"$TMPDIR/cm_time_bad.oo" <<'EOF'
+pub fn main(time: &TimeCap) { let n = now_ms(1); }
+EOF
+set +e; "$OODAC" emit-c "$TMPDIR/cm_time_bad.oo" >"$TMPDIR/cm_time_bad.c" 2>"$TMPDIR/cm_time_bad.err"; tbrc=$?; set -e
+if grep -qE $'^ERR\tc_emit\tnow_ms requires' "$TMPDIR/cm_time_bad.c" "$TMPDIR/cm_time_bad.err" 2>/dev/null; then
+  pass "emit now_ms without TimeCap arg fail-closed"
+elif [[ $tbrc -ne 0 ]]; then pass "emit now_ms without TimeCap arg non-zero exit"
+else bad "emit lowered now_ms without TimeCap arg (must fail-closed)"; fi
 
 FS_PATH="$TMPDIR/cm_fs_round.txt"
 cat >"$TMPDIR/cm_fs.oo" <<EOF
@@ -103,6 +121,49 @@ else
   gcc "${RT[@]}" "$TMPDIR/cm_sys.c" -o "$TMPDIR/cm_sys.bin" -lm
   out=$("$TMPDIR/cm_sys.bin" 2>&1) || true
   if echo "$out" | grep -q 'sys-ok'; then pass "runtime Sys sys_exec argv"; else bad "runtime sys_exec out=$out"; fi
+  # M8: Sys/Env forge deny (zero + classic magic)
+  deny_forge "$TMPDIR/cm_sys.c" \
+    's/long long sys = oo_cap_grant_sys\(\)/long long sys = 0LL/' \
+    "runtime Sys forged cap deny (zero)"
+  deny_forge "$TMPDIR/cm_sys.c" \
+    's/long long sys = oo_cap_grant_sys\(\)/long long sys = 0x4F4F5359LL/' \
+    "runtime Sys classic magic-int deny"
+fi
+
+# Env forge deny after successful env emit (reuse cm_env.c if present)
+if [[ -f "$TMPDIR/cm_env.c" ]] && ! grep -qE $'^ERR\t' "$TMPDIR/cm_env.c" 2>/dev/null; then
+  deny_forge "$TMPDIR/cm_env.c" \
+    's/long long env = oo_cap_grant_env\(\)/long long env = 0LL/' \
+    "runtime Env forged cap deny (zero)"
+  deny_forge "$TMPDIR/cm_env.c" \
+    's/long long env = oo_cap_grant_env\(\)/long long env = 0x4F4F454ELL/' \
+    "runtime Env classic magic-int deny"
+fi
+
+# Net: emit fetch with NetCap; forge grant must deny before network
+cat >"$TMPDIR/cm_net_rt.oo" <<'EOF'
+pub fn main(net: &NetCap) {
+    let r = fetch(net, "http://127.0.0.1:1/");
+    if r.is_ok() { println("net-ok"); } else { println("net-err"); }
+}
+EOF
+set +e
+"$OODAC" emit-c "$TMPDIR/cm_net_rt.oo" >"$TMPDIR/cm_net_rt.c" 2>"$TMPDIR/cm_net_rt.err"
+nrtc=$?
+set -e
+if [[ $nrtc -ne 0 ]] || grep -qE $'^ERR\t' "$TMPDIR/cm_net_rt.c"; then
+  bad "emit fetch with NetCap"
+  head -5 "$TMPDIR/cm_net_rt.err" 2>/dev/null || true
+elif ! grep -qE 'oo_fetch\(net,' "$TMPDIR/cm_net_rt.c"; then
+  bad "emit fetch must pass net cap first"
+else
+  pass "emit fetch with NetCap"
+  deny_forge "$TMPDIR/cm_net_rt.c" \
+    's/long long net = oo_cap_grant_net\(\)/long long net = 0LL/' \
+    "runtime Net forged cap deny (zero)"
+  deny_forge "$TMPDIR/cm_net_rt.c" \
+    's/long long net = oo_cap_grant_net\(\)/long long net = 0x4F4F4E54LL/' \
+    "runtime Net classic magic-int deny"
 fi
 
 cat >"$TMPDIR/cm_pe.oo" <<'EOF'
@@ -111,6 +172,41 @@ EOF
 set +e; "$OODAC" emit-c "$TMPDIR/cm_pe.oo" >"$TMPDIR/cm_pe.c" 2>"$TMPDIR/cm_pe.err"; perc=$?; set -e
 if [[ $perc -ne 0 ]] || ! grep -q 'oo_path_exists' "$TMPDIR/cm_pe.c"; then bad "emit path_exists"
 else emit_run "$TMPDIR/cm_pe.oo" "$TMPDIR/cm_pe.bin" "pe-ok" "Fs path_exists"; fi
+
+# M12: TimeCap — now_ms runtime + forge deny (zero + classic 0x4F4F544D)
+# Grant inject name is `time` (c_emit_fn); body must use that IDENT.
+cat >"$TMPDIR/cm_time.oo" <<'EOF'
+pub fn main(time: &TimeCap) { let n = now_ms(time); println("time-ok"); }
+EOF
+set +e; "$OODAC" emit-c "$TMPDIR/cm_time.oo" >"$TMPDIR/cm_time.c" 2>"$TMPDIR/cm_time.err"; trc=$?; set -e
+if [[ $trc -ne 0 ]] || grep -qE $'^ERR\t' "$TMPDIR/cm_time.c"; then bad "emit now_ms"
+elif ! grep -qE 'oo_now_ms\(time' "$TMPDIR/cm_time.c"; then bad "emit now_ms must pass time cap first"
+else
+  emit_run "$TMPDIR/cm_time.oo" "$TMPDIR/cm_time.bin" "time-ok" "Time now_ms"
+  deny_forge "$TMPDIR/cm_time.c" \
+    's/long long time = oo_cap_grant_time\(\)/long long time = 0LL/' \
+    "runtime Time forged cap deny (zero)"
+  deny_forge "$TMPDIR/cm_time.c" \
+    's/long long time = oo_cap_grant_time\(\)/long long time = 0x4F4F544DLL/' \
+    "runtime Time classic magic-int deny"
+fi
+
+# M12: RandCap — random runtime + forge deny (zero + classic 0x4F4F524E)
+cat >"$TMPDIR/cm_rand.oo" <<'EOF'
+pub fn main(rand: &RandCap) { let x = random(rand); println("rand-ok"); }
+EOF
+set +e; "$OODAC" emit-c "$TMPDIR/cm_rand.oo" >"$TMPDIR/cm_rand.c" 2>"$TMPDIR/cm_rand.err"; rrc=$?; set -e
+if [[ $rrc -ne 0 ]] || grep -qE $'^ERR\t' "$TMPDIR/cm_rand.c"; then bad "emit random"
+elif ! grep -qE 'oo_random\(rand' "$TMPDIR/cm_rand.c"; then bad "emit random must pass rand cap first"
+else
+  emit_run "$TMPDIR/cm_rand.oo" "$TMPDIR/cm_rand.bin" "rand-ok" "Rand random"
+  deny_forge "$TMPDIR/cm_rand.c" \
+    's/long long rand = oo_cap_grant_rand\(\)/long long rand = 0LL/' \
+    "runtime Rand forged cap deny (zero)"
+  deny_forge "$TMPDIR/cm_rand.c" \
+    's/long long rand = oo_cap_grant_rand\(\)/long long rand = 0x4F4F524ELL/' \
+    "runtime Rand classic magic-int deny"
+fi
 
 # C1: magic-int forge must not build
 cat >"$TMPDIR/cm_forge.oo" <<'EOF'

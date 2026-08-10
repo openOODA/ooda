@@ -62,8 +62,8 @@ static void sha256_bytes(const unsigned char *data, size_t len, unsigned char ou
 OoStr crypto_sha256_internal(OoStr data) {
   unsigned char digest[32];
   sha256_bytes((const unsigned char *)data.data, (size_t)data.len, digest);
-  char *hex = (char *)malloc(65);
-  if (!hex) abort();
+  /* ARC: payload must be preceded by OoStrHeader (oo_str_alloc_payload). */
+  char *hex = oo_str_alloc_payload(64);
   for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", digest[i]);
   hex[64] = '\0';
   OoStr r; r.data = hex; r.len = 64; return r;
@@ -95,8 +95,7 @@ OoStr crypto_hmac_sha256_internal(OoStr key, OoStr msg) {
   unsigned char outer_digest[32];
   sha256_bytes(outer_buf, 64 + 32, outer_digest);
 
-  char *hex = (char *)malloc(65);
-  if (!hex) abort();
+  char *hex = oo_str_alloc_payload(64);
   for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", outer_digest[i]);
   hex[64] = '\0';
   OoStr r; r.data = hex; r.len = 64; return r;
@@ -113,8 +112,8 @@ OoStr json_format_string_internal(OoStr s) {
     else if ((unsigned char)c < 32) elen += 6;
     else elen += 1;
   }
-  char *buf = (char *)malloc(elen + 1);
-  if (!buf) abort();
+  /* ARC: headered payload so release can free safely. */
+  char *buf = oo_str_alloc_payload(elen);
   buf[0] = '"'; size_t pos = 1;
   for (long long i = 0; i < s.len; i++) {
     char c = s.data[i];

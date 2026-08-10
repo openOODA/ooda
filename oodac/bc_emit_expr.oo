@@ -1,20 +1,15 @@
 // job: AST Expression-to-bytecode lowering for Interpreter Bytecode Emitter
-// stage: emit
-
 import "token_fmt.oo";
-import "parse_expr.oo";
 import "bc_emit_env.oo";
-
+import "bc_emit_surface.oo";
 pub fn bc_emit_expr(toks: List[String], pos: Int, n: Int, env: String, label_ctr: Int) -> List[String] {
     return bc_emit_expr_bp(toks, pos, n, env, label_ctr, 0);
 }
-
 pub fn bc_emit_expr_bp(toks: List[String], pos: Int, n: Int, env: String, label_ctr: Int, min_bp: Int) -> List[String] {
     let mut p = pos;
-    let mut e = env;
+    let mut e: String = env;
     let mut lc = label_ctr;
-    let mut code = "";
-
+    let mut code: String = "";
     if p >= n {
         let mut out: List[String] = list_new();
         out = list_push(out, p.to_string());
@@ -24,7 +19,7 @@ pub fn bc_emit_expr_bp(toks: List[String], pos: Int, n: Int, env: String, label_
         return out;
     }
 
-    let k0 = field_at(list_get(toks, p), 0);
+    let k0: String = field_at(list_get(toks, p), 0);
     if k0 == "BANG" || k0 == "MINUS" {
         p = p + 1;
         let sub: List[String] = bc_emit_expr_bp(toks, p, n, e, lc, 100);
@@ -48,7 +43,7 @@ pub fn bc_emit_expr_bp(toks: List[String], pos: Int, n: Int, env: String, label_
         if p >= n {
             cont = false;
         } else {
-            let k = field_at(list_get(toks, p), 0);
+            let k: String = field_at(list_get(toks, p), 0);
             let bp = bin_bp(k);
             if bp == 0 || bp < min_bp {
                 cont = false;
@@ -75,13 +70,13 @@ pub fn bc_emit_expr_bp(toks: List[String], pos: Int, n: Int, env: String, label_
 
 pub fn bc_emit_primary(toks: List[String], pos: Int, n: Int, env: String, label_ctr: Int) -> List[String] {
     let mut p = pos;
-    let mut e = env;
+    let mut e: String = env;
     let mut lc = label_ctr;
-    let mut code = "";
+    let mut code: String = "";
 
-    let tok = list_get(toks, p);
-    let k = field_at(tok, 0);
-    let text = field_at(tok, 3);
+    let tok: String = list_get(toks, p);
+    let k: String = field_at(tok, 0);
+    let text: String = field_at(tok, 3);
 
     if k == "INT" {
         code = "PUSH_INT " + text;
@@ -105,13 +100,35 @@ pub fn bc_emit_primary(toks: List[String], pos: Int, n: Int, env: String, label_
         if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
             p = p + 1;
         }
+    } else if k == "KW_MATCH" {
+        let m: List[String] = bc_emit_match_expr(toks, p, n, e, lc);
+        p = parse_int(list_get(m, 0));
+        e = list_get(m, 1);
+        lc = parse_int(list_get(m, 2));
+        code = list_get(m, 3);
     } else if k == "IDENT" {
-        let name = text;
+        let name: String = text;
         p = p + 1;
-        if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+        if (name == "Ok" || name == "Err") && p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+            let oe: List[String] = bc_emit_ok_err(toks, p - 1, n, e, lc, name);
+            p = parse_int(list_get(oe, 0));
+            e = list_get(oe, 1);
+            lc = parse_int(list_get(oe, 2));
+            code = list_get(oe, 3);
+        } else if p < n && field_at(list_get(toks, p), 0) == "LBRACE"
+            && p + 2 < n && field_at(list_get(toks, p + 1), 0) == "IDENT"
+            && field_at(list_get(toks, p + 2), 0) == "COLON"
+        {
+            // Struct lit TypeName { field: val } — not `if x {` (x then block)
+            let sl: List[String] = bc_emit_struct_lit(toks, p - 1, n, e, lc);
+            p = parse_int(list_get(sl, 0));
+            e = list_get(sl, 1);
+            lc = parse_int(list_get(sl, 2));
+            code = list_get(sl, 3);
+        } else if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
             p = p + 1; // consume LPAREN
             let mut argc = 0;
-            let mut args_code = "";
+            let mut args_code: String = "";
             while p < n && field_at(list_get(toks, p), 0) != "RPAREN" {
                 if field_at(list_get(toks, p), 0) == "COMMA" {
                     p = p + 1;
@@ -140,8 +157,15 @@ pub fn bc_emit_primary(toks: List[String], pos: Int, n: Int, env: String, label_
                 code = "PUSH_INT 0";
             }
         }
+        while p < n && field_at(list_get(toks, p), 0) == "DOT" {
+            p = p + 1;
+            if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                let fname = field_at(list_get(toks, p), 3);
+                p = p + 1;
+                code = bc_emit_field_get(code, fname);
+            }
+        }
     } else if k == "KW_IF" {
-        // if-expr value form; residual: multi-stmt value blocks keep first expr only
         let if_res: List[String] = bc_emit_if_expr(toks, p, n, e, lc);
         p = parse_int(list_get(if_res, 0));
         e = list_get(if_res, 1);
@@ -160,12 +184,11 @@ pub fn bc_emit_primary(toks: List[String], pos: Int, n: Int, env: String, label_
     return res;
 }
 
-// Single-expr block value `{ e }` — leaves e on stack (no POP).
 pub fn bc_emit_expr_block(toks: List[String], pos: Int, n: Int, env: String, label_ctr: Int) -> List[String] {
     let mut p = pos;
-    let mut e = env;
+    let mut e: String = env;
     let mut lc = label_ctr;
-    let mut code = "PUSH_INT 0";
+    let mut code: String = "PUSH_INT 0";
     if p < n && field_at(list_get(toks, p), 0) == "LBRACE" { p = p + 1; }
     if p < n && field_at(list_get(toks, p), 0) != "RBRACE" {
         let er: List[String] = bc_emit_expr(toks, p, n, e, lc);
@@ -187,7 +210,7 @@ pub fn bc_emit_expr_block(toks: List[String], pos: Int, n: Int, env: String, lab
 
 pub fn bc_emit_if_expr(toks: List[String], pos: Int, n: Int, env: String, label_ctr: Int) -> List[String] {
     let mut p = pos;
-    let mut e = env;
+    let mut e: String = env;
     let mut lc = label_ctr;
     if p < n && field_at(list_get(toks, p), 0) == "KW_IF" { p = p + 1; }
     let cond_res: List[String] = bc_emit_expr(toks, p, n, e, lc);
@@ -206,7 +229,7 @@ pub fn bc_emit_if_expr(toks: List[String], pos: Int, n: Int, env: String, label_
     e = list_get(then_res, 1);
     lc = parse_int(list_get(then_res, 2));
     let then_code: String = list_get(then_res, 3);
-    let mut else_code = "PUSH_INT 0";
+    let mut else_code: String = "PUSH_INT 0";
     if p < n && field_at(list_get(toks, p), 0) == "KW_ELSE" {
         p = p + 1;
         if p < n && field_at(list_get(toks, p), 0) == "KW_IF" {
@@ -223,7 +246,7 @@ pub fn bc_emit_if_expr(toks: List[String], pos: Int, n: Int, env: String, label_
             else_code = list_get(eblk, 3);
         }
     }
-    let code = cond_code + "\nJUMP_IF_FALSE " + l_else + "\n" + then_code + "\nJUMP " + l_end + "\nLABEL " + l_else + "\n" + else_code + "\nLABEL " + l_end;
+    let code: String = cond_code + "\nJUMP_IF_FALSE " + l_else + "\n" + then_code + "\nJUMP " + l_end + "\nLABEL " + l_else + "\n" + else_code + "\nLABEL " + l_end;
     let mut res: List[String] = list_new();
     res = list_push(res, p.to_string());
     res = list_push(res, e);

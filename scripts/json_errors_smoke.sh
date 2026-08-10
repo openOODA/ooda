@@ -25,6 +25,7 @@ bad() { echo "FAIL $*" >&2; fail=1; }
 PASS_F="$ROOT/bootstrap/corpus/check/pass/ok_main.oo"
 CAP_F="$ROOT/bootstrap/corpus/check/fail/no_cap_fetch.oo"
 UNDEF_F="$ROOT/bootstrap/corpus/typecheck/fail/undefined_var.oo"
+PARSE_F="$ROOT/bootstrap/corpus/parse/fail/missing_brace.oo"
 
 # --- pass: empty errors array ---
 set +e
@@ -71,10 +72,15 @@ assert isinstance(d.get("col"), int) and d["col"] >= 0, d
 assert isinstance(d.get("msg"), str) and len(d["msg"]) > 0, d
 assert "path" in d and isinstance(d["path"], str), d
 assert "fetch" in d["msg"] or "NetCap" in d["msg"] or "Capability" in d["msg"], d
+# M14: fix_hint present, non-empty, capability guidance
+fh = d.get("fix_hint")
+assert "fix_hint" in d and isinstance(fh, str) and len(fh) > 0, d
+fl = fh.lower()
+assert "cap" in fl or "capability" in fl or "add matching" in fl, fh
 print("shape ok")
 PY
   then
-    pass "oodac check --json-errors cap → E_CAP"
+    pass "oodac check --json-errors cap → E_CAP + fix_hint"
   else
     bad "oodac cap JSON: $(head -c 300 "$TMPDIR/je_cap.out")"
   fi
@@ -97,12 +103,43 @@ d = v[0]
 assert d.get("code") == "E_TC", d
 assert isinstance(d.get("line"), int) and d["line"] >= 1, d
 assert "undefined" in d.get("msg", "").lower() or "no_such" in d.get("msg", ""), d
+# optional: E_TC fix_hint non-empty when present
+fh = d.get("fix_hint")
+assert "fix_hint" in d and isinstance(fh, str) and len(fh) > 0, d
 print("shape ok")
 PY
   then
-    pass "oodac check --json-errors undef → E_TC"
+    pass "oodac check --json-errors undef → E_TC + fix_hint"
   else
     bad "oodac undef JSON: $(head -c 300 "$TMPDIR/je_u.out")"
+  fi
+fi
+
+# --- fail: parse (missing brace) → E_PARSE + brace/token fix_hint ---
+set +e
+"$OODAC" check "$PARSE_F" --json-errors >"$TMPDIR/je_parse.out" 2>"$TMPDIR/je_parse.err"
+rparse=$?
+set -e
+if [[ $rparse -eq 0 ]]; then
+  bad "oodac parse should fail"
+else
+  if python3 - "$TMPDIR/je_parse.out" <<'PY'
+import json, sys
+raw = open(sys.argv[1]).read().strip()
+v = json.loads(raw)
+assert isinstance(v, list) and len(v) >= 1, v
+d = v[0]
+assert d.get("code") == "E_PARSE", d
+fh = d.get("fix_hint")
+assert "fix_hint" in d and isinstance(fh, str) and len(fh) > 0, d
+fl = fh.lower()
+assert "parse" in fl or "brace" in fl or "token" in fl, fh
+print("shape ok")
+PY
+  then
+    pass "oodac check --json-errors parse → E_PARSE + fix_hint"
+  else
+    bad "oodac parse JSON: $(head -c 300 "$TMPDIR/je_parse.out")"
   fi
 fi
 
@@ -128,8 +165,20 @@ set -e
 if [[ $rpc -eq 0 ]]; then
   bad "ooda cap should fail"
 else
-  if python3 -c 'import json,sys; v=json.loads(open(sys.argv[1]).read()); assert v[0]["code"]=="E_CAP"' "$TMPDIR/je_prod_cap.out"; then
-    pass "ooda check --json-errors cap E_CAP"
+  if python3 - "$TMPDIR/je_prod_cap.out" <<'PY'
+import json, sys
+v = json.loads(open(sys.argv[1]).read().strip())
+assert isinstance(v, list) and len(v) >= 1, v
+d = v[0]
+assert d.get("code") == "E_CAP", d
+fh = d.get("fix_hint")
+assert "fix_hint" in d and isinstance(fh, str) and len(fh) > 0, d
+fl = fh.lower()
+assert "cap" in fl or "capability" in fl or "add matching" in fl, fh
+print("shape ok")
+PY
+  then
+    pass "ooda check --json-errors cap E_CAP + fix_hint"
   else
     bad "ooda cap JSON: $(head -c 300 "$TMPDIR/je_prod_cap.out")"
   fi

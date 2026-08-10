@@ -1,0 +1,230 @@
+// package: backend-c — emit floor (see bootstrap/FLOOR.md)
+// job: ARC / RAII scope frame tracking & lifetime release emission
+// stage: emit
+import "std/string.oo";
+pub fn c_env_push_scope(env: String) -> String {
+    return env + "{;";
+}
+
+pub fn c_is_formal_param(env: String, name: String) -> Int {
+    if c_env_get(env, "__formal__" + name) == "1" {
+        return 1;
+    }
+    return 0;
+}
+
+pub fn c_emit_scope_exit(env: String) -> String {
+    let elen = chars_len(env);
+    let mut last_idx = -1;
+    let mut i = 0;
+    while i + 1 < elen {
+        if char_at(env, i) == "{" && char_at(env, i + 1) == ";" {
+            last_idx = i;
+        }
+        i = i + 1;
+    }
+    if last_idx < 0 {
+        return env;
+    }
+    let top_frame = str_slice(env, last_idx + 2, elen);
+    let flen = chars_len(top_frame);
+    let mut p = 0;
+    let mut name = "";
+    let mut seen = "";
+    while p < flen {
+        let ch = char_at(top_frame, p);
+        if ch == "=" {
+            if p + 1 < flen {
+                let kind = char_at(top_frame, p + 1);
+                let is_internal = chars_len(name) >= 2 && char_at(name, 0) == "_" && char_at(name, 1) == "_";
+                if !is_internal && c_env_get(seen, name) == "" {
+                    seen = c_env_put(seen, name, "1");
+                    let is_formal = c_is_formal_param(env, name);
+                    if is_formal == 1 {
+                        if kind == "T" { println("  /* no release formal " + name + " */"); }
+                        if kind == "S" { println("  /* no release formal " + name + " */"); }
+                        if kind == "I" { println("  /* no release formal " + name + " */"); }
+                    } else if c_env_get(env, "__no_arc__") != "1" {
+                        if kind == "T" {
+                            println("  oo_str_release(" + name + ");");
+                        }
+                        if kind == "S" {
+                            println("  oo_slist_release(" + name + ");");
+                        }
+                        if kind == "I" {
+                            println("  oo_ilist_release(" + name + ");");
+                        }
+                    }
+                }
+            }
+            name = "";
+            p = p + 2;
+        } else {
+            if ch != ";" {
+                name = name + ch;
+            }
+            p = p + 1;
+        }
+    }
+    return str_slice(env, 0, last_idx);
+}
+
+pub fn c_emit_all_scope_releases(env: String) {
+    let elen = chars_len(env);
+    let mut p = 0;
+    let mut name = "";
+    let mut seen = "";
+    while p < elen {
+        let ch = char_at(env, p);
+        if ch == "{" {
+            name = "";
+            p = p + 1;
+            if p < elen && char_at(env, p) == ";" {
+                p = p + 1;
+            }
+        } else if ch == "=" {
+            if p + 1 < elen {
+                let kind = char_at(env, p + 1);
+                let is_internal = chars_len(name) >= 2 && char_at(name, 0) == "_" && char_at(name, 1) == "_";
+                if !is_internal && c_env_get(seen, name) == "" {
+                    seen = c_env_put(seen, name, "1");
+                    let is_formal = c_is_formal_param(env, name);
+                    if is_formal == 1 {
+                        if kind == "T" { println("  /* no release formal " + name + " */"); }
+                        if kind == "S" { println("  /* no release formal " + name + " */"); }
+                        if kind == "I" { println("  /* no release formal " + name + " */"); }
+                    } else if c_env_get(env, "__no_arc__") != "1" {
+                        if kind == "T" {
+                            println("  oo_str_release(" + name + ");");
+                        }
+                        if kind == "S" {
+                            println("  oo_slist_release(" + name + ");");
+                        }
+                        if kind == "I" {
+                            println("  oo_ilist_release(" + name + ");");
+                        }
+                    }
+                }
+            }
+            name = "";
+            p = p + 2;
+        } else {
+            if ch != ";" {
+                name = name + ch;
+            }
+            p = p + 1;
+        }
+    }
+}
+
+// Body locals only: skip pre-scope params/meta (first `{;`). Safe for early return.
+pub fn c_emit_local_releases(env: String) {
+    let elen = chars_len(env);
+    let mut i = 0;
+    let mut start = -1;
+    while i + 1 < elen {
+        if char_at(env, i) == "{" && char_at(env, i + 1) == ";" {
+            start = i;
+            i = elen;
+        } else {
+            i = i + 1;
+        }
+    }
+    if start < 0 {
+        return;
+    }
+    c_emit_all_scope_releases(str_slice(env, start, elen));
+}
+
+pub fn c_emit_ret_arc(env: String, mut ret_val: String) {
+    ret_val = str_trim(ret_val);
+    // main owns args (pre-scope S) — full release OK; non-main never free params.
+    if c_env_get(env, "__main__") == "1" {
+        c_emit_all_scope_releases(env);
+        println("  return 0;");
+        return;
+    }
+    if ret_val == "" || ret_val == "void" {
+        c_emit_local_releases(env);
+        println("  return;");
+        return;
+    }
+    let k = c_env_get(env, ret_val);
+    if k == "T" || k == "S" || k == "I" {
+        let mut rty = "OoStr";
+        if k == "S" { rty = "OoSList"; }
+        if k == "I" { rty = "OoIList"; }
+        println("  " + rty + " __ret_val = " + ret_val + ";");
+        if c_env_get(env, "__no_arc__") != "1" {
+            if k == "T" { println("  oo_str_retain(__ret_val);"); }
+            if k == "S" { println("  oo_slist_retain(__ret_val);"); }
+            if k == "I" { println("  oo_ilist_retain(__ret_val);"); }
+        }
+        c_emit_local_releases(env);
+        println("  return __ret_val;");
+        return;
+    }
+    // All other non-void: stash expr into __ret_val BEFORE local releases (no UAF).
+    let mut rty2 = "long long";
+    if c_env_get(env, "__ret_str__") == "1" { rty2 = "OoStr"; }
+    let ret_kind = c_env_get(env, "__ret__");
+    if ret_kind == "S" { rty2 = "OoSList"; }
+    if ret_kind == "I" { rty2 = "OoIList"; }
+    if ret_kind == "R" { rty2 = "OoResS"; }
+    if ret_kind == "V" { rty2 = "OoResV"; }
+    println("  " + rty2 + " __ret_val = " + ret_val + ";");
+    c_emit_local_releases(env);
+    println("  return __ret_val;");
+}
+
+pub fn c_emit_reassign_arc(name: String, rhs: String, env: String) {
+    let k = c_env_get(env, name);
+    let rk = c_env_get(env, rhs);
+    if k == "T" {
+        if rk == "T" && c_env_get(env, "__no_arc__") != "1" { println("  oo_str_retain(" + rhs + ");"); }
+        if c_env_get(env, "__no_arc__") != "1" {
+            println("  { OoStr __tmp = " + name + "; " + name + " = " + rhs + "; oo_str_release(__tmp); }");
+        } else {
+            println("  " + name + " = " + rhs + ";");
+        }
+    } else if k == "S" {
+        if rk == "S" && c_env_get(env, "__no_arc__") != "1" { println("  oo_slist_retain(" + rhs + ");"); }
+        if c_env_get(env, "__no_arc__") != "1" {
+            println("  { OoSList __tmp = " + name + "; " + name + " = " + rhs + "; oo_slist_release(__tmp); }");
+        } else {
+            println("  " + name + " = " + rhs + ";");
+        }
+    } else if k == "I" {
+        if rk == "I" && c_env_get(env, "__no_arc__") != "1" { println("  oo_ilist_retain(" + rhs + ");"); }
+        if c_env_get(env, "__no_arc__") != "1" {
+            println("  { OoIList __tmp = " + name + "; " + name + " = " + rhs + "; oo_ilist_release(__tmp); }");
+        } else {
+            println("  " + name + " = " + rhs + ";");
+        }
+    } else {
+        println("  " + name + " = " + rhs + ";");
+    }
+}
+
+// After `let name = rhs` when rhs is a named ARC value (env T/S/I).
+pub fn c_emit_let_alias_retain(name: String, rhs: String, lty: String, env: String) {
+    if lty != "OoStr" && lty != "OoSList" && lty != "OoIList" {
+        return;
+    }
+    let rk = c_env_get(env, rhs);
+    if rk != "T" && rk != "S" && rk != "I" {
+        return;
+    }
+    if c_env_get(env, "__no_arc__") != "1" {
+        if lty == "OoStr" {
+            println("  oo_str_retain(" + name + ");");
+        }
+        if lty == "OoSList" {
+            println("  oo_slist_retain(" + name + ");");
+        }
+        if lty == "OoIList" {
+            println("  oo_ilist_retain(" + name + ");");
+        }
+    }
+}
+

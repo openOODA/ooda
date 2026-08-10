@@ -38,8 +38,10 @@ void oo_ilist_release(OoIList l) {
   OoListHeader *hdr = ((OoListHeader *)l.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    /* list free residual: str free first; list free still unsafe for seed self-host */
-    (void)hdr;
+    if (hdr->ref_count == 0) {
+      hdr->flags = 0xFFFFFFFFu;
+      free(hdr);
+    }
   }
 }
 
@@ -88,8 +90,13 @@ void oo_slist_release(OoSList l) {
   OoListHeader *hdr = ((OoListHeader *)l.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
-    /* list free residual: str free first; list free still unsafe for seed self-host */
-    (void)hdr;
+    if (hdr->ref_count == 0) {
+      for (long long i = 0; i < l.len; i++) {
+        oo_str_release(l.data[i]);
+      }
+      hdr->flags = 0xFFFFFFFFu;
+      free(hdr);
+    }
   }
 }
 

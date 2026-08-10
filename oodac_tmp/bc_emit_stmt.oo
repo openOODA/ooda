@@ -1,0 +1,245 @@
+// job: AST Statement and Block lowering for Interpreter Bytecode Emitter
+// stage: emit
+
+import "token_fmt.oo";
+import "bc_emit_env.oo";
+import "bc_emit_expr.oo";
+
+pub fn bc_emit_block(toks: List[String], pos: Int, n: Int, env: String, label_ctr: Int) -> List[String] {
+    let mut p = pos;
+    let mut e: String = env;
+    let mut lc = label_ctr;
+    let mut code = "";
+
+    if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+        p = p + 1;
+    }
+
+    while p < n {
+        let k = field_at(list_get(toks, p), 0);
+        if k == "RBRACE" {
+            p = p + 1;
+            break;
+        }
+        let st_res: List[String] = bc_emit_stmt(toks, p, n, e, lc);
+        p = parse_int(list_get(st_res, 0));
+        let e_st: String = list_get(st_res, 1);
+        e = e_st;
+        lc = parse_int(list_get(st_res, 2));
+        let sc: String = list_get(st_res, 3);
+        if sc != "" {
+            if code == "" { code = sc; } else { code = code + "\n" + sc; }
+        }
+    }
+
+    let mut res: List[String] = list_new();
+    res = list_push(res, p.to_string());
+    res = list_push(res, e);
+    res = list_push(res, lc.to_string());
+    res = list_push(res, code);
+    return res;
+}
+
+pub fn bc_emit_stmt(toks: List[String], pos: Int, n: Int, env: String, label_ctr: Int) -> List[String] {
+    let mut p = pos;
+    let mut e: String = env;
+    let mut lc = label_ctr;
+    let mut code = "";
+
+    if p >= n {
+        let mut empty: List[String] = list_new();
+        empty = list_push(empty, p.to_string());
+        empty = list_push(empty, e);
+        empty = list_push(empty, lc.to_string());
+        empty = list_push(empty, "");
+        return empty;
+    }
+
+    let k = field_at(list_get(toks, p), 0);
+
+    if k == "KW_LET" {
+        p = p + 1;
+        let mut is_mut = false;
+        if p < n && field_at(list_get(toks, p), 0) == "KW_MUT" {
+            is_mut = true;
+            p = p + 1;
+        }
+        let var_name = field_at(list_get(toks, p), 3);
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "COLON" {
+            p = p + 1;
+            p = p + 1; // skip type
+        }
+        let env_res: List[String] = bc_env_add_var(e, var_name);
+        let slot: String = list_get(env_res, 0);
+        let e_add: String = list_get(env_res, 1);
+        e = e_add;
+
+        // Lexer emits EQ for `=`; ASSIGN is not a token kind (parity with c_emit_let / llvm_emit_let).
+        if p < n && field_at(list_get(toks, p), 0) == "EQ" {
+            p = p + 1;
+            let rhs: List[String] = bc_emit_expr(toks, p, n, e, lc);
+            p = parse_int(list_get(rhs, 0));
+            let e_rhs: String = list_get(rhs, 1);
+            e = e_rhs;
+            lc = parse_int(list_get(rhs, 2));
+            let rhs_code: String = list_get(rhs, 3);
+            code = rhs_code + "\nSTORE_LOCAL " + slot;
+        } else {
+            code = "PUSH_INT 0\nSTORE_LOCAL " + slot;
+        }
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+    } else if k == "KW_RETURN" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+            code = "PUSH_INT 0\nRETURN";
+            p = p + 1;
+        } else {
+            let ret_rhs: List[String] = bc_emit_expr(toks, p, n, e, lc);
+            p = parse_int(list_get(ret_rhs, 0));
+            let e_ret: String = list_get(ret_rhs, 1);
+            e = e_ret;
+            lc = parse_int(list_get(ret_rhs, 2));
+            let ret_code: String = list_get(ret_rhs, 3);
+            code = ret_code + "\nRETURN";
+            if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+        }
+    } else if k == "KW_IF" {
+        p = p + 1;
+        let cond_res: List[String] = bc_emit_expr(toks, p, n, e, lc);
+        p = parse_int(list_get(cond_res, 0));
+        e = list_get(cond_res, 1);
+        lc = parse_int(list_get(cond_res, 2));
+        let cond_code: String = list_get(cond_res, 3);
+
+        let l_else_res: List[String] = bc_next_label(lc);
+        let l_else: String = list_get(l_else_res, 0);
+        lc = parse_int(list_get(l_else_res, 1));
+
+        let l_end_res: List[String] = bc_next_label(lc);
+        let l_end: String = list_get(l_end_res, 0);
+        lc = parse_int(list_get(l_end_res, 1));
+
+        let then_res: List[String] = bc_emit_block(toks, p, n, e, lc);
+        p = parse_int(list_get(then_res, 0));
+        let e_then: String = list_get(then_res, 1);
+        e = e_then;
+        lc = parse_int(list_get(then_res, 2));
+        let then_code: String = list_get(then_res, 3);
+
+        let mut else_code = "";
+        if p < n && field_at(list_get(toks, p), 0) == "KW_ELSE" {
+            p = p + 1;
+            if p < n && field_at(list_get(toks, p), 0) == "KW_IF" {
+                let else_if_res: List[String] = bc_emit_stmt(toks, p, n, e, lc);
+                p = parse_int(list_get(else_if_res, 0));
+                let e_elif: String = list_get(else_if_res, 1);
+                e = e_elif;
+                lc = parse_int(list_get(else_if_res, 2));
+                let ec_elif: String = list_get(else_if_res, 3);
+                else_code = ec_elif;
+            } else {
+                let else_blk_res: List[String] = bc_emit_block(toks, p, n, e, lc);
+                p = parse_int(list_get(else_blk_res, 0));
+                let e_eblk: String = list_get(else_blk_res, 1);
+                e = e_eblk;
+                lc = parse_int(list_get(else_blk_res, 2));
+                let ec_eblk: String = list_get(else_blk_res, 3);
+                else_code = ec_eblk;
+            }
+        }
+
+        code = cond_code + "\nJUMP_IF_FALSE " + l_else + "\n" + then_code + "\nJUMP " + l_end + "\nLABEL " + l_else;
+        if else_code != "" { code = code + "\n" + else_code; }
+        code = code + "\nLABEL " + l_end;
+    } else if k == "KW_WHILE" {
+        p = p + 1;
+        let l_start_res: List[String] = bc_next_label(lc);
+        let l_start: String = list_get(l_start_res, 0);
+        lc = parse_int(list_get(l_start_res, 1));
+
+        let l_end_res: List[String] = bc_next_label(lc);
+        let l_end: String = list_get(l_end_res, 0);
+        lc = parse_int(list_get(l_end_res, 1));
+
+        let cond_res: List[String] = bc_emit_expr(toks, p, n, e, lc);
+        p = parse_int(list_get(cond_res, 0));
+        let e_whc: String = list_get(cond_res, 1);
+        e = e_whc;
+        lc = parse_int(list_get(cond_res, 2));
+        let cond_code: String = list_get(cond_res, 3);
+
+        let body_res: List[String] = bc_emit_block(toks, p, n, e, lc);
+        p = parse_int(list_get(body_res, 0));
+        let e_whb: String = list_get(body_res, 1);
+        e = e_whb;
+        lc = parse_int(list_get(body_res, 2));
+        let body_code: String = list_get(body_res, 3);
+
+        code = "LABEL " + l_start + "\n" + cond_code + "\nJUMP_IF_FALSE " + l_end + "\n" + body_code + "\nJUMP " + l_start + "\nLABEL " + l_end;
+    } else if k == "KW_FOR" {
+        p = p + 1; // consume for
+        let v_name = field_at(list_get(toks, p), 3);
+        p = p + 1; // consume loop var
+        if p < n && field_at(list_get(toks, p), 3) == "in" { p = p + 1; }
+        let lo_val = field_at(list_get(toks, p), 3);
+        p = p + 1; // consume lo
+        if p < n && field_at(list_get(toks, p), 0) == "DOTDOT" { p = p + 1; }
+        let hi_val = field_at(list_get(toks, p), 3);
+        p = p + 1; // consume hi
+
+        let env_res: List[String] = bc_env_add_var(e, v_name);
+        let slot: String = list_get(env_res, 0);
+        let e_fadd: String = list_get(env_res, 1);
+        e = e_fadd;
+
+        let l_start_res: List[String] = bc_next_label(lc);
+        let l_start: String = list_get(l_start_res, 0);
+        lc = parse_int(list_get(l_start_res, 1));
+
+        let l_end_res: List[String] = bc_next_label(lc);
+        let l_end: String = list_get(l_end_res, 0);
+        lc = parse_int(list_get(l_end_res, 1));
+
+        let body_res: List[String] = bc_emit_block(toks, p, n, e, lc);
+        p = parse_int(list_get(body_res, 0));
+        let e_fb: String = list_get(body_res, 1);
+        e = e_fb;
+        lc = parse_int(list_get(body_res, 2));
+        let body_code: String = list_get(body_res, 3);
+
+        code = "PUSH_INT " + lo_val + "\nSTORE_LOCAL " + slot + "\nLABEL " + l_start + "\nLOAD_LOCAL " + slot + "\nPUSH_INT " + hi_val + "\nLT\nJUMP_IF_FALSE " + l_end + "\n" + body_code + "\nLOAD_LOCAL " + slot + "\nPUSH_INT 1\nADD\nSTORE_LOCAL " + slot + "\nJUMP " + l_start + "\nLABEL " + l_end;
+    } else if k == "IDENT" && p + 1 < n && field_at(list_get(toks, p + 1), 0) == "EQ" {
+        let var_name = field_at(list_get(toks, p), 3);
+        p = p + 2; // consume IDENT and EQ (`=`)
+        let env_res: List[String] = bc_env_add_var(e, var_name);
+        let slot: String = list_get(env_res, 0);
+        let e_aadd: String = list_get(env_res, 1);
+        e = e_aadd;
+
+        let rhs: List[String] = bc_emit_expr(toks, p, n, e, lc);
+        p = parse_int(list_get(rhs, 0));
+        let e_arhs: String = list_get(rhs, 1);
+        e = e_arhs;
+        lc = parse_int(list_get(rhs, 2));
+        let rhs_code: String = list_get(rhs, 3);
+        code = rhs_code + "\nSTORE_LOCAL " + slot;
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+    } else {
+        let expr_res: List[String] = bc_emit_expr(toks, p, n, e, lc);
+        p = parse_int(list_get(expr_res, 0));
+        let e_ex: String = list_get(expr_res, 1);
+        e = e_ex;
+        lc = parse_int(list_get(expr_res, 2));
+        let expr_code: String = list_get(expr_res, 3);
+        code = expr_code + "\nPOP";
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+    }
+
+    let mut res: List[String] = list_new();
+    res = list_push(res, p.to_string());
+    res = list_push(res, e);
+    res = list_push(res, lc.to_string());
+    res = list_push(res, code);
+    return res;
+}

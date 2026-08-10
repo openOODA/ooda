@@ -1,7 +1,7 @@
 # Capability seals (static + runtime)
 
-**Status:** product truth on pure Backend-C path.  
-**Product rule:** claim only what is implemented — static check **and** runtime magic-token re-check for sealed FS/Sys/Env ops.
+**Status:** product truth on pure Backend-C path (M8 + M12 Time/Rand + M17 Alloc matrix rails).  
+**Product rule:** claim only process-local magic-token re-check — **not** cryptographic object-caps.
 
 ---
 
@@ -9,61 +9,53 @@
 
 | Layer | Behavior |
 |-------|----------|
-| **Check** | `oodac/check_caps.oo` — default-deny sealed free/method names; require matching `&FsCap` / `&SysCap` / `&EnvCap` / `&NetCap` param |
-| **Emit (Backend-C)** | Cap params lower to `long long`; sealed calls **pass the cap as first arg**; `main` injects `OO_CAP_FS` / `OO_CAP_SYS` / `OO_CAP_ENV` magic tokens |
-| **Runtime (`chs_rt`)** | `oo_cap_require(got, want, op)` gates `read_file` / `write_file` / `path_exists` / `file_size` / `env_get`; preamble `oo_sys_exec1` same for Sys |
-| **Native binary** | Forged or zero cap → `ERR\tcap\t…` + exit 1 (not ambient I/O) |
+| **Check** | `oodac/check_caps.oo` — default-deny sealed free/method names; require matching `&FsCap` / `&SysCap` / `&EnvCap` / `&NetCap` / `&TimeCap` / `&RandCap` / `&AllocCap` **param** |
+| **Emit (Backend-C)** | Cap params → `long long`; sealed calls pass **cap IDENT first**; `main` injects **`oo_cap_grant_fs/sys/env/net/time/rand/alloc()`** (process-local tokens from entropy) |
+| **Runtime (`chs_rt`)** | `oo_cap_require_*` before `read_file` / `write_file` / `path_exists` / `file_size` / `env_get` / `sys_exec` / `fetch` / `now_ms` / `sleep_ms` / `random` / `seed` / `alloc_bytes` / `free_bytes` |
+| **Native binary** | Zero or classic fixed magic (`0x4F4F4653` / `…TM` / `…RN` / `…AL` etc.) as “grant” → `ERR\tcap\t…` + exit 1 |
 
-Security for sealed I/O on the claimed path:
+Security for sealed effects on the claimed path:
 
-1. **Compile-time refuse** — missing cap param → check fail  
+1. **Compile-time refuse** — missing / wrong cap param → check fail  
 2. **Runtime seal** — wrong token → `oo_cap_require` exit  
-3. **Net** — `fetch` product-lowered + runtime (`oo_fetch`); other net names still emit residual
+3. **Net** — `fetch` product-lowered + runtime (`oo_fetch`); other net names may still residual at emit  
+4. **Time / Rand** — `now_ms` / `sleep_ms` need `&TimeCap`; `random` / `seed` need `&RandCap` (process-local seal only)  
+5. **Alloc** — `alloc_bytes` / `free_bytes` need `&AllocCap` (process-local seal only; **not** OS rlimit / heap isolation)
 
-Magic tokens (must match emit preamble + `runtime/chs_rt_fs.c`):
+**Honest ceiling:** process-local tokens stop accidental ambient effects (I/O, clock, entropy, explicit alloc helpers) and classic magic forges on Backend-C. They do **not** stop a hostile binary that calls `oo_cap_grant_*` or patches `oo_cap_require` out.
 
-| Cap | Value |
-|-----|-------|
-| `OO_CAP_FS` | `0x4F4F4653` (`OOFS`) |
-| `OO_CAP_SYS` | `0x4F4F5359` (`OOSY`) |
-| `OO_CAP_ENV` | `0x4F4F454E` (`OOEN`) |
-| `OO_CAP_NET` | `0x4F4F4E54` (`OONT`) — check only; no product runtime |
+Classic `0x4F4F*` constants are **forged values that must be denied**, not ambient grants.  
+`oo_random` uses host entropy when available (else process LCG) — **not** a cryptographic CSPRNG guarantee.
 
-These are **not** cryptographic object-caps. They are process-local magic integers injected into `main`. They stop accidental/forged ambient calls when code is lowered through Backend-C; they do not stop a hostile hand-edited binary that hardcodes the magic constant.
+**Ambient residual (intentional):** `list_new` / `list_push` / string concat stay free for alpha — sealing them would brick the pure compiler and fixtures. Only the narrow `alloc_bytes` / `free_bytes` surface is sealed under AllocCap.
 
 ---
 
 ## What we do **not** claim
 
-- Cryptographic / unforgeable object capabilities across process trust boundaries  
-- Interpreter-style dynamic capability attenuation graphs  
-- Full net surface beyond `fetch` (other names residual — see `CAPS_MATRIX.md`)  
-- Cryptographic net/object caps (magic tokens only)
+- Cryptographic / unforgeable object capabilities  
+- Biometric or OS-level caps  
+- Full net surface beyond `fetch`  
+- Cryptographically secure randomness or attested clocks  
+- Heap sandboxing, ASAN, or OS `rlimit` isolation for AllocCap  
+- Ambient effects without an explicit cap param on the product path  
 
 ---
 
-## Pointers
+## Rails
 
-| Path | Role |
-|------|------|
-| `bootstrap/CAPS_MATRIX.md` | Op matrix + runtime seal |
-| `oodac/check_caps.oo` | Static seal |
-| `oodac/c_emit_lower.oo` | Pass cap args; net residual |
-| `oodac/c_emit_preamble.oo` | `OO_CAP_*` + `oo_cap_require` + `oo_sys_exec1` |
-| `oodac/c_emit_fn.oo` | `main` injects magic tokens |
-| `runtime/chs_rt_fs.c` | Cap-checked FS/env |
-| `scripts/caps_matrix_smoke.sh` | Check + emit + runtime + forge deny |
+`scripts/caps_matrix_smoke.sh` + `scripts/alloc_cap_smoke.sh` (in `ci_product`):
 
-## Audit closures (2026-08)
+- Static pass/fail corpus for FS/Sys/Env/Net/Time/Rand/Alloc  
+- Product `ooda check` deny ×7 families (incl. `no_cap_now_ms`, `no_cap_random`, `no_cap_alloc_bytes`)  
+- Runtime pass: Fs roundtrip, path_exists, Env, Sys argv, Time `now_ms`, Rand `random`, Alloc `alloc_bytes`  
+- Runtime forge deny: Fs/Sys/Env/Net/Time/Rand/Alloc (zero + classic magic)  
+- Emit fail-closed: fetch without NetCap arg; `now_ms` without TimeCap IDENT; `alloc_bytes` without AllocCap IDENT; magic-int forge build  
 
-| Hole | Closure |
-|------|---------|
-| Magic-int forge via pure multi emit | Emit requires bare cap **IDENT** first arg (`c_arg_is_cap_ident`); int/lit rejected |
-| Product single-file build skip check | `oodac_pure_build` runs full `check` when module count is 1 |
-| Torn `write_file` success | `fwrite`/`ferror`/`fclose` checked; `/dev/full` → Err |
-| Incomplete `let x =` | Emit `ERR\tc_emit\tincomplete let RHS` |
-| Hostile multi-MB / large garbage | Per-file **64KiB** gate at load; expanded ≤1MiB at check |
-| Assign-form match silent `.val` | Full arm lower (`c_emit_match_assign`) |
-| `unwrap` on `OoResV` | Env kind V → empty Ok / `ERR\tunwrap` on Err |
+---
 
-**Still residual (honest):** multi-module pure_build does **not** run full expanded typecheck on oodac-scale sources (hang budget); emit-level cap IDENT seal still applies. Magic tokens remain forgeable by hand-editing a binary to hardcode `OO_CAP_*`. `sys_exec` remains `system(3)` shell with SysCap.
+## Related
+
+- `bootstrap/CAPS_MATRIX.md`  
+- `runtime/chs_rt_sys.c`, `chs_rt_fs.c`, `chs_rt_time_rand.c`, `chs_rt_alloc.c`  
+- `oodac/check_caps.oo`, `check_cap_util.oo`, `c_emit_fn.oo`, `c_emit_lower.oo`  

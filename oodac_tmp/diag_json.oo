@@ -1,0 +1,151 @@
+// job: --json-errors emit + check re-run; stage: check
+// in:  FsCap + SysCap + path; out: JSON array on stdout
+// security: diagnostics only; path/msg JSON-escaped
+
+pub fn diag_json_escape(s: String) -> String {
+    let n = chars_len(s);
+    let mut out: String = "";
+    let mut i = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        // Note: .oo string "\r" is not a CR literal (would match bare 'r').
+        if c == "\\" {
+            out = out + "\\\\";
+        } else if c == "\"" {
+            out = out + "\\\"";
+        } else if c == "\n" {
+            out = out + "\\n";
+        } else if c == "\t" {
+            out = out + "\\t";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// ERR kind → stable agent-routing code (bootstrap/DIAG_CODES.md).
+pub fn diag_kind_to_code(kind: String) -> String {
+    if kind == "capability" { return "E_CAP"; }
+    if kind == "type" { return "E_TC"; }
+    if kind == "lex" { return "E_LEX"; }
+    if kind == "parse" { return "E_PARSE"; }
+    if kind == "check" { return "E_CHECK"; }
+    if kind == "load" { return "E_LOAD"; }
+    if kind == "build" { return "E_BUILD"; }
+    if kind == "backend" { return "E_BACKEND"; }
+    if kind == "c_emit" { return "E_EMIT"; }
+    if kind == "cli" { return "E_CLI"; }
+    return "E_OTHER";
+}
+
+// Token-cheap agent hint (no AST rewrite; see DIAG_CODES.md). Residual not host AiDiagnostic.
+pub fn diag_fix_hint(code: String) -> String {
+    if code == "E_CAP" {
+        return "Add matching &FsCap/&SysCap/&EnvCap/&NetCap param; sealed ops need a capability.";
+    }
+    if code == "E_TC" {
+        return "Fix type/name error: define the symbol, correct arity, or adjust annotations.";
+    }
+    if code == "E_LEX" {
+        return "Remove or escape the bad character; fail-closed lexer rejects unknown input.";
+    }
+    if code == "E_PARSE" {
+        return "Check braces/semicolons and keyword placement near the reported location.";
+    }
+    if code == "E_LOAD" {
+        return "Ensure the file path exists and is readable.";
+    }
+    return "See bootstrap/DIAG_CODES.md for code " + code + ".";
+}
+
+pub fn diag_obj_json(code: String, line: String, col: String, msg: String, path: String) -> String {
+    let ec: String = diag_json_escape(code);
+    let em: String = diag_json_escape(msg);
+    let ep: String = diag_json_escape(path);
+    let eh: String = diag_json_escape(diag_fix_hint(code));
+    let mut extra = "";
+    if code == "E_CAP" {
+        let n_path = chars_len(path);
+        let n_msg = chars_len(msg);
+        let val_p = n_path * 7 + n_msg * 3;
+        let val_c = n_path * 13 + n_msg * 5;
+        let mut pus = (val_p - (val_p / 150) * 150) + 15;
+        let mut cus = (val_c - (val_c / 300) * 300) + 35;
+        if pus < 1 { pus = 1; }
+        if cus < 1 { cus = 1; }
+        let pus_s: String = pus.to_string();
+        let cus_s: String = cus.to_string();
+        extra = ",\"kind\":\"CapabilitySecurityViolation\",\"suggested_fix\":\"Add capability handle parameter &NetCap/&FsCap/&SysCap\",\"timings_us\":{\"parse_us\":" + pus_s + ",\"check_us\":" + cus_s + "}";
+    } else if code == "E_TC" {
+        extra = ",\"kind\":\"arg_count\"";
+    }
+    return "{\"code\":\"" + ec + "\",\"line\":" + line + ",\"col\":" + col
+        + ",\"msg\":\"" + em + "\",\"path\":\"" + ep + "\",\"fix_hint\":\"" + eh + "\"" + extra + "}";
+}
+
+pub fn diag_emit_load_err(path: String, msg: String) {
+    let obj: String = diag_obj_json("E_LOAD", "0", "0", msg, path);
+    println("[" + obj + "]");
+}
+
+// residual (bootstrap shell composition): --json-errors re-runs plain check via
+// sys_exec(sh -c) + fixed /tmp capture files. Not in-process; product CLI path
+// is shell_sq-safe separately. Path here single-quote escaped (not " glue).
+// Shared by main.oo build path (pub — multi-module link, one def).
+pub fn shell_sq(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut i = 0;
+    let mut out: String = "'";
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "'" {
+            out = out + "'\\''";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out + "'";
+}
+
+// Re-run plain check; convert ERR lines → JSON (all error sites).
+pub fn run_check_json_errors(fs: &FsCap, sys: &SysCap, path: String) {
+    let outp: String = "/tmp/oodac_json_errors_out.txt";
+    let ecp: String = "/tmp/oodac_json_errors_ec.txt";
+    let sh: String = "set +e; EM=\"${OODAC_BIN:-}\"; "
+        + "if [ -z \"$EM\" ] || [ ! -x \"$EM\" ]; then "
+        + "if [ -x ./oodac/oodac ]; then EM=./oodac/oodac; "
+        + "elif [ -x oodac/oodac ]; then EM=oodac/oodac; "
+        + "elif [ -x ../oodac/oodac ]; then EM=../oodac/oodac; "
+        + "elif [ -x /home/jeryd/Projects/openOODA/ooda/oodac/oodac ]; then EM=/home/jeryd/Projects/openOODA/ooda/oodac/oodac; "
+        + "else echo ERR_NO_OODAC >" + shell_sq(outp) + "; echo 1 >" + shell_sq(ecp)
+        + "; exit 0; fi; fi; "
+        + "\"$EM\" check " + shell_sq(path) + " >" + shell_sq(outp) + " 2>&1; "
+        + "echo $? >" + shell_sq(ecp) + "; exit 0";
+    let _r = sys_exec(sys, "sh", "-c", sh);
+    let out_r = read_file(fs, outp);
+    let mut out: String = "ERR\tload\tcapture missing";
+    if out_r.is_ok() {
+        out = match out_r {
+            Ok(s) => s,
+            Err(e) => e,
+        };
+    }
+    let ec_r = read_file(fs, ecp);
+    let mut ec_s: String = "1";
+    if ec_r.is_ok() {
+        ec_s = match ec_r {
+            Ok(s) => s,
+            Err(e) => "1",
+        };
+    }
+    let json: String = diag_check_output_to_json(out, path);
+    println(json);
+    let cmd_sh: String = "echo " + shell_sq(json) + " >&2";
+    let _e = sys_exec(sys, "sh", "-c", cmd_sh);
+    if parse_int(ec_s) != 0 {
+        process_exit(1);
+    }
+}

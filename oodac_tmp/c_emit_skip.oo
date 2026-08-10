@@ -1,0 +1,189 @@
+// package: backend-c — emit floor (see bootstrap/FLOOR.md)
+// job: skip types/braces; c_ty_at / list elem peek (env map: c_emit_env.oo)
+// stage: emit
+
+// pos at type IDENT (e.g. List); returns S, I, or "" for non-List.
+pub fn c_peek_list_elem(toks: List[String], pos: Int, n: Int) -> String {
+    if pos >= n {
+        return "";
+    }
+    if field_at(list_get(toks, pos), 0) != "IDENT" {
+        return "";
+    }
+    if field_at(list_get(toks, pos), 3) != "List" {
+        return "";
+    }
+    let mut p = pos + 1;
+    if p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+            let e = field_at(list_get(toks, p), 3);
+            if e == "Int" {
+                return "I";
+            }
+            if e == "String" {
+                return "S";
+            }
+        }
+    }
+    // bare List → string lists (oodac token packs)
+    return "S";
+}
+
+// Map type token at pos → C type (params / returns / let ann).
+pub fn c_ty_at(toks: List[String], pos: Int, n: Int) -> String {
+    if pos >= n {
+        return "void";
+    }
+    if field_at(list_get(toks, pos), 0) == "AMP" {
+        // &FsCap / &SysCap / &EnvCap / &NetCap → long long capability token
+        return "long long";
+    }
+    if field_at(list_get(toks, pos), 0) != "IDENT" {
+        return "void";
+    }
+    let tn = field_at(list_get(toks, pos), 3);
+    if tn == "String" {
+        return "OoStr";
+    }
+    if tn == "Int" {
+        return "long long";
+    }
+    if tn == "Bool" {
+        return "int";
+    }
+    if tn == "List" {
+        let lk = c_peek_list_elem(toks, pos, n);
+        if lk == "I" {
+            return "OoIList";
+        }
+        return "OoSList";
+    }
+    // Result[String,String] and friends → OoResS (runtime CHS shape)
+    if tn == "Result" {
+        return "OoResS";
+    }
+    if tn == "FsCap" || tn == "SysCap" || tn == "EnvCap" || tn == "NetCap" {
+        return "long long";
+    }
+    // Unknown / alias: fail soft as long long (still better than void for returns)
+    return "long long";
+}
+
+pub fn c_emit_skip_type(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    if p < n && field_at(list_get(toks, p), 0) == "AMP" {
+        p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+        p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
+        let mut depth = 1;
+        p = p + 1;
+        while p < n && depth > 0 {
+            let k = field_at(list_get(toks, p), 0);
+            if k == "LBRACKET" {
+                depth = depth + 1;
+            }
+            if k == "RBRACKET" {
+                depth = depth - 1;
+            }
+            p = p + 1;
+        }
+    }
+    return p;
+}
+
+// Skip brace-balanced region starting at LBRACE (or find next LBRACE).
+
+pub fn c_emit_skip_braces(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    while p < n && field_at(list_get(toks, p), 0) != "LBRACE" {
+        p = p + 1;
+    }
+    if p >= n {
+        return p;
+    }
+    let mut depth = 0;
+    while p < n {
+        let k = field_at(list_get(toks, p), 0);
+        if k == "LBRACE" {
+            depth = depth + 1;
+        }
+        if k == "RBRACE" {
+            depth = depth - 1;
+            p = p + 1;
+            if depth == 0 {
+                return p;
+            }
+        } else {
+            p = p + 1;
+        }
+    }
+    return p;
+}
+
+// Residual: contracts are NOT runtime-enforced on Backend-C native.
+// Skip requires/ensures clauses until LBRACE (same spirit as parse_item).
+// Fail-closed if a new item starts mid-clause or body brace is missing.
+pub fn c_emit_skip_contracts(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    let mut cont = true;
+    while cont {
+        if p >= n {
+            println("ERR\tc_emit\tcontract: missing LBRACE after fn header");
+            process_exit(1);
+        }
+        let k = field_at(list_get(toks, p), 0);
+        if k == "LBRACE" {
+            cont = false;
+        } else if k == "KW_REQUIRES" || k == "KW_ENSURES" {
+            p = p + 1;
+            let mut in_clause = true;
+            while in_clause {
+                if p >= n {
+                    println("ERR\tc_emit\tcontract clause truncated before LBRACE");
+                    process_exit(1);
+                }
+                let k2 = field_at(list_get(toks, p), 0);
+                if k2 == "KW_REQUIRES" || k2 == "KW_ENSURES" || k2 == "LBRACE" {
+                    in_clause = false;
+                } else if k2 == "KW_FN" || k2 == "KW_PUB" || k2 == "KW_VERIFY"
+                    || k2 == "KW_TYPE" || k2 == "EOF"
+                {
+                    println("ERR\tc_emit\tcontract clause garbage before body");
+                    process_exit(1);
+                } else {
+                    p = p + 1;
+                }
+            }
+        } else if k == "KW_FN" || k == "KW_PUB" || k == "KW_VERIFY"
+            || k == "KW_TYPE" || k == "EOF"
+        {
+            println("ERR\tc_emit\texpected LBRACE after fn header");
+            process_exit(1);
+        } else {
+            println("ERR\tc_emit\tunexpected " + k + " before fn body");
+            process_exit(1);
+        }
+    }
+    return p;
+}
+
+// Skip optional co-located verify name { ... } after a fn body (not emitted).
+pub fn c_emit_skip_verify(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    if p < n && field_at(list_get(toks, p), 0) == "KW_VERIFY" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+            p = p + 1;
+        }
+        if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+            p = c_emit_skip_braces(toks, p, n);
+        }
+    }
+    return p;
+}
+
+

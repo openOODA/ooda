@@ -1,0 +1,224 @@
+// job: sealed-effect capability check on fn items; stage: check
+// in: token list + pos; out: pos after fn; DESIGN caps pillar
+// F01: sealed call must pass cap-typed arg (not only declare &Cap param)
+// helpers: check_cap_util.oo
+
+pub fn skip_until_semi(toks: List[String], pos0: Int) -> Int {
+    let n = list_len(toks);
+    let mut pos = pos0;
+    while pos < n {
+        if field_at(list_get(toks, pos), 0) == "SEMI" {
+            return pos + 1;
+        }
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+// Check one function for sealed-effect capability violations. Returns pos after fn.
+pub fn check_function(toks: List[String], pos0: Int) -> Int {
+    let n = list_len(toks);
+    let mut pos = pos0;
+    if field_at(list_get(toks, pos), 0) == "KW_PUB" {
+        pos = pos + 1;
+    }
+    pos = pos + 1;
+    let fname = field_at(list_get(toks, pos), 3);
+    pos = pos + 1;
+    pos = pos + 1;
+    let mut has_net = false;
+    let mut has_fs = false;
+    let mut has_sys = false;
+    let mut has_env = false;
+    let mut fs_names = "";
+    let mut sys_names = "";
+    let mut env_names = "";
+    let mut net_names = "";
+    // Scan params: grant ONLY COLON+AMP+Cap; record param IDENT for arg-flow seal
+    let mut cont = true;
+    let mut after_colon = false;
+    let mut after_amp = false;
+    let mut bracket_depth = 0;
+    let mut last_param = "";
+    while cont {
+        if pos >= n {
+            cont = false;
+        } else {
+            let k = field_at(list_get(toks, pos), 0);
+            if k == "RPAREN" {
+                cont = false;
+            } else if k == "COMMA" {
+                after_colon = false;
+                after_amp = false;
+                last_param = "";
+                pos = pos + 1;
+            } else if k == "COLON" {
+                after_colon = true;
+                after_amp = false;
+                pos = pos + 1;
+            } else if k == "LBRACKET" {
+                bracket_depth = bracket_depth + 1;
+                pos = pos + 1;
+            } else if k == "RBRACKET" {
+                if bracket_depth > 0 {
+                    bracket_depth = bracket_depth - 1;
+                }
+                pos = pos + 1;
+            } else if k == "AMP" {
+                if after_colon && bracket_depth == 0 {
+                    after_amp = true;
+                }
+                pos = pos + 1;
+            } else if k == "IDENT" {
+                let t = field_at(list_get(toks, pos), 3);
+                if after_amp && bracket_depth == 0 {
+                    if t == "NetCap" {
+                        has_net = true;
+                        if last_param != "" {
+                            net_names = cap_bag_put(net_names, last_param);
+                        }
+                    }
+                    if t == "FsCap" {
+                        has_fs = true;
+                        if last_param != "" {
+                            fs_names = cap_bag_put(fs_names, last_param);
+                        }
+                    }
+                    if t == "SysCap" {
+                        has_sys = true;
+                        if last_param != "" {
+                            sys_names = cap_bag_put(sys_names, last_param);
+                        }
+                    }
+                    if t == "EnvCap" {
+                        has_env = true;
+                        if last_param != "" {
+                            env_names = cap_bag_put(env_names, last_param);
+                        }
+                    }
+                    after_amp = false;
+                    after_colon = false;
+                } else if after_colon && bracket_depth == 0 {
+                    after_colon = false;
+                } else if !after_colon && bracket_depth == 0 {
+                    last_param = t;
+                }
+                pos = pos + 1;
+            } else {
+                pos = pos + 1;
+            }
+        }
+    }
+    if field_at(list_get(toks, pos), 0) == "RPAREN" {
+        pos = pos + 1;
+    }
+    while pos < n {
+        if field_at(list_get(toks, pos), 0) == "LBRACE" {
+            let body_start = pos + 1;
+            let body_end = skip_balanced(toks, pos) - 1;
+            let mut i = body_start;
+            while i < body_end {
+                let k = field_at(list_get(toks, i), 0);
+                let text = field_at(list_get(toks, i), 3);
+                if k == "IDENT" {
+                    if i + 1 < n {
+                        if field_at(list_get(toks, i + 1), 0) == "LPAREN" {
+                            let sealed_fs = is_sealed_fs(text);
+                            let sealed_sys = is_sealed_sys(text);
+                            let sealed_env = is_sealed_env(text);
+                            let sealed_net = is_sealed_net(text);
+                            if sealed_fs || sealed_sys || sealed_env || sealed_net {
+                                let line = field_at(list_get(toks, i), 1);
+                                let col = field_at(list_get(toks, i), 2);
+                                let mut kind = "FsCap";
+                                let mut has = has_fs;
+                                let mut bag = fs_names;
+                                if sealed_sys {
+                                    kind = "SysCap";
+                                    has = has_sys;
+                                    bag = sys_names;
+                                }
+                                if sealed_env {
+                                    kind = "EnvCap";
+                                    has = has_env;
+                                    bag = env_names;
+                                }
+                                if sealed_net {
+                                    kind = "NetCap";
+                                    has = has_net;
+                                    bag = net_names;
+                                }
+                                if sealed_fs {
+                                    kind = "FsCap";
+                                    has = has_fs;
+                                    bag = fs_names;
+                                }
+                                if !has {
+                                    cap_deny(
+                                        fname,
+                                        text,
+                                        kind,
+                                        line,
+                                        col,
+                                        "parameter, but none was declared"
+                                    );
+                                }
+                                if true {
+                                    let mut cap_id = "";
+                                    let mut ok_form = false;
+                                    if i >= 2 {
+                                        if field_at(list_get(toks, i - 1), 0) == "DOT" {
+                                            if field_at(list_get(toks, i - 2), 0) == "IDENT" {
+                                                cap_id = field_at(list_get(toks, i - 2), 3);
+                                                ok_form = true;
+                                            }
+                                        }
+                                    }
+                                    if !ok_form {
+                                        let apos = i + 2;
+                                        if apos < n {
+                                            if field_at(list_get(toks, apos), 0) == "IDENT" {
+                                                cap_id = field_at(list_get(toks, apos), 3);
+                                                ok_form = true;
+                                            }
+                                        }
+                                    }
+                                    if !ok_form || !cap_bag_has(bag, cap_id) {
+                                        cap_deny(
+                                            fname,
+                                            text,
+                                            kind,
+                                            line,
+                                            col,
+                                            "as first argument (or method receiver), but call does not pass a matching cap token"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                i = i + 1;
+            }
+            pos = skip_balanced(toks, pos);
+            if pos < n {
+                if field_at(list_get(toks, pos), 0) == "KW_VERIFY" {
+                    pos = pos + 1;
+                    if pos < n {
+                        if field_at(list_get(toks, pos), 0) == "IDENT" {
+                            pos = pos + 1;
+                        }
+                    }
+                    if pos < n {
+                        if field_at(list_get(toks, pos), 0) == "LBRACE" {
+                            pos = skip_balanced(toks, pos);
+                        }
+                    }
+                }
+            }
+            return pos;
+        }
+        pos = pos + 1;
+    }
+    return pos;
+}

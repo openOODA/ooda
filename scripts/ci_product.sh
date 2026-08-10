@@ -83,6 +83,7 @@ for rail in \
   bc_vm_smoke.sh \
   problem_hunt_smoke.sh \
   caps_matrix_smoke.sh \
+  alloc_cap_smoke.sh \
   import_load_smoke.sh \
   contracts_native_smoke.sh \
   json_errors_smoke.sh \
@@ -91,8 +92,19 @@ for rail in \
   std_smoke.sh \
   shell_safety_smoke.sh \
   arc_smoke.sh \
-  residual_honesty_smoke.sh
+  fuzz_int_depth_smoke.sh \
+  fuzz_bool_smoke.sh \
+  fuzz_string_smoke.sh \
+  fuzz_list_smoke.sh \
+  run_engine_parity_smoke.sh \
+  residual_honesty_smoke.sh \
+  seed_pure_multi_smoke.sh
 do
+  if [[ ! -x "$ROOT/scripts/$rail" ]]; then
+    if [[ -f "$ROOT/scripts/$rail" ]]; then
+      chmod +x "$ROOT/scripts/$rail" 2>/dev/null || true
+    fi
+  fi
   if [[ ! -x "$ROOT/scripts/$rail" ]]; then
     bad "missing rail $rail"
     continue

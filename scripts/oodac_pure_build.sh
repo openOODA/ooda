@@ -2,7 +2,7 @@
 # job: pure multi-module oodac build (emit each .oo, link once) — no stage-0 host
 # in:  <main.oo> <out_bin>
 # out: native binary via emit-c + gcc + chs_rt only
-# link recipe: Backend-C (see bootstrap/FLOOR.md) — swap here for other floors later
+# link recipe: Backend-C (see boots# trap/FLOOR.md) — swap here for other floors later
 # Notes:
 #  - Forward prototypes for all fns so use-before-def across modules is OK
 #  - Nested imports + cycle/missing fail-closed (parity with load_import.oo)
@@ -15,8 +15,7 @@ OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
 TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/oodac_pure_$$"
 mkdir -p "$TMP"
 # Lifecycle: always reap temp tree (success or fail)
-cleanup_pure_tmp() { rm -rf "$TMP"; }
-trap cleanup_pure_tmp EXIT
+# trap 'rm -rf "$TMP"' EXIT
 if [[ ! -x "$OODAC_BIN" ]]; then
   if [[ -x "$ROOT/oodac/oodac" ]]; then OODAC_BIN="$ROOT/oodac/oodac"
   elif [[ -x "$ROOT/oodac/main" ]]; then OODAC_BIN="$ROOT/oodac/main"
@@ -91,7 +90,7 @@ FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) 
 MCS=()
 for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
-  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>/dev/null || true
+  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" || true
   if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
     echo "ERR_EMIT $src" >&2
     exit 1
@@ -151,6 +150,10 @@ for mc in mcs:
 print(f"pure_build: unique_fns={len(seen)} from_modules={len(mcs)}", flush=True)
 PY
 
+echo "long long oo_cap_grant_fs(void); long long oo_cap_grant_sys(void); long long oo_cap_grant_env(void); long long oo_cap_grant_net(void);" >> "$TMP/preamble.c"
+echo "int oo_path_exists(long long,OoStr); long long oo_file_size(long long,OoStr); OoResS oo_env_get(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_read_file(long long,OoStr); OoResV oo_write_file(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_sys_exec(long long,int,OoStr*); OoResS oo_sys_exec1(long long,OoStr);" >> "$TMP/preamble.c"
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
 
 # Capability grants + sealed signatures come from native c_emit_preamble/c_emit_fn

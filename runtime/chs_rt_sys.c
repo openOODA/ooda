@@ -9,7 +9,8 @@
 #include <sys/random.h>
 #endif
 
-/* Process-local capability tokens (R1). Fixed magic ints no longer grant. */
+/* Process-local capability tokens (R1). Fixed magic ints no longer grant.
+ * Time/Rand tokens live in chs_rt_time_rand.c (M12). */
 static long long g_tok_fs, g_tok_sys, g_tok_env, g_tok_net;
 static int g_tok_ready;
 

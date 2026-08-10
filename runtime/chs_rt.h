@@ -112,13 +112,25 @@ long long oo_cap_grant_fs(void);
 long long oo_cap_grant_sys(void);
 long long oo_cap_grant_env(void);
 long long oo_cap_grant_net(void);
+long long oo_cap_grant_time(void);
+long long oo_cap_grant_rand(void);
+long long oo_cap_grant_alloc(void);
 void oo_cap_require(long long got, long long want, const char *op);
 void oo_cap_require_fs(long long got, const char *op);
 void oo_cap_require_sys(long long got, const char *op);
 void oo_cap_require_env(long long got, const char *op);
 void oo_cap_require_net(long long got, const char *op);
+void oo_cap_require_time(long long got, const char *op);
+void oo_cap_require_rand(long long got, const char *op);
+void oo_cap_require_alloc(long long got, const char *op);
 OoResS oo_sys_exec(long long cap, int argc, OoStr *argv);
 OoResS oo_sys_exec1(long long cap, OoStr cmd);
 OoResS oo_fetch(long long cap, OoStr url);
+long long oo_now_ms(long long cap);
+void oo_sleep_ms(long long cap, long long ms);
+long long oo_random(long long cap);
+void oo_seed(long long cap, long long s);
+long long oo_alloc_bytes(long long cap, long long n);
+void oo_free_bytes(long long cap, long long p);
 
 #endif

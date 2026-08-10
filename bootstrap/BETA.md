@@ -94,11 +94,11 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 | **Build / run** | `build --target c\|chs\|native`; `run` = permanent pure **native** build+exec (no host interpreter) | `chs_parity`, product smokes |
 | **Backend** | Product **self-host floor** = Backend-C; `llvm`/`wasm` emit scaffolding only (not alternate floors) | `p3_no_cargo_smoke`, emit smokes, `BACKEND_F3_PREP.md` |
 | **Test** | `ooda test`: check + lower **`assert_eq!` / `assert_ne!` / `assert!`** in `verify` → Backend-C harness build+run | `ooda_test_verify.sh`, `verify_pass.oo` / `verify_fail.oo` |
-| **JSON diags** | `check --json-errors` (product + oodac): codes + optional `fix_hint`; clean → `[]` | `json_errors_smoke`, `DIAG_CODES.md` |
+| **JSON diags** | `check --json-errors` (product + oodac): codes + code-keyed `fix_hint` (E_CAP/E_TC/E_PARSE/E_CHECK+); clean → `[]`; no AST rewrite | `json_errors_smoke`, `DIAG_CODES.md` |
 | **AI agent loop** | `outline` (pub fn summary); `reflect` (NDJSON fn/verify/caps/contracts text); `patch` **`replace_fn` only** (CLI or JSON stdin; path-safe) | `outline_reflect_smoke`, `patch_smoke`, `OUTLINE_REFLECT.md` |
 | **Compiler** | Pure `oodac`: tokens, ast, check, emit-c, multi-module pure build | `fixed_point`, `c_emit_smoke`, `chs_parity` |
 | **Language** | At least **CHS** surface (see `CHS.md`) on check + native C path | CHS fixtures + emit pass/fail |
-| **Caps (static)** | Default-deny sealed I/O at check; CHS-supported Fs/Sys/Env lowered on C; Net fail-closed at emit | `caps_matrix_smoke`, corpus `no_cap_*` |
+| **Caps (static)** | Default-deny sealed effects at check; Fs/Sys/Env/Net/Time/Rand lowered on C (process-local tokens; not crypto object-caps) | `caps_matrix_smoke`, corpus `no_cap_*` |
 | **Self-host** | Seed + pure rebuild of compiler + product CLI (product purity) | `bootstrap_no_cargo`, `fixed_point` |
 | **Install / pin** | Single pin string: BOOTSTRAP_PIN ↔ release ↔ site install ↔ `ooda version` | release extract smoke + install dry-run |
 | **Docs** | README + release notes: In list, Out list, seed+gcc pure product path | review checklist |
@@ -109,7 +109,7 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 |------|-------------|----------|
 | Host Cargo / `.rs` product path | any reintroduction | Forbidden (B0/B1 product purity) |
 | Full LLVM/WASM **product floor** (link/run/optimize) | emit smoke ≠ floor | do not claim production backends (`P4_DROPS.md`); `--release` fail-closed |
-| `ooda test --fuzz` as full multi-type pure fuzzer | CLI un-gated; **Int-domain pure path shipped** | Only `// FUZZ_DOMAIN: int` markers; other domains fail closed (`FUZZ_DEFER.md`) — not full multi-type fuzzer |
+| `ooda test --fuzz` as full multi-type pure fuzzer | CLI un-gated; **Int/Bool/String/List pure domains shipped** | Only `// FUZZ_DOMAIN: int\|bool\|string\|list`; multi-arg fail closed (`FUZZ_DEFER.md`) — not full multi-type fuzzer |
 | **ensures** + complex `requires` | not fully lowered on native | incomplete residual (simple `requires`/`ensures` only where rails prove) |
 | **`for` non-INT bounds** | only `INT..INT` range-for lowered | emit `for residual` (use `while`) |
 | **`match` non-Result / incomplete** | Result Ok/Err stmt + match-let **In** | other shapes fail-closed (`FOR_MATCH_RESIDUAL.md`) |
@@ -164,7 +164,7 @@ public notes match In/Out tables
 | B4 honesty | **PASS process** — Out rows fail-closed; alpha pin; **no beta tag cut** |
 | B5 org | **PASS** product-critical siblings no Rust; editors optional |
 | Part B.1 In surface | **Table promoted** to real alpha (check/dump/build/run/test asserts/json-errors/outline/reflect/patch replace_fn/`--backend c`); rails exist — still not “owner freezes beta forever” |
-| Part B.2 Out surface | **Documented** multi-type fuzz residual (Int pure path In), LLVM/WASM **floor** out (emit+execute smoke only), ensures incomplete, non-INT for residual, non-Result match residual, non-`fetch` net residual; FS/Sys/Env **runtime magic-token seal In** |
+| Part B.2 Out surface | **Documented** multi-arg fuzz residual (Int/Bool/String/List pure domains In), LLVM/WASM **floor** out (emit+execute smoke only), ensures incomplete, non-INT for residual, non-Result match residual, non-`fetch` net residual; FS/Sys/Env **runtime magic-token seal In** |
 | Public beta tag | **Not claimed** |
 
 Live notes: monorepo `PROGRESS.md`, latest `RELEASE_NOTES_*.md`.

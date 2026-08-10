@@ -1,0 +1,161 @@
+// job: check let ann vs initializer; stage: typecheck
+// in: ...; out: updated lit_env string
+
+pub fn ann_check_let(toks: List[String], i: Int, n: Int, aliases: String, lit_env0: String, ret_table: String, struct_table: String) -> String {
+    let mut lit_env = lit_env0;
+            let mut p = i + 1;
+            if p < n && field_at(list_get(toks, p), 0) == "KW_MUT" {
+                p = p + 1;
+            }
+            if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                let vname = field_at(list_get(toks, p), 3);
+                let vline = field_at(list_get(toks, p), 1);
+                let vcol = field_at(list_get(toks, p), 2);
+                p = p + 1;
+                let mut ann_raw = "";
+                let mut ann = "";
+                if p < n && field_at(list_get(toks, p), 0) == "COLON" {
+                    p = p + 1;
+                    if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                        ann_raw = field_at(list_get(toks, p), 3);
+                        ann = resolve_type_alias(aliases, ann_raw);
+                        p = p + 1;
+                    }
+                }
+                if p < n && field_at(list_get(toks, p), 0) == "EQ" {
+                    p = p + 1;
+                    if p < n {
+                        let mut init_ty = infer_typed_expr_type(toks, p, lit_env);
+                        if field_at(list_get(toks, p), 0) == "IDENT" {
+                            let mut re = p;
+                            let mut cont_i = true;
+                            while cont_i {
+                                if re >= n {
+                                    cont_i = false;
+                                } else {
+                                    if field_at(list_get(toks, re), 0) == "SEMI" {
+                                        cont_i = false;
+                                    } else {
+                                        re = re + 1;
+                                    }
+                                }
+                            }
+                            if is_field_chain_span(toks, p, re) {
+                                let fty = field_chain_type(
+                                    toks,
+                                    p,
+                                    re,
+                                    lit_env,
+                                    struct_table
+                                );
+                                if fty != "" {
+                                    init_ty = fty;
+                                }
+                            }
+                            // Method call: x.to_string() / .len() / .is_ok() (not bare field chain)
+                            if p + 4 < n {
+                                if field_at(list_get(toks, p), 0) == "IDENT" {
+                                    if field_at(list_get(toks, p + 1), 0) == "DOT" {
+                                        if field_at(list_get(toks, p + 2), 0) == "IDENT" {
+                                            if field_at(list_get(toks, p + 3), 0) == "LPAREN" {
+                                                let rname = field_at(list_get(toks, p), 3);
+                                                let mname = field_at(list_get(toks, p + 2), 3);
+                                                let rty = resolve_type_alias(lit_env, rname);
+                                                if mname == "to_string" {
+                                                    if rty == "Int" || rty == "Bool"
+                                                        || rty == "Float" || rty == "String" {
+                                                        init_ty = "String";
+                                                    }
+                                                }
+                                                if mname == "len" {
+                                                    if rty == "String" || is_list_type_name(rty) {
+                                                        init_ty = "Int";
+                                                    }
+                                                }
+                                                if mname == "is_ok" || mname == "is_err" {
+                                                    if is_result_type_name(rty) {
+                                                        init_ty = "Bool";
+                                                    }
+                                                }
+                                                if mname == "unwrap" {
+                                                    if is_result_type_name(rty) {
+                                                        init_ty = "String";
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if init_ty == "" {
+                            if field_at(list_get(toks, p), 0) == "IDENT" {
+                                if p + 2 < n {
+                                    if field_at(list_get(toks, p + 1), 0) == "LPAREN" {
+                                        if field_at(list_get(toks, p + 2), 0) == "RPAREN" {
+                                            let cname = field_at(list_get(toks, p), 3);
+                                            let got = resolve_type_alias(ret_table, cname);
+                                            if got != cname {
+                                                init_ty = resolve_type_alias(aliases, got);
+                                            }
+                                        }
+                                    }
+                                }
+                                if init_ty == "" {
+                                    if field_at(list_get(toks, p + 1), 0) == "LBRACE" {
+                                        init_ty = field_at(list_get(toks, p), 3);
+                                    }
+                                }
+                            }
+                        }
+                        if init_ty == "ERR_DIV0" {
+                            println(
+                                "ERR\ttype\tType error at "
+                                    + vline
+                                    + ":"
+                                    + vcol
+                                    + ": division by zero in initializer for '"
+                                    + vname
+                                    + "'"
+                            );
+                            process_exit(1);
+                        }
+                        if init_ty == "ERR_BINOP" {
+                            println(
+                                "ERR\ttype\tType error at "
+                                    + vline
+                                    + ":"
+                                    + vcol
+                                    + ": incompatible operand types in initializer for '"
+                                    + vname
+                                    + "'"
+                            );
+                            process_exit(1);
+                        }
+                        if init_ty != "" {
+                            if ann != "" {
+                                if !types_compatible(ann, init_ty) {
+                                    println(
+                                        "ERR\ttype\tType error at "
+                                            + vline
+                                            + ":"
+                                            + vcol
+                                            + ": let '"
+                                            + vname
+                                            + "' annotated as "
+                                            + ann_raw
+                                            + " but initializer has type "
+                                            + init_ty
+                                    );
+                                    process_exit(1);
+                                }
+                                lit_env = lit_env + vname + ":" + ann + "\t";
+                            } else {
+                                lit_env = lit_env + vname + ":" + init_ty + "\t";
+                            }
+                        }
+                    }
+                }
+            }
+    return lit_env;
+}

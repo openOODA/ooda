@@ -1,0 +1,142 @@
+// package: backend-llvm — let, let mut, stack slot alloca, & variable assignment lowering
+// stage: emit
+
+import "token_fmt.oo";
+import "llvm_emit_ty.oo";
+import "llvm_emit_env.oo";
+import "llvm_emit_expr.oo";
+
+pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    let mut p = pos;
+    let k0: String = field_at(list_get(toks, p), 0);
+    if k0 == "KW_LET" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "KW_MUT" {
+            p = p + 1;
+        }
+    }
+
+    let name: String = field_at(list_get(toks, p), 3);
+    p = p + 1;
+
+    let mut ann_ty: String = "";
+    if p < n && field_at(list_get(toks, p), 0) == "COLON" {
+        p = p + 1;
+        if p < n {
+            let tk: String = field_at(list_get(toks, p), 0);
+            if tk == "IDENT" || tk == "KW_TYPE" {
+                ann_ty = field_at(list_get(toks, p), 3);
+                p = p + 1;
+            }
+        }
+    }
+
+    if p < n && field_at(list_get(toks, p), 0) == "EQ" {
+        p = p + 1;
+    }
+
+    let rhs_res: List[String] = llvm_emit_expr(toks, p, n, env);
+    let rhs_val: String = list_get(rhs_res, 0);
+    let rhs_ty: String = list_get(rhs_res, 1);
+    p = parse_int(list_get(rhs_res, 2));
+
+    let mut cur_env: List[String] = list_new();
+    cur_env = list_push(cur_env, list_get(rhs_res, 3));
+    cur_env = list_push(cur_env, list_get(rhs_res, 4));
+    cur_env = list_push(cur_env, list_get(rhs_res, 5));
+    cur_env = list_push(cur_env, list_get(rhs_res, 6));
+    cur_env = list_push(cur_env, list_get(rhs_res, 7));
+
+    let mut final_ty: String = rhs_ty;
+    if ann_ty != "" {
+        final_ty = llvm_ty_map(ann_ty);
+    }
+
+    println("  %" + name + ".slot = alloca " + final_ty + ", align 8");
+    println("  store " + final_ty + " " + rhs_val + ", " + final_ty + "* %" + name + ".slot, align 8");
+
+    if final_ty == "%OoStr" {
+        println("  call void @oo_str_retain(%OoStr " + rhs_val + ")");
+    } else if final_ty == "%OoIList" {
+        println("  call void @oo_ilist_retain(%OoIList " + rhs_val + ")");
+    } else if final_ty == "%OoSList" {
+        println("  call void @oo_slist_retain(%OoSList " + rhs_val + ")");
+    }
+
+    cur_env = llvm_env_add_var(cur_env, name, final_ty);
+
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+
+    let mut out: List[String] = list_new();
+    out = list_push(out, p.to_string());
+    out = list_push(out, list_get(cur_env, 0));
+    out = list_push(out, list_get(cur_env, 1));
+    out = list_push(out, list_get(cur_env, 2));
+    out = list_push(out, list_get(cur_env, 3));
+    out = list_push(out, list_get(cur_env, 4));
+    return out;
+}
+
+pub fn llvm_emit_assign_stmt(name: String, toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    let mut p = pos;
+    if p < n && field_at(list_get(toks, p), 0) == "EQ" {
+        p = p + 1;
+    }
+
+    let rhs_res: List[String] = llvm_emit_expr(toks, p, n, env);
+    let rhs_val: String = list_get(rhs_res, 0);
+    let rhs_ty: String = list_get(rhs_res, 1);
+    p = parse_int(list_get(rhs_res, 2));
+
+    let mut cur_env: List[String] = list_new();
+    cur_env = list_push(cur_env, list_get(rhs_res, 3));
+    cur_env = list_push(cur_env, list_get(rhs_res, 4));
+    cur_env = list_push(cur_env, list_get(rhs_res, 5));
+    cur_env = list_push(cur_env, list_get(rhs_res, 6));
+    cur_env = list_push(cur_env, list_get(rhs_res, 7));
+
+    let vty: String = llvm_env_get_var_ty(cur_env, name);
+    let lty: String = llvm_ty_map(vty);
+
+    if lty == "%OoStr" || lty == "%OoIList" || lty == "%OoSList" {
+        let reg_res: List[String] = llvm_gen_reg(cur_env);
+        let old_reg: String = list_get(reg_res, 0);
+        cur_env = list_new();
+        cur_env = list_push(cur_env, list_get(reg_res, 1));
+        cur_env = list_push(cur_env, list_get(reg_res, 2));
+        cur_env = list_push(cur_env, list_get(reg_res, 3));
+        cur_env = list_push(cur_env, list_get(reg_res, 4));
+        cur_env = list_push(cur_env, list_get(reg_res, 5));
+
+        println("  " + old_reg + " = load " + lty + ", " + lty + "* %" + name + ".slot, align 8");
+        println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + name + ".slot, align 8");
+
+        if lty == "%OoStr" {
+            println("  call void @oo_str_retain(%OoStr " + rhs_val + ")");
+            println("  call void @oo_str_release(%OoStr " + old_reg + ")");
+        } else if lty == "%OoIList" {
+            println("  call void @oo_ilist_retain(%OoIList " + rhs_val + ")");
+            println("  call void @oo_ilist_release(%OoIList " + old_reg + ")");
+        } else if lty == "%OoSList" {
+            println("  call void @oo_slist_retain(%OoSList " + rhs_val + ")");
+            println("  call void @oo_slist_release(%OoSList " + old_reg + ")");
+        }
+    } else {
+        println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + name + ".slot, align 8");
+    }
+
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+
+    let mut out: List[String] = list_new();
+    out = list_push(out, p.to_string());
+    out = list_push(out, list_get(cur_env, 0));
+    out = list_push(out, list_get(cur_env, 1));
+    out = list_push(out, list_get(cur_env, 2));
+    out = list_push(out, list_get(cur_env, 3));
+    out = list_push(out, list_get(cur_env, 4));
+    return out;
+}

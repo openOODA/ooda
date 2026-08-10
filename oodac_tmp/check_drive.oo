@@ -1,0 +1,107 @@
+// job: check command orchestration; stage: check
+// in: source String; out: OK/ERR side effects
+// quiet: run_check_core for emit gate (no OK line on stdout)
+
+pub fn run_check_from_src(src: String) {
+    run_check_core(src);
+    println("OK");
+}
+
+pub fn run_check_core(src: String) {
+    if chars_len(src) == 0 {
+        println("ERR\tcheck\tempty");
+        process_exit(1);
+    }
+    // H6: expanded source bound (import concat); per-file is 64KiB at load
+    if chars_len(src) > 1048576 {
+        println("ERR\tcheck\tsource exceeds 1MiB expanded limit");
+        process_exit(1);
+    }
+    let probe = lex_all(src);
+    if probe.is_err() {
+        let e = match probe {
+            Ok(s) => s,
+            Err(msg) => msg,
+        };
+        println("ERR\tlex\t" + e);
+        process_exit(1);
+    }
+    let toks: List[String] = tokenize_lines(src);
+    // Must parse as a program (at least one fn or we allow empty items only if type/import)
+    let n = list_len(toks);
+    if n <= 1 {
+        println("ERR\tcheck\tno_fn");
+        process_exit(1);
+    }
+    // Walk functions and sealed effects
+    let mut pos = 0;
+    let mut saw_fn = false;
+    while pos < n {
+        let k = field_at(list_get(toks, pos), 0);
+        if k == "EOF" {
+            pos = n;
+        } else if k == "KW_PUB" || k == "KW_FN" {
+            saw_fn = true;
+            pos = check_function(toks, pos);
+        } else if k == "KW_TYPE" || k == "KW_IMPORT" {
+            // Skip `type Alias = Base;` / import lines to SEMI (was infinite-walk → no_fn).
+            pos = skip_until_semi(toks, pos);
+        } else {
+            println("ERR\tparse\tunexpected " + k);
+            process_exit(1);
+        }
+    }
+    if !saw_fn {
+        println("ERR\tcheck\tno_fn");
+        process_exit(1);
+    }
+    // R1 typecheck slice (real .oo): annotated let + return literals — fail-closed.
+    // Stage-0 previously type-failed while oodac printed OK (honesty D↑).
+    typecheck_ann_and_return_lits(toks);
+    // R1 expand: undefined variables (bound = fn params + let names + fn names + builtins).
+    typecheck_undefined_vars(toks);
+    // R1 expand: call arity vs declared params; assign to immutable let.
+    typecheck_call_arity(toks);
+    typecheck_immut_assign(toks);
+    // R1: mut assign pure-lit RHS must match annotated/init type (was silent OK).
+    typecheck_mut_assign_types(toks);
+    // R1: unary `!` on non-Bool pure lit (e.g. `!1`) fail-closed.
+    typecheck_unary_bang_lit(toks);
+    // R1: unary `-` requires numeric pure lit (not String/Bool).
+    typecheck_unary_minus_lit(toks);
+    // R1: ordering compares require numeric matching types (not String/String).
+    typecheck_cmp_numeric_lits(toks);
+    // R1: `if`/`while` pure-lit condition must be Bool.
+    typecheck_if_while_lit_cond(toks);
+    typecheck_control_flow_branches(toks);
+    // R1: `&&` / `||` pure-lit operands must be Bool (stage-0 parity).
+    typecheck_logic_binop_lits(toks);
+    // R1: lone `&` / `|` as binary ops — stage-0 parse-fails; oodac must not silent-OK.
+    typecheck_reject_amp_pipe_binop(toks);
+    // R1: `<<` / `>>` lex as LT LT / GT GT — reject as unsupported shifts.
+    typecheck_reject_shift_ops(toks);
+    typecheck_missing_return(toks);
+    typecheck_refinements(toks);
+    typecheck_must_use_result(toks);
+    typecheck_call_arg_lits(toks);
+    // R1: `return g()` / `x = g()` when g has declared return type (zero-arg lit-return fns).
+    typecheck_return_and_assign_calls(toks);
+    // R1: `let x: Ann = g()` zero-arg call init vs annotation.
+    typecheck_let_ann_call_init(toks);
+    // R1: g() == lit / lit == g() when declared return known.
+    typecheck_call_eq_lits(toks);
+    // R1: g() < lit / lit < g() — order needs matching numeric types.
+    typecheck_call_order_lits(toks);
+    // R1: g() + lit / g() && lit when return known.
+    typecheck_call_binop_lits(toks);
+    typecheck_call_logic_lits(toks);
+    // R1: field/method on known receivers (x.foo, x.len() on Int) fail-closed.
+    typecheck_field_method(toks);
+    // R1: field access types into binops (p.x + "a") fail-closed.
+    typecheck_field_binop_uses(toks);
+    // R1: struct lit field init types fail-closed (`Point { x: "hi" }`).
+    typecheck_struct_lit_inits(toks);
+    // R1: field assign `p.x = v` types + immut root fail-closed.
+    typecheck_field_assign(toks);
+}
+

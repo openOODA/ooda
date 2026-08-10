@@ -1,0 +1,197 @@
+// package: backend-c — emit floor (see bootstrap/FLOOR.md)
+// job: string escape, str-detect, binop precedence (||/&& vs ==)
+// stage: emit
+
+pub fn c_escape_str_text(t: String) -> String {
+    let n = chars_len(t);
+    if n == 0 {
+        return "";
+    }
+    if n == 1 {
+        let c = char_at(t, 0);
+        if c == "\n" {
+            return "\\n";
+        }
+        if c == "\t" {
+            return "\\t";
+        }
+        if c == "\"" {
+            return "\\\"";
+        }
+        if c == "\\" {
+            return "\\\\";
+        }
+        return t;
+    }
+    let mut out = "";
+    let mut i = 0;
+    while i < n {
+        let c = char_at(t, i);
+        if c == "\\" {
+            out = out + "\\\\";
+        } else if c == "\"" {
+            out = out + "\\\"";
+        } else if c == "\n" {
+            out = out + "\\n";
+        } else if c == "\t" {
+            out = out + "\\t";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn c_expr_is_str(e: String) -> Bool {
+    let cnm = c_rhs_call_name(e);
+    if cnm != "" {
+        if c_call_result_ty(cnm) == "OoStr" {
+            return true;
+        }
+    }
+    if chars_len(e) < 6 {
+        return false;
+    }
+    if char_at(e, 0) == "o" && char_at(e, 1) == "o" && char_at(e, 2) == "_" {
+        if char_at(e, 3) == "s" && char_at(e, 4) == "t" {
+            return true;
+        }
+        if char_at(e, 3) == "s" && char_at(e, 4) == "l" {
+            if chars_len(e) >= 11 && char_at(e, 9) == "g" {
+                return true;
+            }
+        }
+        if char_at(e, 3) == "c" && char_at(e, 4) == "h" {
+            if chars_len(e) >= 10 && char_at(e, 8) == "a" {
+                return true;
+            }
+        }
+        if char_at(e, 3) == "i" && char_at(e, 4) == "n" {
+            if chars_len(e) >= 12 && char_at(e, 7) == "t" {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+pub fn c_expr_is_str_env(e: String, env: String) -> Bool {
+    if c_env_get(env, e) == "T" {
+        return true;
+    }
+    // Bare call: println(make(1)) — __fr__name registered when fn returns String.
+    let cnm = c_rhs_call_name(e);
+    if cnm != "" {
+        if c_env_get(env, "__fr__" + cnm) == "T" {
+            return true;
+        }
+    }
+    return c_expr_is_str(e);
+}
+
+// Precedence: || < && < cmp < + - < * /  (higher number binds tighter)
+pub fn c_binop_prec(opk: String, opt: String) -> Int {
+    if opk == "OROR" || opt == "||" {
+        return 1;
+    }
+    if opk == "ANDAND" || opt == "&&" {
+        return 2;
+    }
+    if opk == "EQEQ" || opk == "NE" || opk == "NEQ" || opk == "LT" || opk == "GT"
+        || opk == "LE" || opk == "GE" || opt == "==" || opt == "!=" || opt == "<"
+        || opt == ">" || opt == "<=" || opt == ">="
+    {
+        return 3;
+    }
+    if opk == "PLUS" || opk == "MINUS" || opt == "+" || opt == "-" {
+        return 4;
+    }
+    if opk == "STAR" || opk == "SLASH" || opt == "*" || opt == "/" {
+        return 5;
+    }
+    return 0;
+}
+
+pub fn c_is_binop(opk: String, opt: String) -> Bool {
+    return c_binop_prec(opk, opt) > 0;
+}
+
+// Build C text for left OP right (string == / + special-cased).
+pub fn c_binop_apply(left: String, opk: String, opt: String, right: String, env: String) -> String {
+    if (opk == "EQEQ" || opt == "==") && (c_expr_is_str_env(left, env) || c_expr_is_str_env(right, env)) {
+        return "oo_str_eq(" + left + ", " + right + ")";
+    }
+    if (opk == "NE" || opk == "NEQ" || opt == "!=")
+        && (c_expr_is_str_env(left, env) || c_expr_is_str_env(right, env))
+    {
+        return "(!oo_str_eq(" + left + ", " + right + "))";
+    }
+    let mut op = opt;
+    if opk == "PLUS" {
+        op = "+";
+    }
+    if opk == "MINUS" {
+        op = "-";
+    }
+    if opk == "EQEQ" {
+        op = "==";
+    }
+    if opk == "LT" {
+        op = "<";
+    }
+    if opk == "GT" {
+        op = ">";
+    }
+    if opk == "ANDAND" {
+        op = "&&";
+    }
+    if opk == "OROR" {
+        op = "||";
+    }
+    if opk == "NE" || opk == "NEQ" {
+        op = "!=";
+    }
+    if (opk == "PLUS" || op == "+") && (c_expr_is_str_env(left, env) || c_expr_is_str_env(right, env)) {
+        return "oo_str_concat(" + left + ", " + right + ")";
+    }
+    return "(" + left + " " + op + " " + right + ")";
+}
+
+// Pratt left-assoc: parse ops with prec >= min_prec; right side min = prec+1.
+pub fn c_emit_expr_prec(toks: List[String], pos: Int, n: Int, env: String, min_prec: Int) -> List[String] {
+    let mut pack = c_emit_primary_c(toks, pos, n, env);
+    let mut guard = 0;
+    while guard < 64 {
+        let mut p = parse_int(list_get(pack, 0));
+        let left = list_get(pack, 1);
+        if p >= n {
+            return pack;
+        }
+        let opk = field_at(list_get(toks, p), 0);
+        let opt = field_at(list_get(toks, p), 3);
+        let prec = c_binop_prec(opk, opt);
+        if prec < min_prec {
+            return pack;
+        }
+        p = p + 1;
+        let next_min = prec + 1;
+        let pr = c_emit_expr_prec(toks, p, n, env, next_min);
+        p = parse_int(list_get(pr, 0));
+        let right = list_get(pr, 1);
+        let expr = c_binop_apply(left, opk, opt, right, env);
+        let mut out: List[String] = list_new();
+        out = list_push(out, p.to_string());
+        out = list_push(out, expr);
+        pack = out;
+        guard = guard + 1;
+    }
+    return pack;
+}
+
+// Back-compat entry used by stmt/call paths.
+pub fn c_emit_maybe_binop(toks: List[String], left_pack: List[String], n: Int, env: String) -> List[String] {
+    // Unused by new expr_prec path; keep for safety if anything still calls it.
+    let p0 = parse_int(list_get(left_pack, 0));
+    return c_emit_expr_prec(toks, p0, n, env, 1);
+}

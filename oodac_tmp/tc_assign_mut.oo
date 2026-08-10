@@ -1,0 +1,215 @@
+// job: mut assign type checks; stage: typecheck
+// in: toks; out: ERR/OK
+
+pub fn typecheck_mut_assign_types(toks: List[String]) {
+    let n = list_len(toks);
+    let mut aliases = "\t";
+    let mut ai = 0;
+    while ai < n {
+        if field_at(list_get(toks, ai), 0) == "KW_TYPE" {
+            if ai + 1 < n {
+                if field_at(list_get(toks, ai + 1), 0) == "IDENT" {
+                    let aname = field_at(list_get(toks, ai + 1), 3);
+                    if ai + 2 < n {
+                        if field_at(list_get(toks, ai + 2), 0) == "EQ" {
+                            if ai + 3 < n {
+                                if field_at(list_get(toks, ai + 3), 0) == "IDENT" {
+                                    let base = field_at(list_get(toks, ai + 3), 3);
+                                    if base != "struct" {
+                                        aliases = aliases + aname + ":" + base + "\t";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        ai = ai + 1;
+    }
+    // mut_env: mut vars with known types; lit_env includes struct lits via build_pure_lit_env.
+    let struct_table = build_struct_field_table(toks);
+    let lit_env = build_pure_lit_env(toks);
+    let mut mut_env = "\t";
+    let mut i = 0;
+    while i < n {
+        let k = field_at(list_get(toks, i), 0);
+        if k == "KW_LET" {
+            let mut p = i + 1;
+            let mut is_mut = false;
+            if p < n {
+                if field_at(list_get(toks, p), 0) == "KW_MUT" {
+                    is_mut = true;
+                    p = p + 1;
+                }
+            }
+            if p < n {
+                if field_at(list_get(toks, p), 0) == "IDENT" {
+                    let v = field_at(list_get(toks, p), 3);
+                    p = p + 1;
+                    let mut ty = "";
+                    if p < n {
+                        if field_at(list_get(toks, p), 0) == "COLON" {
+                            p = p + 1;
+                            if p < n {
+                                if field_at(list_get(toks, p), 0) == "IDENT" {
+                                    ty = resolve_type_alias(aliases, field_at(list_get(toks, p), 3));
+                                    p = p + 1;
+                                }
+                            }
+                        }
+                    }
+                    if p < n {
+                        if field_at(list_get(toks, p), 0) == "EQ" {
+                            p = p + 1;
+                            if p < n {
+                                let ity = infer_pure_lit_expr_type(toks, p);
+                                if ity != "" {
+                                    if ity != "ERR_DIV0" {
+                                        if ity != "ERR_BINOP" {
+                                            if ty == "" {
+                                                ty = ity;
+                                            }
+                                        }
+                                    }
+                                }
+                                // annotated or struct-lit bound mut from lit_env
+                                if ty == "" {
+                                    let got = resolve_type_alias(lit_env, v);
+                                    if got != v {
+                                        ty = got;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if is_mut {
+                        if ty != "" {
+                            mut_env = mut_env + v + ":" + ty + "\t";
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while i < n {
+        let k = field_at(list_get(toks, i), 0);
+        if k == "IDENT" {
+            if i + 1 < n {
+                if field_at(list_get(toks, i + 1), 0) == "EQ" {
+                    let mut is_let = false;
+                    if i > 0 {
+                        let pk = field_at(list_get(toks, i - 1), 0);
+                        if pk == "KW_LET" || pk == "KW_MUT" {
+                            is_let = true;
+                        }
+                    }
+                    if !is_let {
+                        let name = field_at(list_get(toks, i), 3);
+                        let line = field_at(list_get(toks, i), 1);
+                        let col = field_at(list_get(toks, i), 2);
+                        let vty = env_lookup_type(mut_env, name);
+                        if vty != "" {
+                            if i + 2 < n {
+                                // lit_env + mut_env: methods on mut ints (argc.to_string()) type as String.
+                                let env_rhs = lit_env + mut_env;
+                                let mut rty = infer_typed_expr_type(toks, i + 2, env_rhs);
+                                if rty == "" {
+                                    // field chain RHS: s = p.x / s = o.inner.v
+                                    let mut re = i + 2;
+                                    let mut cont_a = true;
+                                    while cont_a {
+                                        if re >= n {
+                                            cont_a = false;
+                                        } else {
+                                            if field_at(list_get(toks, re), 0) == "SEMI" {
+                                                cont_a = false;
+                                            } else {
+                                                re = re + 1;
+                                            }
+                                        }
+                                    }
+                                    if is_field_chain_span(toks, i + 2, re) {
+                                        let fty = field_chain_type(
+                                            toks,
+                                            i + 2,
+                                            re,
+                                            lit_env,
+                                            struct_table
+                                        );
+                                        if fty != "" {
+                                            rty = fty;
+                                        }
+                                    }
+                                }
+                                if rty == "" {
+                                    if field_at(list_get(toks, i + 2), 0) == "IDENT" {
+                                        let src = field_at(list_get(toks, i + 2), 3);
+                                        let got = resolve_type_alias(lit_env, src);
+                                        if got != src {
+                                            // only bare IDENT (not field chain start)
+                                            if i + 3 >= n {
+                                                rty = got;
+                                            } else {
+                                                if field_at(list_get(toks, i + 3), 0) != "DOT" {
+                                                    rty = got;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if rty == "ERR_DIV0" {
+                                    println(
+                                        "ERR\ttype\tType error at "
+                                            + line
+                                            + ":"
+                                            + col
+                                            + ": division by zero in assignment to '"
+                                            + name
+                                            + "'"
+                                    );
+                                    process_exit(1);
+                                }
+                                if rty == "ERR_BINOP" {
+                                    println(
+                                        "ERR\ttype\tType error at "
+                                            + line
+                                            + ":"
+                                            + col
+                                            + ": incompatible operand types in assignment to '"
+                                            + name
+                                            + "'"
+                                    );
+                                    process_exit(1);
+                                }
+                                if rty != "" {
+                                    if !types_compatible(vty, rty) {
+                                        println(
+                                            "ERR\ttype\tType error at "
+                                                + line
+                                                + ":"
+                                                + col
+                                                + ": cannot assign "
+                                                + rty
+                                                + " to '"
+                                                + name
+                                                + "' of type "
+                                                + vty
+                                        );
+                                        process_exit(1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// Fail-closed: unary `!` requires Bool; pure Int/Float/String operand is type error.
+// Stage-0: unary '!' requires Bool, found Int. Non-lit operands stay incomplete (no false fail).

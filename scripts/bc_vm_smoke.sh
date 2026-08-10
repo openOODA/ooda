@@ -15,10 +15,10 @@
 #
 # Residual (honest, not claimed green here):
 #   - multi-statement value blocks in if-expr keep first expr only
-#   - match / struct / list / string method surface not smoked
 #   - product `bin/ooda run` may still be Backend-C build+exec (not always BC VM);
 #     when present it is checked for output parity only
 #   - never claim JIT — this path is a stack bytecode interpreter only
+# M6 surface smoked: list/string methods, match Ok/Err, struct lit + field get
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
@@ -86,20 +86,21 @@ run_fixture() {
   pass "oodac run $name (interpreter)"
 
   if [[ -x "$OODA" ]]; then
-    echo "== product ooda run $name =="
+    # M11: default product run is native; BC surface uses --engine bc
+    echo "== product ooda run --engine bc $name =="
     set +e
-    out=$(timeout 20 "$OODA" run "$src" 2>&1)
+    out=$(timeout 20 "$OODA" run --engine bc "$src" 2>&1)
     ec=$?
     set -e
     if [[ $ec -ne 0 ]]; then
-      bad "product run $name exit=$ec out=$(printf '%q' "$out")"
+      bad "product bc run $name exit=$ec out=$(printf '%q' "$out")"
       return
     fi
     if [[ "$out" != "$expect" ]]; then
-      bad "product run $name output want $(printf '%q' "$expect") got $(printf '%q' "$out")"
+      bad "product bc run $name output want $(printf '%q' "$expect") got $(printf '%q' "$out")"
       return
     fi
-    pass "product ooda run $name"
+    pass "product ooda run --engine bc $name"
   fi
 
   n=$((n + 1))
@@ -127,6 +128,12 @@ run_fixture "bc_nested_for" "$ROOT/fixtures/bc_nested_for.oo" "6" 'PUSH_INT 3|PU
 run_fixture "bc_arith_ops" "$ROOT/fixtures/bc_arith_ops.oo" "4" 'DIV|SUB|CALL println'
 # 11) MOD via %
 run_fixture "bc_mod_ops" "$ROOT/fixtures/bc_mod_ops.oo" "1" 'MOD|CALL println|PUSH_INT 10'
+# 12) list + string methods
+run_fixture "bc_list_string" "$ROOT/fixtures/bc_list_string.oo" $'2\n10\n20\n2\nf\nn\nfn\ntrue' 'CALL list_new|CALL list_push|CALL chars_len|CALL char_at'
+# 13) match Ok/Err value form
+run_fixture "bc_match_ok_err" "$ROOT/fixtures/bc_match_ok_err.oo" $'ok\nbad' 'CALL __ok|CALL __err|CALL __result_ok_keep|CALL __result_val'
+# 14) struct lit + field get
+run_fixture "bc_struct_point" "$ROOT/fixtures/bc_struct_point.oo" $'3\n4' 'CALL __struct_new|CALL __field_get'
 
 if [[ $fail -ne 0 ]]; then
   echo "bc_vm_smoke: FAILED" >&2
