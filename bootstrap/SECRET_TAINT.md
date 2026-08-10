@@ -1,41 +1,36 @@
 # Static taint (`// SECRET:`) — product surface + residual
 
 **Marker:** `SECRET_TAINT_RESIDUAL_ALPHA`  
-**Status:** println + write_file + fetch URL + **sys_exec argv** sinks **In**. PM **3.5**.  
-**Sprint:** M52–M60, M113, M128–M131, **M135 (sys_exec)**.
+**Status:** multiple sinks **In**. PM **3.5** stays **partial**.  
+**Sprint:** M128–M131, M135, **M140–M143** (env_get, read_file, path_exists, file_size).
 
 ## Product surface (In)
 
-| Form | Intent | Status |
-|------|--------|--------|
-| `// SECRET: name` | Line-start tags name as secret | **In** |
-| `println(secret)` bare IDENT | Sink refuse emit + check | **In** |
-| Assign-prop / concat / call prop | Tag copy multi-hop | **In** |
-| `write_file(..., secret)` content | Refuse | **In** (M128) |
-| `fetch(net, secret)` URL | Refuse | **In** (M131) |
-| `sys_exec(sys, …, secret)` argv | Refuse bare SECRET IDENT after cap | **In** (M135) |
-| LLVM `emit-llvm` dual-path | Same checks before IR | **In** (M129) |
-| `#[Secret]` attribute | DESIGN grammar | **residual** |
-
-## What is true today
-
-| Layer | Behavior |
-|-------|----------|
-| **Check + emit** | Refuse secret bare IDENTs at listed sinks |
-| **Other sinks** | Remaining OS / log / NetCap friends residual |
-| **Honesty** | Not full IFC; not attribute grammar |
-
-**Fail-closed residual:** not a full confidentiality boundary for all sinks.
+| Form | Status |
+|------|--------|
+| `// SECRET: name` tag | **In** |
+| `println` bare secret IDENT | **In** |
+| Assign / concat / call prop | **In** |
+| `write_file` content IDENT | **In** |
+| `fetch` URL IDENT | **In** |
+| `sys_exec` argv IDENT | **In** |
+| `env_get` key IDENT | **In** (M140) |
+| `read_file` path IDENT | **In** (M141) |
+| `path_exists` path IDENT | **In** (M142) |
+| `file_size` path IDENT | **In** (M143) |
+| LLVM dual-path check | **In** (M129) |
+| `#[Secret]` attribute | **residual** |
 
 ## What we do **not** claim
 
-- Full-program IFC / all OS sinks  
-- `#[Secret]` attribute enforcement  
+- Full IFC / all OS or log sinks  
+- Attribute grammar  
 - Cryptographic redaction  
+
+**Other sinks residual** (NetCap friends beyond listed, logs, etc.).
 
 ## Rails
 
 - Marker: `SECRET_TAINT_RESIDUAL_ALPHA`
 - Enforce: `scripts/secret_sink_enforce_smoke.sh`
 - Residual: `scripts/secret_taint_residual_smoke.sh`
-- Fixtures: `secret_*`, including `secret_sys_exec_*`
