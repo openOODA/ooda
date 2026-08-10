@@ -5,6 +5,7 @@ import "token_fmt.oo";
 import "llvm_emit_ty.oo";
 import "llvm_emit_env.oo";
 import "llvm_emit_expr.oo";
+import "llvm_emit_control.oo";
 
 pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
     let mut p = pos;
@@ -35,6 +36,40 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
         p = p + 1;
     }
 
+    // if-expression: let y = if c { a } else …
+    if p < n && field_at(list_get(toks, p), 0) == "KW_IF" {
+        let mut final_ty: String = "i64";
+        if ann_ty != "" { final_ty = llvm_ty_map(ann_ty); }
+        if final_ty == "void" || final_ty == "" { final_ty = "i64"; }
+        let mut cur_env: List[String] = env;
+        println("  %" + name + ".slot = alloca " + final_ty + ", align 8");
+        if final_ty == "i64" {
+            println("  store i64 0, i64* %" + name + ".slot, align 8");
+        } else if final_ty == "i32" {
+            println("  store i32 0, i32* %" + name + ".slot, align 8");
+        }
+        cur_env = llvm_env_add_var(cur_env, name, final_ty);
+        cur_env = llvm_env_add_var(cur_env, "__asgn__", name);
+        let if_res: List[String] = llvm_emit_if_stmt(toks, p, n, cur_env);
+        p = parse_int(list_get(if_res, 0));
+        cur_env = list_new();
+        cur_env = list_push(cur_env, list_get(if_res, 1));
+        cur_env = list_push(cur_env, list_get(if_res, 2));
+        cur_env = list_push(cur_env, list_get(if_res, 3));
+        cur_env = list_push(cur_env, list_get(if_res, 4));
+        cur_env = list_push(cur_env, list_get(if_res, 5));
+        cur_env = llvm_env_add_var(cur_env, "__asgn__", "");
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+        let mut out_if: List[String] = list_new();
+        out_if = list_push(out_if, p.to_string());
+        out_if = list_push(out_if, list_get(cur_env, 0));
+        out_if = list_push(out_if, list_get(cur_env, 1));
+        out_if = list_push(out_if, list_get(cur_env, 2));
+        out_if = list_push(out_if, list_get(cur_env, 3));
+        out_if = list_push(out_if, list_get(cur_env, 4));
+        return out_if;
+    }
+
     let rhs_res: List[String] = llvm_emit_expr(toks, p, n, env);
     let rhs_val: String = list_get(rhs_res, 0);
     let rhs_ty: String = list_get(rhs_res, 1);
@@ -58,9 +93,9 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
     if final_ty == "%OoStr" {
         println("  call void @oo_str_retain(%OoStr " + rhs_val + ")");
     } else if final_ty == "%OoIList" {
-        println("  call void @oo_ilist_retain(%OoIList " + rhs_val + ")");
+        println("  call void @oo_ilist_retain(%OoIList* byval(%OoIList) %" + name + ".slot)");
     } else if final_ty == "%OoSList" {
-        println("  call void @oo_slist_retain(%OoSList " + rhs_val + ")");
+        println("  call void @oo_slist_retain(%OoSList* byval(%OoSList) %" + name + ".slot)");
     }
 
     cur_env = llvm_env_add_var(cur_env, name, final_ty);
@@ -111,17 +146,29 @@ pub fn llvm_emit_assign_stmt(name: String, toks: List[String], pos: Int, n: Int,
         cur_env = list_push(cur_env, list_get(reg_res, 5));
 
         println("  " + old_reg + " = load " + lty + ", " + lty + "* %" + name + ".slot, align 8");
-        println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + name + ".slot, align 8");
-
-        if lty == "%OoStr" {
+        if lty == "%OoIList" || lty == "%OoSList" {
+            let reg_old: List[String] = llvm_gen_reg(cur_env);
+            let old_slot: String = list_get(reg_old, 0) + ".old";
+            cur_env = list_new();
+            cur_env = list_push(cur_env, list_get(reg_old, 1));
+            cur_env = list_push(cur_env, list_get(reg_old, 2));
+            cur_env = list_push(cur_env, list_get(reg_old, 3));
+            cur_env = list_push(cur_env, list_get(reg_old, 4));
+            cur_env = list_push(cur_env, list_get(reg_old, 5));
+            println("  " + old_slot + " = alloca " + lty + ", align 8");
+            println("  store " + lty + " " + old_reg + ", " + lty + "* " + old_slot + ", align 8");
+            println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + name + ".slot, align 8");
+            if lty == "%OoIList" {
+                println("  call void @oo_ilist_retain(%OoIList* byval(%OoIList) %" + name + ".slot)");
+                println("  call void @oo_ilist_release(%OoIList* byval(%OoIList) " + old_slot + ")");
+            } else {
+                println("  call void @oo_slist_retain(%OoSList* byval(%OoSList) %" + name + ".slot)");
+                println("  call void @oo_slist_release(%OoSList* byval(%OoSList) " + old_slot + ")");
+            }
+        } else if lty == "%OoStr" {
+            println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + name + ".slot, align 8");
             println("  call void @oo_str_retain(%OoStr " + rhs_val + ")");
             println("  call void @oo_str_release(%OoStr " + old_reg + ")");
-        } else if lty == "%OoIList" {
-            println("  call void @oo_ilist_retain(%OoIList " + rhs_val + ")");
-            println("  call void @oo_ilist_release(%OoIList " + old_reg + ")");
-        } else if lty == "%OoSList" {
-            println("  call void @oo_slist_retain(%OoSList " + rhs_val + ")");
-            println("  call void @oo_slist_release(%OoSList " + old_reg + ")");
         }
     } else {
         println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + name + ".slot, align 8");

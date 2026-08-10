@@ -128,7 +128,7 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Smoke: `scripts/pure_build_fp_smoke.sh` (in `ci_product` after residual/seed rails)
   - Doc: `bootstrap/PURE_BUILD_FP.md`
   - Residual: **not** bit-identical product binaries / full reproducible dist (timestamps, ASLR, host toolchain)
-- [x] LLVM production floor — **not claimed**; textual `emit-llvm` smoke only (M5 partial); see `bootstrap/P4_DROPS.md`
+- [x] LLVM production emit path — **M119 closed** for proven surface (CHS×4 + multi-module + product CLI O0/`--release` O3); not self-host; see `P4_DROPS.md` + `LLVM_SMOKE.md`
 - [x] WASM product run floor — **not claimed**; `.wat` emit smoke only (M4 partial); `P4_DROPS.md`
 - [x] Packaging/registry — **fail-closed residual** (no product registry; ship = tarball+pin only); `P4_DROPS.md`
 - [x] Concurrency / async — **not in product**; DESIGN-aligned future only; `P4_DROPS.md`

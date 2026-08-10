@@ -15,17 +15,16 @@ not soft-pass, not “OK_HOST”.
 
 | Claim | Status |
 |-------|--------|
-| Product LLVM **floor** (link/run/optimize) | **No** — Backend-C remains product self-host floor |
-| `oodac emit-llvm` / `ooda build --target llvm` / `--emit-llvm` | **Emit smoke** (textual IR written; `llvm_token_align_smoke`) — **not** clang/llc product rails |
-| `--release` optimize path | **Fail-closed** residual on pure CLI |
+| Product LLVM emit+link+run O0/O3 (CHS×4 + multi-module import) | **In (M119)** — `llvm_prod_parity_smoke` |
+| Product `ooda build --target llvm` + `--release`→O3 | **In** — `ooda_product.sh` + `llvm_link.sh` |
+| Product LLVM **self-host floor** | **No** — Backend-C remains product self-host floor |
+| Full C-emit parity on LLVM (match/Secret/MaxCycles/…) | **Residual** — fail-closed where not lowered |
+| `--release` on non-llvm targets | **Fail-closed** residual |
 
-**Honest product claim:** openOODA **self-hosts on Backend-C**. LLVM IR **emit**
-exists as a partial M5 surface; do **not** market full LLVM backend, optimize,
-or production link. Optional host clang link of **C** output is incidental.
+**Honest product claim:** openOODA **self-hosts on Backend-C**. LLVM is a **production
+emit path** for a proven surface + O3 product CLI — not alternate self-host.
 
-**Close full LLVM product only with:** FLOOR F3-style MVP + rails + DESIGN-aligned notes.
-
-See: `cli/main.oo`, `scripts/ooda_product.sh`, `bootstrap/FLOOR.md`, `BACKEND_F3_PREP.md`.
+See: `cli/main.oo`, `scripts/ooda_product.sh`, `scripts/llvm_*.sh`, `bootstrap/FLOOR.md`, `bootstrap/LLVM_SMOKE.md`.
 
 ---
 

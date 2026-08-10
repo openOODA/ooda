@@ -63,6 +63,7 @@ case "$MODE" in
     target="c"
     file=""
     out=""
+    release=0
     extra=()
     while [[ $# -gt 0 ]]; do
       case "$1" in
@@ -76,6 +77,10 @@ case "$MODE" in
           ;;
         --emit-llvm)
           target="llvm"
+          shift
+          ;;
+        --release)
+          release=1
           shift
           ;;
         -o)
@@ -92,32 +97,41 @@ case "$MODE" in
           ;;
       esac
     done
+    if [[ "$release" -eq 1 && "$target" != "llvm" ]]; then
+      echo -e "ERR\tbuild\t--release only with --target llvm" >&2
+      exit 2
+    fi
     if [[ "$target" == "wasm" || "$target" == "llvm" ]]; then
       [[ -n "$file" ]] || { echo -e "ERR\tbuild\tmissing file" >&2; exit 2; }
-      ext="wat"; cmd="emit-wasm"; msg="WebAssembly text module"
-      [[ "$target" == "llvm" ]] && { ext="ll"; cmd="emit-llvm"; msg="LLVM IR emitted" ; }
       if [[ "$target" == "wasm" ]]; then
-        [[ -z "$out" ]] && { out="${file%.oo}.$ext"; [[ "$file" == *.oo ]] || out="${file}.$ext"; }
-        tmp_out="${TMPDIR:-/tmp}/${target}_out_$$.$ext"
-        if ! "$EM" "$cmd" "$file" > "$tmp_out"; then rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
-        if ! cp "$tmp_out" "$out" 2>/dev/null; then echo -e "ERR\tbuild\tfailed to write output file: $out" >&2; rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
+        [[ -z "$out" ]] && { out="${file%.oo}.wat"; [[ "$file" == *.oo ]] || out="${file}.wat"; }
+        tmp_out="${TMPDIR:-$HOME/.cache/ooda-tmp}/wasm_out_$$.wat"
+        mkdir -p "$(dirname "$tmp_out")"
+        if ! "$EM" emit-wasm "$file" > "$tmp_out"; then rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
+        if ! cp "$tmp_out" "$out" 2>/dev/null; then echo -e "ERR\tbuild\tfailed to write $out" >&2; rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
         rm -f "$tmp_out" 2>/dev/null || true
         test -s "$out"
-        echo "🚀 [openOODA pure oodac] $msg: $out"
+        echo "🚀 [openOODA pure oodac] WebAssembly text module: $out"
         exit 0
       else
-        # LLVM target
         [[ -z "$out" ]] && { out="${file%.oo}.bin"; [[ "$file" == *.oo ]] || out="${file}.bin"; }
-        tmp_out="${TMPDIR:-/tmp}/${target}_out_$$.ll"
-        if ! "$EM" "$cmd" "$file" > "$tmp_out"; then rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
-        if ! clang -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$tmp_out" -lm -o "$out"; then
-          echo -e "ERR\tbuild\tclang failed to compile $tmp_out" >&2
-          rm -f "$tmp_out" 2>/dev/null || true
+        tmp_out="${TMPDIR:-$HOME/.cache/ooda-tmp}/llvm_out_$$.ll"
+        mkdir -p "$(dirname "$tmp_out")"
+        trap 'rm -f "$tmp_out" 2>/dev/null || true' EXIT
+        if ! "$EM" emit-llvm "$file" > "$tmp_out"; then
+          echo -e "ERR\tbuild\temit-llvm failed" >&2
           exit 2
         fi
-        rm -f "$tmp_out" 2>/dev/null || true
+        opt="-O0"
+        [[ "$release" -eq 1 ]] && opt="-O3"
+        LINK="$ROOT/scripts/llvm_link.sh"
+        [[ -f "$LINK" ]] || { echo -e "ERR\tbuild\tmissing $LINK" >&2; exit 2; }
+        if ! bash "$LINK" "$opt" "$tmp_out" "$out"; then
+          echo -e "ERR\tbuild\tllvm_link failed (need clang/llc)" >&2
+          exit 2
+        fi
         test -x "$out"
-        echo "🚀 [openOODA pure oodac] Native LLVM executable: $out"
+        echo "🚀 [openOODA pure oodac] Native LLVM executable ($opt): $out"
         exit 0
       fi
     fi

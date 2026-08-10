@@ -81,6 +81,8 @@ for rail in \
   wasm_execute_smoke.sh \
   llvm_token_align_smoke.sh \
   llvm_execute_smoke.sh \
+  llvm_prod_parity_smoke.sh \
+  llvm_fail_closed_smoke.sh \
   bc_vm_smoke.sh \
   problem_hunt_smoke.sh \
   caps_matrix_smoke.sh \
