@@ -161,23 +161,28 @@ if [[ -f "$REQ_FAIL" ]]; then
   echo "OK requires fail requires_fail (rc=$rfrc)"
 fi
 
-# --- M19 complex requires: emit fail-closed ---
-if [[ -f "$REQ_CX" ]]; then
-  c_rcx="$TMPDIR/requires_complex.c"
-  err_rcx="$TMPDIR/requires_complex.err"
+# --- M112 complex requires/ensures ---
+if [[ -f "$ROOT/fixtures/complex_contract_pass.oo" ]]; then
+  cx_pass="$(emit_ok "$ROOT/fixtures/complex_contract_pass.oo")"
+  bin_cx="$TMPDIR/complex_contract_pass.bin"
+  gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$cx_pass" -o "$bin_cx" -lm
+  out_cx="$(timeout 3 "$bin_cx")"
+  echo "OK complex contract pass"
+fi
+
+if [[ -f "$ROOT/fixtures/complex_contract_req_fail.oo" ]]; then
+  cx_req_fail="$(emit_ok "$ROOT/fixtures/complex_contract_req_fail.oo")"
+  bin_cx_req="$TMPDIR/complex_contract_req_fail.bin"
+  gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$cx_req_fail" -o "$bin_cx_req" -lm
   set +e
-  "$OODAC" emit-c "$REQ_CX" >"$c_rcx" 2>"$err_rcx"
-  rcxrc=$?
+  out_cx_req="$(timeout 3 "$bin_cx_req" 2>&1)"
+  rc_cx_req=$?
   set -e
-  if grep -qE $'^ERR\tc_emit\trequires residual' "$c_rcx" "$err_rcx" 2>/dev/null; then
-    echo "OK requires complex fail-closed (ERR residual)"
-  elif [[ $rcxrc -ne 0 ]]; then
-    echo "OK requires complex fail-closed (exit $rcxrc)"
-  else
-    echo "FAIL requires complex should fail-closed at emit" >&2
-    head -20 "$c_rcx" "$err_rcx" >&2
+  if [[ $rc_cx_req -eq 0 ]]; then
+    echo "FAIL complex_contract_req_fail should non-zero" >&2
     exit 1
   fi
+  echo "OK complex contract req fail"
 fi
 
 # --- M9 simple ensures: pass runtime ---
@@ -218,23 +223,19 @@ if [[ -f "$ENS_FAIL" ]]; then
   echo "OK ensures fail ensures_fail (rc=$efrc)"
 fi
 
-# --- M9 complex ensures: emit fail-closed ---
-if [[ -f "$ENS_CX" ]]; then
-  c_cx="$TMPDIR/ensures_complex.c"
-  err_cx="$TMPDIR/ensures_complex.err"
+if [[ -f "$ROOT/fixtures/complex_contract_ens_fail.oo" ]]; then
+  cx_ens_fail="$(emit_ok "$ROOT/fixtures/complex_contract_ens_fail.oo")"
+  bin_cx_ens="$TMPDIR/complex_contract_ens_fail.bin"
+  gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$cx_ens_fail" -o "$bin_cx_ens" -lm
   set +e
-  "$OODAC" emit-c "$ENS_CX" >"$c_cx" 2>"$err_cx"
-  cxrc=$?
+  out_cx_ens="$(timeout 3 "$bin_cx_ens" 2>&1)"
+  rc_cx_ens=$?
   set -e
-  if grep -qE $'^ERR\tc_emit\tensures residual' "$c_cx" "$err_cx" 2>/dev/null; then
-    echo "OK ensures complex fail-closed (ERR residual)"
-  elif [[ $cxrc -ne 0 ]]; then
-    echo "OK ensures complex fail-closed (exit $cxrc)"
-  else
-    echo "FAIL ensures complex should fail-closed at emit" >&2
-    head -20 "$c_cx" "$err_cx" >&2
+  if [[ $rc_cx_ens -eq 0 ]]; then
+    echo "FAIL complex_contract_ens_fail should non-zero" >&2
     exit 1
   fi
+  echo "OK complex contract ens fail"
 fi
 
 # M51 multi-clause simple AND (separate script keeps this file ≤ MAX_LINES)

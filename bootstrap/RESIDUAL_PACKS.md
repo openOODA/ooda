@@ -27,7 +27,6 @@ Mechanical residual docs + smokes. **Not DESIGN-complete.**
 | `MAX_CYCLES.md` | `MAX_CYCLES_RESIDUAL_ALPHA` | `max_cycles_residual_smoke.sh` (+ enforce: `max_cycles_enforce_smoke.sh`) |
 | `METAMORPHIC.md` | `METAMORPHIC_RESIDUAL_ALPHA` | `metamorphic_residual_smoke.sh` |
 | `META_VS_DET.md` | `META_VS_DET_RESIDUAL_ALPHA` | `meta_vs_det_residual_smoke.sh` |
-| `MULTI_ARG_FUZZ.md` | `MULTI_ARG_FUZZ_RESIDUAL_ALPHA` | `multi_arg_fuzz_residual_smoke.sh` |
 | `MULTI_TARGET.md` | `MULTI_TARGET_RESIDUAL_ALPHA` | `multi_target_residual_smoke.sh` |
 | `NATIVE_LSP.md` | `NATIVE_LSP_RESIDUAL_ALPHA` | `native_lsp_residual_smoke.sh` |
 | `OODA_SPEED.md` | `OODA_SPEED_RESIDUAL_ALPHA` | `ooda_speed_residual_smoke.sh` |

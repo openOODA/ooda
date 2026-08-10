@@ -52,6 +52,7 @@ typedef struct {
 } OoResV;
 
 /* Internal payload allocation helpers */
+extern long long oo_list_ambient_quota;
 char *oo_str_alloc_payload(size_t len);
 void *oo_list_alloc_payload(size_t elem_size, size_t cap);
 

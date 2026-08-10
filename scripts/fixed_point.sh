@@ -11,7 +11,7 @@
 # oodac/oodac|oodac2).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}/fp_run_$$"
 # Module-check thrash is residual-hostile during pure multi; skip unless forced.
 export PURE_SKIP_CHECK="${PURE_SKIP_CHECK:-1}"
 export PURE_NO_ARC="${PURE_NO_ARC:-0}"
@@ -47,7 +47,7 @@ echo "seed: $SEED (from $SEED_SRC)"
 echo "=== fixed-point: pure seed builds stage-1 oodac ==="
 rm -f "$STAGE1" "$ROOT/oodac/main" "$ROOT/oodac/main.c" "$STAGE2" "$ROOT/oodac/main.oo.c"
 set +e
-(cd "$ROOT" && env -u OODA OODAC_BIN="$SEED" "$SEED" build "$OODAC_SRC" "$STAGE1" \
+(cd "$ROOT" && env -u OODA OODAC_BIN="$SEED" bwrap --bind / / --dev /dev --proc /proc --bind "$TMPDIR" /tmp "$SEED" build "$OODAC_SRC" "$STAGE1" \
   >"$TMPDIR/seed_build_s1.txt" 2>&1)
 rc=$?
 set -e
@@ -96,7 +96,7 @@ echo "=== fixed-point: pure rebuild oodac → stage-2 (seed emit host; stage-1 i
 # Emit host stays SEED; output binary is stage-2 product path.
 rm -f "$STAGE2" "$ROOT/oodac/main" "$ROOT/oodac/main.c" "$ROOT/oodac/main.oo.c"
 set +e
-(cd "$ROOT" && env -u OODA OODAC_BIN="$SEED" "$SEED" build "$OODAC_SRC" "$STAGE2" \
+(cd "$ROOT" && env -u OODA OODAC_BIN="$SEED" bwrap --bind / / --dev /dev --proc /proc --bind "$TMPDIR" /tmp "$SEED" build "$OODAC_SRC" "$STAGE2" \
   >"$TMPDIR/stage1_build_oodac.txt" 2>&1)
 rc=$?
 set -e
@@ -115,8 +115,8 @@ if grep -q 'OK_HOST' "$TMPDIR/stage1_build_oodac.txt" 2>/dev/null; then
 fi
 # Pure fixed-point may be bit-identical (same sources → same emit). That is success,
 # not host re-seed theater — theater is OK_HOST / missing pure build log.
-if ! grep -qE 'OK_PURE|OK_PURE_MULTI' "$TMPDIR/stage1_build_oodac.txt" 2>/dev/null; then
-  echo "FAIL: stage-2 build log missing OK_PURE / OK_PURE_MULTI" >&2
+if ! grep -qE 'OK_PURE|OK_PURE_MULTI|OK_PURE_NATIVE' "$TMPDIR/stage1_build_oodac.txt" 2>/dev/null; then
+  echo "FAIL: stage-2 build log missing OK_PURE / OK_PURE_MULTI / OK_PURE_NATIVE" >&2
   exit 1
 fi
 if cmp -s "$STAGE1" "$STAGE2"; then

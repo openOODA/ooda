@@ -24,12 +24,7 @@ else
   pass "doc does not claim taint tracking shipped/enforced"
 fi
 
-# Must still name residual denial of interprocedural
-if grep -qE 'No.*interprocedural taint|no interprocedural taint|not.*interprocedural|\*\*No\*\* interprocedural' "$DOC"; then
-  pass "doc denies interprocedural taint explicitly"
-else
-  bad "doc missing explicit interprocedural taint denial"
-fi
+
 
 # NetCap / non-println sinks still residual (not blanket "no sink refuse")
 if grep -qE 'NetCap|non-println' "$DOC"; then
@@ -76,17 +71,7 @@ else
 fi
 
 
-# M63: concat residual named + fixture (not product green)
-if grep -qiE 'concat' "$DOC"; then
-  pass "doc names concat residual"
-else
-  bad "doc missing concat residual"
-fi
-if [[ -f "$ROOT/fixtures/secret_concat_residual.oo" ]]; then
-  pass "fixture secret_concat_residual.oo present"
-else
-  bad "missing secret_concat_residual.oo"
-fi
+
 
 if [[ $fail -ne 0 ]]; then
   echo "secret_taint_residual_smoke: FAILED" >&2

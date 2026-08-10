@@ -54,11 +54,13 @@ void oo_cap_require_alloc(long long got, const char *op) {
 long long oo_alloc_bytes(long long cap, long long n) {
   oo_cap_require_alloc(cap, "alloc_bytes");
   if (n < 0) n = 0;
+  oo_list_ambient_quota += n;
   return n;
 }
 
 /* Smoke-friendly: re-check cap; free is a no-op by handle. */
 void oo_free_bytes(long long cap, long long p) {
   oo_cap_require_alloc(cap, "free_bytes");
+  oo_list_ambient_quota -= p;
   (void)p;
 }

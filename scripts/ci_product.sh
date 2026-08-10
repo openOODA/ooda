@@ -138,7 +138,6 @@ for rail in \
   playground_residual_smoke.sh \
   pkg_ecosystem_residual_smoke.sh \
   std_split_residual_smoke.sh \
-  multi_arg_fuzz_residual_smoke.sh \
   seed_pure_multi_smoke.sh \
   multi_target_residual_smoke.sh \
   bc_vm_depth_residual_smoke.sh \

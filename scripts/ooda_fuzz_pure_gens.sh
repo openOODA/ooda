@@ -5,55 +5,45 @@
 
 emit_fuzz_sample_let() {
   local ind="${1:-        }" a="${ARITY:-1}"
-  if [[ "$DOMAIN" == "bool" && "$a" -eq 2 ]]; then
-    echo "${ind}let __fuzz_x: Bool = gen_bool_val(__fuzz_prng_st);"
-    echo "${ind}__fuzz_prng_st = prng_step(__fuzz_prng_st);"
-    echo "${ind}let __fuzz_y: Bool = gen_bool_val(__fuzz_prng_st);"
-    return
-  fi
-  if [[ "$DOMAIN" == "string" && "$a" -eq 2 ]]; then
-    echo "${ind}let __fuzz_x: String = gen_string_val(__fuzz_prng_st, ${tmin}, ${tmax});"
-    echo "${ind}__fuzz_prng_st = prng_step(__fuzz_prng_st);"
-    echo "${ind}let __fuzz_y: String = gen_string_val(__fuzz_prng_st, ${tmin}, ${tmax});"
-    return
-  fi
-  if [[ "$a" -eq 2 || "$a" -eq 3 ]]; then
-    echo "${ind}let __fuzz_x: Int = gen_int_val(__fuzz_prng_st, ${tmin}, ${tmax});"
-    echo "${ind}__fuzz_prng_st = prng_step(__fuzz_prng_st);"
-    echo "${ind}let __fuzz_y: Int = gen_int_val(__fuzz_prng_st, ${tmin}, ${tmax});"
-    if [[ "$a" -eq 3 ]]; then
+  local vars=(x y z w v u t s)
+  for (( i=0; i<a; i++ )); do
+    local vname="${vars[$i]}"
+    if [[ $i -gt 0 ]]; then
       echo "${ind}__fuzz_prng_st = prng_step(__fuzz_prng_st);"
-      echo "${ind}let __fuzz_z: Int = gen_int_val(__fuzz_prng_st, ${tmin}, ${tmax});"
     fi
-    return
-  fi
-  case "$DOMAIN" in
-    bool) echo "${ind}let __fuzz_x: Bool = gen_bool_val(__fuzz_prng_st);" ;;
-    string) echo "${ind}let __fuzz_x: String = gen_string_val(__fuzz_prng_st, ${tmin}, ${tmax});" ;;
-    list) echo "${ind}let __fuzz_x: List[Int] = gen_list_int_val(__fuzz_prng_st, ${tmin}, ${tmax});" ;;
-    *) echo "${ind}let __fuzz_x: Int = gen_int_val(__fuzz_prng_st, ${tmin}, ${tmax});" ;;
-  esac
+    case "$DOMAIN" in
+      bool)
+        echo "${ind}let __fuzz_${vname}: Bool = gen_bool_val(__fuzz_prng_st);"
+        ;;
+      string)
+        echo "${ind}let __fuzz_${vname}: String = gen_string_val(__fuzz_prng_st, ${tmin}, ${tmax});"
+        ;;
+      list)
+        echo "${ind}let __fuzz_${vname}: List[Int] = gen_list_int_val(__fuzz_prng_st, ${tmin}, ${tmax});"
+        ;;
+      *)
+        echo "${ind}let __fuzz_${vname}: Int = gen_int_val(__fuzz_prng_st, ${tmin}, ${tmax});"
+        ;;
+    esac
+  done
 }
 
 emit_fuzz_call_let() {
   local ind="${1:-            }" a="${ARITY:-1}"
-  if [[ "$DOMAIN" == "bool" && "$a" -eq 2 ]]; then
-    echo "${ind}let __fuzz_r: Bool = ${fname}(__fuzz_x, __fuzz_y);"; return
-  fi
-  if [[ "$DOMAIN" == "string" && "$a" -eq 2 ]]; then
-    echo "${ind}let __fuzz_r: String = ${fname}(__fuzz_x, __fuzz_y);"; return
-  fi
-  if [[ "$a" -eq 3 ]]; then
-    echo "${ind}let __fuzz_r: Int = ${fname}(__fuzz_x, __fuzz_y, __fuzz_z);"; return
-  fi
-  if [[ "$a" -eq 2 ]]; then
-    echo "${ind}let __fuzz_r: Int = ${fname}(__fuzz_x, __fuzz_y);"; return
-  fi
+  local vars=(x y z w v u t s)
+  local args=""
+  for (( i=0; i<a; i++ )); do
+    if [[ $i -gt 0 ]]; then
+      args="${args}, "
+    fi
+    args="${args}__fuzz_${vars[$i]}"
+  done
+
   case "$DOMAIN" in
-    bool) echo "${ind}let __fuzz_r: Bool = ${fname}(__fuzz_x);" ;;
-    string) echo "${ind}let __fuzz_r: String = ${fname}(__fuzz_x);" ;;
-    list) echo "${ind}let __fuzz_r: List[Int] = ${fname}(__fuzz_x);" ;;
-    *) echo "${ind}let __fuzz_r: Int = ${fname}(__fuzz_x);" ;;
+    bool) echo "${ind}let __fuzz_r: Bool = ${fname}(${args});" ;;
+    string) echo "${ind}let __fuzz_r: String = ${fname}(${args});" ;;
+    list) echo "${ind}let __fuzz_r: List[Int] = ${fname}(${args});" ;;
+    *) echo "${ind}let __fuzz_r: Int = ${fname}(${args});" ;;
   esac
 }
 

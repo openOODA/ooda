@@ -1,8 +1,17 @@
 #include "chs_rt.h"
 
+long long oo_list_ambient_quota = 64LL * 1024 * 1024;
+long long oo_list_ambient_bytes = 0;
+
 void *oo_list_alloc_payload(size_t elem_size, size_t cap) {
   if (cap == 0) return NULL;
-  OoListHeader *hdr = (OoListHeader *)malloc(sizeof(OoListHeader) + cap * elem_size);
+  size_t bytes = sizeof(OoListHeader) + cap * elem_size;
+  if (oo_list_ambient_bytes + (long long)bytes > oo_list_ambient_quota) {
+    fprintf(stderr, "ERR\tcap\tambient List memory quota exceeded (AllocCap required)\n");
+    exit(1);
+  }
+  oo_list_ambient_bytes += (long long)bytes;
+  OoListHeader *hdr = (OoListHeader *)malloc(bytes);
   if (!hdr) abort();
   hdr->ref_count = 1;
   hdr->flags = 0;
@@ -40,6 +49,7 @@ void oo_ilist_release(OoIList l) {
     hdr->ref_count--;
     if (hdr->ref_count == 0) {
       hdr->flags = 0xFFFFFFFFu;
+      oo_list_ambient_bytes -= (long long)(sizeof(OoListHeader) + l.cap * sizeof(long long));
       free(hdr);
     }
   }
@@ -95,6 +105,7 @@ void oo_slist_release(OoSList l) {
         oo_str_release(l.data[i]);
       }
       hdr->flags = 0xFFFFFFFFu;
+      oo_list_ambient_bytes -= (long long)(sizeof(OoListHeader) + l.cap * sizeof(OoStr));
       free(hdr);
     }
   }

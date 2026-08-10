@@ -10,6 +10,19 @@ fuzz_fn_arity() {
   commas="${inside//[^,]/}"; echo $((${#commas} + 1))
 }
 
+fuzz_fn_params_all_list() {
+  local fname="$1" body="$2" line inside p
+  line=$(grep -E "^(pub[[:space:]]+)?fn[[:space:]]+${fname}[[:space:]]*\\(" "$body" | head -1 || true)
+  [[ -z "$line" ]] && return 1
+  inside="${line#*(}"; inside="${inside%%)*}"
+  IFS=',' read -ra parts <<<"$inside"
+  for p in "${parts[@]}"; do
+    p="${p#"${p%%[![:space:]]*}"}"; p="${p%"${p##*[![:space:]]}"}"
+    [[ "$p" =~ :[[:space:]]*List\[Int\]$ ]] || return 1
+  done
+  return 0
+}
+
 # True if every param of fname is typed Int (multi-arg Int gate).
 fuzz_fn_params_all_int() {
   local fname="$1" body="$2" line inside p
@@ -52,15 +65,11 @@ fuzz_fn_params_all_string() {
   return 0
 }
 
-# Fail-closed: arity 0; arity≥4; multi List; wrong multi param types.
-# In: Int arity-2/3; Bool/String arity-2.
+# Fail-closed: arity 0; wrong multi param types.
 fuzz_check_arity() {
   local fname="$1" arity="$2" body="$3"
   if [[ "$arity" -le 0 ]]; then
     echo "ERR	fuzz	target '${fname}' has no parameters (fail-closed)" >&2; return 2
-  fi
-  if [[ "$arity" -ge 4 ]]; then
-    echo "ERR	fuzz	arity>=4 fail-closed for pure path (target ${fname} arity=${arity})" >&2; return 2
   fi
   if [[ "$arity" -ge 2 ]]; then
     if [[ "$DOMAIN" == "int" ]]; then
@@ -68,31 +77,34 @@ fuzz_check_arity() {
         echo "ERR	fuzz	arity-${arity} pure path requires all Int params (target ${fname})" >&2; return 2
       fi
     elif [[ "$DOMAIN" == "bool" ]]; then
-      if [[ "$arity" -ge 3 ]]; then
-        echo "ERR	fuzz	bool multi-arg arity>=3 fail-closed (target ${fname})" >&2; return 2
-      fi
       if ! fuzz_fn_params_all_bool "$fname" "$body"; then
-        echo "ERR	fuzz	arity-2 pure bool path requires all Bool params (target ${fname})" >&2; return 2
+        echo "ERR	fuzz	arity-${arity} pure bool path requires all Bool params (target ${fname})" >&2; return 2
       fi
     elif [[ "$DOMAIN" == "string" ]]; then
-      if [[ "$arity" -ge 3 ]]; then
-        echo "ERR	fuzz	string multi-arg arity>=3 fail-closed (target ${fname})" >&2; return 2
-      fi
       if ! fuzz_fn_params_all_string "$fname" "$body"; then
-        echo "ERR	fuzz	arity-2 pure string path requires all String params (target ${fname})" >&2; return 2
+        echo "ERR	fuzz	arity-${arity} pure string path requires all String params (target ${fname})" >&2; return 2
+      fi
+    elif [[ "$DOMAIN" == "list" ]]; then
+      if ! fuzz_fn_params_all_list "$fname" "$body"; then
+        echo "ERR	fuzz	arity-${arity} pure list path requires all List[Int] params (target ${fname})" >&2; return 2
       fi
     else
-      echo "ERR	fuzz	multi-arg non-int fail-closed (domain=${DOMAIN} target=${fname})" >&2; return 2
+      echo "ERR	fuzz	multi-arg fail-closed (domain=${DOMAIN} target=${fname})" >&2; return 2
     fi
   fi
   return 0
 }
 
-# Rewrite marker expr: x/y/z/result → harness locals (arity-aware).
+# Rewrite marker expr: x/y/z/w/v/u/t/s/result → harness locals (arity-aware).
 fuzz_rewrite_expr() {
   local expr="$1" kind="$2" a="${ARITY:-1}" sedp='s/\bx\b/__fuzz_x/g'
   [[ "$a" -ge 2 ]] && sedp="s/\by\b/__fuzz_y/g; $sedp"
   [[ "$a" -ge 3 ]] && sedp="s/\bz\b/__fuzz_z/g; $sedp"
+  [[ "$a" -ge 4 ]] && sedp="s/\bw\b/__fuzz_w/g; $sedp"
+  [[ "$a" -ge 5 ]] && sedp="s/\bv\b/__fuzz_v/g; $sedp"
+  [[ "$a" -ge 6 ]] && sedp="s/\bu\b/__fuzz_u/g; $sedp"
+  [[ "$a" -ge 7 ]] && sedp="s/\bt\b/__fuzz_t/g; $sedp"
+  [[ "$a" -ge 8 ]] && sedp="s/\bs\b/__fuzz_s/g; $sedp"
   [[ "$kind" == "ens" ]] && sedp="s/\bresult\b/__fuzz_r/g; $sedp"
   echo "$expr" | sed "$sedp"
 }

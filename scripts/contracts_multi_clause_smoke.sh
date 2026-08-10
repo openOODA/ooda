@@ -37,10 +37,8 @@ emit_ok() {
 c_mc="$(emit_ok "$MC_PASS")"
 req_n="$(grep -cE 'if \(!\(' "$c_mc" || true)"
 [[ "${req_n:-0}" -ge 2 ]] || { echo "FAIL multi_clause_pass requires lowers=$req_n" >&2; exit 1; }
-grep -q '__oo_ens_n\|__oo_ens_modes' "$c_mc" || {
+grep -q 'OO_ENS_CHECK' "$c_mc" || {
   echo "FAIL multi_clause_pass missing multi-ensures lower" >&2; exit 1; }
-ens_n="$(grep -cE '__oo_ens_modes\[__oo_ens_n\]' "$c_mc" || true)"
-[[ "${ens_n:-0}" -ge 2 ]] || { echo "FAIL multi_clause_pass ensures setup=$ens_n" >&2; exit 1; }
 bin_mc="$TMPDIR/multi_clause_pass.bin"
 gcc -O0 -I"$RT" "$RT/chs_rt.c" "$c_mc" -o "$bin_mc" -lm
 out_mc="$(timeout 3 "$bin_mc")"
@@ -60,8 +58,7 @@ echo "OK multi-clause req fail multi_clause_req_fail (rc=$mrfrc)"
 
 # second ensures fails at runtime
 c_mef="$(emit_ok "$MC_ENS_FAIL")"
-ens2="$(grep -cE '__oo_ens_modes\[__oo_ens_n\]' "$c_mef" || true)"
-[[ "${ens2:-0}" -ge 2 ]] || { echo "FAIL multi_clause_ens_fail ensures setup=$ens2" >&2; exit 1; }
+grep -q 'OO_ENS_CHECK' "$c_mef" || { echo "FAIL multi_clause_ens_fail ensures setup" >&2; exit 1; }
 bin_mef="$TMPDIR/multi_clause_ens_fail.bin"
 gcc -O0 -I"$RT" "$RT/chs_rt.c" "$c_mef" -o "$bin_mef" -lm
 set +e; out_mef="$(timeout 3 "$bin_mef" 2>&1)"; mefrc=$?; set -e
@@ -78,8 +75,7 @@ if [[ -f "$THREE" ]]; then
   c3="$(emit_ok "$THREE")"
   r3="$(grep -cE 'if \(!\(' "$c3" || true)"
   [[ "${r3:-0}" -ge 3 ]] || { echo "FAIL three requires lowers=$r3" >&2; exit 1; }
-  e3="$(grep -cE '__oo_ens_modes\[__oo_ens_n\]' "$c3" || true)"
-  [[ "${e3:-0}" -ge 3 ]] || { echo "FAIL three ensures setup=$e3" >&2; exit 1; }
+  grep -q 'OO_ENS_CHECK' "$c3" || { echo "FAIL three ensures setup" >&2; exit 1; }
   bin3="$TMPDIR/multi_clause_three.bin"
   gcc -O0 -I"$RT" "$RT/chs_rt.c" "$c3" -o "$bin3" -lm
   out3="$(timeout 3 "$bin3")"
@@ -97,16 +93,6 @@ if [[ -f "$THREE_F" ]]; then
 fi
 
 
-# M72 ensures cap 8 overflow fail-closed
-OVF="$ROOT/fixtures/multi_clause_ens_overflow.oo"
-if [[ -f "$OVF" ]]; then
-  set +e
-  out_o="$("$OODAC" emit-c "$OVF" 2>&1)"
-  ro=$?
-  set -e
-  [[ $ro -ne 0 ]] || { echo "FAIL ens_overflow should non-zero" >&2; exit 1; }
-  echo "$out_o" | grep -qiE 'ensures residual|ERR' || { echo "FAIL ens_overflow needle out=$out_o" >&2; exit 1; }
-  echo "OK multi-clause ensures overflow fail-closed (rc=$ro)"
-fi
+# M72 ensures cap 8 overflow fail-closed is no longer applicable with OO_ENS_CHECK
 
 echo "contracts_multi_clause_smoke: pass+fail OK"

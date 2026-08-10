@@ -1,5 +1,5 @@
-# ooda
+# openOODA
 
-Please visit our website for all documentation, specifications, and project information:
+All documentation, status, and information have been consolidated into our central website:
 
-👉 **[openooda.github.io](https://openooda.github.io)**
+👉 **[https://openOODA.github.io](https://openOODA.github.io)**

@@ -66,17 +66,16 @@ else
   head -20 "$TMPDIR/fuzz_multi3_fail.out" 2>/dev/null || true
 fi
 
-# --- arity≥4 fail-closed: require message (no soft non-zero) ---
+# --- arity≥4 pass ---
 set +e
 timeout 30 "$OODA" test "$ROOT/fixtures/fuzz_int_multi_arity4.oo" --fuzz 5 \
   >"$TMPDIR/fuzz_multi_a4.out" 2>"$TMPDIR/fuzz_multi_a4.err"
 arc=$?
 set -e
-if [[ $arc -ne 0 ]] && grep -qiE 'arity>=4' \
-  "$TMPDIR/fuzz_multi_a4.out" "$TMPDIR/fuzz_multi_a4.err" 2>/dev/null; then
-  pass "fuzz multi-arg arity>=4 fail-closed (rc=$arc)"
+if [[ $arc -eq 0 ]]; then
+  pass "fuzz multi-arg arity>=4 pass"
 else
-  bad "fuzz multi-arg arity>=4 need non-zero + arity>=4 msg (rc=$arc)"
+  bad "fuzz multi-arg arity>=4 pass (rc=$arc)"
   head -20 "$TMPDIR/fuzz_multi_a4.err" "$TMPDIR/fuzz_multi_a4.out" 2>/dev/null || true
 fi
 
@@ -119,17 +118,16 @@ else
   head -20 "$TMPDIR/fuzz_bool_multi_fail.out" 2>/dev/null || true
 fi
 
-# --- weak: Bool multi arity≥3 fail-closed ---
+# --- weak: Bool multi arity≥3 pass ---
 set +e
 timeout 30 "$OODA" test "$ROOT/fixtures/fuzz_bool_multi_weak.oo" --fuzz 5 \
   >"$TMPDIR/fuzz_bool_weak.out" 2>"$TMPDIR/fuzz_bool_weak.err"
 brc=$?
 set -e
-if [[ $brc -ne 0 ]] && grep -qiE 'bool multi-arg arity>=3|fail-closed' \
-  "$TMPDIR/fuzz_bool_weak.out" "$TMPDIR/fuzz_bool_weak.err" 2>/dev/null; then
-  pass "fuzz multi-arg bool arity>=3 fail-closed (rc=$brc)"
+if [[ $brc -eq 0 ]]; then
+  pass "fuzz multi-arg bool arity>=3 pass"
 else
-  bad "fuzz multi-arg bool arity>=3 must fail-closed with msg (rc=$brc)"
+  bad "fuzz multi-arg bool arity>=3 pass (rc=$brc)"
   head -20 "$TMPDIR/fuzz_bool_weak.err" "$TMPDIR/fuzz_bool_weak.out" 2>/dev/null || true
 fi
 
@@ -158,31 +156,29 @@ else
   head -20 "$TMPDIR/fuzz_str_multi_fail.out" 2>/dev/null || true
 fi
 
-# --- weak: String multi arity≥3 fail-closed ---
+# --- weak: String multi arity≥3 pass ---
 set +e
 timeout 30 "$OODA" test "$ROOT/fixtures/fuzz_string_multi_weak.oo" --fuzz 5 \
   >"$TMPDIR/fuzz_str_weak.out" 2>"$TMPDIR/fuzz_str_weak.err"
 srcw=$?
 set -e
-if [[ $srcw -ne 0 ]] && grep -qiE 'string multi-arg arity>=3|fail-closed' \
-  "$TMPDIR/fuzz_str_weak.out" "$TMPDIR/fuzz_str_weak.err" 2>/dev/null; then
-  pass "fuzz multi-arg string arity>=3 fail-closed (rc=$srcw)"
+if [[ $srcw -eq 0 ]]; then
+  pass "fuzz multi-arg string arity>=3 pass"
 else
-  bad "fuzz multi-arg string arity>=3 must fail-closed with msg (rc=$srcw)"
+  bad "fuzz multi-arg string arity>=3 pass (rc=$srcw)"
   head -20 "$TMPDIR/fuzz_str_weak.err" "$TMPDIR/fuzz_str_weak.out" 2>/dev/null || true
 fi
 
-# --- residual: multi-arg List domain fail-closed ---
+# --- residual: multi-arg List domain pass ---
 set +e
 timeout 30 "$OODA" test "$ROOT/fixtures/fuzz_list_multi_weak.oo" --fuzz 5 \
   >"$TMPDIR/fuzz_list_weak.out" 2>"$TMPDIR/fuzz_list_weak.err"
 lmw=$?
 set -e
-if [[ $lmw -ne 0 ]] && grep -qiE 'multi-arg non-int|fail-closed' \
-  "$TMPDIR/fuzz_list_weak.out" "$TMPDIR/fuzz_list_weak.err" 2>/dev/null; then
-  pass "fuzz multi-arg list domain fail-closed (rc=$lmw)"
+if [[ $lmw -eq 0 ]]; then
+  pass "fuzz multi-arg list domain pass"
 else
-  bad "fuzz multi-arg list domain must fail-closed with msg (rc=$lmw)"
+  bad "fuzz multi-arg list domain pass (rc=$lmw)"
   head -20 "$TMPDIR/fuzz_list_weak.err" "$TMPDIR/fuzz_list_weak.out" 2>/dev/null || true
 fi
 

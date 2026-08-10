@@ -41,6 +41,9 @@ expect_ok "secret_sink_pass" "$ROOT/fixtures/secret_sink_pass.oo"
 expect_refuse "secret_assign_fail" "$ROOT/fixtures/secret_assign_fail.oo"
 expect_ok "secret_assign_pass" "$ROOT/fixtures/secret_assign_pass.oo"
 expect_refuse "secret_chain_fail" "$ROOT/fixtures/secret_chain_fail.oo"
+expect_refuse "secret_concat_fail" "$ROOT/fixtures/secret_concat_fail.oo"
+expect_refuse "secret_call_return_fail" "$ROOT/fixtures/secret_call_return_fail.oo"
+expect_refuse "secret_call_arg_fail" "$ROOT/fixtures/secret_call_arg_fail.oo"
 # M65 empty SECRET name fail-closed
 if [[ -f "$ROOT/fixtures/secret_invalid_empty.oo" ]]; then
   
