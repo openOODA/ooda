@@ -93,7 +93,7 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 | **CLI core** | `ooda version`, `help`, `check`, `dump tokens\|ast\|check` | `product_pure_dispatch_smoke`, `beta_cli_smoke` |
 | **Build / run** | `build --target c\|chs\|native`; `run` = permanent pure **native** build+exec (no host interpreter) | `chs_parity`, product smokes |
 | **Backend** | Product **self-host floor** = Backend-C; `llvm`/`wasm` emit scaffolding only (not alternate floors) | `p3_no_cargo_smoke`, emit smokes, `BACKEND_F3_PREP.md` |
-| **Test** | `ooda test`: check + lower **`assert_eq!` / `assert_ne!` / `assert!`** in `verify` → Backend-C harness build+run | `ooda_test_verify.sh`, `verify_pass.oo` / `verify_fail.oo` |
+| **Test** | `ooda test`: check + lower **`assert_eq!` / `assert_ne!` / `assert!`** in `verify` → pure emit-c+gcc harness (no Python) | `ooda_test_verify.sh`, `ooda_verify_pure.sh`, `verify_pure_smoke.sh`, `verify_pass.oo` / `verify_fail.oo` |
 | **JSON diags** | `check --json-errors` (product + oodac): codes + code-keyed `fix_hint` (E_CAP/E_TC/E_PARSE/E_CHECK+); clean → `[]`; no AST rewrite | `json_errors_smoke`, `DIAG_CODES.md` |
 | **AI agent loop** | `outline` (pub fn summary); `reflect` (NDJSON fn/verify/caps/contracts text); `patch` **`replace_fn` only** (CLI or JSON stdin; path-safe) | `outline_reflect_smoke`, `patch_smoke`, `OUTLINE_REFLECT.md` |
 | **Compiler** | Pure `oodac`: tokens, ast, check, emit-c, multi-module pure build | `fixed_point`, `c_emit_smoke`, `chs_parity` |
@@ -109,8 +109,8 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 |------|-------------|----------|
 | Host Cargo / `.rs` product path | any reintroduction | Forbidden (B0/B1 product purity) |
 | Full LLVM/WASM **product floor** (link/run/optimize) | emit smoke ≠ floor | do not claim production backends (`P4_DROPS.md`); `--release` fail-closed |
-| `ooda test --fuzz` as full multi-type pure fuzzer | CLI un-gated; **Int/Bool/String/List pure domains shipped** | Only `// FUZZ_DOMAIN: int\|bool\|string\|list`; multi-arg fail closed (`FUZZ_DEFER.md`) — not full multi-type fuzzer |
-| **ensures** + complex `requires` | not fully lowered on native | incomplete residual (simple `requires`/`ensures` only where rails prove) |
+| `ooda test --fuzz` as full multi-type pure fuzzer | CLI un-gated; **Int/Bool/String/List pure domains shipped**; **Int arity-2/3 multi-arg In** | Only `// FUZZ_DOMAIN: int\|bool\|string\|list`; arity≥4 / multi-arg non-int fail-closed (`FUZZ_DEFER.md`) — not full multi-type multi-param fuzzer |
+| complex `requires` / `ensures` | not `&&` / SMT / full contract language | simple `IDENT OP lit|ident` / `result OP lit|ident` runtime In; **multi-clause simple AND In (M51)**; complex fail-closed at emit |
 | **`for` non-INT bounds** | only `INT..INT` range-for lowered | emit `for residual` (use `while`) |
 | **`match` non-Result / incomplete** | Result Ok/Err stmt + match-let **In** | other shapes fail-closed (`FOR_MATCH_RESIDUAL.md`) |
 | **Net ops** beyond `fetch` | `fetch` lowers + runtime exists (AUDIT R9); other net names residual | friends still `ERR … net residual` |
@@ -118,6 +118,8 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 | Non-`c` as **self-host floor** | product rebuild is Backend-C | `llvm`/`wasm` backends are emit scaffolding, not alternate self-host floors |
 | Full SPEC beyond CHS + explicit B.1 promotions | post-beta | fail-closed or not advertised |
 | `patch` line-range / AST node_id | residual | fail-closed / not shipped (`replace_fn` only is In) |
+| **`#[MaxCycles]` / OS MaxCycles** | path A/B In: `// MAX_CYCLES: N` Backend-C `while` + range-`for` fuel (M48/M54; zero-N fail-closed) | **not** OS cgroup / recursion / attr lower — `MAX_CYCLES.md` |
+| **`#[Secret]` / `// SECRET:`** | path A/B In: println bare IDENT refuse + direct assign-prop + check dual (M52–M55) | **not** interproc / NetCap suite / full taint / `#[Secret]` attr — `SECRET_TAINT.md` |
 
 Promoting an Out item to In requires: implementation + pass/fail rails + this table edit + B4 still true for what remains Out.
 
@@ -164,7 +166,7 @@ public notes match In/Out tables
 | B4 honesty | **PASS process** — Out rows fail-closed; alpha pin; **no beta tag cut** |
 | B5 org | **PASS** product-critical siblings no Rust; editors optional |
 | Part B.1 In surface | **Table promoted** to real alpha (check/dump/build/run/test asserts/json-errors/outline/reflect/patch replace_fn/`--backend c`); rails exist — still not “owner freezes beta forever” |
-| Part B.2 Out surface | **Documented** multi-arg fuzz residual (Int/Bool/String/List pure domains In), LLVM/WASM **floor** out (emit+execute smoke only), ensures incomplete, non-INT for residual, non-Result match residual, non-`fetch` net residual; FS/Sys/Env **runtime magic-token seal In** |
+| Part B.2 Out surface | **Documented** arity≥4 / multi-arg non-int fuzz residual (Int/Bool/String/List pure + Int arity-2/3 multi-arg In), LLVM/WASM **floor** out (emit+execute smoke only), ensures incomplete, non-INT for residual, non-Result match residual, non-`fetch` net residual; FS/Sys/Env **runtime magic-token seal In** |
 | Public beta tag | **Not claimed** |
 
 Live notes: monorepo `PROGRESS.md`, latest `RELEASE_NOTES_*.md`.

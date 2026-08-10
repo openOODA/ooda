@@ -37,6 +37,9 @@ Agents should branch on **`code`**, not free-text `msg`.
 | `E_BACKEND` | `backend` | Unsupported `--backend` | product floor is `--backend c` |
 | `E_EMIT` | `c_emit` | Backend-C emit failure | simplify residual / emit-c corpus |
 | `E_CLI` | `cli` | Product CLI residual / usage | `ooda help` + flags/paths |
+| `E_SECRET` | `secret` | Secret→println bare IDENT refuse (M52–M60 path A/B) | remove sink / do not print SECRET name |
+| `E_MAX_CYCLES` | `max_cycles` | Cycle fuel exceeded or invalid N (M48/M54/M58) | lower loops or raise MAX_CYCLES; not OS cgroup |
+| `E_CONTRACT` | `contract` | Simple requires/ensures violation or residual complex | fix simple shape or residual pack |
 | `E_OTHER` | *(unknown)* | Unclassified line in capture | see this doc |
 
 ## CLI

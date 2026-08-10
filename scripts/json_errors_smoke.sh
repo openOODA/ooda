@@ -199,6 +199,21 @@ else
   fi
 fi
 
+# M61: Secret path A → E_SECRET + fix_hint
+set +e
+"$OODAC" check --json-errors "$ROOT/fixtures/secret_sink_fail.oo" >"$TMPDIR/je_secret.out" 2>"$TMPDIR/je_secret.err"
+secrc=$?
+set -e
+if [[ $secrc -ne 0 ]]; then
+  if python3 -c 'import json,sys,os; p=os.environ["TMPDIR"]+"/je_secret.out"; raw=open(p).read(); lines=[l for l in raw.splitlines() if l.strip().startswith("[")]; v=json.loads(lines[-1]); assert v[0]["code"]=="E_SECRET"; assert "Secret" in v[0].get("fix_hint","")'; then
+    pass "oodac check --json-errors secret → E_SECRET + fix_hint"
+  else
+    bad "secret json E_SECRET: $(head -c 200 "$TMPDIR/je_secret.out")"
+  fi
+else
+  bad "secret json should non-zero"
+fi
+
 if [[ $fail -ne 0 ]]; then
   echo "json_errors_smoke: FAIL" >&2
   exit 1

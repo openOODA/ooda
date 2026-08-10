@@ -72,6 +72,7 @@ export OODAC_BIN="$ROOT/oodac/oodac"
 
 for rail in \
   product_pure_dispatch_smoke.sh \
+  verify_pure_smoke.sh \
   p3_no_cargo_smoke.sh \
   chs_parity.sh \
   beta_cli_smoke.sh \
@@ -86,6 +87,7 @@ for rail in \
   alloc_cap_smoke.sh \
   import_load_smoke.sh \
   contracts_native_smoke.sh \
+  contracts_multi_clause_smoke.sh \
   json_errors_smoke.sh \
   outline_reflect_smoke.sh \
   patch_smoke.sh \
@@ -96,9 +98,56 @@ for rail in \
   fuzz_bool_smoke.sh \
   fuzz_string_smoke.sh \
   fuzz_list_smoke.sh \
+  fuzz_multi_arg_smoke.sh \
   run_engine_parity_smoke.sh \
   residual_honesty_smoke.sh \
-  seed_pure_multi_smoke.sh
+  max_cycles_enforce_smoke.sh \
+  max_cycles_for_enforce_smoke.sh \
+  max_cycles_shared_smoke.sh \
+  max_cycles_residual_smoke.sh \
+  secret_sink_enforce_smoke.sh \
+  secret_taint_residual_smoke.sh \
+  hitl_residual_smoke.sh \
+  zero_trust_pkg_residual_smoke.sh \
+  type_state_residual_smoke.sh \
+  toolchains_adv_residual_smoke.sh \
+  temporal_mem_residual_smoke.sh \
+  telepathic_ast_residual_smoke.sh \
+  shadow_state_residual_smoke.sh \
+  native_lsp_residual_smoke.sh \
+  meta_vs_det_residual_smoke.sh \
+  metamorphic_residual_smoke.sh \
+  lto_xlang_residual_smoke.sh \
+  hot_reload_residual_smoke.sh \
+  holographic_residual_smoke.sh \
+  hivemind_residual_smoke.sh \
+  gpu_npu_residual_smoke.sh \
+  ffi_gen_residual_smoke.sh \
+  dod_layout_residual_smoke.sh \
+  concurrency_residual_smoke.sh \
+  callgraph_crypto_residual_smoke.sh \
+  bare_metal_residual_smoke.sh \
+  ast_macros_residual_smoke.sh \
+  cap_ffi_residual_smoke.sh \
+  biometric_caps_residual_smoke.sh \
+  arc_temporal_tension_residual_smoke.sh \
+  ooda_speed_residual_smoke.sh \
+  qa_matrix_residual_smoke.sh \
+  spec_depth_residual_smoke.sh \
+  ebnf_align_residual_smoke.sh \
+  playground_residual_smoke.sh \
+  pkg_ecosystem_residual_smoke.sh \
+  std_split_residual_smoke.sh \
+  multi_arg_fuzz_residual_smoke.sh \
+  seed_pure_multi_smoke.sh \
+  multi_target_residual_smoke.sh \
+  bc_vm_depth_residual_smoke.sh \
+  contracts_complex_residual_smoke.sh \
+  ast_autofix_residual_smoke.sh \
+  llvm_smoke_residual_smoke.sh \
+  wasm_smoke_residual_smoke.sh \
+  residual_packs_index_smoke.sh \
+  pure_build_fp_smoke.sh
 do
   if [[ ! -x "$ROOT/scripts/$rail" ]]; then
     if [[ -f "$ROOT/scripts/$rail" ]]; then

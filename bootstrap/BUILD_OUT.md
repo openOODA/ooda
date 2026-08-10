@@ -42,16 +42,17 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 - [x] Line lock \(O=0\) — *standing rail* (`scripts/check_file_lines.sh`); O=0 on main (re-check every pin)
 
 ### P1 — Core systems development loop
-- [x] **Contracts on native path** — Backend-C lowers **simple `requires IDENT OP lit|ident`** at runtime (`c_emit_contract.oo`); structural skip still correct
-  - Residual: **ensures** + complex requires not lowered (bodies still emit; no false claim of full contracts)
-  - Pass: `bootstrap/corpus/emit-c/pass/fn_contracts_add.oo` + `fixtures/int_main.oo` / `hello.oo`
-  - Fail: `bootstrap/corpus/emit-c/fail/contract_no_brace.oo`; requires violation rail in `problem_hunt_smoke.sh`
-  - Smoke: `scripts/contracts_native_smoke.sh` + `scripts/problem_hunt_smoke.sh`
+- [x] **Contracts on native path** — Backend-C lowers **simple `requires IDENT OP lit|ident`** + **simple `ensures result OP lit|ident`** at runtime (`c_emit_contract.oo`); structural skip still correct
+  - **M51 multi-clause simple AND In** — multiple simple `requires`/`ensures` on one fn lower as sequential runtime checks (ensures cap 8); complex (`&&` / expr) still fail-closed at emit (no SMT / full contract language)
+  - Pass: `fixtures/requires_simple.oo` / `ensures_simple.oo` / `multi_clause_pass.oo` + `bootstrap/corpus/emit-c/pass/fn_contracts_add.oo`
+  - Fail: `fixtures/requires_fail.oo` / `ensures_fail.oo` / `multi_clause_{req,ens}_fail.oo`; complex: `bootstrap/corpus/emit-c/fail/{requires,ensures}_complex.oo`; `contract_no_brace.oo`
+  - Smoke: `scripts/contracts_native_smoke.sh` (+ nested `contracts_multi_clause_smoke.sh`) + `scripts/problem_hunt_smoke.sh`
 - [x] **Real `ooda test`** — run `verify` blocks (not only typecheck)
-  - Pure path: check → lower `assert_eq!` in `verify` → Backend-C harness build+run
-  - Scripts: `scripts/ooda_test_verify.sh` + `ooda_test_harness.py`; CLI `ooda test`
+  - Pure path: check → lower `assert_eq!`/`assert_ne!`/`assert!` in `verify` → emit-c+gcc harness (no Python / pure_build)
+  - Scripts: `scripts/ooda_test_verify.sh` + `ooda_verify_pure.sh`; CLI `ooda test`; smoke `verify_pure_smoke.sh`
   - Fixtures: `fixtures/verify_pass.oo` / `verify_fail.oo`; product smoke rails
-  - Residual: ensures not runtime; verify supports `assert_eq!`/`assert_ne!`/`assert!` only; non-fuzz verify may still use Python harness
+  - Residual: verify supports `assert_eq!`/`assert_ne!`/`assert!`/`let` only; complex contracts residual
+  - Legacy: `ooda_test_harness.py` retained but off critical path
 - [x] **`ooda test --fuzz` pure Int/Bool/String/List domains** — CLI un-gated; **`ooda_fuzz_pure.sh`** (no Python on `--fuzz` path); fixtures `fuzz_{int,bool,string,list}_{domain,fail}.oo`
   - Residual: multi-param pure fuzzer **not** shipped; other domains fail closed (`FUZZ_DEFER.md`)
   - Do **not** claim full multi-type pure-native fuzzer
@@ -121,6 +122,12 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
   - Residual: optional host FFI path; programs that need host dumps must opt into FFI
 
 ### P4 — Stretch (DESIGN or aligned)
+- [x] **Deterministic pure multi input fingerprint** (M20 / PM 4.3.2 partial depth)
+  - `scripts/oodac_pure_build.sh` prints `pure_build: input_fp=<sha256 hex>` over module `relpath\0`+contents (order = MODS)
+  - Same tree → same fingerprint on two pure multi runs; optional `PURE_BUILD_FP_OUT`
+  - Smoke: `scripts/pure_build_fp_smoke.sh` (in `ci_product` after residual/seed rails)
+  - Doc: `bootstrap/PURE_BUILD_FP.md`
+  - Residual: **not** bit-identical product binaries / full reproducible dist (timestamps, ASLR, host toolchain)
 - [x] LLVM production floor — **not claimed**; textual `emit-llvm` smoke only (M5 partial); see `bootstrap/P4_DROPS.md`
 - [x] WASM product run floor — **not claimed**; `.wat` emit smoke only (M4 partial); `P4_DROPS.md`
 - [x] Packaging/registry — **fail-closed residual** (no product registry; ship = tarball+pin only); `P4_DROPS.md`

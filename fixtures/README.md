@@ -17,7 +17,9 @@ This is **not** a public tutorial pack. Prefer `bootstrap/corpus/` for pass/fail
 | `std_{result,str,option}_main.oo` | `scripts/std_smoke.sh` |
 | `result_unwrap.oo` | Result `.unwrap()` Ok path |
 | `result_unwrap_err.oo` | Result `.unwrap()` Err → `ERR\tunwrap` + exit 1 |
-| `ensures_simple.oo` / `ensures_fail.oo` | ensures runtime rails |
+| `requires_simple.oo` / `requires_fail.oo` | simple requires runtime rails |
+| `ensures_simple.oo` / `ensures_fail.oo` | simple ensures runtime rails |
+| `multi_clause_pass.oo` / `multi_clause_{req,ens}_fail.oo` | M51 multi-clause simple AND rails |
 | `unauthorized_io.oo` | static cap deny (check) |
 | `em_demo.oo` | measured `ooda em` (In — parse/cap/typecheck µs + weight; no fake drag-%) |
 

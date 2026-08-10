@@ -64,6 +64,27 @@ collect() {
 }
 collect "$MAIN_ABS"
 
+# Stable content fingerprint of emit inputs (module path + body, deps-first order).
+# Same tree → same input_fp across runs. Does NOT claim bit-identical product binaries
+# (timestamps, ASLR, host toolchain may differ). See bootstrap/PURE_BUILD_FP.md.
+PURE_INPUT_FP="$(
+  {
+    for src in "${MODS[@]}"; do
+      if [[ "$src" == "$ROOT/"* ]]; then
+        rel="${src#"$ROOT"/}"
+      else
+        rel="$(basename "$src")"
+      fi
+      printf '%s\0' "$rel"
+      cat -- "$src"
+    done
+  } | sha256sum | awk '{print $1}'
+)"
+echo "pure_build: input_fp=$PURE_INPUT_FP"
+if [[ -n "${PURE_BUILD_FP_OUT:-}" ]]; then
+  printf '%s\n' "$PURE_INPUT_FP" >"$PURE_BUILD_FP_OUT"
+fi
+
 # Check gate always runs (R4). Fail-closed.
 # Product `oodac check` uses native .oo module cache (.ooda-cache/check):
 #   warm tree hit is sub-second; cold re-parses only uncached modules.
@@ -166,5 +187,6 @@ fi
 
 gcc -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" -lm -o "$OUT"
 test -x "$OUT"
+echo "pure_build: input_fp=$PURE_INPUT_FP"
 echo OK_PURE_MULTI
 rm -rf "$TMP"

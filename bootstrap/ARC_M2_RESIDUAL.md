@@ -21,6 +21,7 @@
 1. **While/if mut UAF:** reassignment used top-frame `c_env_put`, so `scope_exit` freed outer `mut` each iteration.
 2. **Nested bare block:** `c_emit_all_scope_releases` freed outer locals at `}`.
 3. **Headerless malloc strings:** crypto/json free of `data-8` corrupted heap.
+4. **Match-assign outer mut UAF (M23):** `name = match …` used `c_env_put` → top-appended into enclosing `if` frame; `scope_exit` freed outer `mut` (`out`/`ec_s` in `run_check_json_errors`) → null-byte / truncated `ERR\tcapability` under free. Fixed: `decl=0` uses `c_env_put_last` in `c_emit_match.oo`.
 
 ## Residual (not M2 gate)
 

@@ -1,9 +1,32 @@
 # sourced by ooda_fuzz_pure.sh — PRNG generators + domain emit helpers
-# Domain-typed sample/call (uses DOMAIN, tmin, tmax, fname from caller)
+# Domain-typed sample/call (uses DOMAIN, tmin, tmax, fname, ARITY from caller)
 # List[Int] element range constants (gen_list_int_val): min=-8, max=16
+# M49/M56 multi-arg: arity helpers in ooda_fuzz_pure_arity.sh
 
 emit_fuzz_sample_let() {
-  local ind="${1:-        }"
+  local ind="${1:-        }" a="${ARITY:-1}"
+  if [[ "$DOMAIN" == "bool" && "$a" -eq 2 ]]; then
+    echo "${ind}let __fuzz_x: Bool = gen_bool_val(__fuzz_prng_st);"
+    echo "${ind}__fuzz_prng_st = prng_step(__fuzz_prng_st);"
+    echo "${ind}let __fuzz_y: Bool = gen_bool_val(__fuzz_prng_st);"
+    return
+  fi
+  if [[ "$DOMAIN" == "string" && "$a" -eq 2 ]]; then
+    echo "${ind}let __fuzz_x: String = gen_string_val(__fuzz_prng_st, ${tmin}, ${tmax});"
+    echo "${ind}__fuzz_prng_st = prng_step(__fuzz_prng_st);"
+    echo "${ind}let __fuzz_y: String = gen_string_val(__fuzz_prng_st, ${tmin}, ${tmax});"
+    return
+  fi
+  if [[ "$a" -eq 2 || "$a" -eq 3 ]]; then
+    echo "${ind}let __fuzz_x: Int = gen_int_val(__fuzz_prng_st, ${tmin}, ${tmax});"
+    echo "${ind}__fuzz_prng_st = prng_step(__fuzz_prng_st);"
+    echo "${ind}let __fuzz_y: Int = gen_int_val(__fuzz_prng_st, ${tmin}, ${tmax});"
+    if [[ "$a" -eq 3 ]]; then
+      echo "${ind}__fuzz_prng_st = prng_step(__fuzz_prng_st);"
+      echo "${ind}let __fuzz_z: Int = gen_int_val(__fuzz_prng_st, ${tmin}, ${tmax});"
+    fi
+    return
+  fi
   case "$DOMAIN" in
     bool) echo "${ind}let __fuzz_x: Bool = gen_bool_val(__fuzz_prng_st);" ;;
     string) echo "${ind}let __fuzz_x: String = gen_string_val(__fuzz_prng_st, ${tmin}, ${tmax});" ;;
@@ -13,13 +36,60 @@ emit_fuzz_sample_let() {
 }
 
 emit_fuzz_call_let() {
-  local ind="${1:-            }"
+  local ind="${1:-            }" a="${ARITY:-1}"
+  if [[ "$DOMAIN" == "bool" && "$a" -eq 2 ]]; then
+    echo "${ind}let __fuzz_r: Bool = ${fname}(__fuzz_x, __fuzz_y);"; return
+  fi
+  if [[ "$DOMAIN" == "string" && "$a" -eq 2 ]]; then
+    echo "${ind}let __fuzz_r: String = ${fname}(__fuzz_x, __fuzz_y);"; return
+  fi
+  if [[ "$a" -eq 3 ]]; then
+    echo "${ind}let __fuzz_r: Int = ${fname}(__fuzz_x, __fuzz_y, __fuzz_z);"; return
+  fi
+  if [[ "$a" -eq 2 ]]; then
+    echo "${ind}let __fuzz_r: Int = ${fname}(__fuzz_x, __fuzz_y);"; return
+  fi
   case "$DOMAIN" in
     bool) echo "${ind}let __fuzz_r: Bool = ${fname}(__fuzz_x);" ;;
     string) echo "${ind}let __fuzz_r: String = ${fname}(__fuzz_x);" ;;
     list) echo "${ind}let __fuzz_r: List[Int] = ${fname}(__fuzz_x);" ;;
     *) echo "${ind}let __fuzz_r: Int = ${fname}(__fuzz_x);" ;;
   esac
+}
+
+# Strip FUZZ markers, requires/ensures, and main from source → body file.
+fuzz_strip_body() {
+  local src="$1" out="$2"
+  awk '
+    function brace_delta(s,   i, c, d) {
+      d = 0
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "{") d++
+        if (c == "}") d--
+      }
+      return d
+    }
+    BEGIN { in_main = 0; depth = 0; main_seen_brace = 0 }
+    /^[[:space:]]*\/\/[[:space:]]*FUZZ_/ { next }
+    /^[[:space:]]*requires[[:space:]]/ { next }
+    /^[[:space:]]*ensures[[:space:]]/ { next }
+    !in_main && /^(pub[[:space:]]+)?fn[[:space:]]+main[[:space:]]*\(/ {
+      in_main = 1; depth = 0; main_seen_brace = 0
+    }
+    in_main {
+      d = brace_delta($0)
+      if (d != 0 || index($0, "{") || index($0, "}")) {
+        main_seen_brace = 1
+        depth += d
+        if (main_seen_brace && depth <= 0) {
+          in_main = 0; depth = 0; main_seen_brace = 0
+        }
+      }
+      next
+    }
+    { print }
+  ' "$src" >"$out"
 }
 
 emit_fuzz_generators() {

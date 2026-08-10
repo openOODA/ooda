@@ -39,6 +39,7 @@ Classic `0x4F4F*` constants are **forged values that must be denied**, not ambie
 - Cryptographically secure randomness or attested clocks  
 - Heap sandboxing, ASAN, or OS `rlimit` isolation for AllocCap  
 - Ambient effects without an explicit cap param on the product path  
+- **C FFI / `dlopen` / raw-pointer / Compile-Time FFI seal** — process-local caps do **not** seal C interop; `&UnsafeFFICap` is residual-only (see [`CAP_FFI.md`](CAP_FFI.md))  
 
 ---
 
@@ -57,5 +58,6 @@ Classic `0x4F4F*` constants are **forged values that must be denied**, not ambie
 ## Related
 
 - `bootstrap/CAPS_MATRIX.md`  
+- `bootstrap/CAP_FFI.md` — Cap vs FFI residual (PM 6.3 / M25); process-local seals ≠ FFI sandbox  
 - `runtime/chs_rt_sys.c`, `chs_rt_fs.c`, `chs_rt_time_rand.c`, `chs_rt_alloc.c`  
 - `oodac/check_caps.oo`, `check_cap_util.oo`, `c_emit_fn.oo`, `c_emit_lower.oo`  

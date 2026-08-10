@@ -68,6 +68,29 @@ else
   echo "OK residual_honesty: ooda_test_verify wires ooda_fuzz_pure.sh"
 fi
 
+if ! grep -q 'ooda_verify_pure.sh' scripts/ooda_test_verify.sh; then
+  echo "FAIL residual_honesty: ooda_test_verify.sh missing ooda_verify_pure.sh" >&2
+  fail=1
+else
+  echo "OK residual_honesty: ooda_test_verify wires ooda_verify_pure.sh"
+fi
+
+# M50: no Python harness / multi pure-build on ooda test critical path (ignore comments)
+if grep -vE '^[[:space:]]*#' scripts/ooda_test_verify.sh \
+  | grep -nE 'python3|[[:space:]]ooda_test_harness\.py|oodac_pure_build\.sh' 2>/dev/null; then
+  echo "FAIL residual_honesty: ooda_test_verify still invokes Python harness" >&2
+  fail=1
+else
+  echo "OK residual_honesty: no Python on ooda_test_verify critical path"
+fi
+if grep -vE '^[[:space:]]*#' scripts/ooda_test_verify.sh \
+  | grep -nE 'oodac_pure_build\.sh' 2>/dev/null; then
+  echo "FAIL residual_honesty: ooda_test_verify invokes pure multi build" >&2
+  fail=1
+else
+  echo "OK residual_honesty: ooda_test_verify has no pure multi build"
+fi
+
 if grep -q 'PURE_NO_ARC="${PURE_NO_ARC:-0}"' scripts/bootstrap_no_cargo.sh; then
   echo "OK residual_honesty: bootstrap default PURE_NO_ARC=0"
 else

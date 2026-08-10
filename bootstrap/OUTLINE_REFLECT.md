@@ -79,10 +79,12 @@ Optional second arg filters to items whose `name` matches (function and/or verif
 **Example** (`fixtures/hello.oo`):
 
 ```text
-{"kind":"fn","name":"greet",…,"requires":["name.len() > 0"],"ensures":["result.len() > 0"],"caps":[]}
+{"kind":"fn","name":"greet",…,"requires":[],"ensures":[],"caps":[]}
 {"kind":"verify","name":"greet"}
 {"kind":"fn","name":"main",…}
 ```
+
+(Complex contracts like `name.len() > 0` are residual on Backend-C emit — fail-closed; outline/reflect still may surface them when present.)
 
 ---
 

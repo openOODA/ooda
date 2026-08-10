@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# job: native Backend-C contracts smoke (requires + simple ensures + complex ensures fail-closed)
+# job: native Backend-C contracts smoke (simple + complex fail-closed; M51 via multi_clause smoke)
 # stage: test
-# residual: complex requires may still be best-effort; simple ensures are runtime
+# residual: complex requires/ensures (&& / expr) only — multi simple clause AND is In (M51)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
@@ -15,6 +15,9 @@ fi
 
 PASS="$ROOT/bootstrap/corpus/emit-c/pass/fn_contracts_add.oo"
 FAIL="$ROOT/bootstrap/corpus/emit-c/fail/contract_no_brace.oo"
+REQ_PASS="$ROOT/fixtures/requires_simple.oo"
+REQ_FAIL="$ROOT/fixtures/requires_fail.oo"
+REQ_CX="$ROOT/bootstrap/corpus/emit-c/fail/requires_complex.oo"
 ENS_PASS="$ROOT/fixtures/ensures_simple.oo"
 ENS_FAIL="$ROOT/fixtures/ensures_fail.oo"
 ENS_CX="$ROOT/bootstrap/corpus/emit-c/fail/ensures_complex.oo"
@@ -120,6 +123,63 @@ echo "$outb" | grep -q '42' || {
 }
 echo "OK contracts build int_main"
 
+# --- M19 simple requires: pass runtime ---
+if [[ -f "$REQ_PASS" ]]; then
+  c_rq="$(emit_ok "$REQ_PASS")"
+  if ! grep -qE 'if \(!\(|requires' "$c_rq"; then
+    echo "FAIL requires_simple missing requires lower" >&2
+    head -80 "$c_rq" >&2
+    exit 1
+  fi
+  bin_rq="$TMPDIR/requires_simple.bin"
+  gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$c_rq" -o "$bin_rq" -lm
+  out_rq="$(timeout 3 "$bin_rq")"
+  echo "$out_rq" | grep -qE '3' || {
+    echo "FAIL requires_simple run expected 3 got: $out_rq" >&2
+    exit 1
+  }
+  echo "OK requires pass requires_simple"
+fi
+
+# --- M19 simple requires: fail runtime ---
+if [[ -f "$REQ_FAIL" ]]; then
+  c_rf="$(emit_ok "$REQ_FAIL")"
+  bin_rf="$TMPDIR/requires_fail.bin"
+  gcc -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$c_rf" -o "$bin_rf" -lm
+  set +e
+  out_rf="$(timeout 3 "$bin_rf" 2>&1)"
+  rfrc=$?
+  set -e
+  if [[ $rfrc -eq 0 ]]; then
+    echo "FAIL requires_fail should non-zero out=$out_rf" >&2
+    exit 1
+  fi
+  if ! echo "$out_rf" | grep -qiE 'contract|requires'; then
+    echo "FAIL requires_fail missing contract/requires needle out=$out_rf" >&2
+    exit 1
+  fi
+  echo "OK requires fail requires_fail (rc=$rfrc)"
+fi
+
+# --- M19 complex requires: emit fail-closed ---
+if [[ -f "$REQ_CX" ]]; then
+  c_rcx="$TMPDIR/requires_complex.c"
+  err_rcx="$TMPDIR/requires_complex.err"
+  set +e
+  "$OODAC" emit-c "$REQ_CX" >"$c_rcx" 2>"$err_rcx"
+  rcxrc=$?
+  set -e
+  if grep -qE $'^ERR\tc_emit\trequires residual' "$c_rcx" "$err_rcx" 2>/dev/null; then
+    echo "OK requires complex fail-closed (ERR residual)"
+  elif [[ $rcxrc -ne 0 ]]; then
+    echo "OK requires complex fail-closed (exit $rcxrc)"
+  else
+    echo "FAIL requires complex should fail-closed at emit" >&2
+    head -20 "$c_rcx" "$err_rcx" >&2
+    exit 1
+  fi
+fi
+
 # --- M9 simple ensures: pass runtime ---
 if [[ -f "$ENS_PASS" ]]; then
   c_ens="$(emit_ok "$ENS_PASS")"
@@ -176,5 +236,8 @@ if [[ -f "$ENS_CX" ]]; then
     exit 1
   fi
 fi
+
+# M51 multi-clause simple AND (separate script keeps this file ≤ MAX_LINES)
+bash "$ROOT/scripts/contracts_multi_clause_smoke.sh"
 
 echo "contracts_native_smoke: pass+fail OK"

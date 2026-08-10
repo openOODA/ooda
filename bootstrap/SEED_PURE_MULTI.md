@@ -37,8 +37,10 @@ No **active** residual line is present (smoke greps only for a start-of-line
 
 **Honesty:** if tip sources later break under seed emit, flip this section to residual
 and add the active marker line (below). Never claim seed is current when pure multi fails.
-Some emit-host chains can produce larger free-hostile self-hosts (json string UAF);
-prefer a known free-safe seed pin for product `oodac` when refreshing.
+Match-assign free-ARC json UAF (outer mut freed at if scope_exit) is fixed in tip
+`c_emit_match.oo` (`decl=0` → `c_env_put_last`); rebuild free self-host before
+claiming seed/product free-safe for `--json-errors`. Prefer a known free-safe
+seed pin when refreshing until stage-2 re-prove.
 
 ## Residual honesty (if seed lags later)
 
@@ -48,9 +50,8 @@ If cold seed cannot emit current tree modules (mis-type / `ERR_EMIT` / bad binar
 2. Do **not** claim seed is current.
 3. Document lag with an **active** status line the smoke greps (`^ACTIVE: RESIDUAL_SEED_PURE_MULTI`):
 
-        ACTIVE: RESIDUAL_SEED_PURE_MULTI: ERR_EMIT oodac/c_emit_arc.oo (seed lag)
 
-   (Indent that line left-flush at column 0 in this file — not in a fenced block.)
+   (That ACTIVE line must be left-flush at column 0 — not in a fenced block.)
 
 When that active line is present **and** pure multi fails, `seed_pure_multi_smoke.sh`
 prints `RESIDUAL_SEED_PURE_MULTI` and exits 0 (CI honesty is mechanical).
@@ -88,5 +89,7 @@ Or extract from a release pack (see `bootstrap/seed/README.md`).
 | `scripts/fixed_point.sh` | seed preference includes `bootstrap/seed/oodac` |
 | `scripts/seed_dress_rehearsal.sh` | offline bootstrap dress (full product path) |
 | `scripts/seed_pure_multi_smoke.sh` | **this** M15 side-path pure multi rail |
+| `scripts/pure_build_fp_smoke.sh` | M20 input_fp stability (content only; not bit-identical bins) |
+| `bootstrap/PURE_BUILD_FP.md` | pure multi input fingerprint contract |
 | `bootstrap/seed/README.md` | seed placement / integrity |
 | `bootstrap/ARC_M2_RESIDUAL.md` | ARC residual (orthogonal to seed multi green) |
