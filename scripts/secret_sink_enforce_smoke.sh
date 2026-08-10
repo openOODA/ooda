@@ -123,3 +123,45 @@ fi
 if [[ -f "$ROOT/fixtures/secret_file_size_pass.oo" ]]; then
   expect_ok "secret_file_size_pass" "$ROOT/fixtures/secret_file_size_pass.oo"
 fi
+
+if [[ -f "$ROOT/fixtures/secret_write_file_path_fail.oo" ]]; then
+  expect_refuse "secret_write_file_path_fail" "$ROOT/fixtures/secret_write_file_path_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_write_file_path_pass.oo" ]]; then
+  expect_ok "secret_write_file_path_pass" "$ROOT/fixtures/secret_write_file_path_pass.oo"
+fi
+
+if [[ -f "$ROOT/fixtures/secret_seed_fail.oo" ]]; then
+  expect_refuse "secret_seed_fail" "$ROOT/fixtures/secret_seed_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_seed_pass.oo" ]]; then
+  expect_ok "secret_seed_pass" "$ROOT/fixtures/secret_seed_pass.oo"
+fi
+
+if [[ -f "$ROOT/fixtures/secret_sleep_ms_fail.oo" ]]; then
+  expect_refuse "secret_sleep_ms_fail" "$ROOT/fixtures/secret_sleep_ms_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_sleep_ms_pass.oo" ]]; then
+  expect_ok "secret_sleep_ms_pass" "$ROOT/fixtures/secret_sleep_ms_pass.oo"
+fi
+
+if [[ -f "$ROOT/fixtures/secret_free_bytes_fail.oo" ]]; then
+  expect_refuse "secret_free_bytes_fail" "$ROOT/fixtures/secret_free_bytes_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_free_bytes_pass.oo" ]]; then
+  expect_ok "secret_free_bytes_pass" "$ROOT/fixtures/secret_free_bytes_pass.oo"
+fi
+
+if [[ -f "$ROOT/fixtures/secret_alloc_bytes_fail.oo" ]]; then
+  expect_refuse "secret_alloc_bytes_fail" "$ROOT/fixtures/secret_alloc_bytes_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_alloc_bytes_pass.oo" ]]; then
+  expect_ok "secret_alloc_bytes_pass" "$ROOT/fixtures/secret_alloc_bytes_pass.oo"
+fi
+
+if [[ -f "$ROOT/fixtures/secret_process_exit_fail.oo" ]]; then
+  expect_refuse "secret_process_exit_fail" "$ROOT/fixtures/secret_process_exit_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_process_exit_pass.oo" ]]; then
+  expect_ok "secret_process_exit_pass" "$ROOT/fixtures/secret_process_exit_pass.oo"
+fi
