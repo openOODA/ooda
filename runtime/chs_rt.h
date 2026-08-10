@@ -135,3 +135,5 @@ long long oo_alloc_bytes(long long cap, long long n);
 void oo_free_bytes(long long cap, long long p);
 
 #endif
+long long oo_cg_sign(void);
+int oo_cg_verify(long long sig);
