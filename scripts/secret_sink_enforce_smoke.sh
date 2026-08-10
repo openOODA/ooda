@@ -109,3 +109,10 @@ fi
 if [[ -f "$ROOT/fixtures/secret_read_file_pass.oo" ]]; then
   expect_ok "secret_read_file_pass" "$ROOT/fixtures/secret_read_file_pass.oo"
 fi
+
+if [[ -f "$ROOT/fixtures/secret_path_exists_fail.oo" ]]; then
+  expect_refuse "secret_path_exists_fail" "$ROOT/fixtures/secret_path_exists_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_path_exists_pass.oo" ]]; then
+  expect_ok "secret_path_exists_pass" "$ROOT/fixtures/secret_path_exists_pass.oo"
+fi
