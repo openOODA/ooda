@@ -41,5 +41,5 @@ path A bare IDENT println refuse is product In.
 
 ## Fail-closed residual
 
-Do **not** treat partial sink refuse as full static taint analysis shipped.
+Do **not** claim the whole secrecy story is product-green.
 Fail-closed residual: unfinished sinks stay residual, not soft-pass.
