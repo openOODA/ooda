@@ -87,6 +87,7 @@ for rail in \
   problem_hunt_smoke.sh \
   caps_matrix_smoke.sh \
   alloc_cap_smoke.sh \
+  list_quota_smoke.sh \
   import_load_smoke.sh \
   contracts_native_smoke.sh \
   contracts_multi_clause_smoke.sh \
@@ -106,6 +107,7 @@ for rail in \
   max_cycles_enforce_smoke.sh \
   max_cycles_for_enforce_smoke.sh \
   max_cycles_shared_smoke.sh \
+  max_cycles_recursion_smoke.sh \
   max_cycles_residual_smoke.sh \
   secret_sink_enforce_smoke.sh \
   secret_taint_residual_smoke.sh \

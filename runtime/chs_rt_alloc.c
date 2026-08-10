@@ -1,5 +1,6 @@
 /* M17: process-local AllocCap — explicit alloc helpers only.
- * Not OS rlimit / heap isolation / ASAN. Ambient list_new remains free. */
+ * Not OS rlimit / heap isolation / ASAN.
+ * Ambient List growth is quota-bounded (chs_rt_list); alloc_bytes raises ceiling. */
 #include "chs_rt.h"
 #include <unistd.h>
 #if defined(__linux__)
@@ -50,10 +51,13 @@ void oo_cap_require_alloc(long long got, const char *op) {
   }
 }
 
-/* Smoke-friendly: re-check cap then return n as opaque size token (not real mmap). */
+/* Smoke-friendly: re-check cap then return n as opaque size token (not real mmap).
+ * Raises ambient List ceiling after env init (so OO_LIST_AMBIENT_QUOTA is base). */
 long long oo_alloc_bytes(long long cap, long long n) {
+  extern void oo_list_quota_init_public(void);
   oo_cap_require_alloc(cap, "alloc_bytes");
   if (n < 0) n = 0;
+  oo_list_quota_init_public();
   oo_list_ambient_quota += n;
   return n;
 }

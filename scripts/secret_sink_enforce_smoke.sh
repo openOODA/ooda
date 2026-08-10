@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M52/M53 Secret — Backend-C println bare-IDENT refuse + direct IDENT assign-prop
-# residual: interproc / concat taint / NetCap / #[Secret]
+# residual: NetCap/fetch / #[Secret] attr / full IFC (interproc+concat+write_file In)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
@@ -44,6 +44,13 @@ expect_refuse "secret_chain_fail" "$ROOT/fixtures/secret_chain_fail.oo"
 expect_refuse "secret_concat_fail" "$ROOT/fixtures/secret_concat_fail.oo"
 expect_refuse "secret_call_return_fail" "$ROOT/fixtures/secret_call_return_fail.oo"
 expect_refuse "secret_call_arg_fail" "$ROOT/fixtures/secret_call_arg_fail.oo"
+# M128 write_file non-println sink
+if [[ -f "$ROOT/fixtures/secret_write_file_fail.oo" ]]; then
+  expect_refuse "secret_write_file_fail" "$ROOT/fixtures/secret_write_file_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_write_file_pass.oo" ]]; then
+  expect_ok "secret_write_file_pass" "$ROOT/fixtures/secret_write_file_pass.oo"
+fi
 # M65 empty SECRET name fail-closed
 if [[ -f "$ROOT/fixtures/secret_invalid_empty.oo" ]]; then
   
@@ -63,9 +70,9 @@ fi
 
 [[ -f "$DOC" ]] || bad "missing SECRET_TAINT.md"
 grep -q 'SECRET_TAINT_RESIDUAL_ALPHA' "$DOC" || bad "doc missing residual marker"
-grep -qiE 'interprocedural' "$DOC" || bad "doc missing interprocedural residual"
 grep -qiE 'NetCap|netcap' "$DOC" || bad "doc missing NetCap residual"
-pass "residual doc still honest"
+grep -qiE 'write_file' "$DOC" || bad "doc missing write_file sink"
+pass "residual doc still honest (NetCap residual; write_file named)"
 
 if grep -q 'secret_sink_enforce_smoke' "$ROOT/scripts/ci_product.sh" 2>/dev/null; then
   pass "ci_product wires secret_sink_enforce_smoke"

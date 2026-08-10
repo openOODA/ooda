@@ -1,11 +1,27 @@
 #include "chs_rt.h"
 
+/* Default ambient budget for list payloads (not OS rlimit). Override via
+ * OO_LIST_AMBIENT_QUOTA (bytes, positive). alloc_bytes raises the ceiling. */
 long long oo_list_ambient_quota = 64LL * 1024 * 1024;
 long long oo_list_ambient_bytes = 0;
+
+void oo_list_quota_init_public(void) {
+  static int ready;
+  const char *e;
+  long long v;
+  if (ready) return;
+  ready = 1;
+  e = getenv("OO_LIST_AMBIENT_QUOTA");
+  if (e && e[0]) {
+    v = atoll(e);
+    if (v > 0) oo_list_ambient_quota = v;
+  }
+}
 
 void *oo_list_alloc_payload(size_t elem_size, size_t cap) {
   if (cap == 0) return NULL;
   size_t bytes = sizeof(OoListHeader) + cap * elem_size;
+  oo_list_quota_init_public();
   if (oo_list_ambient_bytes + (long long)bytes > oo_list_ambient_quota) {
     fprintf(stderr, "ERR\tcap\tambient List memory quota exceeded (AllocCap required)\n");
     exit(1);

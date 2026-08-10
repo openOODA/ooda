@@ -53,6 +53,25 @@ else
   echo "OK fail-closed unsupported for (exit=$ec2)"
 fi
 
+# 3) M129 Secret sink refuse on emit-llvm (same dual-path as check)
+SEC="$ROOT/fixtures/secret_sink_fail.oo"
+if [[ -f "$SEC" ]]; then
+  set +e
+  "$OODAC" emit-llvm "$SEC" >"$TMP/sec.ll" 2>"$TMP/sec.err"
+  ec3=$?
+  set -e
+  if [[ $ec3 -eq 0 ]]; then
+    echo "FAIL expected non-zero emit-llvm on secret_sink_fail" >&2
+    fail=1
+  elif ! grep -qE $'ERR\tsecret|secret' "$TMP/sec.ll" "$TMP/sec.err" 2>/dev/null; then
+    echo "FAIL missing secret ERR on llvm secret_sink_fail" >&2
+    cat "$TMP/sec.err" >&2 || true
+    fail=1
+  else
+    echo "OK fail-closed secret on emit-llvm (exit=$ec3)"
+  fi
+fi
+
 if [[ "$fail" -ne 0 ]]; then
   echo "llvm_fail_closed_smoke: FAILED" >&2
   exit 1

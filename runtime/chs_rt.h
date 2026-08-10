@@ -51,8 +51,12 @@ typedef struct {
   OoStr err;
 } OoResV;
 
-/* Internal payload allocation helpers */
+/* Internal payload allocation helpers.
+ * Ambient List quota: default 64MiB; override OO_LIST_AMBIENT_QUOTA (bytes).
+ * Not OS rlimit; raise ceiling via alloc_bytes(&AllocCap, n). */
 extern long long oo_list_ambient_quota;
+extern long long oo_list_ambient_bytes;
+void oo_list_quota_init_public(void);
 char *oo_str_alloc_payload(size_t len);
 void *oo_list_alloc_payload(size_t elem_size, size_t cap);
 
