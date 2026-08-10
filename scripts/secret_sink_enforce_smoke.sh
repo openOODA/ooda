@@ -102,3 +102,10 @@ else
 fi
 
 echo "OK secret_sink_enforce_smoke"
+
+if [[ -f "$ROOT/fixtures/secret_read_file_fail.oo" ]]; then
+  expect_refuse "secret_read_file_fail" "$ROOT/fixtures/secret_read_file_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_read_file_pass.oo" ]]; then
+  expect_ok "secret_read_file_pass" "$ROOT/fixtures/secret_read_file_pass.oo"
+fi
