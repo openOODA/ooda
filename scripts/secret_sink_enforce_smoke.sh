@@ -57,6 +57,12 @@ fi
 if [[ -f "$ROOT/fixtures/secret_fetch_pass.oo" ]]; then
   expect_ok "secret_fetch_pass" "$ROOT/fixtures/secret_fetch_pass.oo"
 fi
+if [[ -f "$ROOT/fixtures/secret_sys_exec_fail.oo" ]]; then
+  expect_refuse "secret_sys_exec_fail" "$ROOT/fixtures/secret_sys_exec_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_sys_exec_pass.oo" ]]; then
+  expect_ok "secret_sys_exec_pass" "$ROOT/fixtures/secret_sys_exec_pass.oo"
+fi
 if [[ -f "$ROOT/fixtures/secret_multi_arg_println_fail.oo" ]]; then
   expect_refuse "secret_multi_arg_println_fail" "$ROOT/fixtures/secret_multi_arg_println_fail.oo"
 fi
@@ -74,7 +80,8 @@ fi
 grep -q 'SECRET_TAINT_RESIDUAL_ALPHA' "$DOC" || bad "doc missing residual marker"
 grep -qiE 'fetch' "$DOC" || bad "doc missing fetch sink"
 grep -qiE 'write_file' "$DOC" || bad "doc missing write_file sink"
-pass "residual doc honest (fetch named; residual IFC)"
+grep -qiE 'sys_exec' "$DOC" || bad "doc missing sys_exec sink"
+pass "residual doc honest (fetch/sys_exec named; residual IFC)"
 
 if grep -q 'secret_sink_enforce_smoke' "$ROOT/scripts/ci_product.sh" 2>/dev/null; then
   pass "ci_product wires secret_sink_enforce_smoke"

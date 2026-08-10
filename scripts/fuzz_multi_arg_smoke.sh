@@ -169,6 +169,31 @@ else
   head -20 "$TMPDIR/fuzz_str_weak.err" "$TMPDIR/fuzz_str_weak.out" 2>/dev/null || true
 fi
 
+# --- M137 List arity-2 pass / fail ---
+set +e
+timeout 60 "$OODA" test "$ROOT/fixtures/fuzz_list_multi_id.oo" --fuzz 20 \
+  >"$TMPDIR/fuzz_list_multi_pass.out" 2>"$TMPDIR/fuzz_list_multi_pass.err"
+lmp=$?
+set -e
+if [[ $lmp -eq 0 ]]; then
+  pass "fuzz multi-arg List arity-2 pass"
+else
+  bad "fuzz multi-arg List arity-2 pass rc=$lmp"
+  head -20 "$TMPDIR/fuzz_list_multi_pass.err" "$TMPDIR/fuzz_list_multi_pass.out" 2>/dev/null || true
+fi
+
+set +e
+timeout 60 "$OODA" test "$ROOT/fixtures/fuzz_list_multi_fail.oo" --fuzz 20 \
+  >"$TMPDIR/fuzz_list_multi_fail.out" 2>"$TMPDIR/fuzz_list_multi_fail.err"
+lmf=$?
+set -e
+if [[ $lmf -ne 0 ]]; then
+  pass "fuzz multi-arg List arity-2 fail-rail (rc=$lmf)"
+else
+  bad "fuzz multi-arg List arity-2 fail-rail expected non-zero"
+  head -20 "$TMPDIR/fuzz_list_multi_fail.out" 2>/dev/null || true
+fi
+
 # --- residual: multi-arg List domain pass ---
 set +e
 timeout 30 "$OODA" test "$ROOT/fixtures/fuzz_list_multi_weak.oo" --fuzz 5 \
