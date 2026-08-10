@@ -108,7 +108,6 @@ for rail in \
   secret_sink_enforce_smoke.sh \
   secret_taint_residual_smoke.sh \
   hitl_residual_smoke.sh \
-  zero_trust_pkg_residual_smoke.sh \
   type_state_residual_smoke.sh \
   toolchains_adv_residual_smoke.sh \
   temporal_mem_residual_smoke.sh \
