@@ -378,7 +378,7 @@ Same pipeline. Split when **touching** the file or after oodac peer exists. Do n
 6. Tests/install/runtime/scripts      ← when they block Lock O=0
 ```
 
-**O=0** only when Part A–C all clear (or exceptions explicitly revoked in TOOLS — none today).
+**O=0** only when Part A–C all clear (or exceptions explicitly revoked in RULES — none today).
 
 ---
 
@@ -438,4 +438,4 @@ Same pipeline. Split when **touching** the file or after oodac peer exists. Do n
 
 ---
 
-*Product architecture: `DESIGN.md`. Beta: `BETA.md`. Process lenses: `TOOLS.md`. Line Lock: `scripts/check_file_lines.sh`.*
+*Product architecture: `DESIGN.md`. Beta: `BETA.md`. Process lenses: monorepo `RULES.md` / `OODA.md`. Line Lock: `scripts/check_file_lines.sh`.*

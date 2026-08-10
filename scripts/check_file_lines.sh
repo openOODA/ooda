@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Lock: owned source files must be ≤ MAX_LINES (default 256).
-# See bootstrap/SPLIT_PLAN.md and TOOLS.md (entropy O).
+# See bootstrap/SPLIT_PLAN.md and monorepo RULES.md (entropy O / line pressure).
 #
 # Usage:
 #   ./scripts/check_file_lines.sh           # list violators; exit 1 if any
