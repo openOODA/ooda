@@ -45,7 +45,7 @@
 ## Softeners inventory (do not delete without free plan)
 - `scripts/pure_rewrite_formals.py`
 - `scripts/pure_rewrite_alias_retain.py`
-- `scripts/oodac_pure_rewrite.py` (wires both when PURE_NO_ARC≠1)
+- `scripts/oodac_pure_rewrite.py` **retired** (native `c_emit` grants caps; file → `.retired`)
 
 ## Suggested debt-scan order
 1. M2 free ownership graph (seed emit vs tree)

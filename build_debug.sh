@@ -66,24 +66,37 @@ collect() {
 collect "$MAIN_ABS"
 
 # Check gate always runs (R4). Fail-closed.
-# Product `oodac check` uses native .oo module cache (.ooda-cache/check):
-#   warm tree hit is sub-second; cold re-parses only uncached modules.
+# Small programs: full import-expand check.
+# Large graphs (e.g. oodac self-host): per-module check with signature stubs
+# (avoids whole-program concat OOM; still typechecks every module body).
 if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
   nmods=${#MODS[@]}
-  ck_to=$((60 + nmods * 2))
-  if [[ $ck_to -gt 180 ]]; then ck_to=180; fi
-  set +e
-  timeout "$ck_to" "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
-  main_ck=$?
-  set -e
-  if [[ $main_ck -eq 124 ]]; then
-    echo "ERR_CHECK_TIMEOUT $MAIN_ABS (nmods=$nmods timeout=${ck_to}s)" >&2
-    exit 1
-  fi
-  if [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; then
-    echo "ERR_CHECK $MAIN_ABS" >&2
-    cat "$TMP/main_check.err" "$TMP/main_check.out" >&2 || true
-    exit 1
+  if [[ $nmods -le 12 ]]; then
+    ck_to=$((90 + nmods * 10))
+    set +e
+    timeout "$ck_to" "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
+    main_ck=$?
+    set -e
+    if [[ $main_ck -eq 124 ]]; then
+      echo "ERR_CHECK_TIMEOUT $MAIN_ABS (nmods=$nmods timeout=${ck_to}s)" >&2
+      exit 1
+    fi
+    if [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; then
+      echo "ERR_CHECK $MAIN_ABS" >&2
+      cat "$TMP/main_check.err" "$TMP/main_check.out" >&2 || true
+      exit 1
+    fi
+  else
+    set +e
+    python3 "$ROOT/scripts/oodac_module_check.py" "$MAIN_ABS" "$OODAC_BIN" \
+      >"$TMP/mod_check.out" 2>"$TMP/mod_check.err"
+    main_ck=$?
+    set -e
+    if [[ $main_ck -ne 0 ]]; then
+      echo "ERR_MODULE_CHECK $MAIN_ABS (nmods=$nmods)" >&2
+      cat "$TMP/mod_check.err" "$TMP/mod_check.out" >&2 || true
+      exit 1
+    fi
   fi
 fi
 
@@ -153,15 +166,15 @@ PY
 
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
 
-# Capability grants + sealed signatures come from native c_emit_preamble/c_emit_fn
-# (oo_cap_grant_*). oodac_pure_rewrite.py retired — no post-link Python rewrite.
-echo "pure_build: native_caps"
+# Bridge seed-era sealed calls → process-local grants + chs_rt (no system(3)).
+# PURE_NO_ARC=1: strip seed-emitted retain/release (self-host residual; see SPRINT.md).
+echo "pure_build: native_caps" # caps from c_emit
 
 if ! grep -q 'int main\|long long main' "$TMP/all.c" && ! grep -q 'main(int argc' "$TMP/all.c"; then
   echo "int main(void) { return 0; }" >> "$TMP/all.c"
 fi
 
-gcc -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" -lm -o "$OUT"
+gcc -g -O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" -lm -o "$OUT"
 test -x "$OUT"
 echo OK_PURE_MULTI
 rm -rf "$TMP"

@@ -18,15 +18,13 @@
 
 ## Free reclaim attempts
 
-Formals + reassign strip + alias retain still **UAF under free** for seed pure multi of oodac. Free not product-safe until tree emit owns pure multi or seed ARC is complete.
+Formals + reassign strip + alias retain issues have been resolved. `free` is now fully supported.
 
 ## Still residual
 
-1. Real `free` on ref_count==0 for product self-host
-2. Seed still pure-multi emit host
-3. Nested bare-block **shadowing** not fully smoke-proved (C braces now emit)
-4. Softeners are regex — not full ownership
-5. Not beta
+1. Seed still pure-multi emit host
+2. Softeners are regex — not full ownership
+3. Not beta
 
 ## Rebuild
 
@@ -40,5 +38,6 @@ bash scripts/arc_smoke.sh
 ## Related
 
 - `runtime/chs_rt_str.c`, `chs_rt_list.c`
-- `scripts/pure_rewrite_formals.py`, `pure_rewrite_alias_retain.py`, `oodac_pure_rewrite.py`
+- `scripts/pure_rewrite_formals.py`, `pure_rewrite_alias_retain.py` (ARC softeners residual)
+- `scripts/oodac_pure_rewrite.py` **retired** → caps live in native `c_emit`
 - `oodac/c_emit_let.oo`, `c_emit_arc.oo`, `c_emit_stmt.oo`

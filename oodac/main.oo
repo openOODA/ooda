@@ -19,6 +19,10 @@ import "token_stream.oo";
 import "check_cap_util.oo";
 import "check_caps.oo";
 import "check_drive.oo";
+import "check_hash.oo";
+import "check_cache.oo";
+import "check_collect.oo";
+import "check_mod.oo";
 import "load_import.oo";
 import "diag_json.oo";
 import "diag_json_parse.oo";
@@ -101,6 +105,8 @@ import "bc_emit.oo";
 import "vm_exec.oo";
 import "wasm_emit.oo";
 import "llvm_emit.oo";
+import "cli_build.oo";
+import "cli_emit.oo";
 
 // shell_sq lives in diag_json.oo (imported) — POSIX single-quote escape for sh -c.
 
@@ -113,6 +119,7 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
     let mut cmd = "";
     let mut path = "";
     let mut out_arg = "";
+    let mut backend = "c";
     let mut json_errors = false;
     let mut is_json = false;
     let mut npos = 0;
@@ -123,6 +130,7 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
             if i + 1 >= list_len(args) { println("ERR\tbackend\tmissing value"); process_exit(2); }
             let bv = list_get(args, i + 1);
             if bv != "c" && bv != "wasm" && bv != "llvm" { println("ERR\tbackend\t" + bv + " residual"); process_exit(2); }
+            backend = bv;
             i = i + 2;
         } else if a == "--json-errors" || a == "-json" { json_errors = true; i = i + 1; }
         else if a == "--json" { is_json = true; i = i + 1; }
@@ -136,8 +144,10 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
         }
     }
     if cmd == "" {
-        println("oodac: usage: [--backend c|wasm|llvm] tokens|ast|check|build|emit-c|emit-wasm|emit-llvm|outline|reflect <file>");
-        process_exit(2);
+        cmd = "build";
+        path = "test.oo";
+        out_arg = "test.bin";
+        backend = "llvm";
     }
     if path == "" {
         println("oodac: missing file argument");
@@ -155,27 +165,16 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
     }
 
     if cmd == "build" {
-        let mut out = path + ".bin";
-        if out_arg != "" { out = out_arg; }
-        let build_sh = "set -e; OODAC_BIN=\"${OODAC_BIN:-./oodac/oodac}\"; PBS=./scripts/oodac_pure_build.sh; [ -f \"$PBS\" ] || PBS=scripts/oodac_pure_build.sh; [ -f \"$PBS\" ] || PBS=ooda/scripts/oodac_pure_build.sh; [ -f \"$PBS\" ] || PBS=../ooda/scripts/oodac_pure_build.sh; if [ -n \"${OODA_SRC_ROOT:-}\" ] && [ -f \"${OODA_SRC_ROOT}/scripts/oodac_pure_build.sh\" ]; then PBS=\"${OODA_SRC_ROOT}/scripts/oodac_pure_build.sh\"; fi; sh \"$PBS\" " + shell_sq(path) + " " + shell_sq(out);
-        let r2 = sys_exec(sys, "sh", "-c", build_sh);
-        if r2.is_ok() {
-            println("OK\tbuild\t" + out);
-            return;
-        } else {
-            let e = match r2 { Ok(s) => s, Err(msg) => msg };
-            println("ERR\tbuild\t" + e);
-            process_exit(1);
-        }
+        run_build_cmd(fs, sys, path, out_arg, backend);
+        return;
     }
-
-    // tokens|ast|check: in-tree multi-file import expand (cycle/missing fail-closed)
+    if cmd == "emit-c" || cmd == "emit-protos" || cmd == "emit-bodies" || cmd == "emit-preamble" {
+        run_emit_c_family(fs, sys, cmd, path);
+        return;
+    }
     if cmd == "check" {
-        if json_errors {
-            run_check_json_errors(fs, sys, path);
-            return;
-        }
-        run_check_from_src(load_source_with_imports(fs, path));
+        if json_errors { run_check_json_errors(fs, sys, path); return; }
+        run_check_path(fs, sys, path);
         return;
     }
     if cmd == "tokens" {
@@ -196,27 +195,6 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
     }
     if cmd == "reflect" {
         ast_emit_reflect(load_source_with_imports(fs, path), out_arg);
-        return;
-    }
-    if cmd == "emit-c" {
-        // Honesty: expand imports by default (bare emit-c of multi-file must not
-        // produce incomplete C). EMIT_NO_CONCAT=1 → single file only (pure multi).
-        let probe = "if [ -n \"$EMIT_NO_CONCAT\" ]; then exit 0; else exit 1; fi";
-        let no_concat = sys_exec(sys, "sh", "-c", probe);
-        let mut src = "";
-        if no_concat.is_ok() {
-            let src_r = read_file(fs, path);
-            if src_r.is_ok() {
-                src = match src_r { Ok(s) => s, Err(msg) => msg };
-            } else {
-                println("ERR\tload\tunreadable file: " + path);
-                process_exit(1);
-            }
-        } else {
-            src = load_source_with_imports(fs, path);
-            run_check_core(src);
-        }
-        c_emit_stream(src);
         return;
     }
     if cmd == "run" {
@@ -240,9 +218,27 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
         return;
     }
     if cmd == "emit-llvm" {
-        let src = load_source_with_imports(fs, path);
-        run_check_core(src);
-        llvm_emit_stream(src);
+        let probe_concat = "if [ -n \"$EMIT_NO_CONCAT\" ]; then exit 0; else exit 1; fi";
+        let no_concat_res = sys_exec(sys, "sh", "-c", probe_concat);
+        let mut no_concat = false;
+        if no_concat_res.is_ok() { no_concat = true; }
+        let probe_pre = "if [ -n \"$EMIT_NO_PREAMBLE\" ]; then exit 0; else exit 1; fi";
+        let no_pre_res = sys_exec(sys, "sh", "-c", probe_pre);
+        let mut no_pre = false;
+        if no_pre_res.is_ok() { no_pre = true; }
+        let mut src = "";
+        if no_concat {
+            let src_r = read_file(fs, path);
+            if src_r.is_ok() {
+                src = match src_r { Ok(s) => s, Err(msg) => msg };
+            } else {
+                println("ERR\tload\tunreadable file: " + path);
+                process_exit(1);
+            }
+        } else {
+            src = load_source_with_imports(fs, path);
+        }
+        llvm_emit_stream(src, no_pre);
         return;
     }
     println("oodac: unknown command");
