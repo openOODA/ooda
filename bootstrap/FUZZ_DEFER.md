@@ -49,3 +49,8 @@ ooda test <file.oo> --fuzz [iterations]
 - `scripts/ooda_fuzz_pure.sh` + `ooda_fuzz_pure_gens.sh`
 - `scripts/fuzz_int_depth_smoke.sh` / `fuzz_bool_smoke.sh` / `fuzz_string_smoke.sh` / `fuzz_list_smoke.sh` / `fuzz_multi_arg_smoke.sh` (in `ci_product`)
 - `bootstrap/MULTI_ARG_FUZZ.md` — arity-2/3 In; arity≥4 residual honesty
+
+## M137 List multi arity-2 (In)
+
+Pure List multi-arg arity-2 pass/fail is product In (`fuzz_list_multi_*`, `fuzz_multi_arg_smoke`).
+Residual: arity≥4 multi-arg still fail-closed / deferred.
