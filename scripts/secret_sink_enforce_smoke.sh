@@ -61,7 +61,19 @@ if [[ -f "$ROOT/fixtures/secret_sys_exec_fail.oo" ]]; then
   expect_refuse "secret_sys_exec_fail" "$ROOT/fixtures/secret_sys_exec_fail.oo"
 fi
 if [[ -f "$ROOT/fixtures/secret_sys_exec_pass.oo" ]]; then
+if [[ -f "$ROOT/fixtures/secret_env_get_fail.oo" ]]; then
+  expect_refuse "secret_env_get_fail" "$ROOT/fixtures/secret_env_get_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_env_get_pass.oo" ]]; then
+  expect_ok "secret_env_get_pass" "$ROOT/fixtures/secret_env_get_pass.oo"
+fi
   expect_ok "secret_sys_exec_pass" "$ROOT/fixtures/secret_sys_exec_pass.oo"
+if [[ -f "$ROOT/fixtures/secret_env_get_fail.oo" ]]; then
+  expect_refuse "secret_env_get_fail" "$ROOT/fixtures/secret_env_get_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_env_get_pass.oo" ]]; then
+  expect_ok "secret_env_get_pass" "$ROOT/fixtures/secret_env_get_pass.oo"
+fi
 fi
 if [[ -f "$ROOT/fixtures/secret_multi_arg_println_fail.oo" ]]; then
   expect_refuse "secret_multi_arg_println_fail" "$ROOT/fixtures/secret_multi_arg_println_fail.oo"
