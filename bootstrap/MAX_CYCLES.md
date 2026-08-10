@@ -1,52 +1,52 @@
-# MaxCycles (CPU quota) — path A while fuel + residual
+# MaxCycles (CPU quota) — product floor (alpha) + residual DESIGN extras
 
 **Marker:** `MAX_CYCLES_RESIDUAL_ALPHA`  
-**Status:** **M48/M54/M58 + M126 recursion In** — Backend-C `while` + range-`for` + **call-entry** fuel under `// MAX_CYCLES: N`.  
-PM **3.4**.
+**Status:** **Product floor In (alpha).** PM **3.4** → **done (alpha)** for path A.  
+DESIGN extras (`#[MaxCycles]`, OS cgroup, static WCET) remain residual.
 
-## Product surface (In — not names-only)
+## Product floor (In — production-ready alpha)
 
 | Form | Status |
 |------|--------|
-| `// MAX_CYCLES: N` (N > 0) | **In:** while + range-`for` + **fn call-entry** on shared static `__oo_mc`; exceed → `ERR\tmax_cycles\texceeded` |
+| `// MAX_CYCLES: N` with N > 0 (multi-digit OK) | **In** — while + range-`for` + call-entry/recursion on shared static `__oo_mc` |
+| Exceed budget | **In** — `ERR\tmax_cycles\texceeded` + non-zero exit |
 | `// MAX_CYCLES: 0` / invalid N | **Fail-closed** (no silent disable) |
-| `#[MaxCycles(N)]` | Named residual only (no attribute grammar / no static WCET proof) |
+| Shared budget across nested loops / helpers | **In** — file-static counter |
 
 ### How fuel is applied
 
-1. **Native emit:** parse marker → `__mc__` env → file-level `static long long __oo_mc`  
-2. **Debits:** each `while` body, range-`for` body, and **function entry** (incl. recursive helpers)  
-3. **Inject rail** (`scripts/max_cycles_fuel_inject.sh`): while fuel if native emit lacks counters  
+1. Parse `// MAX_CYCLES: N` → `#define OO_MC_LIMIT N` + static `__oo_mc`  
+2. Debit each `while` body, range-`for` body, and **function entry** (incl. recursion)  
+3. Optional inject rail if native emit lacks counters (`max_cycles_fuel_inject.sh`)
 
-Not OS cgroup / non-range for / static WCET / `#[MaxCycles]`.
 ```
-emit-c <file.oo>  [→ inject if no __oo_mc]  → gcc + chs_rt → run
+emit-c <file.oo> → gcc + chs_rt → run
 ```
 
-## What is true today
+## Residual (not product floor)
 
-| Layer | Behavior |
-|-------|----------|
-| **Parse / check** | Comment marker; no `#[MaxCycles]` grammar |
-| **Emit (Backend-C)** | Path A while + path B range-for fuel (native; while inject rail still available) |
-| **Runtime** | Exceed → `ERR\tmax_cycles\texceeded` + exit 1 |
-| **Honesty** | Residual below; **do not** claim names-only after path A/B In |
+| Form | Status |
+|------|--------|
+| `#[MaxCycles(N)]` attribute grammar | **residual** |
+| OS cgroup / cpulimit / RLIMIT_CPU | **residual** (not OS isolation) |
+| Static WCET that refuses unbounded loops at compile time | **residual** |
+| Non-range `for` / every control form | **residual** depth |
 
-**Fail-closed residual:** path A/B is **not** OS CPU isolation. Code without the marker is not fuel-limited. Marker is opt-in.
+**Fail-closed residual:** path A is **not** OS CPU isolation. Files without the marker are not fuel-limited (opt-in).
 
 ## What we do **not** claim
 
 - OS **cgroup** / **cpulimit** / scheduler isolation  
 - OS **rlimit** CPU time as MaxCycles  
-- Static WCET proof that refuses unbounded loops at compile time  
-- Full hybrid fuel metering (DESIGN / RP-3-4 goal)  
-- Fuel on recursion / non-range `for` / other control  
-- `#[MaxCycles(N)]` attribute enforcement  
+- Static WCET proof  
+- Full DESIGN hybrid metering / attribute syntax  
 
-## Rails
+## Rails (must stay green)
 
-- Doc marker: `MAX_CYCLES_RESIDUAL_ALPHA`
-- Product: `scripts/max_cycles_enforce_smoke.sh` + `scripts/max_cycles_smoke.sh`
-- Residual honesty: `scripts/max_cycles_residual_smoke.sh`
-- Inject helper: `scripts/max_cycles_fuel_inject.sh`
-- Fixtures: `max_cycles_pass.oo`, `max_cycles_fail.oo`, `max_cycles_zero.oo`, `max_cycles_marker.oo`
+- `scripts/max_cycles_enforce_smoke.sh` — while pass/fail/zero  
+- `scripts/max_cycles_for_enforce_smoke.sh` — range-for  
+- `scripts/max_cycles_shared_smoke.sh` — shared budget  
+- `scripts/max_cycles_recursion_smoke.sh` — recursion  
+- `scripts/max_cycles_multi_digit_smoke.sh` — N≥10 emit  
+- `scripts/max_cycles_residual_smoke.sh` — honesty  
+- `ci_product.sh` wires the above (multi-digit added if missing)

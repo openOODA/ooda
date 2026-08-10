@@ -108,6 +108,7 @@ for rail in \
   max_cycles_for_enforce_smoke.sh \
   max_cycles_shared_smoke.sh \
   max_cycles_recursion_smoke.sh \
+  max_cycles_multi_digit_smoke.sh \
   max_cycles_residual_smoke.sh \
   secret_sink_enforce_smoke.sh \
   secret_taint_residual_smoke.sh \

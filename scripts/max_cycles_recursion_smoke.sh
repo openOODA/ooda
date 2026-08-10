@@ -7,6 +7,9 @@ export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
 [[ -x "$OODA" ]] || { echo "ERR_NO_OODA" >&2; exit 1; }
+# Product CLI resolves scripts relative to cwd
+cd "$ROOT"
+export OODA_SRC_ROOT="$ROOT"
 PASS="$ROOT/fixtures/max_cycles_recursion_pass.oo"
 FAIL="$ROOT/fixtures/max_cycles_recursion_fail.oo"
 fail=0
