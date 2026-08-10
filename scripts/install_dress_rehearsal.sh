@@ -13,7 +13,7 @@ pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
 
 PIN_FILE="$ROOT/install/BOOTSTRAP_PIN"
-PIN="v0.184.0-alpha"
+PIN="v0.183.0-alpha"
 if [[ -f "$PIN_FILE" ]]; then
   PIN="$(tr -d '\r\n' <"$PIN_FILE" | head -1)"
   case "$PIN" in v*) ;; *) PIN="v${PIN}" ;; esac

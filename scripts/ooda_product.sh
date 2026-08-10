@@ -40,8 +40,8 @@ resolve_em() {
       EM="$(readlink -f oodac/oodac 2>/dev/null || echo oodac/oodac)"
     elif [[ -x "$ROOT/../ooda/oodac/oodac" ]]; then
       EM="$(readlink -f "$ROOT/../ooda/oodac/oodac" 2>/dev/null || echo "$ROOT/../ooda/oodac/oodac")"
-    elif [[ -x "$ROOT/dist/ooda-v0.184.0-alpha-linux-x86_64/oodac/oodac" ]]; then
-      EM="$(readlink -f "$ROOT/dist/ooda-v0.184.0-alpha-linux-x86_64/oodac/oodac" 2>/dev/null || echo "$ROOT/dist/ooda-v0.184.0-alpha-linux-x86_64/oodac/oodac")"
+    elif [[ -x "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac" ]]; then
+      EM="$(readlink -f "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac" 2>/dev/null || echo "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac")"
     elif [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then
       EM="$(readlink -f "$ROOT/bootstrap/seed/oodac" 2>/dev/null || echo "$ROOT/bootstrap/seed/oodac")"
     else
