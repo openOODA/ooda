@@ -20,7 +20,7 @@
 
 ### Typecheck / lex parity
 5. `% 0` not fail-closed like `/ 0` (if DIV0 exists)
-6. LLVM / WASM: no PERCENT lowering (honest residual if unclaimed)
+6. LLVM: multi-binop + `%` (srem) **landed** (see `llvm_execute_smoke`); WASM PERCENT residual if unclaimed
 7. `lex.oo` near **MAX_LINES=256** (252) — next lex tweak needs split
 
 ### Emit hosts
@@ -33,7 +33,7 @@
 12. Verify-without-fuzz may still use Python residual paths
 
 ### M4/M5/M6 surface
-13. M5 multi-binop IR holes (`2+3*4` empty mul operands historically)
+13. M5 multi-binop IR holes — **closed** (Pratt prec + `%`→srem; smoke proves `2+3*4` and `10%3`)
 14. M6: match/struct/list/string methods not on VM smoke
 15. Product `ooda run` may Backend-C not always BC VM
 

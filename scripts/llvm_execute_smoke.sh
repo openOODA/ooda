@@ -149,5 +149,65 @@ if [[ "$got" != "$EXPECTED" ]]; then
 fi
 
 echo "OK llvm execute (stdout matches expected 42)"
+
+# Multi-binop + modulo (historical residual: empty mul operands / missing %)
+echo "== M5 multi-binop+mod =="
+BINOP_SRC="$TMP/binop_llvm.oo"
+BINOP_LL="$TMP/binop_llvm.ll"
+BINOP_BIN="$TMP/binop_llvm.bin"
+cat >"$BINOP_SRC" <<'EOF'
+pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let x = 2 + 3 * 4;
+    println(x.to_string());
+    let w = 10 % 3;
+    println(w.to_string());
+}
+EOF
+set +e
+timeout 30 "$OODAC" emit-llvm "$BINOP_SRC" >"$BINOP_LL" 2>"$TMP/binop_emit.err"
+ec=$?
+set -e
+if [[ $ec -ne 0 || ! -s "$BINOP_LL" ]]; then
+  echo "FAIL multi-binop emit-llvm" >&2
+  cat "$TMP/binop_emit.err" >&2 || true
+  exit 1
+fi
+if ! grep -q 'mul i64' "$BINOP_LL" || ! grep -q 'add i64' "$BINOP_LL"; then
+  echo "FAIL multi-binop IR missing mul/add" >&2
+  grep -E 'add|mul|srem' "$BINOP_LL" >&2 || true
+  exit 1
+fi
+if ! grep -q 'srem i64' "$BINOP_LL"; then
+  echo "FAIL multi-binop IR missing srem for %" >&2
+  exit 1
+fi
+set +e
+if [[ -n "${CLANG:-}" ]]; then
+  timeout 60 "$CLANG" -O0 -Wno-override-module -Wno-unused-command-line-argument \
+    -I"$RT_I" "$BINOP_LL" "$RT_C" -o "$BINOP_BIN" -lm \
+    >"$TMP/binop_cc.out" 2>"$TMP/binop_cc.err"
+  cc_ec=$?
+else
+  timeout 60 "$LLC" -filetype=obj -o "$TMP/binop.o" "$BINOP_LL" >"$TMP/binop_llc.err" 2>&1
+  timeout 60 "$LINKER" -O0 -I"$RT_I" "$TMP/binop.o" "$RT_C" -o "$BINOP_BIN" -lm \
+    >"$TMP/binop_cc.out" 2>"$TMP/binop_cc.err"
+  cc_ec=$?
+fi
+set -e
+if [[ $cc_ec -ne 0 || ! -x "$BINOP_BIN" ]]; then
+  echo "FAIL multi-binop compile" >&2
+  cat "$TMP/binop_cc.err" >&2 || true
+  exit 1
+fi
+got2="$(timeout 5 "$BINOP_BIN" | tr -d '\r' | sed -e 's/[[:space:]]*$//')"
+# 2+3*4=14, 10%3=1
+if [[ "$got2" != $'14\n1' ]]; then
+  echo "FAIL multi-binop execute stdout" >&2
+  echo "  expected: 14\\n1" >&2
+  echo "  got:      $(printf '%q' "$got2")" >&2
+  exit 1
+fi
+echo "OK multi-binop+mod execute (14, 1)"
+
 echo "llvm_execute_smoke: PASSED"
 exit 0

@@ -1,141 +1,35 @@
-// package: backend-llvm — Expression lowering, binary ops, literals, & primary expressions
+// package: backend-llvm — Expression lowering (primary + Pratt binops)
 // stage: emit
+// Multi-binop uses precedence (* / % > + - > cmp); PERCENT → srem.
 
-import "token_fmt.oo";
-import "llvm_emit_ty.oo";
-import "llvm_emit_env.oo";
-
-pub fn llvm_emit_primary(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
-    let tok: String = list_get(toks, pos);
-    let k: String = field_at(tok, 0);
-    let txt: String = field_at(tok, 3);
-    let mut cur_env: List[String] = env;
-
-    // Lexer kinds: INT / STRING / KW_TRUE / KW_FALSE (not INT_LIT/STR_LIT/BOOL_LIT)
-    if k == "INT" {
-        let mut out: List[String] = list_new();
-        out = list_push(out, txt);
-        out = list_push(out, "i64");
-        let p1 = pos + 1;
-        out = list_push(out, p1.to_string());
-        out = list_push(out, list_get(env, 0));
-        out = list_push(out, list_get(env, 1));
-        out = list_push(out, list_get(env, 2));
-        out = list_push(out, list_get(env, 3));
-        out = list_push(out, list_get(env, 4));
-        return out;
+// Precedence: higher binds tighter. 0 = not a binop.
+pub fn llvm_binop_prec(op_k: String) -> Int {
+    if op_k == "OROR" { return 1; }
+    if op_k == "ANDAND" { return 2; }
+    if op_k == "EQEQ" || op_k == "NEQ" || op_k == "LT" || op_k == "LTE" || op_k == "GT" || op_k == "GTE" {
+        return 3;
     }
+    if op_k == "PLUS" || op_k == "MINUS" { return 4; }
+    if op_k == "STAR" || op_k == "SLASH" || op_k == "PERCENT" { return 5; }
+    return 0;
+}
 
-    if k == "KW_TRUE" || k == "KW_FALSE" {
-        let mut bval: String = "0";
-        if k == "KW_TRUE" { bval = "1"; }
-        let mut out: List[String] = list_new();
-        out = list_push(out, bval);
-        out = list_push(out, "i32");
-        let p1 = pos + 1;
-        out = list_push(out, p1.to_string());
-        out = list_push(out, list_get(env, 0));
-        out = list_push(out, list_get(env, 1));
-        out = list_push(out, list_get(env, 2));
-        out = list_push(out, list_get(env, 3));
-        out = list_push(out, list_get(env, 4));
-        return out;
-    }
+// Pack env slots 3..7 from a result list into a fresh env list.
+fn llvm_pack_env5(src: List[String], base: Int) -> List[String] {
+    let mut e: List[String] = list_new();
+    e = list_push(e, list_get(src, base));
+    e = list_push(e, list_get(src, base + 1));
+    e = list_push(e, list_get(src, base + 2));
+    e = list_push(e, list_get(src, base + 3));
+    e = list_push(e, list_get(src, base + 4));
+    return e;
+}
 
-    if k == "STRING" {
-        let str_res: List[String] = llvm_add_str_lit(txt, cur_env);
-        let sconst: String = list_get(str_res, 0);
-        let slen: String = list_get(str_res, 1);
-        cur_env = list_new();
-        cur_env = list_push(cur_env, list_get(str_res, 2));
-        cur_env = list_push(cur_env, list_get(str_res, 3));
-        cur_env = list_push(cur_env, list_get(str_res, 4));
-        cur_env = list_push(cur_env, list_get(str_res, 5));
-        cur_env = list_push(cur_env, list_get(str_res, 6));
-
-        let reg_res: List[String] = llvm_gen_reg(cur_env);
-        let treg: String = list_get(reg_res, 0);
-        cur_env = list_new();
-        cur_env = list_push(cur_env, list_get(reg_res, 1));
-        cur_env = list_push(cur_env, list_get(reg_res, 2));
-        cur_env = list_push(cur_env, list_get(reg_res, 3));
-        cur_env = list_push(cur_env, list_get(reg_res, 4));
-        cur_env = list_push(cur_env, list_get(reg_res, 5));
-
-        println("  " + treg + " = call %OoStr @oo_str_lit(i8* getelementptr inbounds ([" + slen + " x i8], [" + slen + " x i8]* " + sconst + ", i64 0, i64 0))");
-
-        let mut out: List[String] = list_new();
-        out = list_push(out, treg);
-        out = list_push(out, "%OoStr");
-        let p1 = pos + 1;
-        out = list_push(out, p1.to_string());
-        out = list_push(out, list_get(cur_env, 0));
-        out = list_push(out, list_get(cur_env, 1));
-        out = list_push(out, list_get(cur_env, 2));
-        out = list_push(out, list_get(cur_env, 3));
-        out = list_push(out, list_get(cur_env, 4));
-        return out;
-    }
-
-    if k == "IDENT" {
-        if txt == "println" || txt == "print" || txt == "eprintln" {
-            return llvm_emit_builtin_println(toks, pos, n, env);
-        }
-        if txt == "assert" || txt == "assert_eq" || txt == "assert_ne" {
-            return llvm_emit_builtin_assert(txt, toks, pos, n, env);
-        }
-
-        let vty_ooda: String = llvm_env_get_var_ty(env, txt);
-        let lty: String = llvm_ty_map(vty_ooda);
-
-        let reg_res: List[String] = llvm_gen_reg(cur_env);
-        let treg: String = list_get(reg_res, 0);
-        cur_env = list_new();
-        cur_env = list_push(cur_env, list_get(reg_res, 1));
-        cur_env = list_push(cur_env, list_get(reg_res, 2));
-        cur_env = list_push(cur_env, list_get(reg_res, 3));
-        cur_env = list_push(cur_env, list_get(reg_res, 4));
-        cur_env = list_push(cur_env, list_get(reg_res, 5));
-
-        println("  " + treg + " = load " + lty + ", " + lty + "* %" + txt + ".slot, align 8");
-
-        let mut out: List[String] = list_new();
-        out = list_push(out, treg);
-        out = list_push(out, lty);
-        let p1 = pos + 1;
-        out = list_push(out, p1.to_string());
-        out = list_push(out, list_get(cur_env, 0));
-        out = list_push(out, list_get(cur_env, 1));
-        out = list_push(out, list_get(cur_env, 2));
-        out = list_push(out, list_get(cur_env, 3));
-        out = list_push(out, list_get(cur_env, 4));
-        return out;
-    }
-
-    if k == "LPAREN" {
-        let sub_res: List[String] = llvm_emit_expr(toks, pos + 1, n, env);
-        let r_val: String = list_get(sub_res, 0);
-        let r_ty: String = list_get(sub_res, 1);
-        let mut p = parse_int(list_get(sub_res, 2));
-        if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
-
-        let mut out: List[String] = list_new();
-        out = list_push(out, r_val);
-        out = list_push(out, r_ty);
-        out = list_push(out, p.to_string());
-        out = list_push(out, list_get(sub_res, 3));
-        out = list_push(out, list_get(sub_res, 4));
-        out = list_push(out, list_get(sub_res, 5));
-        out = list_push(out, list_get(sub_res, 6));
-        out = list_push(out, list_get(sub_res, 7));
-        return out;
-    }
-
+fn llvm_out_val(val: String, ty: String, p: Int, env: List[String]) -> List[String] {
     let mut out: List[String] = list_new();
-    out = list_push(out, "0");
-    out = list_push(out, "i64");
-    let p1 = pos + 1;
-    out = list_push(out, p1.to_string());
+    out = list_push(out, val);
+    out = list_push(out, ty);
+    out = list_push(out, p.to_string());
     out = list_push(out, list_get(env, 0));
     out = list_push(out, list_get(env, 1));
     out = list_push(out, list_get(env, 2));
@@ -144,100 +38,158 @@ pub fn llvm_emit_primary(toks: List[String], pos: Int, n: Int, env: List[String]
     return out;
 }
 
-pub fn llvm_emit_expr(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
-    let lhs_res: List[String] = llvm_emit_primary(toks, pos, n, env);
-    let mut lhs_val: String = list_get(lhs_res, 0);
-    let mut lhs_ty: String = list_get(lhs_res, 1);
-    let mut p = parse_int(list_get(lhs_res, 2));
-
-    let mut cur_env: List[String] = list_new();
-    cur_env = list_push(cur_env, list_get(lhs_res, 3));
-    cur_env = list_push(cur_env, list_get(lhs_res, 4));
-    cur_env = list_push(cur_env, list_get(lhs_res, 5));
-    cur_env = list_push(cur_env, list_get(lhs_res, 6));
-    cur_env = list_push(cur_env, list_get(lhs_res, 7));
-
-    if p < n {
-        let op_k: String = field_at(list_get(toks, p), 0);
-        // Lexer cmp kinds: EQEQ/NEQ/LT/LTE/GT/GTE (EQ is assignment only)
-        if op_k == "PLUS" || op_k == "MINUS" || op_k == "STAR" || op_k == "SLASH" || op_k == "EQEQ" || op_k == "NEQ" || op_k == "LT" || op_k == "LTE" || op_k == "GT" || op_k == "GTE" {
-            p = p + 1;
-            let rhs_res: List[String] = llvm_emit_primary(toks, p, n, cur_env);
-            let rhs_val: String = list_get(rhs_res, 0);
-            let rhs_ty: String = list_get(rhs_res, 1);
-            p = parse_int(list_get(rhs_res, 2));
-
-            cur_env = list_new();
-            cur_env = list_push(cur_env, list_get(rhs_res, 3));
-            cur_env = list_push(cur_env, list_get(rhs_res, 4));
-            cur_env = list_push(cur_env, list_get(rhs_res, 5));
-            cur_env = list_push(cur_env, list_get(rhs_res, 6));
-            cur_env = list_push(cur_env, list_get(rhs_res, 7));
-
-            let reg_res: List[String] = llvm_gen_reg(cur_env);
-            let mut treg: String = list_get(reg_res, 0);
-            cur_env = list_new();
-            cur_env = list_push(cur_env, list_get(reg_res, 1));
-            cur_env = list_push(cur_env, list_get(reg_res, 2));
-            cur_env = list_push(cur_env, list_get(reg_res, 3));
-            cur_env = list_push(cur_env, list_get(reg_res, 4));
-            cur_env = list_push(cur_env, list_get(reg_res, 5));
-
-            if op_k == "PLUS" {
-                if lhs_ty == "%OoStr" {
-                    println("  " + treg + " = call %OoStr @oo_str_concat(%OoStr " + lhs_val + ", %OoStr " + rhs_val + ")");
-                    lhs_ty = "%OoStr";
-                } else {
-                    println("  " + treg + " = add i64 " + lhs_val + ", " + rhs_val);
-                    lhs_ty = "i64";
-                }
-            } else if op_k == "MINUS" {
-                println("  " + treg + " = sub i64 " + lhs_val + ", " + rhs_val);
-                lhs_ty = "i64";
-            } else if op_k == "STAR" {
-                println("  " + treg + " = mul i64 " + lhs_val + ", " + rhs_val);
-                lhs_ty = "i64";
-            } else if op_k == "SLASH" {
-                println("  " + treg + " = sdiv i64 " + lhs_val + ", " + rhs_val);
-                lhs_ty = "i64";
-            } else if op_k == "EQEQ" || op_k == "NEQ" || op_k == "LT" || op_k == "LTE" || op_k == "GT" || op_k == "GTE" {
-                let mut inst: String = "eq";
-                if op_k == "NEQ" { inst = "ne"; }
-                else if op_k == "LT" { inst = "slt"; }
-                else if op_k == "LTE" { inst = "sle"; }
-                else if op_k == "GT" { inst = "sgt"; }
-                else if op_k == "GTE" { inst = "sge"; }
-
-                if lhs_ty == "%OoStr" {
-                    println("  " + treg + " = call i32 @oo_str_eq(%OoStr " + lhs_val + ", %OoStr " + rhs_val + ")");
-                } else {
-                    let reg_res2: List[String] = llvm_gen_reg(cur_env);
-                    let treg2: String = list_get(reg_res2, 0);
-                    cur_env = list_new();
-                    cur_env = list_push(cur_env, list_get(reg_res2, 1));
-                    cur_env = list_push(cur_env, list_get(reg_res2, 2));
-                    cur_env = list_push(cur_env, list_get(reg_res2, 3));
-                    cur_env = list_push(cur_env, list_get(reg_res2, 4));
-                    cur_env = list_push(cur_env, list_get(reg_res2, 5));
-
-                    println("  " + treg + " = icmp " + inst + " i64 " + lhs_val + ", " + rhs_val);
-                    println("  " + treg2 + " = zext i1 " + treg + " to i32");
-                    treg = treg2;
-                }
-                lhs_ty = "i32";
-            }
-            lhs_val = treg;
+// Apply one binop; returns [val, ty, env…]
+fn llvm_apply_binop(op_k: String, lhs_val: String, lhs_ty: String, rhs_val: String, env: List[String]) -> List[String] {
+    let mut cur_env: List[String] = env;
+    let reg_res: List[String] = llvm_gen_reg(cur_env);
+    let mut treg: String = list_get(reg_res, 0);
+    cur_env = llvm_pack_env5(reg_res, 1);
+    let mut out_ty: String = "i64";
+    if op_k == "PLUS" {
+        if lhs_ty == "%OoStr" {
+            println("  " + treg + " = call %OoStr @oo_str_concat(%OoStr " + lhs_val + ", %OoStr " + rhs_val + ")");
+            out_ty = "%OoStr";
+        } else {
+            println("  " + treg + " = add i64 " + lhs_val + ", " + rhs_val);
         }
+    } else if op_k == "MINUS" {
+        println("  " + treg + " = sub i64 " + lhs_val + ", " + rhs_val);
+    } else if op_k == "STAR" {
+        println("  " + treg + " = mul i64 " + lhs_val + ", " + rhs_val);
+    } else if op_k == "SLASH" {
+        println("  " + treg + " = sdiv i64 " + lhs_val + ", " + rhs_val);
+    } else if op_k == "PERCENT" {
+        println("  " + treg + " = srem i64 " + lhs_val + ", " + rhs_val);
+    } else {
+        let mut inst: String = "eq";
+        if op_k == "NEQ" { inst = "ne"; }
+        else if op_k == "LT" { inst = "slt"; }
+        else if op_k == "LTE" { inst = "sle"; }
+        else if op_k == "GT" { inst = "sgt"; }
+        else if op_k == "GTE" { inst = "sge"; }
+        if lhs_ty == "%OoStr" {
+            println("  " + treg + " = call i32 @oo_str_eq(%OoStr " + lhs_val + ", %OoStr " + rhs_val + ")");
+        } else {
+            let reg2: List[String] = llvm_gen_reg(cur_env);
+            let treg2: String = list_get(reg2, 0);
+            cur_env = llvm_pack_env5(reg2, 1);
+            println("  " + treg + " = icmp " + inst + " i64 " + lhs_val + ", " + rhs_val);
+            println("  " + treg2 + " = zext i1 " + treg + " to i32");
+            treg = treg2;
+        }
+        out_ty = "i32";
     }
-
     let mut out: List[String] = list_new();
-    out = list_push(out, lhs_val);
-    out = list_push(out, lhs_ty);
-    out = list_push(out, p.to_string());
+    out = list_push(out, treg);
+    out = list_push(out, out_ty);
     out = list_push(out, list_get(cur_env, 0));
     out = list_push(out, list_get(cur_env, 1));
     out = list_push(out, list_get(cur_env, 2));
     out = list_push(out, list_get(cur_env, 3));
     out = list_push(out, list_get(cur_env, 4));
     return out;
+}
+
+pub fn llvm_emit_primary(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    let tok: String = list_get(toks, pos);
+    let k: String = field_at(tok, 0);
+    let txt: String = field_at(tok, 3);
+    let mut cur_env: List[String] = env;
+    if k == "INT" {
+        return llvm_out_val(txt, "i64", pos + 1, env);
+    }
+    if k == "KW_TRUE" || k == "KW_FALSE" {
+        let mut bval: String = "0";
+        if k == "KW_TRUE" { bval = "1"; }
+        return llvm_out_val(bval, "i32", pos + 1, env);
+    }
+    if k == "STRING" {
+        let str_res: List[String] = llvm_add_str_lit(txt, cur_env);
+        let sconst: String = list_get(str_res, 0);
+        let slen: String = list_get(str_res, 1);
+        cur_env = llvm_pack_env5(str_res, 2);
+        let reg_res: List[String] = llvm_gen_reg(cur_env);
+        let treg: String = list_get(reg_res, 0);
+        cur_env = llvm_pack_env5(reg_res, 1);
+        println("  " + treg + " = call %OoStr @oo_str_lit(i8* getelementptr inbounds ([" + slen + " x i8], [" + slen + " x i8]* " + sconst + ", i64 0, i64 0))");
+        return llvm_out_val(treg, "%OoStr", pos + 1, cur_env);
+    }
+    if k == "IDENT" {
+        if txt == "println" || txt == "print" || txt == "eprintln" {
+            return llvm_emit_builtin_println(toks, pos, n, env);
+        }
+        if txt == "assert" || txt == "assert_eq" || txt == "assert_ne" {
+            return llvm_emit_builtin_assert(txt, toks, pos, n, env);
+        }
+        if pos + 1 < n && field_at(list_get(toks, pos + 1), 0) == "LPAREN" {
+            return llvm_emit_call_expr(txt, toks, pos + 1, n, env);
+        }
+        if pos + 1 < n && field_at(list_get(toks, pos + 1), 0) == "DOT" {
+            return llvm_emit_method(txt, toks, pos + 1, n, env);
+        }
+        let vty_ooda: String = llvm_env_get_var_ty(env, txt);
+        let lty: String = llvm_ty_map(vty_ooda);
+        let reg_res: List[String] = llvm_gen_reg(cur_env);
+        let treg: String = list_get(reg_res, 0);
+        cur_env = llvm_pack_env5(reg_res, 1);
+        println("  " + treg + " = load " + lty + ", " + lty + "* %" + txt + ".slot, align 8");
+        return llvm_out_val(treg, lty, pos + 1, cur_env);
+    }
+    if k == "LPAREN" {
+        let sub_res: List[String] = llvm_emit_expr(toks, pos + 1, n, env);
+        let r_val: String = list_get(sub_res, 0);
+        let r_ty: String = list_get(sub_res, 1);
+        let mut p = parse_int(list_get(sub_res, 2));
+        if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
+        cur_env = llvm_pack_env5(sub_res, 3);
+        return llvm_out_val(r_val, r_ty, p, cur_env);
+    }
+    if k == "MINUS" {
+        // unary minus
+        let sub: List[String] = llvm_emit_primary(toks, pos + 1, n, env);
+        let sv: String = list_get(sub, 0);
+        cur_env = llvm_pack_env5(sub, 3);
+        let reg_res: List[String] = llvm_gen_reg(cur_env);
+        let treg: String = list_get(reg_res, 0);
+        cur_env = llvm_pack_env5(reg_res, 1);
+        println("  " + treg + " = sub i64 0, " + sv);
+        let p = parse_int(list_get(sub, 2));
+        return llvm_out_val(treg, "i64", p, cur_env);
+    }
+    return llvm_out_val("0", "i64", pos + 1, env);
+}
+
+// Pratt: parse ops with prec >= min_prec.
+pub fn llvm_emit_expr_prec(toks: List[String], pos: Int, n: Int, env: List[String], min_prec: Int) -> List[String] {
+    let lhs0: List[String] = llvm_emit_primary(toks, pos, n, env);
+    let mut lhs_val: String = list_get(lhs0, 0);
+    let mut lhs_ty: String = list_get(lhs0, 1);
+    let mut p = parse_int(list_get(lhs0, 2));
+    let mut cur_env: List[String] = llvm_pack_env5(lhs0, 3);
+    let mut guard = 0;
+    while guard < 64 {
+        if p >= n {
+            return llvm_out_val(lhs_val, lhs_ty, p, cur_env);
+        }
+        let op_k: String = field_at(list_get(toks, p), 0);
+        let prec = llvm_binop_prec(op_k);
+        if prec < min_prec {
+            return llvm_out_val(lhs_val, lhs_ty, p, cur_env);
+        }
+        p = p + 1;
+        let rhs: List[String] = llvm_emit_expr_prec(toks, p, n, cur_env, prec + 1);
+        let rhs_val: String = list_get(rhs, 0);
+        p = parse_int(list_get(rhs, 2));
+        cur_env = llvm_pack_env5(rhs, 3);
+        let applied: List[String] = llvm_apply_binop(op_k, lhs_val, lhs_ty, rhs_val, cur_env);
+        lhs_val = list_get(applied, 0);
+        lhs_ty = list_get(applied, 1);
+        cur_env = llvm_pack_env5(applied, 2);
+        guard = guard + 1;
+    }
+    return llvm_out_val(lhs_val, lhs_ty, p, cur_env);
+}
+
+pub fn llvm_emit_expr(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    return llvm_emit_expr_prec(toks, pos, n, env, 1);
 }
