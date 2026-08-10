@@ -34,3 +34,12 @@
 - Marker: `SECRET_TAINT_RESIDUAL_ALPHA`
 - Enforce: `scripts/secret_sink_enforce_smoke.sh`
 - Residual: `scripts/secret_taint_residual_smoke.sh`
+
+## Path A println refuse (In)
+
+path A bare IDENT println refuse is product In.
+
+## Fail-closed residual
+
+Do **not** treat partial sink refuse as full static taint analysis shipped.
+Fail-closed residual: unfinished sinks stay residual, not soft-pass.
