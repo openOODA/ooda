@@ -4,7 +4,7 @@ Harness inputs for **tests**, **CHS parity**, **fixed-point**, and product smoke
 
 This is **not** a public tutorial pack. Prefer `bootstrap/corpus/` for pass/fail rails.
 
-## Pure product path (v0.183.0-alpha+)
+## Pure product path (v0.184.0-alpha+)
 
 | File | Used by |
 |------|---------|

@@ -1,5 +1,5 @@
 # OODA Programming Language (`.oo`)
-**openOODA Project** — `https://github.com/openOODA` — **Version `v0.183.0-alpha`**
+**openOODA Project** — `https://github.com/openOODA` — **Version `v0.184.0-alpha`**
 
 OODA (Observe, Orient, Decide, Act) — capability-secure, self-testing, AI-native systems language.  
 **Product path:** pure `.oo` compiler + CLI, thin C runtime floor, trusted seed binary (bash + gcc to rebuild).
@@ -39,7 +39,7 @@ ooda version
 
 ---
 
-## What's real in v0.183.0-alpha (pure product)
+## What's real in v0.184.0-alpha (pure product)
 
 | Capability | Status |
 |---|---|
@@ -103,7 +103,7 @@ SEED_OODAC=./oodac/oodac ./scripts/bootstrap_no_cargo.sh
 ./scripts/ci_product.sh   # product rails: seed bootstrap + smokes + fixed_point
 
 # Release tarball (pure product pack)
-./scripts/release.sh v0.183.0-alpha
+./scripts/release.sh v0.184.0-alpha
 ```
 
 Builder needs **gcc + seed binary only**. See `scripts/bootstrap_no_cargo.sh`.
@@ -121,9 +121,9 @@ Builder needs **gcc + seed binary only**. See `scripts/bootstrap_no_cargo.sh`.
 | **B4** honesty / fail-closed residual | PASS process; **no beta tag** until public review |
 | **B5** org siblings pure product path | PASS for product-critical siblings (std/qa/docs …); editors optional |
 
-**Do not call this beta** until a public beta tag + install pin + notes are deliberately cut. This is **v0.183.0-alpha** pure `.oo` product.
+**Do not call this beta** until a public beta tag + install pin + notes are deliberately cut. This is **v0.184.0-alpha** pure `.oo` product.
 
-Proof / status: monorepo `PROGRESS.md`; criteria `bootstrap/BETA.md`; latest ship notes `RELEASE_NOTES_v0.183.0-alpha.md`.
+Proof / status: monorepo `PROGRESS.md`; criteria `bootstrap/BETA.md`; latest ship notes `RELEASE_NOTES_v0.184.0-alpha.md`.
 
 ---
 

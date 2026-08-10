@@ -40,8 +40,8 @@ resolve_em() {
       EM="$(readlink -f oodac/oodac 2>/dev/null || echo oodac/oodac)"
     elif [[ -x "$ROOT/../ooda/oodac/oodac" ]]; then
       EM="$(readlink -f "$ROOT/../ooda/oodac/oodac" 2>/dev/null || echo "$ROOT/../ooda/oodac/oodac")"
-    elif [[ -x "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac" ]]; then
-      EM="$(readlink -f "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac" 2>/dev/null || echo "$ROOT/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac")"
+    elif [[ -x "$ROOT/dist/ooda-v0.184.0-alpha-linux-x86_64/oodac/oodac" ]]; then
+      EM="$(readlink -f "$ROOT/dist/ooda-v0.184.0-alpha-linux-x86_64/oodac/oodac" 2>/dev/null || echo "$ROOT/dist/ooda-v0.184.0-alpha-linux-x86_64/oodac/oodac")"
     elif [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then
       EM="$(readlink -f "$ROOT/bootstrap/seed/oodac" 2>/dev/null || echo "$ROOT/bootstrap/seed/oodac")"
     else
@@ -95,15 +95,31 @@ case "$MODE" in
     if [[ "$target" == "wasm" || "$target" == "llvm" ]]; then
       [[ -n "$file" ]] || { echo -e "ERR\tbuild\tmissing file" >&2; exit 2; }
       ext="wat"; cmd="emit-wasm"; msg="WebAssembly text module"
-      [[ "$target" == "llvm" ]] && { ext="ll"; cmd="emit-llvm"; msg="LLVM IR emitted"; }
-      [[ -z "$out" ]] && { out="${file%.oo}.$ext"; [[ "$file" == *.oo ]] || out="${file}.$ext"; }
-      tmp_out="${TMPDIR:-/tmp}/${target}_out_$$.$ext"
-      if ! "$EM" "$cmd" "$file" > "$tmp_out"; then rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
-      if ! cp "$tmp_out" "$out" 2>/dev/null; then echo -e "ERR\tbuild\tfailed to write output file: $out" >&2; rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
-      rm -f "$tmp_out" 2>/dev/null || true
-      test -s "$out"
-      echo "🚀 [openOODA pure oodac] $msg: $out"
-      exit 0
+      [[ "$target" == "llvm" ]] && { ext="ll"; cmd="emit-llvm"; msg="LLVM IR emitted" ; }
+      if [[ "$target" == "wasm" ]]; then
+        [[ -z "$out" ]] && { out="${file%.oo}.$ext"; [[ "$file" == *.oo ]] || out="${file}.$ext"; }
+        tmp_out="${TMPDIR:-/tmp}/${target}_out_$$.$ext"
+        if ! "$EM" "$cmd" "$file" > "$tmp_out"; then rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
+        if ! cp "$tmp_out" "$out" 2>/dev/null; then echo -e "ERR\tbuild\tfailed to write output file: $out" >&2; rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
+        rm -f "$tmp_out" 2>/dev/null || true
+        test -s "$out"
+        echo "🚀 [openOODA pure oodac] $msg: $out"
+        exit 0
+      else
+        # LLVM target
+        [[ -z "$out" ]] && { out="${file%.oo}.bin"; [[ "$file" == *.oo ]] || out="${file}.bin"; }
+        tmp_out="${TMPDIR:-/tmp}/${target}_out_$$.ll"
+        if ! "$EM" "$cmd" "$file" > "$tmp_out"; then rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
+        if ! clang -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$tmp_out" -lm -o "$out"; then
+          echo -e "ERR\tbuild\tclang failed to compile $tmp_out" >&2
+          rm -f "$tmp_out" 2>/dev/null || true
+          exit 2
+        fi
+        rm -f "$tmp_out" 2>/dev/null || true
+        test -x "$out"
+        echo "🚀 [openOODA pure oodac] Native LLVM executable: $out"
+        exit 0
+      fi
     fi
     if [[ -z "$out" ]]; then
       if [[ ${#extra[@]} -gt 0 && -n "${extra[0]:-}" ]]; then
@@ -164,64 +180,14 @@ case "$MODE" in
     fi
     ;;
   migrate)
-    file=""
-    json_mode=""
-    skip_next=0
-    for arg in "$@"; do
-      if [[ $skip_next -eq 1 ]]; then
-        skip_next=0
-        continue
-      fi
-      if [[ "$arg" == "--json" ]]; then
-        json_mode=1
-      elif [[ "$arg" == "--edition" ]]; then
-        skip_next=1
-      elif [[ "$arg" != -* ]]; then
-        if [[ -z "$file" ]]; then
-          file="$arg"
-        fi
-      fi
-    done
-    fixes=0
-    changed="false"
-    if [[ -n "$file" && -f "$file" ]]; then
-      fixes=$(grep -c -E '\blet[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*=' "$file" 2>/dev/null || true)
-      if [[ -z "$fixes" ]]; then fixes=0; fi
-      if [[ $fixes -gt 0 ]]; then
-        sed -i -E 's/\blet[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=/let mut \1 =/g' "$file" 2>/dev/null || true
-        changed="true"
-      fi
-    fi
-    if [[ -n "$json_mode" ]]; then
-      echo "{\"file\": \"$file\", \"edition\": \"2026\", \"match_wildcard_arms\": 0, \"let_mut_fixes\": $fixes, \"changed\": $changed}"
-    else
-      echo "migrated $file: let_mut_fixes=$fixes changed=$changed"
-    fi
+    S="$ROOT/scripts/ooda_product_migrate.sh"
+    [[ -x "$S" ]] || S=./scripts/ooda_product_migrate.sh
+    exec "$S" "$@"
     ;;
   context)
-    file=""
-    sym=""
-    for arg in "$@"; do
-      if [[ "$arg" != -* ]]; then
-        if [[ -z "$file" ]]; then
-          file="$arg"
-        elif [[ -z "$sym" ]]; then
-          sym="$arg"
-        fi
-      fi
-    done
-    ctx=""
-    if [[ -n "$file" && -f "$file" && -n "$sym" ]]; then
-      match_line=$(grep -n -E "\b(fn|let|struct|enum|type)\s+${sym}\b" "$file" 2>/dev/null | head -n 1 || true)
-      if [[ -n "$match_line" ]]; then
-        ctx=$(echo "$match_line" | tr '\n' ' ' | sed 's/"/\\"/g')
-      else
-        ctx="symbol '$sym' definition not found in $file"
-      fi
-    else
-      ctx="no context definition"
-    fi
-    echo "{\"symbol\": \"$sym\", \"file\": \"$file\", \"context\": \"$ctx\"}"
+    S="$ROOT/scripts/ooda_product_context.sh"
+    [[ -x "$S" ]] || S=./scripts/ooda_product_context.sh
+    exec "$S" "$@"
     ;;
   run)
     resolve_em

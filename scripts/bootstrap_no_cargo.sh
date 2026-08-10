@@ -45,7 +45,7 @@ echo "bootstrap: seed=$SEED (from $SEED_SRC)"
 # 1) Rebuild oodac from sources (pure multi) — seed is emit host
 rm -f "$STAGE1"
 echo "=== seed builds oodac (emit host=seed) ==="
-(cd "$ROOT" && env -u OODA OODAC_BIN="$SEED" "$SEED" build "$ROOT/oodac/main.oo" "$STAGE1")
+(cd "$ROOT" && env -u OODA OODAC_BIN="$SEED" "scripts/oodac_pure_build.sh" "$ROOT/oodac/main.oo" "$STAGE1")
 if [[ ! -x "$STAGE1" ]]; then
   echo "FAIL: seed did not produce $STAGE1" >&2
   exit 1
@@ -55,7 +55,7 @@ fi
 CLI_OUT="$ROOT/bin/ooda"
 rm -f "$CLI_OUT"
 echo "=== seed builds pure .oo product CLI (emit host=seed) ==="
-(cd "$ROOT" && env -u OODA OODAC_BIN="$SEED" "$SEED" build "$ROOT/cli/main.oo" "$CLI_OUT")
+(cd "$ROOT" && env -u OODA OODAC_BIN="$SEED" "scripts/oodac_pure_build.sh" "$ROOT/cli/main.oo" "$CLI_OUT")
 if [[ ! -x "$CLI_OUT" ]]; then
   echo "FAIL: pure CLI missing at $CLI_OUT" >&2
   exit 1
@@ -64,7 +64,7 @@ fi
 # 3) Smoke product CLI
 echo "=== smoke product bin/ooda ==="
 "$CLI_OUT" version | tee "$TMPDIR/bootstrap_ver.txt"
-grep -q '0.183.0-alpha' "$TMPDIR/bootstrap_ver.txt"
+grep -q '0.184.0-alpha' "$TMPDIR/bootstrap_ver.txt"
 "$CLI_OUT" check "$ROOT/fixtures/chs_list_string.oo" | tee "$TMPDIR/bootstrap_chk.txt"
 grep -qE '^OK' "$TMPDIR/bootstrap_chk.txt"
 SMOKE_BIN="$TMPDIR/bootstrap_chs_native"
