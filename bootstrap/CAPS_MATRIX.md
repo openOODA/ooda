@@ -41,6 +41,7 @@ Status legend:
 | `mutex_lock` / `mutex_unlock` | `&ThreadCap` | sealed free call | `oo_mutex_lock` / `oo_mutex_unlock` | `chs_rt_libfloor.c` pthread mutex slots | **real** (M162) |
 | `thread_spawn` | `&ThreadCap` | sealed free call | `oo_thread_spawn` | `chs_rt_thread.c` joinable pthread; Ok(`"tid:N"`) | **real** (M163 join path A) |
 | `thread_join` | `&ThreadCap` | sealed free call | `oo_thread_join` (Int) / `oo_thread_join_s` (String `"tid:N"`) | `pthread_join` slot table | **real** (M163) |
+| `channel_new` / `channel_send` / `channel_recv` | `&ThreadCap` | sealed free call | `oo_channel_new` / `oo_channel_send` / `oo_channel_recv` | `chs_rt_channel.c` process-local bounded string queue (16×8) | **real** (M164 path A) |
 | `gpu_launch` | `&GpuCap` | sealed free call | `oo_gpu_launch` | require then **Err residual** | **fail-closed residual** |
 | `process_exit` | none (ambient) | not sealed | `oo_process_exit` | `exit` | **real** (not a cap class) |
 | `list_new` / `list_push` / string concat | **none (ambient residual)** | not sealed | ambient CHS | no AllocCap gate | **intentional alpha residual** — sealing would brick pure compiler |
@@ -61,7 +62,7 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 ### Emit (Backend-C)
 - Cap tokens compile to `long long`; `main` injects `oo_cap_grant_fs/sys/env/net/time/rand/alloc/ffi/thread/gpu()` (process-local; grant idents match param names).
 - Sealed FS/Env/Sys/Net/Time/Rand/Alloc/FFI/Thread/Gpu lowers **pass the leading cap arg** (ABI with runtime).
-- Sealed **ThreadCap product (M162/M163):** `mutex_lock`/`mutex_unlock` real pthread mutex; `thread_spawn` joinable pthread → Ok(`"tid:N"`); `thread_join(slot)` joins slot (or `oo_thread_join_s` parses `"tid:N"`). Not detach-by-default. **GpuCap** `gpu_launch` remains **Err residual** seal only.
+- Sealed **ThreadCap product (M162/M163/M164):** `mutex_lock`/`mutex_unlock` real pthread mutex; `thread_spawn` joinable pthread → Ok(`"tid:N"`); `thread_join(slot)` joins slot (or `oo_thread_join_s` parses `"tid:N"`); `channel_new`/`channel_send`/`channel_recv` process-local bounded string queues. Not detach-by-default. **GpuCap** `gpu_launch` remains **Err residual** seal only. Actor model residual.
 - Net libfloor: `tcp_*` / `bind_udp` **real** (M162); `tls_connect` residual without OpenSSL (M163).
 - Non-IDENT first arg on sealed ops: `ERR\tc_emit\t… requires &…Cap` (fail-closed).
 

@@ -105,7 +105,9 @@ for rail in \
   etc_autofix_smoke.sh \
   m162_residual_deepen_smoke.sh \
   thread_join_smoke.sh \
+  channel_path_a_smoke.sh \
   byte_str_path_a_smoke.sh \
+  bytes_buffer_smoke.sh \
   tls_path_a_smoke.sh \
   outline_reflect_smoke.sh \
   patch_smoke.sh \

@@ -80,6 +80,12 @@ if [[ -f "$STD" ]] && grep -q 'byte_slice' "$STD" && grep -qiE 'residual:.*&str|
 else
   bad "std/byte.oo missing path A wrappers/residual"
 fi
+# M164 buffer free names present in source floor (exec may lag oodac rebuild)
+if grep -q 'bytes_new' "$ROOT/oodac/tc_names.oo" && grep -q 'oo_bytes_to_str' "$ROOT/runtime/chs_rt.h"; then
+  pass "M164 buffer free names source floor"
+else
+  bad "M164 buffer free names missing from source floor"
+fi
 
 # Runtime C floor (independent of oodac free-name rebuild)
 cat >"$TMPDIR/byte_path_a_rt.c" <<'CEOF'

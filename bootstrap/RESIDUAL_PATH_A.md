@@ -23,7 +23,7 @@ Unshipped DESIGN free calls are **default-deny at check**:
 | DOD_LAYOUT | `soa_layout`, `dod_layout` |
 | TELEPATHIC_AST | `telepathic_compile`, `intent_compile` |
 | NATIVE_LSP | `lsp_serve` |
-| CONCURRENCY | `channel_new`, `actor_spawn` |
+| CONCURRENCY | `actor_spawn` (channels sealed under ThreadCap M164) |
 | CALLGRAPH_CRYPTO | `sign_callgraph`, `verify_callgraph` |
 | FFI_GEN | `ffi_gen`, `import_c` |
 | LTO_XLANG | `lto_xlang_link` |

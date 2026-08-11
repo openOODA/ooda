@@ -107,6 +107,47 @@ OoStr oo_byte_slice(OoStr s, long long start, long long end) {
 /* Path A: raw byte equality (len + memcmp). Not &str borrow. */
 int oo_bytes_eq(OoStr a, OoStr b) { return oo_str_eq(a, b); }
 
+/* Path A: owned identity — String as byte-string view (still OoStr, not &str). */
+OoStr oo_bytes_from_str(OoStr s) {
+  return oo_byte_slice(s, 0, oo_bytes_len(s));
+}
+
+/* Path A: raw byte concat (alias of oo_str_concat; not UTF-8 merge). */
+OoStr oo_bytes_concat(OoStr a, OoStr b) { return oo_str_concat(a, b); }
+
+/* Path A Byte buffer = List[Int] elements in 0..255. Not List[Byte] ABI. */
+OoIList oo_bytes_new(void) { return oo_ilist_new(); }
+
+OoIList oo_bytes_push(OoIList l, long long b) {
+  if (b < 0) b = 0;
+  if (b > 255) b = 255;
+  return oo_ilist_push(l, b);
+}
+
+/* Soft OOB like byte_at: -1; else stored 0..255 Int. */
+long long oo_bytes_get(OoIList l, long long i) {
+  if (!l.data || i < 0 || i >= l.len) return -1;
+  long long v = l.data[i];
+  if (v < 0) return 0;
+  if (v > 255) return 255;
+  return v;
+}
+
+/* Build owned OoStr from Byte buffer (List[Int] 0..255). Clamps each elem. */
+OoStr oo_bytes_to_str(OoIList l) {
+  long long n = (l.data && l.len > 0 && l.len < (1LL << 28)) ? l.len : 0;
+  OoStr r;
+  r.len = n;
+  r.data = oo_str_alloc_payload((size_t)n);
+  for (long long i = 0; i < n; i++) {
+    long long v = l.data[i];
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    r.data[i] = (char)(unsigned char)v;
+  }
+  return r;
+}
+
 long long oo_chars_len(OoStr s) {
   /* UTF-8 scalar count (ASCII-fast path covers CHS corpus). */
   long long n = 0;

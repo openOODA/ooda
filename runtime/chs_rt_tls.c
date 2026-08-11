@@ -1,6 +1,6 @@
-/* M163 TLS path A: NetCap + optional OpenSSL 1.2+ client; else residual.
- * Default fail-closed after real TCP connect. OO_HAVE_OPENSSL → handshake.
- * OODA_TLS_INSECURE_TCP=1 → Ok after TCP-only (insecure residual; honesty). */
+/* M164 TLS product floor: client handshake via system libssl.so.3 (OpenSSL 3).
+ * No openssl headers required — local decls + explicit .so.3 link path.
+ * Fallback residual when OO_HAVE_OPENSSL not defined. */
 #include "chs_rt.h"
 #include <unistd.h>
 #include <errno.h>
@@ -9,10 +9,6 @@
 #include <sys/types.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#if defined(OO_HAVE_OPENSSL)
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#endif
 
 static OoResS tls_err(const char *msg) {
   OoResS r;
@@ -21,7 +17,6 @@ static OoResS tls_err(const char *msg) {
   return r;
 }
 
-/* TCP connect; returns fd >= 0 or -1. *err set on failure (static-ish msg). */
 static int tls_tcp_fd(const char *h, long long port, const char **err) {
   char portstr[16];
   struct addrinfo hints, *res = NULL, *rp;
@@ -49,6 +44,32 @@ static int tls_tcp_fd(const char *h, long long port, const char **err) {
 }
 
 #if defined(OO_HAVE_OPENSSL)
+/* OpenSSL 1.1+/3 C ABI — macros expanded to SSL_ctrl / SSL_CTX_ctrl. */
+typedef struct ssl_st SSL;
+typedef struct ssl_ctx_st SSL_CTX;
+typedef struct ssl_method_st SSL_METHOD;
+const SSL_METHOD *TLS_client_method(void);
+SSL_CTX *SSL_CTX_new(const SSL_METHOD *meth);
+void SSL_CTX_free(SSL_CTX *ctx);
+long SSL_CTX_ctrl(SSL_CTX *ctx, int cmd, long larg, void *parg);
+void SSL_CTX_set_verify(SSL_CTX *ctx, int mode, void *cb);
+int SSL_CTX_set_default_verify_paths(SSL_CTX *ctx);
+SSL *SSL_new(SSL_CTX *ctx);
+void SSL_free(SSL *ssl);
+int SSL_set_fd(SSL *ssl, int fd);
+int SSL_connect(SSL *ssl);
+int SSL_shutdown(SSL *ssl);
+long SSL_ctrl(SSL *ssl, int cmd, long larg, void *parg);
+
+#define TLS1_2_VERSION 0x0303
+#define SSL_VERIFY_PEER 0x01
+#define SSL_CTRL_SET_TLSEXT_HOSTNAME 55
+#define SSL_CTRL_SET_MIN_PROTO_VERSION 123
+#define SSL_set_tlsext_host_name(s, name) \
+  SSL_ctrl((s), SSL_CTRL_SET_TLSEXT_HOSTNAME, 0, (void *)(name))
+#define SSL_CTX_set_min_proto_version(ctx, ver) \
+  SSL_CTX_ctrl((ctx), SSL_CTRL_SET_MIN_PROTO_VERSION, (ver), NULL)
+
 static OoResS tls_handshake_openssl(int fd, const char *h, long long port) {
   OoResS r;
   SSL_CTX *ctx = NULL;
@@ -66,10 +87,9 @@ static OoResS tls_handshake_openssl(int fd, const char *h, long long port) {
     close(fd);
     return tls_err("tls_connect: SSL_CTX_new failed");
   }
-  /* TLS 1.2+ only — no SSLv3/TLS1.0/1.1 product surface */
-  SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+  (void)SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
   SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-  SSL_CTX_set_default_verify_paths(ctx);
+  (void)SSL_CTX_set_default_verify_paths(ctx);
   ssl = SSL_new(ctx);
   if (!ssl) {
     SSL_CTX_free(ctx);
@@ -108,7 +128,6 @@ OoResS oo_tls_connect(long long cap, OoStr host, long long port) {
 #if defined(OO_HAVE_OPENSSL)
   return tls_handshake_openssl(fd, h, port);
 #else
-  /* Path A without OpenSSL: TCP proved; residual or explicit insecure TCP-only. */
   {
     OoResS r;
     const char *insec = getenv("OODA_TLS_INSECURE_TCP");

@@ -40,7 +40,7 @@ Sibling org repo `openOODA/std` (json/crypto/net/fs aspirational APIs) is
 |------|---------|
 | `Option[T]` / `Some` / `None` as sum types | Typecheck may accept; **Backend-C does not lower** constructors → use `option.oo` Result encoding |
 | Generic `Result[T,E]` beyond String | Runtime `OoResS` is string payload only on pure path |
-| Native `&str` borrow + real `Byte` arrays | **Residual** — see `bootstrap/BYTE_STR.md`; `byte.oo` is Int convention only; `String` remains value-copy |
+| Native `&str` borrow + real `Byte` arrays | **Residual** — see `bootstrap/BYTE_STR.md`; path A Byte buffer is `List[Int]` 0..255; `String` remains value-copy |
 | `std::fs` / `std::net` / json / crypto (org sibling) | Cap-gated or host-era; **not** imported by pure std here |
 | Thread/mutex/gpu free names | Path A seal only — granted cap returns residual Err, not real concurrency/GPU |
 | Full XML/YAML/TOML/JSON Schema | Path A subsets only; else `UNIMPLEMENTED_RESIDUAL` — not DESIGN parsers |
