@@ -13,7 +13,7 @@ ooda reflect <file.oo> [symbol]
 
 | Command | Purpose | Exit |
 |---------|---------|------|
-| `outline` | Token-cheap **public** API list | `0` ok; `2` missing/unreadable file; `1` parse fail |
+| `outline` | Token-cheap **public** API list | `0` ok; `2` missing/unreadable file; `1` empty / no `pub fn` / parse fail |
 | `reflect` | Richer symbol/contract/cap/verify metadata (NDJSON) | same; `1` if optional `symbol` not found |
 
 Missing path or unreadable file → fail-closed (`ERR	outline|reflect	unreadable file: …`).
