@@ -99,20 +99,45 @@ else
   bad "non-applicable should fail"
 fi
 
-# --- product CLI if wired ---
-if [[ -x "$OODA" ]]; then
+# --- product CLI: non-NetCap E_CAP (FsCap / read_file) must succeed ---
+if [[ ! -x "$OODA" ]]; then
+  bad "need product OODA for ooda fix rail"
+else
   cp "$ROOT/bootstrap/corpus/check/fail/no_cap_read_file.oo" "$WORK/read.oo"
   set +e
   "$OODA" fix "$WORK/read.oo" >"$WORK/cli.out" 2>"$WORK/cli.err"
   crc=$?
   set -e
-  if [[ $crc -eq 0 ]] || grep -qE 'OK\tfix|applied E_CAP' "$WORK/cli.out" "$WORK/cli.err" 2>/dev/null; then
-    pass "ooda fix product path"
-  elif grep -qE 'unknown command|ERR' "$WORK/cli.err" 2>/dev/null && [[ $crc -ne 0 ]]; then
-    # if not wired yet, script path still product entry
-    pass "ooda fix optional (script entry is product path)"
+  if [[ $crc -ne 0 ]]; then
+    bad "ooda fix read_file exit=$crc"
+    cat "$WORK/cli.out" "$WORK/cli.err" | head -20 || true
+  elif ! grep -qE 'OK\tfix|applied E_CAP' "$WORK/cli.out" "$WORK/cli.err" 2>/dev/null; then
+    bad "ooda fix missing OK fix banner"
+  elif ! grep -q 'FsCap' "$WORK/read.oo" || ! grep -qE 'read_file\s*\(\s*fs\s*,' "$WORK/read.oo"; then
+    bad "ooda fix did not add FsCap + read_file(fs,"
+    cat "$WORK/read.oo"
   else
-    pass "ooda fix exercised rc=$crc"
+    pass "ooda fix FsCap/read_file structural"
+  fi
+  set +e
+  "$OODAC_BIN" check "$WORK/read.oo" --json-errors >"$WORK/read_after.json" 2>"$WORK/read_after.err"
+  set -e
+  if python3 - "$WORK/read_after.json" <<'PY'
+import json,sys
+raw=open(sys.argv[1]).read().strip()
+if not raw or raw=="[]":
+    raise SystemExit(0)
+lines=[l for l in raw.splitlines() if l.strip().startswith("[")]
+v=json.loads(lines[-1] if lines else raw)
+for d in v:
+    if d.get("code")=="E_CAP":
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+  then
+    pass "ooda fix read_file: no E_CAP after"
+  else
+    bad "ooda fix read_file still E_CAP"
   fi
 fi
 

@@ -197,21 +197,22 @@ def main() -> None:
     if not ecap:
         die("no E_CAP diagnostic (non-applicable)")
 
-    # Infer cap from message
-    msg = ecap[0].get("msg", "") + " " + (ecap[0].get("fix_hint") or "")
+    # Infer cap: sealed op name in msg first, then explicit &Cap in msg.
+    # Do NOT scan fix_hint first — it lists every &XCap and would always pick NetCap.
+    msg = ecap[0].get("msg", "") or ""
     cap = None
-    for c in ("NetCap", "FsCap", "SysCap", "EnvCap", "TimeCap", "RandCap", "AllocCap"):
-        if c in msg or f"&{c}" in msg:
+    # Prefer longer op names first (e.g. path_exists before path)
+    for op, c in sorted(SEALED.items(), key=lambda kv: -len(kv[0])):
+        if re.search(rf"\b{re.escape(op)}\b", msg):
             cap = c
             break
     if not cap:
-        # try sealed op in msg
-        for op, c in SEALED.items():
-            if op in msg:
+        for c in ("NetCap", "FsCap", "SysCap", "EnvCap", "TimeCap", "RandCap", "AllocCap"):
+            if f"&{c}" in msg or re.search(rf"\b{re.escape(c)}\b", msg):
                 cap = c
                 break
     if not cap:
-        die("could not infer Cap type from E_CAP (non-applicable)")
+        die("could not infer Cap type from E_CAP msg (non-applicable)")
 
     text = path.read_text(encoding="utf-8")
     fixed = apply_fix(text, cap)

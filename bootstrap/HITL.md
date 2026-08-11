@@ -1,59 +1,46 @@
-# M24 Human-in-the-loop (`hitl`) testing — residual at alpha
+# Human-in-the-loop (`hitl`) testing — path A deny-mode + residual interactive
 
-**Marker:** `HITL_RESIDUAL_ALPHA`  
-**Status:** path A deny-mode **In** at check; interactive residual. PM **5.6** / sprint **M24**.
+**Marker residual:** `HITL_RESIDUAL_ALPHA`  
+**Path A marker:** `HITL_PATH_A_ALPHA`  
+**Status:** path A **In** (M157 non-interactive deny-mode + residual free-name refuse). Interactive harness residual. PM **5.6**.
 
-## Product surface (names only)
+## Product surface
 
-| Form | Intent |
-|------|--------|
-| `verify_human("…")` | DESIGN primitive (subjective approval in test loops) |
-| `// HITL: pause` | Simpler product marker (comment form) |
-
-Either form **names** a HITL pause point. At alpha neither opens an interactive harness nor pauses agent/product execution.
+| Form | Behavior (alpha) |
+|------|------------------|
+| `// HITL: pause` | **In (M157):** line-start marker → check fail-closed `ERR\thitl\t…` / `--json-errors` **E_HITL** (CI / non-interactive deny-mode) |
+| `verify_human("…")` | **Residual free-name refuse** at check (`E_RESIDUAL`) — not a product harness call |
 
 ## What is true today
 
 | Layer | Behavior |
 |-------|----------|
-| **Parse / check** | No dedicated `verify_human` / hitl grammar; comment marker is source-level only |
-| **Runtime / CLI** | **No** interactive HITL harness shipped; no TTY prompt / record / replay modes |
-| **Agent / product** | **Not** agent pause/resume product; no CI gate on human approval |
-| **Honesty** | Residual documented here + `scripts/hitl_residual_smoke.sh` |
+| **Check** | `// HITL: pause` denied (non-interactive product path); `verify_human` free call refused |
+| **Runtime / CLI** | **No** interactive HITL harness (TTY prompt / record / replay / approve) |
+| **Agent / product** | **Not** agent pause/resume product |
+| **Honesty** | This file + `hitl_product_floor_smoke` + `hitl_residual_smoke` |
 
-**Fail-closed residual:** do not treat presence of `// HITL: pause` or `verify_human(…)` as a human-attestation boundary. Autonomous loops are **not** required to pause for human review by the product.
+**Fail-closed residual:** deny-mode is **not** human attestation. It only blocks silent green when the pause marker is present. Full DESIGN `verify_human` approval loops remain residual.
 
 ## What we do **not** claim
 
 - Interactive HITL harness (TTY prompt / record / replay / deny / skip modes)  
-- “HITL shipped” / “HITL enforced” as product green  
+- “HITL fully shipped” as interactive product green  
 - Agent pause/resume product surface  
 - Capability-gated human attestation (`&HumanCap`-class)  
-- Full DESIGN `verify_human` CLI approval before marking a build passing
+- Full DESIGN `verify_human` CLI approval before marking a build passing  
 
+## Path A product floor (alpha) — M157
 
-## Path A product floor (alpha) — M153
+**In:**  
+- `// HITL: pause` → non-interactive deny at check (`E_HITL`)  
+- `verify_human` free-name refuse (M153 residual free-name path A)  
 
-**Path A marker:** `HITL_PATH_A_ALPHA`  
-**Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
-**In:** verify_human free call refused at check (E_RESIDUAL)  
-**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
-**Still residual:** full DESIGN implementation of this moonshot (not claimed).
+**Rails:**  
+- `scripts/hitl_product_floor_smoke.sh`  
+- `scripts/hitl_residual_smoke.sh`  
+- Fixtures: `hitl_pause_fail.oo`, `hitl_pause_pass.oo`, `hitl_marker.oo` (docs/marker rail)
 
+## Residual next (not this floor)
 
-## Path A product floor (alpha) — M157 non-interactive deny-mode
-
-**Path A marker:** `HITL_PATH_A_ALPHA`  
-**In:** line-start `// HITL: pause` → `ERR\thitl\t…` / `E_HITL` at check (CI deny-mode).  
-**Rails:** `scripts/hitl_product_floor_smoke.sh`  
-**Still residual:** interactive harness, agent pause/resume, `verify_human` product (still residual free-name refuse).
-
-## Rails
-
-- Doc marker: this file must contain `HITL_RESIDUAL_ALPHA`
-- Smoke: `scripts/hitl_residual_smoke.sh` (wired in `ci_product`)
-- Fixture (marker only, not enforced): `fixtures/hitl_marker.oo`
-
-## Next (not this sprint)
-
-Path A candidate: parse `// HITL: pause` or `verify_human(…)` and fail-closed (deny mode) in non-interactive CI only — still **not** interactive harness or agent pause/resume.
+Interactive harness; agent pause/resume; live `verify_human` product semantics.

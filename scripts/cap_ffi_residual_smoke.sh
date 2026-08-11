@@ -51,11 +51,17 @@ if grep -q 'CAP_FFI_PATH_A_ALPHA' "$DOC"; then
 else
   bad "doc missing CAP_FFI_PATH_A_ALPHA"
 fi
-# Residual: must not claim runtime token / full FFI sandbox shipped
-if grep -qiE 'runtime (UnsafeFFICap )?(grant|token) (shipped|enforced)|FFI fully (sealed|enforced) shipped' "$DOC"; then
-  bad "doc claims runtime UnsafeFFICap or full FFI seal shipped"
+# Residual: must not claim full FFI sandbox / OS dlopen isolation as shipped
+if grep -qiE 'FFI fully (sealed|enforced) shipped|OS dlopen isolation (shipped|enforced)|full C TCB seal shipped' "$DOC"; then
+  bad "doc claims full FFI sandbox / OS dlopen isolation shipped"
 else
-  pass "doc does not claim runtime UnsafeFFICap / full seal shipped"
+  pass "doc does not claim full FFI sandbox / OS dlopen isolation shipped"
+fi
+# Path A runtime token must be named as process-local (not denied as absent)
+if grep -qE 'oo_cap_grant_ffi|process-local.*ffi|Process-local FFI token' "$DOC"; then
+  pass "doc names process-local FFI token path A"
+else
+  bad "doc missing process-local FFI token path A wording"
 fi
 
 # Fixture carries product marker form (documentation rail)
@@ -102,12 +108,11 @@ if ! grep -q 'UnsafeFFICap' oodac/check_cap_util.oo; then
 else
   echo "OK check path A names UnsafeFFICap"
 fi
-# product truth: process-local grant/require for FFI may exist (M156 path A);
-# must still deny OS-level / full TCB seal claims in docs (above).
-if grep -q 'oo_cap_grant_ffi' runtime/chs_rt_sys.c 2>/dev/null; then
+# product truth: process-local grant/require for FFI is In (M156) in chs_rt_ffi.c
+if grep -q 'oo_cap_grant_ffi' runtime/chs_rt_ffi.c 2>/dev/null || grep -rq 'oo_cap_grant_ffi' runtime/ 2>/dev/null; then
   echo "OK runtime has process-local oo_cap_grant_ffi (path A)"
 else
-  echo "OK runtime FFI grant optional residual"
+  echo "FAIL runtime missing oo_cap_grant_ffi" >&2; fail=1
 fi
 # must not claim real OS dlopen sandbox in runtime comments as shipped full seal
 if grep -rn --include='*.c' -E 'OS dlopen isolation shipped|full C TCB sealed' runtime/ 2>/dev/null | head -1 | grep -q .; then
