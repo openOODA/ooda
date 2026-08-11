@@ -22,6 +22,9 @@ for s in \
   contracts_complex_residual_smoke.sh \
   json_errors_smoke.sh \
   ai_native_product_floor_smoke.sh \
+  hitl_product_floor_smoke.sh \
+  cap_ffi_runtime_smoke.sh \
+  ecap_autofix_smoke.sh \
   patch_smoke.sh \
   ast_autofix_residual_smoke.sh \
   arc_smoke.sh \

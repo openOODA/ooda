@@ -12,7 +12,7 @@
 | `&UnsafeFFICap` | Cap type accepted in param lists; sealed FFI free names require it |
 | Sealed free names | `dlopen` / `dlsym` / `dlclose` / `chs_build` / `host_*` / `ooda_host_*` |
 | **Check** | Default-deny: call needs matching `&UnsafeFFICap` param **and** token as first arg (or method receiver) — same form as other sealed caps |
-| **Emit (Backend-C)** | Fail-closed residual lower: no C `dlopen` / host-FFI emit (`ERR\tc_emit\tffi residual`) |
+| **Emit (Backend-C)** | `dlopen` → `oo_dlopen` with cap; other host-FFI free names still emit residual |
 | `// FFI: residual` | Comment form for residual honesty (full seal still residual) |
 
 ## What is true today
@@ -35,6 +35,13 @@
 - Runtime process-local `UnsafeFFICap` token / forge deny for real `dlopen`  
 - Compile-time FFI generation (`import "C" "…"`) with cap taint  
 - Full DESIGN capability taint-tracking across every FFI boundary  
+
+
+## Path A runtime (M156)
+
+**In:** process-local `oo_cap_grant_ffi` / `oo_cap_require_ffi` + Backend-C lower of `dlopen(ffi, path)` → `oo_dlopen` stub.  
+**Rails:** `scripts/cap_ffi_runtime_smoke.sh` (pass + zero/magic forge deny).  
+**Still residual:** real OS `dlopen`, full C TCB seal, host-FFI free names beyond stub, compile-time FFI gen.
 
 ## Rails
 

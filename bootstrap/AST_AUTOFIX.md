@@ -15,7 +15,8 @@ Full DESIGN depth for this item is not product alpha.
 - `--json-errors` `fix_hint` on codes (E_CAP/E_TC/E_PARSE/E_SECRET/…)  
 - **E_CAP** also ships machine `kind` + `suggested_fix` for agent apply guidance  
 - Full agent loop floor: `scripts/ai_native_product_floor_smoke.sh`  
-**Still residual:** automatic AST rewrite / apply of `suggested_fix` without human/agent patch step (`ooda patch` is manual surgical apply, not auto-apply).
+**In (M155):** `ooda fix <file.oo>` / `scripts/ooda_apply_ecap_fix.sh` — bounded E_CAP structural apply (add `&Cap` param + first-arg token); rails `ecap_autofix_smoke`.
+**Still residual:** auto-apply for non-E_CAP codes; full AST rewrite; telepathic compile.
 
 ## Rails
 - `AST_AUTOFIX_RESIDUAL_ALPHA`

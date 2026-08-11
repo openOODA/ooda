@@ -224,6 +224,13 @@ case "$MODE" in
     [[ -x "$S" ]] || { echo ERR_NO_PATCH_SCRIPT >&2; exit 1; }
     exec "$S" "$@"
     ;;
+  fix)
+    # Bounded E_CAP structural auto-fix (M155)
+    S="$ROOT/scripts/ooda_apply_ecap_fix.sh"
+    [[ -x "$S" ]] || S=./scripts/ooda_apply_ecap_fix.sh
+    [[ -x "$S" ]] || { echo ERR_NO_FIX_SCRIPT >&2; exit 1; }
+    exec "$S" "$@"
+    ;;
   outline|reflect)
     resolve_em
     exec "$EM" "$MODE" "$@"

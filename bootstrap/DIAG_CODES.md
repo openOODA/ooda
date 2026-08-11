@@ -60,3 +60,5 @@ Human mode (default) still prints `ERR\t<kind>\t<message>` tab lines.
   - **E_PARSE** — non-empty `fix_hint` with parse/brace/token guidance (`corpus/parse/fail/missing_brace.oo`)
 - Corpus: `bootstrap/corpus/check/pass|fail`, `bootstrap/corpus/typecheck/fail/undefined_var.oo`, `bootstrap/corpus/parse/fail/`
 | E_RESIDUAL | residual | Residual DESIGN free-call path A default-deny (M153) |
+
+| E_HITL | hitl | Non-interactive // HITL: pause deny-mode (M157) |

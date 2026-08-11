@@ -1,7 +1,7 @@
 # M24 Human-in-the-loop (`hitl`) testing — residual at alpha
 
 **Marker:** `HITL_RESIDUAL_ALPHA`  
-**Status:** residual honesty (not enforced). PM **5.6** / sprint **M24**.
+**Status:** path A deny-mode **In** at check; interactive residual. PM **5.6** / sprint **M24**.
 
 ## Product surface (names only)
 
@@ -39,6 +39,14 @@ Either form **names** a HITL pause point. At alpha neither opens an interactive 
 **In:** verify_human free call refused at check (E_RESIDUAL)  
 **Rails:** `scripts/residual_path_a_floor_smoke.sh`  
 **Still residual:** full DESIGN implementation of this moonshot (not claimed).
+
+
+## Path A product floor (alpha) — M157 non-interactive deny-mode
+
+**Path A marker:** `HITL_PATH_A_ALPHA`  
+**In:** line-start `// HITL: pause` → `ERR\thitl\t…` / `E_HITL` at check (CI deny-mode).  
+**Rails:** `scripts/hitl_product_floor_smoke.sh`  
+**Still residual:** interactive harness, agent pause/resume, `verify_human` product (still residual free-name refuse).
 
 ## Rails
 

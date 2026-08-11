@@ -2,6 +2,7 @@
 #include "chs_rt_str.c"
 #include "chs_rt_list.c"
 #include "chs_rt_sys.c"
+#include "chs_rt_ffi.c"
 #include "chs_rt_time_rand.c"
 #include "chs_rt_alloc.c"
 #include "chs_rt_fs.c"

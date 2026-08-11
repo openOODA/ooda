@@ -12,6 +12,7 @@
 | `ooda reflect` | NDJSON symbol / caps / contracts / verify | same |
 | `ooda check --json-errors` | Machine codes + `fix_hint`; **E_CAP** also `kind` + `suggested_fix` | `json_errors_smoke` |
 | `ooda patch … --replace-fn` | Surgical function body replace (path-safe) | `patch_smoke` |
+| `ooda fix` | Bounded E_CAP structural auto-fix | `ecap_autofix_smoke` |
 | **Agent loop floor** | outline → reflect → json-errors → patch in one smoke | `ai_native_product_floor_smoke` |
 | Residual free names | telepathic/hive free calls refuse | `residual_path_a_floor_smoke` |
 
