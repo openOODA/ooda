@@ -129,7 +129,8 @@ def collect_verifies(text: str) -> tuple[list[str], list[tuple], int]:
                     pos += 1
             continue
 
-        j = match_kw(text, i, n, "type")
+        i_type = skip_ws(text, match_kw(text, i, n, "pub"), n) if match_kw(text, i, n, "pub") >= 0 else i
+        j = match_kw(text, i_type, n, "type")
         if j < 0: j = match_kw(text, i, n, "import")
         if j >= 0:
             start_i = i

@@ -16,7 +16,7 @@ Unshipped DESIGN free calls are **default-deny at check**:
 | SHADOW_STATE | `shadow_revert`, `shadow_commit` |
 | METAMORPHIC | `metamorphic_emit`, `metamorphic_build` |
 | HOLOGRAPHIC | `holo_persist`, `holo_load` |
-| GPU_NPU | `emit_ptx`, `emit_spirv`, `gpu_launch` |
+| GPU_NPU | `emit_ptx`, `emit_spirv` (sealed residual: `gpu_launch` + `&GpuCap`) |
 | BARE_METAL | `bare_metal_init` |
 | AST_MACROS | `macro_expand`, `ast_macro` |
 | TYPE_STATE | `type_state_check`, `typestate_assert` |

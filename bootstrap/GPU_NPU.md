@@ -24,16 +24,19 @@ Do **not** treat the named surface as a security or product boundary. Absence of
 
 **Path A marker:** `GPU_NPU_PATH_A_ALPHA`  
 **Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
-**In:** emit_ptx/emit_spirv/gpu_launch free calls refused at check  
-**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
-**Still residual:** full DESIGN implementation of this moonshot (not claimed).
+**In:** emit_ptx/emit_spirv free calls refused at check  
+**Sealed residual:** `gpu_launch(gpu, shader)` under `&GpuCap` → runtime `Result` **Err** path A (no shaders)  
+**Dual path:** granted `gpu` → residual Err (`gpu residual: path A seal only`); zero/magic forge → `ERR\tcap\t…` + exit  
+**Rails:** `scripts/residual_path_a_floor_smoke.sh`, `scripts/libfloor_mutex_thread_smoke.sh`, `scripts/libfloor_thread_gpu_smoke.sh`  
+**Still residual:** full DESIGN GPU/NPU backends (not claimed).
 
 ## Rails
 
 - Doc marker: `GPU_NPU_RESIDUAL_ALPHA`
-- Smoke: `scripts/gpu_npu_residual_smoke.sh`
-- Fixture: `fixtures/gpu_marker.oo` (marker comment only)
+- Smoke: `scripts/gpu_npu_residual_smoke.sh`, `scripts/libfloor_mutex_thread_smoke.sh` (gpu residual)
+- Fixture: `fixtures/gpu_marker.oo` (marker); `fixtures/libfloor_gpu_launch.oo`, `fixtures/libfloor_gpu_cap.oo`
+- Std: `std/os/gpu.oo` (`gpu_launch_shader`)
 
 ## Next (path A, not this pack)
 
-Bounded product refuse or thin enforce path — still not full DESIGN depth.
+Real shader lower / device dispatch under GpuCap — still not full DESIGN depth.

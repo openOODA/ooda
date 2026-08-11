@@ -86,6 +86,8 @@ for rail in \
   bc_vm_smoke.sh \
   problem_hunt_smoke.sh \
   caps_matrix_smoke.sh \
+  libfloor_process_smoke.sh \
+  libfloor_net_smoke.sh \
   alloc_cap_smoke.sh \
   list_quota_smoke.sh \
   import_load_smoke.sh \
@@ -95,6 +97,8 @@ for rail in \
   ai_native_product_floor_smoke.sh \
   hitl_product_floor_smoke.sh \
   cap_ffi_runtime_smoke.sh \
+  libfloor_mutex_thread_smoke.sh \
+  libfloor_thread_gpu_smoke.sh \
   ecap_autofix_smoke.sh \
   secret_eprintln_smoke.sh \
   contracts_and_smoke.sh \
@@ -138,6 +142,7 @@ for rail in \
   concurrency_residual_smoke.sh \
   callgraph_crypto_residual_smoke.sh \
   bare_metal_residual_smoke.sh \
+  byte_str_residual_smoke.sh \
   ast_macros_residual_smoke.sh \
   cap_ffi_product_floor_smoke.sh \
   residual_path_a_floor_smoke.sh \

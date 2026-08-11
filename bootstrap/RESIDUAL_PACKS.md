@@ -10,6 +10,7 @@ Mechanical residual docs + smokes. **Not DESIGN-complete.**
 | `BARE_METAL.md` | `BARE_METAL_RESIDUAL_ALPHA` | `bare_metal_residual_smoke.sh` |
 | `BC_VM_DEPTH.md` | `BC_VM_DEPTH_RESIDUAL_ALPHA` | `bc_vm_depth_residual_smoke.sh` |
 | `BIOMETRIC_CAPS.md` | `BIOMETRIC_CAPS_RESIDUAL_ALPHA` | `biometric_caps_residual_smoke.sh` |
+| `BYTE_STR.md` | `BYTE_STR_RESIDUAL_ALPHA` | `byte_str_residual_smoke.sh` |
 | `CALLGRAPH_CRYPTO.md` | `CALLGRAPH_CRYPTO_RESIDUAL_ALPHA` | `callgraph_crypto_residual_smoke.sh` |
 | `CAP_FFI.md` | `CAP_FFI_RESIDUAL_ALPHA` | `cap_ffi_residual_smoke.sh` |
 | `CONCURRENCY.md` | `CONCURRENCY_RESIDUAL_ALPHA` | `concurrency_residual_smoke.sh` |

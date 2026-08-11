@@ -131,6 +131,24 @@ void oo_cap_require_rand(long long got, const char *op);
 void oo_cap_require_alloc(long long got, const char *op);
 void oo_cap_require_ffi(long long got, const char *op);
 OoResS oo_dlopen(long long cap, OoStr path);
+long long oo_cap_grant_thread(void);
+long long oo_cap_grant_gpu(void);
+void oo_cap_require_thread(long long got, const char *op);
+void oo_cap_require_gpu(long long got, const char *op);
+OoStr crypto_md5_internal(OoStr data);
+OoStr crypto_sha1_internal(OoStr data);
+OoStr crypto_aes_encrypt_internal(OoStr key, OoStr plain);
+OoResS oo_tcp_bind(long long cap, long long port);
+OoResS oo_tcp_connect(long long cap, OoStr host, long long port);
+OoResS oo_bind_udp(long long cap, long long port);
+OoResS oo_tls_connect(long long cap, OoStr host, long long port);
+OoResS oo_sys_spawn(long long cap, OoStr cmd);
+OoResS oo_sys_wait(long long cap, long long pid);
+OoResS oo_sys_kill(long long cap, long long pid, long long sig);
+OoResS oo_mutex_lock(long long cap, long long mid);
+OoResS oo_mutex_unlock(long long cap, long long mid);
+OoResS oo_thread_spawn(long long cap, OoStr name);
+OoResS oo_gpu_launch(long long cap, OoStr shader);
 OoResS oo_sys_exec(long long cap, int argc, OoStr *argv);
 OoResS oo_sys_exec1(long long cap, OoStr cmd);
 OoResS oo_fetch(long long cap, OoStr url);
@@ -140,7 +158,7 @@ long long oo_random(long long cap);
 void oo_seed(long long cap, long long s);
 long long oo_alloc_bytes(long long cap, long long n);
 void oo_free_bytes(long long cap, long long p);
-
-#endif
 long long oo_cg_sign(void);
 int oo_cg_verify(long long sig);
+
+#endif

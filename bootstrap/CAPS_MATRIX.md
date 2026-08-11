@@ -26,6 +26,7 @@ Status legend:
 | `path_exists` | `&FsCap` | sealed free call | `oo_path_exists(cap, path)` | require + fopen probe | **real** |
 | `file_size` | `&FsCap` | sealed free call | `oo_file_size(cap, path)` | require + ftell | **real** |
 | `sys_exec` | `&SysCap` | sealed free call + arg-flow | multi-arg → `oo_sys_exec`; single → `oo_sys_exec1` | `fork`+`execvp` (AUDIT R2/R3 closed; not `system(3)`) | **real** |
+| `sys_spawn` / `sys_wait` / `sys_kill` | `&SysCap` | sealed free call + arg-flow | `oo_sys_spawn` / `oo_sys_wait` / `oo_sys_kill` | require Sys then **Err residual** (path A seal; no real fork/wait/kill) | **fail-closed residual** — use `sys_exec` for blocking spawn+wait; `std/os/process.oo` wrappers |
 | `env_get` | `&EnvCap` | sealed free call | `oo_env_get(cap, key)` | require + getenv | **real** |
 | `fetch` | `&NetCap` | sealed free call; allow only with `NetCap` | `oo_fetch(cap, url)` | `chs_rt_sys.c` + net cap require; HTTP/1.0 GET | **real** (AUDIT R9) |
 | `http_get` / `net_get` / `net_connect` / `downloadData` / `query_remote_api` | `&NetCap` | sealed free call | **explicit `ERR\tc_emit\tnet residual`** | none | **fail-closed residual** |
@@ -52,9 +53,9 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 - Residual: dynamic/computed callees not scanned; cap only as param name (not expression). Ambient `list_new` not sealed.
 
 ### Emit (Backend-C)
-- Cap tokens compile to `long long`; `main` injects `oo_cap_grant_fs/sys/env/net/time/rand/alloc()` (process-local; grant idents `fs`/`sys`/`env`/`net`/`time`/`rand`/`alloc`).
-- Sealed FS/Env/Sys/Net/Time/Rand/Alloc lowers **pass the leading cap arg** (ABI with runtime).
-- Sealed **net** ops other than `fetch`: `process_exit(1)` with `ERR\tc_emit\tnet residual` (never emit a fake socket).
+- Cap tokens compile to `long long`; `main` injects `oo_cap_grant_fs/sys/env/net/time/rand/alloc/ffi/thread/gpu()` (process-local; grant idents match param names).
+- Sealed FS/Env/Sys/Net/Time/Rand/Alloc/FFI/Thread/Gpu lowers **pass the leading cap arg** (ABI with runtime).
+- Sealed **libfloor residual** (`mutex_*`/`thread_spawn`/`gpu_launch`/`tcp_*`/…): after require, return `Result` **Err** path A (not real OS threads/GPU/sockets).
 - Non-IDENT first arg on sealed ops: `ERR\tc_emit\t… requires &…Cap` (fail-closed).
 
 ### Runtime: process-local token seal
@@ -76,6 +77,7 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 | Fs write | `check/pass/ok_fs_write.oo` | `check/fail/no_cap_write_file.oo` |
 | Fs path | `check/pass/ok_path_exists.oo` | `check/fail/no_cap_path_exists.oo` |
 | Sys | `check/pass/ok_sys_exec.oo` | `check/fail/no_cap_sys_exec.oo` |
+| Sys spawn (path A residual) | `check/pass/ok_sys_spawn.oo` | `check/fail/no_cap_sys_spawn.oo` |
 | Env | `check/pass/ok_env_get.oo` | `check/fail/no_cap_env_get.oo` |
 | Time | `check/pass/ok_now_ms.oo` | `check/fail/no_cap_now_ms.oo` |
 | Rand | `check/pass/ok_random.oo` | `check/fail/no_cap_random.oo` |
