@@ -1,4 +1,4 @@
-/* M165 path A: verify_human free builtin — env-gated HITL, not full harness.
+/* M165/ZT path A: verify_human — EnvCap + FsCap required; policy env allowlisted.
  * OODA_HITL_ALLOW set → try TTY Enter or OODA_HITL_AUTO_APPROVE=1;
  * else fail-closed Err (E_HITL). Returns Ok("approved") on accept. */
 #include "chs_rt.h"
@@ -6,14 +6,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-OoResS oo_verify_human(OoStr msg) {
+OoResS oo_verify_human(long long env, long long fs, OoStr msg) {
   OoResS r;
   const char *allow;
   const char *auto_ap;
   FILE *tty;
   int c;
 
-  allow = getenv("OODA_HITL_ALLOW");
+  oo_cap_require_env(env, "verify_human");
+  oo_cap_require_fs(fs, "verify_human");
+
+  allow = oo_process_policy_getenv("OODA_HITL_ALLOW");
   if (!allow || !allow[0]) {
     r.ok = 0;
     r.val = oo_str_lit(
@@ -27,7 +30,7 @@ OoResS oo_verify_human(OoStr msg) {
   }
   fputc('\n', stderr);
 
-  auto_ap = getenv("OODA_HITL_AUTO_APPROVE");
+  auto_ap = oo_process_policy_getenv("OODA_HITL_AUTO_APPROVE");
   if (auto_ap && strcmp(auto_ap, "1") == 0) {
     fprintf(stderr, "[HITL] Auto-approved (OODA_HITL_AUTO_APPROVE=1). Resuming...\n");
     r.ok = 1;

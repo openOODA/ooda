@@ -194,7 +194,10 @@ OoResS oo_channel_recv(long long cap, long long slot);
 OoResS oo_actor_spawn(long long cap, OoStr name);
 OoResS oo_actor_send(long long cap, long long id, OoStr msg);
 OoResS oo_actor_recv(long long cap, long long id);
-OoResS oo_verify_human(OoStr msg);
+/* Process-policy env: only OODA_* / OO_* keys (not product env_get). */
+const char *oo_process_policy_getenv(const char *key);
+/* HITL requires process EnvCap + FsCap (TTY / policy env). */
+OoResS oo_verify_human(long long env, long long fs, OoStr msg);
 OoResS oo_gpu_launch(long long cap, OoStr shader);
 OoResS oo_sys_exec(long long cap, int argc, OoStr *argv);
 OoResS oo_sys_exec1(long long cap, OoStr cmd);

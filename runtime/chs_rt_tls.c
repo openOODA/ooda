@@ -130,7 +130,7 @@ OoResS oo_tls_connect(long long cap, OoStr host, long long port) {
 #else
   {
     OoResS r;
-    const char *insec = getenv("OODA_TLS_INSECURE_TCP");
+    const char *insec = oo_process_policy_getenv("OODA_TLS_INSECURE_TCP");
     char buf[160];
     if (insec && strcmp(insec, "1") == 0) {
       close(fd);

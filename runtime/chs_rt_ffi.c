@@ -78,8 +78,9 @@ OoResS oo_dlopen(long long cap, OoStr path) {
   char buf[96];
   oo_cap_require_ffi(cap, "dlopen");
   r.ok = 0;
-  allow = getenv("OODA_FFI_ALLOW_DLOPEN");
-  dir = getenv("OODA_FFI_ALLOWDIR");
+  /* ZT: process-policy keys only (OODA_*) — not product env_get */
+  allow = oo_process_policy_getenv("OODA_FFI_ALLOW_DLOPEN");
+  dir = oo_process_policy_getenv("OODA_FFI_ALLOWDIR");
   p = path.data ? path.data : "";
   if (!allow || strcmp(allow, "1") != 0) {
     r.val = oo_str_lit("ffi residual: set OODA_FFI_ALLOW_DLOPEN=1 for OS dlopen");

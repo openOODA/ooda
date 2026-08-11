@@ -11,7 +11,8 @@ void oo_list_quota_init_public(void) {
   long long v;
   if (ready) return;
   ready = 1;
-  e = getenv("OO_LIST_AMBIENT_QUOTA");
+  /* ZT: only process-policy key OO_LIST_AMBIENT_QUOTA (not arbitrary getenv) */
+  e = oo_process_policy_getenv("OO_LIST_AMBIENT_QUOTA");
   if (e && e[0]) {
     v = atoll(e);
     if (v > 0) oo_list_ambient_quota = v;
