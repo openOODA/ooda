@@ -1,23 +1,32 @@
-# AST auto-apply residual
-**Status:** residual honesty. PM **2.1**. **Marker:** `AST_AUTOFIX_RESIDUAL_ALPHA`
-## Named / partial surface
-See PM notes for what is already product In.
-## Fail-closed residual
-Do not treat residual gaps as DESIGN-complete.
-## What we do **not** claim
-Full DESIGN depth for this item is not product alpha.
+# AST auto-apply — path A floors + residual multi-code depth
 
-## Path A product floor (alpha) — M153 + M154 agent loop
-
+**Marker residual:** `AST_AUTOFIX_RESIDUAL_ALPHA`  
 **Path A marker:** `AST_AUTOFIX_PATH_A_ALPHA`  
-**Status:** path A **In** for **hints**, not full auto-apply.  
-**In:**  
-- `--json-errors` `fix_hint` on codes (E_CAP/E_TC/E_PARSE/E_SECRET/…)  
-- **E_CAP** also ships machine `kind` + `suggested_fix` for agent apply guidance  
-- Full agent loop floor: `scripts/ai_native_product_floor_smoke.sh`  
-**In (M155):** `ooda fix <file.oo>` / `scripts/ooda_apply_ecap_fix.sh` — bounded E_CAP structural apply (add `&Cap` param + first-arg token); rails `ecap_autofix_smoke`.
-**Still residual:** auto-apply for non-E_CAP codes; full AST rewrite; telepathic compile.
+**PM:** **2.1**. Status: bounded product apply **In** for named classes; full multi-code AST rewrite residual.
+
+## What is production-ready (alpha)
+
+| Class | Behavior | Rails |
+|-------|----------|-------|
+| **Hints** | `--json-errors` `fix_hint` (E_CAP/E_TC/E_PARSE/E_SECRET/…); E_CAP also `kind` + `suggested_fix` | `json_errors_smoke` |
+| **E_CAP apply (M155)** | `ooda fix` / `ooda_apply_ecap_fix.py` — structural add `&Cap` param + first-arg token | `ecap_autofix_smoke` |
+| **E_TC undefined-var (M158)** | `ooda fix` / `ooda_apply_etc_fix.py` — insert `let name = 0;` in enclosing fn body | `etc_autofix_smoke` |
+| **Agent loop** | outline → reflect → json-errors → patch | `ai_native_product_floor_smoke` |
+| **Dispatcher** | `ooda_apply_fix.py` routes E_CAP then E_TC | product `ooda fix` |
+
+## What we do **not** claim
+
+- Auto-apply for **other** diagnostic codes (E_PARSE brace rewrite, multi-error batches, E_SECRET, …)  
+- Full AST rewrite / apply of free-form `suggested_fix` text (never shell-eval of diagnostics)  
+- Telepathic / intent compile  
+
+## Fail-closed residual
+
+Non-applicable inputs (e.g. parse-only fail, no E_CAP/E_TC-undefined) exit non-zero. Do not treat residual multi-code depth as DESIGN-complete.
 
 ## Rails
-- `AST_AUTOFIX_RESIDUAL_ALPHA`
-- `scripts/ast_autofix_residual_smoke.sh`
+
+- `AST_AUTOFIX_RESIDUAL_ALPHA` / `AST_AUTOFIX_PATH_A_ALPHA`  
+- `scripts/ecap_autofix_smoke.sh`  
+- `scripts/etc_autofix_smoke.sh`  
+- `scripts/ast_autofix_residual_smoke.sh`  

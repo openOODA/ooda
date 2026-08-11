@@ -2,7 +2,7 @@
 
 **Marker:** `AI_NATIVE_PATH_A_ALPHA`  
 **PM:** executive **AI-native systems language** + tooling **2.1 / 2.2 / 2.2b / 5.5**  
-**Status:** path A **In** — agent loop surfaces proven; full DESIGN AI stack residual.
+**Status:** path A **In** — agent loop + bounded `ooda fix` (E_CAP + E_TC); full DESIGN AI stack residual.
 
 ## What is production-ready (alpha)
 
@@ -12,13 +12,13 @@
 | `ooda reflect` | NDJSON symbol / caps / contracts / verify | same |
 | `ooda check --json-errors` | Machine codes + `fix_hint`; **E_CAP** also `kind` + `suggested_fix` | `json_errors_smoke` |
 | `ooda patch … --replace-fn` | Surgical function body replace (path-safe) | `patch_smoke` |
-| `ooda fix` | Bounded E_CAP structural auto-fix | `ecap_autofix_smoke` |
+| `ooda fix` | **E_CAP** structural apply (M155) **and** **E_TC undefined-var** `let name = 0` (M158) | `ecap_autofix_smoke`, `etc_autofix_smoke` |
 | **Agent loop floor** | outline → reflect → json-errors → patch in one smoke | `ai_native_product_floor_smoke` |
 | Residual free names | telepathic/hive free calls refuse | `residual_path_a_floor_smoke` |
 
 ## What we do **not** claim
 
-- Full AST auto-apply of `suggested_fix` / `fix_hint` (see `AST_AUTOFIX.md`)  
+- Full multi-code AST auto-apply (only E_CAP + E_TC-undefined classes) — see `AST_AUTOFIX.md`  
 - Intent-driven / telepathic compile (`TELEPATHIC_AST.md`)  
 - Global hive-mind fuzzing (`HIVEMIND.md`)  
 - Typed import-graph outline depth  
@@ -26,5 +26,7 @@
 ## Rails
 
 - `scripts/ai_native_product_floor_smoke.sh`  
-- Component smokes: outline/reflect, patch, json-errors  
+- `scripts/ecap_autofix_smoke.sh`  
+- `scripts/etc_autofix_smoke.sh`  
+- Component: outline/reflect, patch, json-errors  
 - Residual: `ast_autofix_residual_smoke`, telepathic/hive residual packs  
