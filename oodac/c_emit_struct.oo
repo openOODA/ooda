@@ -1,0 +1,158 @@
+// package: backend-c — emit floor
+// job: M168 path A — emit C typedefs for `type Name = struct {..}` and simple aliases
+// stage: emit
+// residual: no nested List[Struct]; no &mut T product; not full generics
+
+// Map field type tokens at pos → C field type (Int/String/List/user).
+pub fn c_struct_field_c_ty(toks: List[String], pos: Int, n: Int) -> String {
+    if pos >= n {
+        return "long long";
+    }
+    if field_at(list_get(toks, pos), 0) == "AMP" {
+        return "long long";
+    }
+    if field_at(list_get(toks, pos), 0) != "IDENT" {
+        return "long long";
+    }
+    let tn = field_at(list_get(toks, pos), 3);
+    if tn == "String" {
+        return "OoStr";
+    }
+    if tn == "Int" || tn == "Bool" {
+        return "long long";
+    }
+    if tn == "Float" || tn == "f64" {
+        return "double";
+    }
+    if tn == "List" {
+        let lk = c_peek_list_elem(toks, pos, n);
+        if lk == "I" {
+            return "OoIList";
+        }
+        // List[String] product; List[Struct] residual → still OoSList shape
+        return "OoSList";
+    }
+    if tn == "Result" {
+        return "OoResS";
+    }
+    // user type name / alias (must have been emitted earlier or is Int alias)
+    return tn;
+}
+
+// Emit one `type Name = ...;` as C typedef. pos at KW_TYPE. Returns pos after SEMI.
+pub fn c_emit_one_type_alias(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    if p < n && field_at(list_get(toks, p), 0) == "KW_TYPE" {
+        p = p + 1;
+    }
+    if p >= n || field_at(list_get(toks, p), 0) != "IDENT" {
+        return skip_until_semi(toks, pos);
+    }
+    let name = field_at(list_get(toks, p), 3);
+    p = p + 1;
+    if p < n && field_at(list_get(toks, p), 0) == "EQ" {
+        p = p + 1;
+    }
+    // type Name = struct { f: T, ... };
+    if p < n && field_at(list_get(toks, p), 0) == "IDENT"
+        && field_at(list_get(toks, p), 3) == "struct" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+            p = p + 1;
+        }
+        let mut body = "";
+        let mut first = true;
+        while p < n && field_at(list_get(toks, p), 0) != "RBRACE" {
+            if field_at(list_get(toks, p), 0) == "COMMA" {
+                p = p + 1;
+            }
+            if p >= n || field_at(list_get(toks, p), 0) != "IDENT" {
+                break;
+            }
+            let fname = field_at(list_get(toks, p), 3);
+            p = p + 1;
+            if p < n && field_at(list_get(toks, p), 0) == "COLON" {
+                p = p + 1;
+            }
+            let fty = c_struct_field_c_ty(toks, p, n);
+            p = c_emit_skip_type(toks, p, n);
+            if first {
+                body = fty + " " + fname + ";";
+                first = false;
+            } else {
+                body = body + " " + fty + " " + fname + ";";
+            }
+        }
+        if p < n && field_at(list_get(toks, p), 0) == "RBRACE" {
+            p = p + 1;
+        }
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+            p = p + 1;
+        }
+        println("typedef struct { " + body + " } " + name + ";");
+        return p;
+    }
+    // type Name = Int | String | Float | List[...] | Other
+    let simple = c_struct_field_c_ty(toks, p, n);
+    // avoid `typedef Point Point` for unresolved self — use long long fallback only if empty
+    let mut cty = simple;
+    if cty == name {
+        cty = "long long";
+    }
+    println("typedef " + cty + " " + name + ";");
+    return skip_until_semi(toks, pos);
+}
+
+// Emit all top-level type aliases before functions.
+pub fn c_emit_type_aliases(toks: List[String]) {
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        let k = field_at(list_get(toks, i), 0);
+        if k == "KW_TYPE" {
+            i = c_emit_one_type_alias(toks, i, n);
+        } else if k == "KW_FN" || k == "KW_PUB" {
+            // skip fn body braces so nested types (none path A) don't confuse
+            i = i + 1;
+            while i < n {
+                let kk = field_at(list_get(toks, i), 0);
+                if kk == "LBRACE" {
+                    i = c_emit_skip_braces(toks, i, n);
+                    break;
+                }
+                if kk == "EOF" {
+                    break;
+                }
+                i = i + 1;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+}
+
+// Extract type name from struct-lit C text: ((Name){ ... })
+pub fn c_struct_lit_ty_name(rhs: String) -> String {
+    if chars_len(rhs) < 6 {
+        return "";
+    }
+    if char_at(rhs, 0) != "(" || char_at(rhs, 1) != "(" {
+        return "";
+    }
+    let mut i = 2;
+    let n = chars_len(rhs);
+    let mut name = "";
+    while i < n {
+        let c = char_at(rhs, i);
+        if c == ")" {
+            break;
+        }
+        if c == " " {
+            i = i + 1;
+        } else {
+            name = name + c;
+            i = i + 1;
+        }
+    }
+    return name;
+}
