@@ -3,7 +3,8 @@
 **Purpose:** Map each sealed effect op through **check → emit-c → runtime → product**.  
 **Rules:** Default-deny. Unfinished = fail-closed, never silent ambient I/O. `fetch` is product-lowered; other net names residual.  
 **Runtime seal:** sealed FS/Sys/Env/Net/Time/Rand/Alloc ops re-check process-local capability tokens at native runtime. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md).  
-**Not sealed by this matrix:** C FFI / `dlopen` / raw pointers / `import "C"` — residual honesty only; see [`CAP_FFI.md`](CAP_FFI.md) (PM 6.3 / M25). Process-local caps do **not** seal C interop.  
+**Cap vs FFI (PM 6.3 path A):** bare `dlopen` / host-FFI free names need `&UnsafeFFICap` at check. Process-local Fs/Sys/… do **not** seal full C TCB / OS `dlopen` / raw pointers / `import "C"` — see [`CAP_FFI.md`](CAP_FFI.md).  
+
 **Sources:** `oodac/check_caps.oo`, `oodac/c_emit_lower.oo`, `runtime/chs_rt_fs.c`, `runtime/chs_rt_sys.c`, `chs_rt_time_rand.c`, `chs_rt_alloc.c`.
 
 Status legend:

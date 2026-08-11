@@ -9,7 +9,7 @@
 
 | Layer | Behavior |
 |-------|----------|
-| **Check** | `oodac/check_caps.oo` — default-deny sealed free/method names; require matching `&FsCap` / `&SysCap` / `&EnvCap` / `&NetCap` / `&TimeCap` / `&RandCap` / `&AllocCap` **param** |
+| **Check** | `oodac/check_caps.oo` — default-deny sealed free/method names; require matching `&FsCap` / `&SysCap` / `&EnvCap` / `&NetCap` / `&TimeCap` / `&RandCap` / `&AllocCap` / `&UnsafeFFICap` **param** (FFI free names: path A) |
 | **Emit (Backend-C)** | Cap params → `long long`; sealed calls pass **cap IDENT first**; `main` injects **`oo_cap_grant_fs/sys/env/net/time/rand/alloc()`** (process-local tokens from entropy) |
 | **Runtime (`chs_rt`)** | `oo_cap_require_*` before `read_file` / `write_file` / `path_exists` / `file_size` / `env_get` / `sys_exec` / `fetch` / `now_ms` / `sleep_ms` / `random` / `seed` / `alloc_bytes` / `free_bytes` |
 | **Native binary** | Zero or classic fixed magic (`0x4F4F4653` / `…TM` / `…RN` / `…AL` etc.) as “grant” → `ERR\tcap\t…` + exit 1 |
@@ -39,7 +39,7 @@ Classic `0x4F4F*` constants are **forged values that must be denied**, not ambie
 - Cryptographically secure randomness or attested clocks  
 - Heap sandboxing, ASAN, or OS `rlimit` isolation for AllocCap  
 - Ambient effects without an explicit cap param on the product path  
-- **C FFI / `dlopen` / raw-pointer / Compile-Time FFI seal** — process-local caps do **not** seal C interop; `&UnsafeFFICap` is residual-only (see [`CAP_FFI.md`](CAP_FFI.md))  
+- **Full C TCB / OS `dlopen` / raw-pointer / Compile-Time FFI gen** — process-local Fs/Sys/… do **not** seal the whole C interop surface; path A seals named free calls under `&UnsafeFFICap` at **check** only (see [`CAP_FFI.md`](CAP_FFI.md)) — runtime FFI token residual
 
 ---
 

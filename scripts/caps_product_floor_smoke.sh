@@ -21,7 +21,7 @@ run() {
 run caps_matrix_smoke.sh
 run alloc_cap_smoke.sh
 run biometric_caps_residual_smoke.sh
-run cap_ffi_residual_smoke.sh
+run cap_ffi_product_floor_smoke.sh
 if [[ $fail -ne 0 ]]; then
   echo "caps_product_floor_smoke: FAILED" >&2
   exit 1

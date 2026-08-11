@@ -40,16 +40,22 @@ else
   bad "doc missing DESIGN tension residual wording"
 fi
 
-# Named surface only: &UnsafeFFICap (doc name; type not required)
+# Named surface: &UnsafeFFICap (path A check type In; runtime token residual)
 if grep -q '&UnsafeFFICap' "$DOC"; then
   pass "doc names &UnsafeFFICap surface"
 else
   bad "doc missing &UnsafeFFICap named surface"
 fi
-if grep -qiE 'UnsafeFFICap (type|grant|token) (shipped|enforced|implemented)' "$DOC"; then
-  bad "doc claims &UnsafeFFICap type/grant shipped"
+if grep -q 'CAP_FFI_PATH_A_ALPHA' "$DOC"; then
+  pass "doc marker CAP_FFI_PATH_A_ALPHA"
 else
-  pass "doc does not claim &UnsafeFFICap type shipped"
+  bad "doc missing CAP_FFI_PATH_A_ALPHA"
+fi
+# Residual: must not claim runtime token / full FFI sandbox shipped
+if grep -qiE 'runtime (UnsafeFFICap )?(grant|token) (shipped|enforced)|FFI fully (sealed|enforced) shipped' "$DOC"; then
+  bad "doc claims runtime UnsafeFFICap or full FFI seal shipped"
+else
+  pass "doc does not claim runtime UnsafeFFICap / full seal shipped"
 fi
 
 # Fixture carries product marker form (documentation rail)
@@ -90,12 +96,15 @@ if ! grep -qE 'CAP_FFI|do not.*seal C|interop' bootstrap/CAPS_MATRIX.md; then
 else
   echo "OK CAPS_MATRIX names Cap/FFI residual ceiling"
 fi
-if grep -rn --include='*.oo' -E 'UnsafeFFICap' oodac/ 2>/dev/null | grep -v residual | head -1 | grep -q .; then
-  echo "WARN UnsafeFFICap appears in oodac sources (check not shipped as green)"
+# Path A: check-side UnsafeFFICap is In; runtime grant must stay residual
+if ! grep -q 'UnsafeFFICap' oodac/check_cap_util.oo; then
+  echo "FAIL path A missing UnsafeFFICap in check_cap_util" >&2; fail=1
+else
+  echo "OK check path A names UnsafeFFICap"
 fi
 # product truth: no grant/require for UnsafeFFICap in runtime
-if grep -rn --include='*.c' --include='*.h' -E 'oo_cap_grant_unsafe|UnsafeFFICap' runtime/ 2>/dev/null | head -1 | grep -q .; then
-  echo "FAIL runtime appears to implement UnsafeFFICap" >&2; fail=1
+if grep -rn --include='*.c' --include='*.h' -E 'oo_cap_grant_unsafe|oo_cap_require_ffi|UnsafeFFICap' runtime/ 2>/dev/null | head -1 | grep -q .; then
+  echo "FAIL runtime appears to implement UnsafeFFICap grant/require" >&2; fail=1
 else
   echo "OK runtime has no UnsafeFFICap grant/token"
 fi
@@ -103,6 +112,11 @@ if ! grep -q 'cap_ffi_residual_smoke.sh' scripts/ci_product.sh; then
   echo "FAIL ci_product missing cap_ffi_residual_smoke" >&2; fail=1
 else
   echo "OK ci_product wires cap_ffi residual"
+fi
+if ! grep -q 'cap_ffi_product_floor_smoke.sh' scripts/ci_product.sh && ! grep -q 'cap_ffi_product_floor_smoke' scripts/caps_product_floor_smoke.sh; then
+  echo "FAIL product floor smoke not wired" >&2; fail=1
+else
+  echo "OK product floor smoke wired"
 fi
 
 if [[ $fail -ne 0 ]]; then
