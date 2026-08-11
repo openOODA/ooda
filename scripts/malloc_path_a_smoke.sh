@@ -76,6 +76,12 @@ if [[ -f "$FIX" ]] \
 else
   bad "fixture malloc_path_a.oo missing or wrong shape"
 fi
+# M167: typed let bind path A (tip host SEGV on untyped free-name let until rebuild)
+if grep -qE 'let p: Int = malloc|free\(alloc, malloc' "$FIX"; then
+  pass "fixture uses typed let or nested free(malloc) (SEGV-safe on tip host)"
+else
+  bad "fixture missing typed/nested malloc shape"
+fi
 
 # Runtime symbols still present (aliases only; no new C API required)
 if grep -q 'oo_alloc_bytes' runtime/chs_rt.h \

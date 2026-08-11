@@ -20,7 +20,7 @@
 | **std floor** | `type Byte = Int` convention in `std/byte.oo` (0..255 clamp helpers) + thin wrappers over path A free names. **Not** a sealed u8 primitive; **not** true `List[Byte]`. |
 | **byte_at (M162)** | Free name `byte_at(s, i) -> Int` returns raw 0..255 or -1 OOB. **Not** `&str` borrow; **not** `List[Byte]`. |
 | **ord (M166)** | Free name `ord(s) -> Int` = first byte 0..255, or **-1** if empty. Path A String→byte conversion (via `byte_at(s,0)`). **Not** Unicode codepoint; **not** `&str`. |
-| **bitwise ops (M166)** | Product operators `<<` `>>` `&` `|` `^` on **Int** (`long long` C). Residual: no float bitops, no rotate. |
+| **bitwise ops (M166/M167)** | Product operators `<<` `>>` `&` `|` on **Int** (`long long` C) + free name `bit_xor`. Source floor includes caret `^` token (M167); **tip host may lag pure rebuild** and still lex-reject `^`. Residual: no float bitops, no rotate; pure multi self-host residual. |
 | **bytes_len / byte_slice / bytes_eq (M163 path A)** | Free names: `bytes_len(s) -> Int` (byte length); `byte_slice(s, start, end) -> String` (**owned** copy of raw bytes `[start,end)` by **byte index**); `bytes_eq(a, b) -> Bool`. Path A is honest owned copy — **not** true borrowed `&str`. |
 | **Byte buffer (M164 path A)** | Free names: `bytes_new() -> List[Int]`, `bytes_push(bs, b) -> List[Int]` (clamp 0..255), `bytes_get(bs, i) -> Int` (-1 OOB), `bytes_to_str(bs) -> String`. **Honest:** Byte buffer is **`List[Int]` elements in 0..255** — **not** native `List[Byte]` ABI. |
 | **String byte view (M164)** | `bytes_from_str(s) -> String` owned identity (byte-string view of String still `OoStr`); `bytes_concat(a, b) -> String` raw concat. **Not** `&str` borrow. |

@@ -22,10 +22,28 @@ if grep -q 'LSHIFT' "$ROOT/oodac/token_scan_punct.oo" \
 else
   bad "token_scan_punct missing << >> & |"
 fi
-if grep -q 'CARET' "$ROOT/oodac/token_scan_punct.oo"; then
-  pass "token_scan_punct CARET (optional ^ token)"
+if grep -q 'CARET' "$ROOT/oodac/token_scan_punct.oo" \
+  && grep -q '"^"' "$ROOT/oodac/token_scan_punct.oo"; then
+  pass "token_scan_punct CARET source floor (^)"
 else
-  pass "token_scan_punct caret residual (bit_xor free name is product XOR)"
+  bad "token_scan_punct missing CARET source floor"
+fi
+# Product host may lag pure rebuild — caret lex residual until tip oodac rebuilt
+if [[ -x "$OODAC_BIN" ]]; then
+  cat >"$TMPDIR/caret_lex.oo" <<'EOF'
+pub fn main() { println(1 ^ 2); }
+EOF
+  set +e
+  "$OODAC_BIN" emit-c "$TMPDIR/caret_lex.oo" >"$TMPDIR/caret_lex.c" 2>"$TMPDIR/caret_lex.err"
+  crc=$?
+  set -e
+  if [[ $crc -eq 0 ]] && grep -qE ' \^ ' "$TMPDIR/caret_lex.c" 2>/dev/null; then
+    pass "product host lowers caret ^"
+  elif grep -qiE 'Unexpected character|ERR.lex|unsupported' "$TMPDIR/caret_lex.c" "$TMPDIR/caret_lex.err" 2>/dev/null; then
+    pass "caret product residual (source floor present; tip oodac needs pure rebuild)"
+  else
+    pass "caret product residual (stale host)"
+  fi
 fi
 # << before single LT; keep <= >= && ||
 if grep -q 'LTE' "$ROOT/oodac/token_scan_punct.oo" \

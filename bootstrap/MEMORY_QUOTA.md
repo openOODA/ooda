@@ -14,5 +14,6 @@
 - **Not** GC / automatic reclamation  
 - **Not** typed `&AllocCap<N>` or full heap sandbox / ASAN  
 - **Not** raw ambient libc `malloc` without AllocCap  
+- **M167:** untyped `let p = malloc(...)` may **SEGV tip oodac** until pure rebuild ships free-name short-circuit in `c_emit_let*`; path A fixture uses **`let p: Int = malloc(...)`** (or nested `free(malloc(...))`).
 
-**Rails:** `memory_quota_product_floor_smoke.sh` (`alloc_cap_smoke` + `list_quota_smoke`) + `scripts/malloc_path_a_smoke.sh`.
+**Rails:** `memory_quota_product_floor_smoke.sh` (`alloc_cap_smoke` + `list_quota_smoke`) + `scripts/malloc_path_a_smoke.sh` + `scripts/m167_residual_deepen_smoke.sh`.

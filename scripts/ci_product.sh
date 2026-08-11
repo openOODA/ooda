@@ -91,6 +91,7 @@ for rail in \
   alloc_cap_smoke.sh \
   list_quota_smoke.sh \
   malloc_path_a_smoke.sh \
+  m167_residual_deepen_smoke.sh \
   bitwise_ops_smoke.sh \
   math_trig_smoke.sh \
   tcp_io_smoke.sh \
