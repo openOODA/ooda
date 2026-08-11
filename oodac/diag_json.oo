@@ -138,41 +138,50 @@ pub fn shell_sq(s: String) -> String {
 }
 
 // Re-run plain check; convert ERR lines → JSON (all error sites).
+// Use let-match (decl=1), never mut match-assign — M23 UAF zeroed first 8 msg bytes.
 pub fn run_check_json_errors(fs: &FsCap, sys: &SysCap, path: String) {
     let outp: String = "/tmp/oodac_json_errors_out.txt";
     let ecp: String = "/tmp/oodac_json_errors_ec.txt";
-    let sh: String = "set +e; EM=\"${OODAC_BIN:-}\"; "
-        + "if [ -z \"$EM\" ] || [ ! -x \"$EM\" ]; then "
-        + "if [ -x ./oodac/oodac ]; then EM=./oodac/oodac; "
-        + "elif [ -x oodac/oodac ]; then EM=oodac/oodac; "
-        + "elif [ -x ../oodac/oodac ]; then EM=../oodac/oodac; "
-        + "elif [ -x /home/jeryd/Projects/openOODA/ooda/oodac/oodac ]; then EM=/home/jeryd/Projects/openOODA/ooda/oodac/oodac; "
-        + "else echo ERR_NO_OODAC >" + shell_sq(outp) + "; echo 1 >" + shell_sq(ecp)
-        + "; exit 0; fi; fi; "
-        + "\"$EM\" check " + shell_sq(path) + " >" + shell_sq(outp) + " 2>&1; "
-        + "echo $? >" + shell_sq(ecp) + "; exit 0";
-    let _r = sys_exec(sys, "sh", "-c", sh);
+    // Helper: argv only (no sh -c quote bugs). Prefer tree path via path_exists.
+    let h1: String = "scripts/oodac_check_capture.sh";
+    let h2: String = "./scripts/oodac_check_capture.sh";
+    let h3: String = "/home/jeryd/Projects/openOODA/ooda/scripts/oodac_check_capture.sh";
+    let mut helper: String = h3;
+    if path_exists(fs, h1) {
+        helper = h1;
+    } else if path_exists(fs, h2) {
+        helper = h2;
+    }
+    let _r = sys_exec(sys, "sh", helper, path, outp, ecp);
     let out_r = read_file(fs, outp);
-    let mut out: String = "ERR\tload\tcapture missing";
-    if out_r.is_ok() {
-        out = match out_r {
-            Ok(s) => s,
-            Err(e) => e,
-        };
-    }
+    let out: String = match out_r {
+        Ok(s) => s,
+        Err(_e) => "ERR\tload\tcapture missing",
+    };
     let ec_r = read_file(fs, ecp);
-    let mut ec_s: String = "1";
-    if ec_r.is_ok() {
-        ec_s = match ec_r {
-            Ok(s) => s,
-            Err(e) => "1",
-        };
-    }
+    let ec_s: String = match ec_r {
+        Ok(s) => s,
+        Err(_e) => "1",
+    };
     let json: String = diag_check_output_to_json(out, path);
+    // stdout only — do not re-shell-echo JSON (quotes/nulls break sh -c).
     println(json);
-    let cmd_sh: String = "echo " + shell_sq(json) + " >&2";
-    let _e = sys_exec(sys, "sh", "-c", cmd_sh);
-    if parse_int(ec_s) != 0 {
+    let mut ec_trim: String = ec_s;
+    if chars_len(ec_trim) > 0 {
+        if char_at(ec_trim, chars_len(ec_trim) - 1) == "\n" {
+            ec_trim = str_slice(ec_trim, 0, chars_len(ec_trim) - 1);
+        }
+    }
+    let mut bad = false;
+    if parse_int(ec_trim) != 0 {
+        bad = true;
+    }
+    if json != "[]" {
+        if diag_find(json, "E_") >= 0 {
+            bad = true;
+        }
+    }
+    if bad {
         process_exit(1);
     }
 }
