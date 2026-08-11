@@ -103,6 +103,7 @@ for rail in \
   secret_eprintln_smoke.sh \
   contracts_and_smoke.sh \
   etc_autofix_smoke.sh \
+  m162_residual_deepen_smoke.sh \
   outline_reflect_smoke.sh \
   patch_smoke.sh \
   std_smoke.sh \

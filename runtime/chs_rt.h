@@ -138,6 +138,7 @@ void oo_cap_require_gpu(long long got, const char *op);
 OoStr crypto_md5_internal(OoStr data);
 OoStr crypto_sha1_internal(OoStr data);
 OoStr crypto_aes_encrypt_internal(OoStr key, OoStr plain);
+long long oo_byte_at(OoStr s, long long idx);
 OoResS oo_tcp_bind(long long cap, long long port);
 OoResS oo_tcp_connect(long long cap, OoStr host, long long port);
 OoResS oo_bind_udp(long long cap, long long port);

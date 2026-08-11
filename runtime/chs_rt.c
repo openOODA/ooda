@@ -4,6 +4,7 @@
 #include "chs_rt_sys.c"
 #include "chs_rt_ffi.c"
 #include "chs_rt_hash.c"
+#include "chs_rt_netfloor.c"
 #include "chs_rt_libfloor.c"
 #include "chs_rt_time_rand.c"
 #include "chs_rt_alloc.c"

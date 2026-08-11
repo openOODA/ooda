@@ -96,5 +96,5 @@ if ! grep -q 'int main\|long long main' "$TMP/all.c" && ! grep -q 'main(int argc
   echo "int main(void) { return 0; }" >> "$TMP/all.c"
 fi
 
-gcc -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" -lm -o "$OUT"
+gcc -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" -lm -ldl -lpthread -o "$OUT"
 echo OK_PURE_MULTI

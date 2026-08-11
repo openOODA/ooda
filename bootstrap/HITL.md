@@ -43,4 +43,6 @@
 
 ## Residual next (not this floor)
 
-Interactive harness; agent pause/resume; live `verify_human` product semantics.
+**M162 path A:** `OODA_HITL_ALLOW` + TTY Enter, or `OODA_HITL_AUTO_APPROVE=1` non-TTY agent approve.
+
+Still residual: full interactive harness; agent pause/resume product; live `verify_human` DESIGN semantics; HumanCap.

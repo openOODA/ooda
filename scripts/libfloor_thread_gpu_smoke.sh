@@ -11,12 +11,12 @@ OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
 fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
-RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c")
+RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm -ldl -lpthread)
 
 deny_forge() { # $1=c $2=sed_expr $3=label
   local fc="${1%.c}_forge.c" fb="${1%.c}_forge.bin"
   sed -E "$2" "$1" >"$fc"
-  gcc "${RT[@]}" "$fc" -o "$fb" -lm
+  gcc "${RT[@]}" "$fc" -o "$fb" -lm -ldl -lpthread
   set +e; local o rc=0; o=$("$fb" 2>&1) || rc=$?; set -e
   if [[ $rc -ne 0 ]] && echo "$o" | grep -qE $'ERR[\t ]*cap'; then pass "$3"
   else bad "$3 out=$o rc=$rc"; fi
@@ -85,19 +85,19 @@ for m in thread.oo gpu.oo sync.oo; do
   fi
 done
 
-# path A honesty strings + no real OS threads/GPU in residual runtime
-if grep -q 'thread_spawn residual: path A seal only' runtime/chs_rt_libfloor.c \
-  && grep -q 'mutex residual: path A seal only' runtime/chs_rt_libfloor.c \
+# M162: real pthread; GPU residual remains
+if grep -q 'pthread_create' runtime/chs_rt_libfloor.c \
+  && grep -q 'pthread_mutex_lock' runtime/chs_rt_libfloor.c \
   && grep -q 'gpu residual: path A seal only' runtime/chs_rt_libfloor.c; then
-  pass "runtime residual err strings present"
+  pass "runtime pthread path A + GPU residual present"
 else
-  bad "runtime residual err strings missing"
+  bad "runtime thread/gpu path A missing"
 fi
-if grep -nE 'pthread_create|pthread_mutex|cudaLaunch|clEnqueue|vkCmdDispatch' \
+if grep -nE 'cudaLaunch|clEnqueue|vkCmdDispatch' \
   runtime/chs_rt_libfloor.c 2>/dev/null | head -3; then
-  bad "libfloor residual claims real OS/GPU path"
+  bad "libfloor must not claim GPU shader product"
 else
-  pass "no OS pthread/GPU in libfloor residual"
+  pass "no GPU shader product in libfloor"
 fi
 
 # --- dual-run: emit-c + residual Err at runtime ---
@@ -114,13 +114,13 @@ elif ! grep -qE 'oo_cap_grant_thread' "$TMPDIR/lf_thr.c"; then
   bad "emit missing oo_cap_grant_thread"
 else
   pass "emit thread lowers + grant"
-  gcc "${RT[@]}" "$TMPDIR/lf_thr.c" -o "$TMPDIR/lf_thr.bin" -lm 2>"$TMPDIR/lf_thr.gcc" || {
+  gcc "${RT[@]}" "$TMPDIR/lf_thr.c" -o "$TMPDIR/lf_thr.bin" -lm -ldl -lpthread 2>"$TMPDIR/lf_thr.gcc" || {
     bad "gcc thread"; head -10 "$TMPDIR/lf_thr.gcc" || true
   }
   if [[ -x "$TMPDIR/lf_thr.bin" ]]; then
     out=$("$TMPDIR/lf_thr.bin" 2>&1) || true
     if echo "$out" | grep -q 'thread-residual-ok' && echo "$out" | grep -q 'mutex-residual-ok'; then
-      pass "runtime thread residual Err"
+      pass "runtime thread product Ok"
     else
       bad "runtime thread out=$out"
     fi
@@ -143,7 +143,7 @@ elif ! grep -qE 'oo_cap_grant_gpu' "$TMPDIR/lf_gpu.c"; then
   bad "emit missing oo_cap_grant_gpu"
 else
   pass "emit gpu lowers + grant"
-  gcc "${RT[@]}" "$TMPDIR/lf_gpu.c" -o "$TMPDIR/lf_gpu.bin" -lm 2>"$TMPDIR/lf_gpu.gcc" || {
+  gcc "${RT[@]}" "$TMPDIR/lf_gpu.c" -o "$TMPDIR/lf_gpu.bin" -lm -ldl -lpthread 2>"$TMPDIR/lf_gpu.gcc" || {
     bad "gcc gpu"; head -10 "$TMPDIR/lf_gpu.gcc" || true
   }
   if [[ -x "$TMPDIR/lf_gpu.bin" ]]; then

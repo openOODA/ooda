@@ -11,7 +11,7 @@ mkdir -p "$TMPDIR"
 fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
-RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm)
+RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm -ldl -lpthread)
 
 # check still refuses bare dlopen
 set +e
@@ -53,7 +53,7 @@ if [[ -x "$TMPDIR/cfr_pass.bin" ]]; then
   # forge deny: zero token
   sed -E 's/long long ffi = oo_cap_grant_ffi\(\)/long long ffi = 0LL/' \
     "$TMPDIR/cfr_pass.c" >"$TMPDIR/cfr_zero.c"
-  gcc "${RT[@]}" "$TMPDIR/cfr_zero.c" -o "$TMPDIR/cfr_zero.bin" -lm
+  gcc "${RT[@]}" "$TMPDIR/cfr_zero.c" -o "$TMPDIR/cfr_zero.bin" -lm -ldl -lpthread
   set +e
   zout=$("$TMPDIR/cfr_zero.bin" 2>&1); zrc=$?
   set -e
@@ -65,7 +65,7 @@ if [[ -x "$TMPDIR/cfr_pass.bin" ]]; then
   # classic magic forge
   sed -E 's/long long ffi = oo_cap_grant_ffi\(\)/long long ffi = 0x4F4F4649LL/' \
     "$TMPDIR/cfr_pass.c" >"$TMPDIR/cfr_mag.c"
-  gcc "${RT[@]}" "$TMPDIR/cfr_mag.c" -o "$TMPDIR/cfr_mag.bin" -lm
+  gcc "${RT[@]}" "$TMPDIR/cfr_mag.c" -o "$TMPDIR/cfr_mag.bin" -lm -ldl -lpthread
   set +e
   mout=$("$TMPDIR/cfr_mag.bin" 2>&1); mrc=$?
   set -e

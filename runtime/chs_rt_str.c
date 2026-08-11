@@ -72,6 +72,12 @@ OoStr oo_str_concat(OoStr a, OoStr b) {
 
 long long oo_str_byte_len(OoStr s) { return s.len; }
 
+/* Path A Byte floor (M162): raw byte 0..255 at index; -1 if OOB. Not &str borrow. */
+long long oo_byte_at(OoStr s, long long idx) {
+  if (!s.data || idx < 0 || idx >= s.len) return -1;
+  return (long long)(unsigned char)s.data[idx];
+}
+
 long long oo_chars_len(OoStr s) {
   /* UTF-8 scalar count (ASCII-fast path covers CHS corpus). */
   long long n = 0;

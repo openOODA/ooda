@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M161 libfloor path A — NetCap tcp_bind/connect, bind_udp, tls_connect residual seals
 # Dual path: granted → Result residual Err; forge (zero/magic) → ERR cap deny
-# Honesty: no real sockets / TLS handshake — path A seal + residual only
+# Honesty: real TCP/UDP bind+connect under NetCap; TLS residual
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -13,7 +13,7 @@ mkdir -p "$TMPDIR"
 fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
-RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm)
+RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm -ldl -lpthread)
 
 # check: bare tcp_connect without NetCap refused
 cat >"$TMPDIR/lfn_bare.oo" <<'EOF'
@@ -93,7 +93,7 @@ emit_run() {
   # forge deny: zero NetCap
   sed -E 's/long long net = oo_cap_grant_net\(\)/long long net = 0LL/' \
     "$TMPDIR/${base}.c" >"$TMPDIR/${base}_zero.c"
-  gcc "${RT[@]}" "$TMPDIR/${base}_zero.c" -o "$TMPDIR/${base}_zero.bin" -lm
+  gcc "${RT[@]}" "$TMPDIR/${base}_zero.c" -o "$TMPDIR/${base}_zero.bin" -lm -ldl -lpthread
   set +e
   local zout zrc=0
   zout=$("$TMPDIR/${base}_zero.bin" 2>&1) || zrc=$?
@@ -106,7 +106,7 @@ emit_run() {
   # classic magic forge NetCap 0x4F4F4E54 "OONT"
   sed -E 's/long long net = oo_cap_grant_net\(\)/long long net = 0x4F4F4E54LL/' \
     "$TMPDIR/${base}.c" >"$TMPDIR/${base}_mag.c"
-  gcc "${RT[@]}" "$TMPDIR/${base}_mag.c" -o "$TMPDIR/${base}_mag.bin" -lm
+  gcc "${RT[@]}" "$TMPDIR/${base}_mag.c" -o "$TMPDIR/${base}_mag.bin" -lm -ldl -lpthread
   set +e
   local mout mrc2=0
   mout=$("$TMPDIR/${base}_mag.bin" 2>&1) || mrc2=$?
@@ -118,7 +118,7 @@ emit_run() {
   fi
 }
 
-emit_run "$ROOT/fixtures/libfloor_tcp.oo" "lfn_tcp" "tcp-residual-ok" "tcp_connect" "oo_tcp_connect"
+emit_run "$ROOT/fixtures/libfloor_tcp.oo" "lfn_tcp" "tcp-err-ok" "tcp_connect" "oo_tcp_connect"
 emit_run "$ROOT/fixtures/libfloor_tls.oo" "lfn_tls" "tls-residual-ok" "tls_connect" "oo_tls_connect"
 
 # tcp_bind + bind_udp residual (inline)
@@ -154,20 +154,18 @@ else
   fi
 fi
 
-# runtime residual string honesty
-if grep -q 'net residual: path A seal only' runtime/chs_rt_libfloor.c \
-  && grep -q 'no full TCP/UDP/TLS product' runtime/chs_rt_libfloor.c; then
-  pass "runtime residual err string present"
+# M162 honesty: real TCP/UDP present; TLS residual remains
+if grep -q 'tls residual: path A seal only' runtime/chs_rt_netfloor.c \
+  && grep -q 'getaddrinfo' runtime/chs_rt_netfloor.c \
+  && grep -q 'socket(' runtime/chs_rt_netfloor.c; then
+  pass "runtime real TCP/UDP + TLS residual present"
 else
-  bad "runtime residual err string missing"
+  bad "runtime net path A missing"
 fi
-
-# path A honesty: no real OS sockets/TLS in libfloor residual
-# (word-boundary so oo_tcp_connect / oo_bind_udp names do not false-positive)
-if grep -nE '\bsocket\(|\bconnect\(|\bbind\(|\blisten\(|sys/socket|netinet/|openssl|SSL_|getaddrinfo' runtime/chs_rt_libfloor.c 2>/dev/null | head -5; then
-  bad "libfloor residual claims real socket/TLS path"
+if grep -nE 'openssl|SSL_' runtime/chs_rt_netfloor.c 2>/dev/null | head -3; then
+  bad "netfloor must not claim TLS/SSL product"
 else
-  pass "no OS socket/TLS in libfloor residual"
+  pass "no TLS/SSL product in netfloor"
 fi
 
 if [[ $fail -ne 0 ]]; then

@@ -6,7 +6,7 @@
 - Rails: `fixtures/multi_clause_pass.oo`, `multi_clause_{req,ens}_fail.oo`, `scripts/contracts_multi_clause_smoke.sh`
 ## Path A product floor — simple `&&` (M159)
 
-**In:** simple comparison clauses combined with `&&` in `requires` / `ensures` (runtime checks via emit).  
+**In:** simple comparison clauses combined with `&&` / `||` (M162) in `requires` / `ensures` (runtime checks via emit).  
 **Rails:** `scripts/contracts_and_smoke.sh` + multi-clause smokes.  
 **Fixtures:** `complex_contract_{pass,req_fail,ens_fail}.oo`
 

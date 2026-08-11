@@ -13,7 +13,7 @@ mkdir -p "$TMPDIR"
 fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
-RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm)
+RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm -ldl -lpthread)
 
 # check: bare mutex_lock without ThreadCap refused
 cat >"$TMPDIR/lf_bare_mutex.oo" <<'EOF'
@@ -82,7 +82,7 @@ emit_run() {
   # forge deny: zero token
   sed -E "s/long long ${gident} = oo_cap_grant_${gident}\\(\\)/long long ${gident} = 0LL/" \
     "$TMPDIR/${base}.c" >"$TMPDIR/${base}_zero.c"
-  gcc "${RT[@]}" "$TMPDIR/${base}_zero.c" -o "$TMPDIR/${base}_zero.bin" -lm
+  gcc "${RT[@]}" "$TMPDIR/${base}_zero.c" -o "$TMPDIR/${base}_zero.bin" -lm -ldl -lpthread
   set +e
   local zout zrc=0
   zout=$("$TMPDIR/${base}_zero.bin" 2>&1) || zrc=$?
@@ -97,7 +97,7 @@ emit_run() {
   [[ "$gident" == "gpu" ]] && magic="0x4F4F4750LL"
   sed -E "s/long long ${gident} = oo_cap_grant_${gident}\\(\\)/long long ${gident} = ${magic}/" \
     "$TMPDIR/${base}.c" >"$TMPDIR/${base}_mag.c"
-  gcc "${RT[@]}" "$TMPDIR/${base}_mag.c" -o "$TMPDIR/${base}_mag.bin" -lm
+  gcc "${RT[@]}" "$TMPDIR/${base}_mag.c" -o "$TMPDIR/${base}_mag.bin" -lm -ldl -lpthread
   set +e
   local mout mrc2=0
   mout=$("$TMPDIR/${base}_mag.bin" 2>&1) || mrc2=$?
@@ -109,24 +109,22 @@ emit_run() {
   fi
 }
 
-emit_run "$ROOT/fixtures/libfloor_mutex.oo" "lf_mutex" "mutex-residual-ok" "mutex" "thread"
-emit_run "$ROOT/fixtures/libfloor_thread_spawn.oo" "lf_tspawn" "thread-spawn-residual-ok" "thread_spawn" "thread"
+emit_run "$ROOT/fixtures/libfloor_mutex.oo" "lf_mutex" "mutex-lock-ok" "mutex" "thread"
+emit_run "$ROOT/fixtures/libfloor_thread_spawn.oo" "lf_tspawn" "thread-spawn-ok" "thread_spawn" "thread"
 emit_run "$ROOT/fixtures/libfloor_gpu_launch.oo" "lf_gpu" "gpu-residual-ok" "gpu_launch" "gpu"
 
-# document residual err strings present in runtime (path A honesty)
-if grep -q 'mutex residual: path A seal only' runtime/chs_rt_libfloor.c \
-  && grep -q 'thread_spawn residual: path A seal only' runtime/chs_rt_libfloor.c \
+# M162: real pthread mutex/spawn; GPU residual remains
+if grep -q 'pthread_mutex_lock' runtime/chs_rt_libfloor.c \
+  && grep -q 'pthread_create' runtime/chs_rt_libfloor.c \
   && grep -q 'gpu residual: path A seal only' runtime/chs_rt_libfloor.c; then
-  pass "runtime residual err strings present"
+  pass "runtime pthread path A + GPU residual present"
 else
-  bad "runtime residual err strings missing"
+  bad "runtime thread/gpu path A missing"
 fi
-
-# path A honesty: no real OS pthread/spinlock/shader in libfloor residual
-if grep -nE 'pthread_create|pthread_mutex|cudaLaunch|clEnqueue|vkCmdDispatch' runtime/chs_rt_libfloor.c 2>/dev/null | head -3; then
-  bad "libfloor residual claims real OS/GPU path"
+if grep -nE 'cudaLaunch|clEnqueue|vkCmdDispatch' runtime/chs_rt_libfloor.c 2>/dev/null | head -3; then
+  bad "libfloor must not claim GPU shader product"
 else
-  pass "no OS pthread/GPU in libfloor residual"
+  pass "no GPU shader product in libfloor"
 fi
 
 if [[ $fail -ne 0 ]]; then

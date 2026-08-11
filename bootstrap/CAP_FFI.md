@@ -57,4 +57,6 @@
 
 ## Residual next (not this floor)
 
-Real OS `dlopen` / library loading under seal; raw-pointer grammar; compile-time FFI gen (`FFI_GEN.md`); host-FFI free-name lowers beyond residual.
+**M162 path A:** OS `dlopen` when `OODA_FFI_ALLOW_DLOPEN=1` and path under absolute `OODA_FFI_ALLOWDIR` (returns `handle:…`); otherwise residual Err after seal.
+
+Still residual: unrestricted OS load, raw-pointer grammar, compile-time FFI gen (`FFI_GEN.md`), `dlsym` product surface.

@@ -17,6 +17,7 @@
 | **Slice** | `str_slice` / `str_sub` / `char_at` return **new `String` values**, not borrowed `&str`. |
 | **Bytes** | Runtime `OoStr` is length-prefixed bytes internally; there is **no** language `Byte` / `List[Byte]` / `&[Byte]` product type. |
 | **std floor** | Optional docs-only `type Byte = Int` convention in `std/byte.oo` (0..255 clamp helpers). **Not** a sealed u8 primitive; **not** byte arrays. |
+| **byte_at (M162)** | Free name `byte_at(s, i) -> Int` returns raw 0..255 or -1 OOB. **Not** `&str` borrow; **not** `List[Byte]`. |
 
 ## Fail-closed residual
 

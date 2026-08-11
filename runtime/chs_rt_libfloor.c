@@ -1,6 +1,7 @@
-/* M161 library path A: net/process/thread/gpu sealed stubs (+ ThreadCap/GpuCap). */
+/* M161/M162: ThreadCap/GpuCap + process residual; pthread mutex/spawn path A. */
 #include "chs_rt.h"
 #include <unistd.h>
+#include <pthread.h>
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/random.h>
 #endif
@@ -48,26 +49,7 @@ void oo_cap_require_gpu(long long got, const char *op) {
   }
 }
 
-static OoResS residual_net(long long cap, const char *op) {
-  OoResS r;
-  oo_cap_require_net(cap, op);
-  r.ok = 0;
-  r.val = oo_str_lit("net residual: path A seal only (no full TCP/UDP/TLS product)");
-  return r;
-}
-OoResS oo_tcp_bind(long long cap, long long port) {
-  (void)port; return residual_net(cap, "tcp_bind");
-}
-OoResS oo_tcp_connect(long long cap, OoStr host, long long port) {
-  (void)host; (void)port; return residual_net(cap, "tcp_connect");
-}
-OoResS oo_bind_udp(long long cap, long long port) {
-  (void)port; return residual_net(cap, "bind_udp");
-}
-OoResS oo_tls_connect(long long cap, OoStr host, long long port) {
-  (void)host; (void)port; return residual_net(cap, "tls_connect");
-}
-
+/* Process residual seals (real process still via sys_exec) */
 OoResS oo_sys_spawn(long long cap, OoStr cmd) {
   OoResS r;
   oo_cap_require_sys(cap, "sys_spawn");
@@ -93,30 +75,68 @@ OoResS oo_sys_kill(long long cap, long long pid, long long sig) {
   return r;
 }
 
+#define OO_MUTEX_SLOTS 64
+static pthread_mutex_t g_mutexes[OO_MUTEX_SLOTS];
+static int g_mutex_inited[OO_MUTEX_SLOTS];
+static pthread_mutex_t g_mutex_boot = PTHREAD_MUTEX_INITIALIZER;
+
+static pthread_mutex_t *mutex_for(long long mid) {
+  unsigned idx = (unsigned)(mid < 0 ? -mid : mid) % OO_MUTEX_SLOTS;
+  pthread_mutex_lock(&g_mutex_boot);
+  if (!g_mutex_inited[idx]) {
+    pthread_mutex_init(&g_mutexes[idx], NULL);
+    g_mutex_inited[idx] = 1;
+  }
+  pthread_mutex_unlock(&g_mutex_boot);
+  return &g_mutexes[idx];
+}
+
 OoResS oo_mutex_lock(long long cap, long long mid) {
   OoResS r;
   oo_cap_require_thread(cap, "mutex_lock");
-  r.ok = 0;
-  r.val = oo_str_lit("mutex residual: path A seal only");
-  (void)mid;
+  if (pthread_mutex_lock(mutex_for(mid)) != 0) {
+    r.ok = 0;
+    r.val = oo_str_lit("mutex_lock failed");
+    return r;
+  }
+  r.ok = 1;
+  r.val = oo_str_lit("locked");
   return r;
 }
 OoResS oo_mutex_unlock(long long cap, long long mid) {
   OoResS r;
   oo_cap_require_thread(cap, "mutex_unlock");
-  r.ok = 0;
-  r.val = oo_str_lit("mutex residual: path A seal only");
-  (void)mid;
+  if (pthread_mutex_unlock(mutex_for(mid)) != 0) {
+    r.ok = 0;
+    r.val = oo_str_lit("mutex_unlock failed");
+    return r;
+  }
+  r.ok = 1;
+  r.val = oo_str_lit("unlocked");
   return r;
 }
+
+static void *oo_thread_noop(void *arg) {
+  (void)arg;
+  return NULL;
+}
+
 OoResS oo_thread_spawn(long long cap, OoStr name) {
   OoResS r;
+  pthread_t th;
   oo_cap_require_thread(cap, "thread_spawn");
-  r.ok = 0;
-  r.val = oo_str_lit("thread_spawn residual: path A seal only");
   (void)name;
+  if (pthread_create(&th, NULL, oo_thread_noop, NULL) != 0) {
+    r.ok = 0;
+    r.val = oo_str_lit("thread_spawn failed");
+    return r;
+  }
+  pthread_detach(th);
+  r.ok = 1;
+  r.val = oo_str_lit("thread-spawned");
   return r;
 }
+
 OoResS oo_gpu_launch(long long cap, OoStr shader) {
   OoResS r;
   oo_cap_require_gpu(cap, "gpu_launch");

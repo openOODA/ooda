@@ -99,7 +99,7 @@ else
 fi
 
 if [[ -f "$TMPDIR/lp_spawn.c" ]] && ! grep -qE $'^ERR\t' "$TMPDIR/lp_spawn.c" 2>/dev/null; then
-  gcc "${RT[@]}" "$TMPDIR/lp_spawn.c" -o "$TMPDIR/lp_spawn.bin" -lm 2>"$TMPDIR/lp_gcc.err" || {
+  gcc "${RT[@]}" "$TMPDIR/lp_spawn.c" -o "$TMPDIR/lp_spawn.bin" -lm -ldl -lpthread 2>"$TMPDIR/lp_gcc.err" || {
     bad "gcc link libfloor_sys_spawn"
     head -20 "$TMPDIR/lp_gcc.err" || true
   }
@@ -115,7 +115,7 @@ if [[ -f "$TMPDIR/lp_spawn.c" ]] && ! grep -qE $'^ERR\t' "$TMPDIR/lp_spawn.c" 2>
     # forge deny: zero SysCap token
     sed -E 's/long long sys = oo_cap_grant_sys\(\)/long long sys = 0LL/' \
       "$TMPDIR/lp_spawn.c" >"$TMPDIR/lp_zero.c"
-    gcc "${RT[@]}" "$TMPDIR/lp_zero.c" -o "$TMPDIR/lp_zero.bin" -lm
+    gcc "${RT[@]}" "$TMPDIR/lp_zero.c" -o "$TMPDIR/lp_zero.bin" -lm -ldl -lpthread
     set +e
     zout=$("$TMPDIR/lp_zero.bin" 2>&1); zrc=$?
     set -e
@@ -141,7 +141,7 @@ set -e
 if [[ $xerc -ne 0 ]] || grep -qE $'^ERR\t' "$TMPDIR/lp_exec.c"; then
   bad "emit sys_exec contrast"
 else
-  gcc "${RT[@]}" "$TMPDIR/lp_exec.c" -o "$TMPDIR/lp_exec.bin" -lm
+  gcc "${RT[@]}" "$TMPDIR/lp_exec.c" -o "$TMPDIR/lp_exec.bin" -lm -ldl -lpthread
   xout=$("$TMPDIR/lp_exec.bin" 2>&1) || true
   if echo "$xout" | grep -q 'exec-real-ok'; then
     pass "runtime sys_exec real blocking spawn+wait"

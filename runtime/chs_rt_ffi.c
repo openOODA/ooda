@@ -1,6 +1,7 @@
-/* M156: process-local UnsafeFFICap + stub oo_dlopen (not OS dlopen / full C TCB). */
+/* M156/M162: process-local UnsafeFFICap + optional allowlisted OS dlopen. */
 #include "chs_rt.h"
 #include <unistd.h>
+#include <dlfcn.h>
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/random.h>
 #endif
@@ -44,12 +45,46 @@ void oo_cap_require_ffi(long long got, const char *op) {
   }
 }
 
-/* Seal-checked stub — process-local only; not real OS dlopen. */
+/* Path A OS dlopen: only when OODA_FFI_ALLOW_DLOPEN=1 and path is under
+ * OODA_FFI_ALLOWDIR (absolute prefix). Otherwise residual Err after seal. */
+static int path_under_allowdir(const char *path, const char *dir) {
+  size_t n;
+  if (!path || !dir || path[0] != '/' || dir[0] != '/') return 0;
+  n = strlen(dir);
+  if (n == 0) return 0;
+  if (strncmp(path, dir, n) != 0) return 0;
+  if (path[n] != '\0' && path[n] != '/') return 0;
+  return 1;
+}
+
 OoResS oo_dlopen(long long cap, OoStr path) {
   OoResS r;
+  const char *allow;
+  const char *dir;
+  const char *p;
+  void *h;
+  char buf[96];
   oo_cap_require_ffi(cap, "dlopen");
   r.ok = 0;
-  r.val = oo_str_lit("ffi residual: process-local seal only (no OS dlopen)");
-  (void)path;
+  allow = getenv("OODA_FFI_ALLOW_DLOPEN");
+  dir = getenv("OODA_FFI_ALLOWDIR");
+  p = path.data ? path.data : "";
+  if (!allow || strcmp(allow, "1") != 0 || !dir || !dir[0]) {
+    r.val = oo_str_lit("ffi residual: set OODA_FFI_ALLOW_DLOPEN=1 and OODA_FFI_ALLOWDIR for OS dlopen");
+    return r;
+  }
+  if (!path_under_allowdir(p, dir)) {
+    r.val = oo_str_lit("ffi residual: path not under OODA_FFI_ALLOWDIR");
+    return r;
+  }
+  h = dlopen(p, RTLD_NOW);
+  if (!h) {
+    r.val = oo_str_lit("dlopen failed");
+    return r;
+  }
+  /* Return opaque handle as hex string (path A; no dlsym product surface). */
+  snprintf(buf, sizeof buf, "handle:%p", h);
+  r.ok = 1;
+  r.val = oo_str_lit(buf);
   return r;
 }

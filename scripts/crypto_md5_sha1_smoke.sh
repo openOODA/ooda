@@ -12,7 +12,7 @@ OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
 fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
-RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm)
+RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm -ldl -lpthread)
 
 # Expected vectors (NIST / common test suite)
 MD5_EMPTY="d41d8cd98f00b204e9800998ecf8427e"

@@ -1,64 +1,10 @@
 // job: HITL non-interactive deny-mode (path A product); stage: check
 // in: source String; out: ERR+exit if // HITL: pause present
-// residual: interactive harness / agent pause-resume / OODA_HITL_ALLOW product flag
+// residual: full interactive harness / record-replay / HumanCap
+// M162: OODA_HITL_ALLOW + optional OODA_HITL_AUTO_APPROVE=1 agent path
 
-// Line-start // HITL: pause → fail-closed in product check (CI deny-mode).
-pub fn check_hitl_deny(sys: &SysCap, src: String) {
-    let n = chars_len(src);
-    let mut i = 0;
-    let mut line_start = true;
-    while i < n {
-        let c: String = char_at(src, i);
-        if c == "\n" {
-            line_start = true;
-            i = i + 1;
-        } else if line_start {
-            // skip leading spaces/tabs
-            if c == " " || c == "\t" {
-                i = i + 1;
-            } else if c == "/" {
-                // // HITL: pause
-                if i + 1 < n {
-                    if char_at(src, i + 1) == "/" {
-                        let rest: String = str_slice(src, i, n);
-                        // match // HITL: pause (spaces flexible after //)
-                        if diag_find_hitl_pause(rest) {
-                            let allow_hitl = sys_exec(sys, "sh", "-c", "if [ -n \"$OODA_HITL_ALLOW\" ]; then exit 0; else exit 1; fi");
-                            if allow_hitl.is_ok() {
-                                println("");
-                                println("========================================");
-                                println("= [HITL] INTERACTIVE HARNESS PAUSED    =");
-                                println("========================================");
-                                println("Code execution reached: // HITL: pause");
-                                let wait = sys_exec(sys, "sh", "-c", "read -p 'Press [Enter] to approve, or [Ctrl+C] to abort: ' </dev/tty");
-                                if wait.is_err() {
-                                    println("ERR\thitl\tInteractive approval aborted.");
-                                    process_exit(1);
-                                }
-                                println("[HITL] Approved. Resuming execution...");
-                            } else {
-                                println(
-                                    "ERR\thitl\tnon-interactive deny: // HITL: pause is product deny-mode at check; interactive harness residual (HITL.md)"
-                                );
-                                process_exit(1);
-                            }
-                        }
-                    }
-                }
-                line_start = false;
-                i = i + 1;
-            } else {
-                line_start = false;
-                i = i + 1;
-            }
-        } else {
-            i = i + 1;
-        }
-    }
-}
-
-fn diag_find_hitl_pause(s: String) -> Bool {
-    // s starts at //
+// True if s (from //) is a HITL pause marker line (not a longer comment that merely starts with HITL).
+fn diag_hitl_pause_line(s: String) -> Bool {
     let n = chars_len(s);
     if n < 12 {
         return false;
@@ -75,7 +21,6 @@ fn diag_find_hitl_pause(s: String) -> Bool {
             break;
         }
     }
-    // HITL:
     if i + 5 > n {
         return false;
     }
@@ -94,8 +39,90 @@ fn diag_find_hitl_pause(s: String) -> Bool {
     if i + 5 > n {
         return false;
     }
-    if str_slice(s, i, i + 5) == "pause" {
+    if str_slice(s, i, i + 5) != "pause" {
+        return false;
+    }
+    // require end or whitespace after "pause" (not "paused" / "pauseX")
+    let end = i + 5;
+    if end == n {
+        return true;
+    }
+    let c3: String = char_at(s, end);
+    if c3 == " " || c3 == "\t" || c3 == "\n" || c3 == "\r" {
         return true;
     }
     return false;
+}
+
+// Line-oriented scan (avoids // mid-file state bugs).
+fn source_has_hitl_pause(src: String) -> Bool {
+    let n = chars_len(src);
+    let mut i = 0;
+    let mut line_start = 0;
+    while i <= n {
+        let at_end = i == n;
+        let mut is_nl = false;
+        if !at_end {
+            if char_at(src, i) == "\n" {
+                is_nl = true;
+            }
+        }
+        if at_end || is_nl {
+            let line: String = str_slice(src, line_start, i);
+            // trim leading spaces/tabs on the line
+            let ln = chars_len(line);
+            let mut j = 0;
+            while j < ln {
+                let c: String = char_at(line, j);
+                if c == " " || c == "\t" {
+                    j = j + 1;
+                } else {
+                    break;
+                }
+            }
+            if j < ln {
+                let rest: String = str_slice(line, j, ln);
+                if diag_hitl_pause_line(rest) {
+                    return true;
+                }
+            }
+            if at_end {
+                return false;
+            }
+            line_start = i + 1;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn check_hitl_deny(sys: &SysCap, src: String) {
+    if !source_has_hitl_pause(src) {
+        return;
+    }
+    // Path A: OODA_HITL_ALLOW enables harness; AUTO_APPROVE for non-TTY agent/CI.
+    let allow_hitl = sys_exec(sys, "sh", "-c", "if [ -n \"$OODA_HITL_ALLOW\" ]; then exit 0; else exit 1; fi");
+    if allow_hitl.is_ok() {
+        println("");
+        println("========================================");
+        println("= [HITL] HARNESS PAUSE (path A)        =");
+        println("========================================");
+        println("Code check reached: // HITL: pause");
+        let wait = sys_exec(sys, "sh", "-c", "if [ -r /dev/tty ]; then read -p 'Press [Enter] to approve, or [Ctrl+C] to abort: ' </dev/tty; else exit 2; fi");
+        if wait.is_ok() {
+            println("[HITL] Approved (TTY). Resuming...");
+            return;
+        }
+        let hitl_auto = sys_exec(sys, "sh", "-c", "if [ \"$OODA_HITL_AUTO_APPROVE\" = \"1\" ]; then exit 0; else exit 1; fi");
+        if hitl_auto.is_ok() {
+            println("[HITL] Auto-approved (OODA_HITL_AUTO_APPROVE=1). Resuming...");
+            return;
+        }
+        println("ERR\thitl\tno TTY and OODA_HITL_AUTO_APPROVE not set; deny");
+        process_exit(1);
+    }
+    println(
+        "ERR\thitl\tnon-interactive deny: // HITL: pause is product deny-mode at check; set OODA_HITL_ALLOW (+ optional OODA_HITL_AUTO_APPROVE=1) for path A harness (HITL.md)"
+    );
+    process_exit(1);
 }
