@@ -96,16 +96,22 @@ for rail in \
   json_errors_smoke.sh \
   ai_native_product_floor_smoke.sh \
   hitl_product_floor_smoke.sh \
+  hitl_verify_human_smoke.sh \
   cap_ffi_runtime_smoke.sh \
   libfloor_mutex_thread_smoke.sh \
   libfloor_thread_gpu_smoke.sh \
+  gpu_path_a_smoke.sh \
+  ffi_dlopen_path_a_smoke.sh \
   ecap_autofix_smoke.sh \
   secret_eprintln_smoke.sh \
   contracts_and_smoke.sh \
+  contracts_arith_smoke.sh \
   etc_autofix_smoke.sh \
+  ehitl_autofix_smoke.sh \
   m162_residual_deepen_smoke.sh \
   thread_join_smoke.sh \
   channel_path_a_smoke.sh \
+  actor_path_a_smoke.sh \
   byte_str_path_a_smoke.sh \
   bytes_buffer_smoke.sh \
   tls_path_a_smoke.sh \

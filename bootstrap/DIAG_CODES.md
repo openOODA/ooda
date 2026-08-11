@@ -61,4 +61,4 @@ Human mode (default) still prints `ERR\t<kind>\t<message>` tab lines.
 - Corpus: `bootstrap/corpus/check/pass|fail`, `bootstrap/corpus/typecheck/fail/undefined_var.oo`, `bootstrap/corpus/parse/fail/`
 | E_RESIDUAL | residual | Residual DESIGN free-call path A default-deny (M153) |
 
-| E_HITL | hitl | Non-interactive // HITL: pause deny-mode (M157) |
+| E_HITL | hitl | Non-interactive // HITL: pause deny-mode (M157); bounded `ooda fix` remove exact pause line (M165) |

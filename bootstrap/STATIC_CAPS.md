@@ -40,7 +40,7 @@ Classic `0x4F4F*` constants are **forged values that must be denied**, not ambie
 - Cryptographically secure randomness or attested clocks  
 - Heap sandboxing, ASAN, or OS `rlimit` isolation for AllocCap  
 - Ambient effects without an explicit cap param on the product path  
-- **Full C TCB / OS `dlopen` / raw-pointer / Compile-Time FFI gen** — process-local Fs/Sys/… do **not** seal the whole C interop surface; path A seals named free calls under `&UnsafeFFICap` at check + process-local `oo_cap_grant_ffi` / stub `oo_dlopen` (M156) — **not** OS `dlopen` isolation (see [`CAP_FFI.md`](CAP_FFI.md))
+- **Full C TCB / unrestricted OS `dlopen` / raw-pointer / Compile-Time FFI gen** — process-local Fs/Sys/… do **not** seal the whole C interop surface; path A seals named free calls under `&UnsafeFFICap` + process-local grant; M165 allowlisted OS `dlopen` (system dirs or `ALLOWDIR`) — **not** unrestricted any-path load / product `dlsym` (see [`CAP_FFI.md`](CAP_FFI.md))
 
 ---
 

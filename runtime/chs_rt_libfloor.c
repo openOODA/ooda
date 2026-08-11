@@ -117,11 +117,45 @@ OoResS oo_mutex_unlock(long long cap, long long mid) {
   return r;
 }
 
+/* M165 Path A: noop / cpu: fallthrough honesty; no device shaders (no CUDA). */
 OoResS oo_gpu_launch(long long cap, OoStr shader) {
   OoResS r;
+  const char *p;
+  long long len;
+  char buf[96];
   oo_cap_require_gpu(cap, "gpu_launch");
+  p = shader.data ? shader.data : "";
+  len = shader.len;
+  if (len < 0) len = 0;
+  /* empty or "noop" → Ok("gpu-noop") — no device, honesty product path */
+  if (len == 0 || (len == 4 && strncmp(p, "noop", 4) == 0)) {
+    r.ok = 1;
+    r.val = oo_str_lit("gpu-noop");
+    return r;
+  }
+  /* cpu:… → trivial CPU interpret; honesty "cpu fallthrough" (not GPU) */
+  if (len >= 4 && strncmp(p, "cpu:", 4) == 0) {
+    const char *rest = p + 4;
+    long long rest_len = len - 4;
+    if (rest_len >= 4 && strncmp(rest, "add:", 4) == 0) {
+      const char *nums = rest + 4;
+      char *end1 = NULL;
+      long long a, b;
+      a = strtoll(nums, &end1, 10);
+      if (end1 && *end1 == ':') {
+        b = strtoll(end1 + 1, NULL, 10);
+        snprintf(buf, sizeof buf, "cpu fallthrough:%lld", a + b);
+        r.ok = 1;
+        r.val = oo_str_lit(buf);
+        return r;
+      }
+    }
+    r.ok = 1;
+    r.val = oo_str_lit("cpu fallthrough");
+    return r;
+  }
+  /* PTX/SPIR-V/device shaders still fail-closed residual */
   r.ok = 0;
-  r.val = oo_str_lit("gpu residual: path A seal only");
-  (void)shader;
+  r.val = oo_str_lit("gpu residual: no device shaders");
   return r;
 }

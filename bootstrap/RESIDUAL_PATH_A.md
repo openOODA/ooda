@@ -9,7 +9,6 @@ Unshipped DESIGN free calls are **default-deny at check**:
 
 | Surface | Example free names refused |
 |---------|----------------------------|
-| HITL | `verify_human` |
 | TEMPORAL | `checkpoint`, `rollback`, `snapshot_state` |
 | HIVEMIND | `hive_fuzz`, `hivemind_join` |
 | HOT_RELOAD | `hot_reload`, `live_reload` |
@@ -23,13 +22,14 @@ Unshipped DESIGN free calls are **default-deny at check**:
 | DOD_LAYOUT | `soa_layout`, `dod_layout` |
 | TELEPATHIC_AST | `telepathic_compile`, `intent_compile` |
 | NATIVE_LSP | `lsp_serve` |
-| CONCURRENCY | `actor_spawn` (channels sealed under ThreadCap M164) |
 | CALLGRAPH_CRYPTO | `sign_callgraph`, `verify_callgraph` |
 | FFI_GEN | `ffi_gen`, `import_c` |
 | LTO_XLANG | `lto_xlang_link` |
 | TOOLCHAINS_ADV | `advanced_toolchain` |
 | PLAYGROUND | `playground_eval` |
 | META_VS_DET | `metamorphic_vs_det` |
+
+**Promoted off residual refuse (path A product):** `verify_human` (M165 HITL env-gated Result); `actor_spawn` / `actor_send` / `actor_recv` sealed under ThreadCap (M165 thin actors).
 
 Codes: `ERR\tresidual\t…` → `--json-errors` **E_RESIDUAL**.
 

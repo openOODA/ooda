@@ -117,7 +117,7 @@ emit_run "$ROOT/fixtures/libfloor_gpu_launch.oo" "lf_gpu" "gpu-residual-ok" "gpu
 if grep -q 'pthread_mutex_lock' runtime/chs_rt_libfloor.c \
   && grep -q 'pthread_create' runtime/chs_rt_thread.c \
   && grep -q 'pthread_join' runtime/chs_rt_thread.c \
-  && grep -q 'gpu residual: path A seal only' runtime/chs_rt_libfloor.c; then
+  && grep -q 'gpu residual: no device shaders' runtime/chs_rt_libfloor.c; then
   pass "runtime pthread path A + GPU residual present"
 else
   bad "runtime thread/gpu path A missing"

@@ -54,14 +54,19 @@ else
   head -c 300 "$TMPDIR/hitl_j.out" || true
 fi
 
-# residual: verify_human free name still refuse
+# M165: verify_human is product free builtin (not residual refuse)
 set +e
-"$OODAC_BIN" check "$ROOT/fixtures/residual_verify_human_fail.oo" >"$TMPDIR/hitl_vh.out" 2>"$TMPDIR/hitl_vh.err"
+"$OODAC_BIN" check "$ROOT/fixtures/hitl_verify_human.oo" >"$TMPDIR/hitl_vh.out" 2>"$TMPDIR/hitl_vh.err"
 vrc=$?
 set -e
-[[ $vrc -ne 0 ]] && pass "verify_human still residual refuse" || bad "verify_human silent OK"
+if [[ $vrc -eq 0 ]] && grep -qE '^OK' "$TMPDIR/hitl_vh.out"; then
+  pass "verify_human free builtin check OK"
+else
+  bad "verify_human should check OK (path A product)"
+  head -8 "$TMPDIR/hitl_vh.out" "$TMPDIR/hitl_vh.err" || true
+fi
 
-# residual honesty pack still green
+# residual honesty pack still green (interactive harness residual)
 if bash "$ROOT/scripts/hitl_residual_smoke.sh" >"$TMPDIR/hitl_res.log" 2>&1; then
   pass "hitl_residual_smoke"
 else

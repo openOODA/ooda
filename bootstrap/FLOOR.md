@@ -93,7 +93,7 @@ Frontends (**tokens / ast / check**) must not import backend modules.
 | Family | Examples (illustrative) | C TU today |
 |--------|-------------------------|------------|
 | print | println / print paths | `chs_rt_print.c` |
-| string | concat, slice, char_at, len, … | `chs_rt_str.c` |
+| string | concat, slice, char_at, len, starts/ends/index/repeat/upper (M165) … | `chs_rt_str.c` (+ upper in `chs_rt_print.c`) |
 | list | new/push/get/len (int & string) | `chs_rt_list.c` |
 | fs | read_file, write_file, path_exists, … | `chs_rt_fs.c` |
 | process/env | env_get, sys_exec, process_exit | host/process pieces |

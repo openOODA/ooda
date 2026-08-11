@@ -34,15 +34,16 @@ Sibling org repo `openOODA/std` (json/crypto/net/fs aspirational APIs) is
 |--------|------|------|
 | `os/sync.oo` | ThreadCap wrappers: `sync_mutex_lock` / `sync_mutex_unlock` / `sync_thread_spawn` | residual **Err** (no OS pthreads) |
 | `os/thread.oo` | ThreadCap wrappers: `thr_mutex_*` / `thr_spawn` | residual **Err** |
-| `os/gpu.oo` | GpuCap wrapper: `gpu_launch_shader` | residual **Err** (no shaders) |
+| `os/gpu.oo` | GpuCap wrapper: `gpu_launch_shader` | Path A: noop/cpu Ok; else residual **Err** (no device) |
 
 | Item | Honesty |
 |------|---------|
 | `Option[T]` / `Some` / `None` as sum types | Typecheck may accept; **Backend-C does not lower** constructors → use `option.oo` Result encoding |
 | Generic `Result[T,E]` beyond String | Runtime `OoResS` is string payload only on pure path |
-| Native `&str` borrow + real `Byte` arrays | **Residual** — see `bootstrap/BYTE_STR.md`; path A Byte buffer is `List[Int]` 0..255; `String` remains value-copy |
+| Native `&str` borrow + real `Byte` arrays | **Residual** — see `bootstrap/BYTE_STR.md` + `STR_OPS.md`; path A Byte buffer is `List[Int]` 0..255; owned str ops In; `String` remains value-copy |
 | `std::fs` / `std::net` / json / crypto (org sibling) | Cap-gated or host-era; **not** imported by pure std here |
-| Thread/mutex/gpu free names | Path A seal only — granted cap returns residual Err, not real concurrency/GPU |
+| Thread/mutex free names | Path A product under ThreadCap (pthread/channels); actor residual |
+| GPU free names | Path A: noop/`cpu:` honesty Ok; device shaders residual Err (no CUDA) |
 | Full XML/YAML/TOML/JSON Schema | Path A subsets only; else `UNIMPLEMENTED_RESIDUAL` — not DESIGN parsers |
 | Full tar/zip/gzip decompress | Magic detect only; decompress NOT product |
 | Multi-file `oodac check` of importers | Check is single-file; import resolution is pure-build residual (bash multi-emit) |

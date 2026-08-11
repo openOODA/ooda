@@ -85,11 +85,11 @@ for m in thread.oo gpu.oo sync.oo; do
   fi
 done
 
-# M162/M163: real pthread + joinable; GPU residual remains
+# M162/M163/M165: real pthread + joinable; GPU device residual remains
 if grep -q 'pthread_create' runtime/chs_rt_thread.c \
   && grep -q 'pthread_join' runtime/chs_rt_thread.c \
   && grep -q 'pthread_mutex_lock' runtime/chs_rt_libfloor.c \
-  && grep -q 'gpu residual: path A seal only' runtime/chs_rt_libfloor.c; then
+  && grep -q 'gpu residual: no device shaders' runtime/chs_rt_libfloor.c; then
   pass "runtime pthread path A + GPU residual present"
 else
   bad "runtime thread/gpu path A missing"

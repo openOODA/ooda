@@ -9,6 +9,8 @@
 #include "chs_rt_libfloor.c"
 #include "chs_rt_thread.c"
 #include "chs_rt_channel.c"
+#include "chs_rt_actor.c"
+#include "chs_rt_hitl.c"
 #include "chs_rt_time_rand.c"
 #include "chs_rt_alloc.c"
 #include "chs_rt_fs.c"

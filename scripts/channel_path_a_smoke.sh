@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M164 path A — process-local channels under ThreadCap
-# Dual-run: bare refuse; grant path → hi; forge deny; actor residual
+# Dual-run: bare refuse; grant path → hi; forge deny; actor ThreadCap seal
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -30,18 +30,18 @@ else
   head -5 "$TMPDIR/ch_bare.out" "$TMPDIR/ch_bare.err" || true
 fi
 
-# residual: actor_spawn still CONCURRENCY refuse
+# M165: actor_spawn sealed under ThreadCap (capability refuse, not residual)
 cat >"$TMPDIR/ch_actor.oo" <<'EOF'
-pub fn main() { let r = actor_spawn(); }
+pub fn main() { let r = actor_spawn("x"); }
 EOF
 set +e
 "$OODAC_BIN" check "$TMPDIR/ch_actor.oo" >"$TMPDIR/ch_actor.out" 2>"$TMPDIR/ch_actor.err"
 arc=$?
 set -e
-if [[ $arc -ne 0 ]] && grep -qE $'ERR\tresidual|Residual product refuse' "$TMPDIR/ch_actor.out" "$TMPDIR/ch_actor.err" 2>/dev/null; then
-  pass "check residual refuse actor_spawn"
+if [[ $arc -ne 0 ]] && grep -qiE 'capability|ThreadCap|ERR' "$TMPDIR/ch_actor.out" "$TMPDIR/ch_actor.err" 2>/dev/null; then
+  pass "check refuse bare actor_spawn (ThreadCap)"
 else
-  bad "actor_spawn residual refuse missing rc=$arc"
+  bad "bare actor_spawn accepted rc=$arc"
 fi
 
 # check: granted ThreadCap fixture
@@ -139,12 +139,12 @@ if grep -q 'chs_rt_channel.c' runtime/chs_rt.c; then
 else
   bad "chs_rt.c missing channel include"
 fi
-# residual: channel_* not residual free-name; actor still is
+# residual honesty: channel_* and actor_* not residual free-name (M164/M165)
 if ! grep -qE 'name == "channel_' oodac/check_residual.oo \
-  && grep -qE 'name == "actor_spawn"' oodac/check_residual.oo; then
-  pass "residual honesty: channels out, actor residual"
+  && ! grep -qE 'name == "actor_spawn"' oodac/check_residual.oo; then
+  pass "residual honesty: channels + actors out of residual refuse"
 else
-  bad "residual table wrong for channels/actors"
+  bad "residual table still lists channel/actor free names"
 fi
 
 if [[ $fail -ne 0 ]]; then

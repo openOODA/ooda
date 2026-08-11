@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# job: native Backend-C contracts smoke (simple + complex fail-closed; M51 via multi_clause smoke)
+# job: native Backend-C contracts smoke (simple + path A &&/||/arith; M51 multi_clause)
 # stage: test
-# residual: complex requires/ensures (&& / expr) only — multi simple clause AND is In (M51)
+# residual: full SMT / quantifiers / old-state (CONTRACTS_COMPLEX.md)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"

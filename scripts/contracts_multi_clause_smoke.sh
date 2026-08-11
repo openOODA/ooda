@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # job: M51 multi-clause simple contracts (AND of simple requires/ensures)
 # stage: test
-# residual: complex (&& / expr / SMT) still fail-closed via contracts_native_smoke
+# residual: full SMT / quantifiers / old-state still not product (CONTRACTS_COMPLEX.md)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"

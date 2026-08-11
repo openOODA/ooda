@@ -22,10 +22,11 @@
 | **bytes_len / byte_slice / bytes_eq (M163 path A)** | Free names: `bytes_len(s) -> Int` (byte length); `byte_slice(s, start, end) -> String` (**owned** copy of raw bytes `[start,end)` by **byte index**); `bytes_eq(a, b) -> Bool`. Path A is honest owned copy — **not** true borrowed `&str`. |
 | **Byte buffer (M164 path A)** | Free names: `bytes_new() -> List[Int]`, `bytes_push(bs, b) -> List[Int]` (clamp 0..255), `bytes_get(bs, i) -> Int` (-1 OOB), `bytes_to_str(bs) -> String`. **Honest:** Byte buffer is **`List[Int]` elements in 0..255** — **not** native `List[Byte]` ABI. |
 | **String byte view (M164)** | `bytes_from_str(s) -> String` owned identity (byte-string view of String still `OoStr`); `bytes_concat(a, b) -> String` raw concat. **Not** `&str` borrow. |
+| **String ops (M165 path A)** | Free names `str_starts_with` / `str_ends_with` / `str_index_of` / `str_repeat` / `str_to_uppercase` — **owned** String ops (byte index). See `bootstrap/STR_OPS.md`. **Still not** true borrowed `&str`. |
 
 ## Fail-closed residual
 
-Do **not** treat native `&str` lifetimes / `List[Byte]` as DESIGN-complete product features. Path A owned byte-indexed slice + `List[Int]` 0..255 buffer are **In** for crypto/encoding scaffolding; zero-copy borrow and true `List[Byte]` remain residual, not silent green.
+Do **not** treat native `&str` lifetimes / `List[Byte]` as DESIGN-complete product features. Path A owned byte-indexed slice + `List[Int]` 0..255 buffer + owned string ops are **In** for crypto/encoding scaffolding; zero-copy borrow and true `List[Byte]` remain residual, not silent green.
 
 ## What we do **not** claim
 

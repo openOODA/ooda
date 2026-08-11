@@ -1,48 +1,47 @@
-# Human-in-the-loop (`hitl`) testing — path A deny-mode + residual interactive
+# Human-in-the-loop (`hitl`) testing — path A deny-mode + verify_human
 
 **Marker residual:** `HITL_RESIDUAL_ALPHA`  
 **Path A marker:** `HITL_PATH_A_ALPHA`  
-**Status:** path A **In** (M157 non-interactive deny-mode + residual free-name refuse). Interactive harness residual. PM **5.6**.
+**Status:** path A **In** (M157 deny-mode + M162 pause harness + M165 `verify_human` Result). Full interactive record/replay residual. PM **5.6**.
 
 ## Product surface
 
 | Form | Behavior (alpha) |
 |------|------------------|
-| `// HITL: pause` | **In (M157):** line-start marker → check fail-closed `ERR\thitl\t…` / `--json-errors` **E_HITL** (CI / non-interactive deny-mode) |
-| `verify_human("…")` | **Residual free-name refuse** at check (`E_RESIDUAL`) — not a product harness call |
+| `// HITL: pause` | **In (M157/M162):** line-start marker → check fail-closed `ERR\thitl\t…` / **E_HITL** unless `OODA_HITL_ALLOW` (+ TTY Enter or `OODA_HITL_AUTO_APPROVE=1`) |
+| `verify_human("…")` | **In (M165):** free builtin → `Result[String,String]`; runtime env gate (not residual refuse) |
 
 ## What is true today
 
 | Layer | Behavior |
 |-------|----------|
-| **Check** | `// HITL: pause` denied (non-interactive product path); `verify_human` free call refused |
-| **Runtime / CLI** | **No** interactive HITL harness (TTY prompt / record / replay / approve) |
-| **Agent / product** | **Not** agent pause/resume product |
-| **Honesty** | This file + `hitl_product_floor_smoke` + `hitl_residual_smoke` |
+| **Check** | `// HITL: pause` denied unless allow/auto; `verify_human` is a **known free builtin** (not residual refuse) |
+| **Runtime** | `oo_verify_human(msg)`: if `OODA_HITL_ALLOW` set → TTY Enter or `OODA_HITL_AUTO_APPROVE=1` → Ok(`"approved"`); else Err with **E_HITL** text |
+| **Agent / product** | Auto-approve agent path only; **not** agent pause/resume product |
+| **Honesty** | This file + `hitl_product_floor_smoke` + `hitl_verify_human_smoke` + `hitl_residual_smoke` |
 
-**Fail-closed residual:** deny-mode is **not** human attestation. It only blocks silent green when the pause marker is present. Full DESIGN `verify_human` approval loops remain residual.
+**Fail-closed residual:** deny-mode and path A `verify_human` are **not** full DESIGN human attestation / record-replay harness. **No** interactive HITL harness product-green (record/replay/deny/skip modes remain residual).
 
 ## What we do **not** claim
 
-- Interactive HITL harness (TTY prompt / record / replay / deny / skip modes)  
+- No interactive HITL harness (record / replay / deny / skip modes) as full product  
 - “HITL fully shipped” as interactive product green  
-- Agent pause/resume product surface  
+- Not agent pause/resume product surface  
 - Capability-gated human attestation (`&HumanCap`-class)  
-- Full DESIGN `verify_human` CLI approval before marking a build passing  
+- Full DESIGN approval loops before marking a build passing  
 
-## Path A product floor (alpha) — M157
+## Path A product floor (alpha) — M157 / M162 / M165
 
 **In:**  
-- `// HITL: pause` → non-interactive deny at check (`E_HITL`)  
-- `verify_human` free-name refuse (M153 residual free-name path A)  
+- `// HITL: pause` → non-interactive deny at check (`E_HITL`); allow via `OODA_HITL_ALLOW` + TTY or `OODA_HITL_AUTO_APPROVE=1`  
+- `verify_human(msg) -> Result` — runtime lower `oo_verify_human`; Ok(`"approved"`) or Err; same env gates  
 
 **Rails:**  
 - `scripts/hitl_product_floor_smoke.sh`  
+- `scripts/hitl_verify_human_smoke.sh`  
 - `scripts/hitl_residual_smoke.sh`  
-- Fixtures: `hitl_pause_fail.oo`, `hitl_pause_pass.oo`, `hitl_marker.oo` (docs/marker rail)
+- Fixtures: `hitl_pause_fail.oo`, `hitl_pause_pass.oo`, `hitl_verify_human.oo`, `hitl_marker.oo`
 
 ## Residual next (not this floor)
 
-**M162 path A:** `OODA_HITL_ALLOW` + TTY Enter, or `OODA_HITL_AUTO_APPROVE=1` non-TTY agent approve.
-
-Still residual: full interactive harness; agent pause/resume product; live `verify_human` DESIGN semantics; HumanCap.
+Still residual: full interactive harness; agent pause/resume product; HumanCap; record/replay.

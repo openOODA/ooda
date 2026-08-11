@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Product ooda fix dispatcher: multi-pass E_CAP + E_TC (path A multi-code).
+"""Product ooda fix dispatcher: multi-pass E_CAP + E_TC + E_HITL (path A).
 
   ooda_apply_fix.py <file.oo> [--dry-run]
 
-Path A: repeatedly apply supported classes until check is clean of E_CAP/E_TC
-undefined-var, or max rounds, or a pass makes no progress.
+Path A: repeatedly apply supported classes until check is clean of
+E_CAP / E_TC undefined-var / E_HITL pause, or max rounds.
 Residual: other codes (E_PARSE rewrite, E_SECRET, …), free-form suggested_fix.
 """
 from __future__ import annotations
@@ -56,7 +56,9 @@ def main() -> None:
     applied = 0
     for rnd in range(MAX_ROUNDS):
         codes, rc, _ = load_codes(oodac, path)
-        if rc == 0:
+        # Some diags (E_HITL) may still exit 0 after printing JSON; trust codes first.
+        has_fixable = any(c in codes for c in ("E_CAP", "E_TC", "E_HITL"))
+        if rc == 0 and not has_fixable:
             if applied == 0:
                 die("check passed (nothing to fix)")
             print(f"OK\tfix\tmulti-pass clean after {applied} apply step(s)")
@@ -69,9 +71,15 @@ def main() -> None:
         elif "E_TC" in codes:
             step = "etc"
             script = root / "ooda_apply_etc_fix.py"
+        elif "E_HITL" in codes:
+            step = "ehitl"
+            script = root / "ooda_apply_ehitl_fix.py"
         else:
             if applied == 0:
-                die("no supported diagnostic class (want E_CAP or E_TC undefined-var)")
+                die(
+                    "no supported diagnostic class "
+                    "(want E_CAP, E_TC undefined-var, or E_HITL)"
+                )
             die(
                 f"multi-pass stopped after {applied} step(s); remaining codes={codes} "
                 "(other codes residual — not multi-code product)"

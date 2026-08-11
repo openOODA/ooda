@@ -15,8 +15,8 @@ pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
 
 # Map fixture → expected residual feature token in message
+# M165: verify_human + actor_spawn promoted off residual refuse
 declare -A EXPECT=(
-  [residual_verify_human_fail]=HITL
   [residual_checkpoint_fail]=TEMPORAL
   [residual_hive_fuzz_fail]=HIVEMIND
   [residual_hot_reload_fail]=HOT_RELOAD
@@ -30,7 +30,6 @@ declare -A EXPECT=(
   [residual_dod_fail]=DOD
   [residual_telepathic_fail]=TELEPATHIC
   [residual_lsp_fail]=NATIVE_LSP
-  [residual_concurrency_fail]=CONCURRENCY
   [residual_callgraph_fail]=CALLGRAPH
   [residual_ffigen_fail]=FFI_GEN
   [residual_lto_fail]=LTO
@@ -68,19 +67,19 @@ else
   cat "$TMPDIR/rpa_ok.out" "$TMPDIR/rpa_ok.err" | head -5 || true
 fi
 
-# Product CLI refuse one representative
+# Product CLI refuse one representative (TEMPORAL residual)
 if [[ -x "$OODA" ]]; then
   set +e
-  "$OODA" check "$ROOT/fixtures/residual_verify_human_fail.oo" >"$TMPDIR/rpa_prod.out" 2>"$TMPDIR/rpa_prod.err"
+  "$OODA" check "$ROOT/fixtures/residual_checkpoint_fail.oo" >"$TMPDIR/rpa_prod.out" 2>"$TMPDIR/rpa_prod.err"
   prc=$?
   set -e
-  if [[ $prc -eq 0 ]]; then bad "product accepted verify_human"
-  else pass "product refuse verify_human"; fi
+  if [[ $prc -eq 0 ]]; then bad "product accepted checkpoint"
+  else pass "product refuse checkpoint"; fi
 fi
 
 # json-errors codes E_RESIDUAL for one
 set +e
-"$OODAC_BIN" check "$ROOT/fixtures/residual_verify_human_fail.oo" --json-errors >"$TMPDIR/rpa_json.out" 2>"$TMPDIR/rpa_json.err"
+"$OODAC_BIN" check "$ROOT/fixtures/residual_checkpoint_fail.oo" --json-errors >"$TMPDIR/rpa_json.out" 2>"$TMPDIR/rpa_json.err"
 jrc=$?
 set -e
 if [[ $jrc -ne 0 ]] && python3 - "$TMPDIR/rpa_json.out" <<'PY'

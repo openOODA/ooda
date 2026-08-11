@@ -43,10 +43,12 @@ Reorder freely; owner steers. Agents should **not** ignore P0–P2 forever to po
 
 ### P1 — Core systems development loop
 - [x] **Contracts on native path** — Backend-C lowers **simple `requires IDENT OP lit|ident`** + **simple `ensures result OP lit|ident`** at runtime (`c_emit_contract.oo`); structural skip still correct
-  - **M51 multi-clause simple AND In** — multiple simple `requires`/`ensures` on one fn lower as sequential runtime checks (ensures cap 8); complex (`&&` / expr) still fail-closed at emit (no SMT / full contract language)
-  - Pass: `fixtures/requires_simple.oo` / `ensures_simple.oo` / `multi_clause_pass.oo` + `bootstrap/corpus/emit-c/pass/fn_contracts_add.oo`
-  - Fail: `fixtures/requires_fail.oo` / `ensures_fail.oo` / `multi_clause_{req,ens}_fail.oo`; complex: `bootstrap/corpus/emit-c/fail/{requires,ensures}_complex.oo`; `contract_no_brace.oo`
-  - Smoke: `scripts/contracts_native_smoke.sh` (+ nested `contracts_multi_clause_smoke.sh`) + `scripts/problem_hunt_smoke.sh`
+  - **M51 multi-clause simple AND In** — multiple simple `requires`/`ensures` on one fn lower as sequential runtime checks (ensures cap 8)
+  - **M159/M162/M165 path A** — simple `&&` / `||` and simple arith+compare (`x + 1 > 0`, `(a>0||b>0)&&c>=0`) runtime emit (not SMT; **no quantifiers / old-state**)
+  - Pass: `fixtures/requires_simple.oo` / `ensures_simple.oo` / `multi_clause_pass.oo` / `complex_contract_pass.oo` / `contract_arith_pass.oo` + `bootstrap/corpus/emit-c/pass/fn_contracts_add.oo`
+  - Fail: `fixtures/requires_fail.oo` / `ensures_fail.oo` / `multi_clause_{req,ens}_fail.oo` / `contract_arith_*_fail.oo`; `contract_no_brace.oo`
+  - Smoke: `scripts/contracts_native_smoke.sh` (+ multi_clause / and / arith smokes) + `scripts/problem_hunt_smoke.sh`
+  - Residual honesty: `CONTRACTS_COMPLEX.md` (no full SMT / quantifiers / old-state)
 - [x] **Real `ooda test`** — run `verify` blocks (not only typecheck)
   - Pure path: check → lower `assert_eq!`/`assert_ne!`/`assert!` in `verify` → emit-c+gcc harness (no Python / pure_build)
   - Scripts: `scripts/ooda_test_verify.sh` + `ooda_verify_pure.sh`; CLI `ooda test`; smoke `verify_pure_smoke.sh`

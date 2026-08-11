@@ -33,7 +33,10 @@
 | `oo_str_contains` | string | `chs_rt_str.c` |
 | `oo_str_eq` | string | `chs_rt_str.c` |
 | `oo_str_trim` | string | `chs_rt_str.c` |
-| `oo_str_to_lowercase` | string | `chs_rt_str.c` |
+| `oo_str_to_lowercase` | string | `chs_rt_str.c` / `chs_rt_print.c` |
+| `oo_str_to_uppercase` | string | `chs_rt_print.c` (M165) |
+| `oo_str_starts_with` / `oo_str_ends_with` | string | `chs_rt_str.c` (M165) |
+| `oo_str_index_of` / `oo_str_repeat` | string | `chs_rt_str.c` (M165) |
 | `oo_int_to_str` | string | `chs_rt_str.c` |
 | `oo_char_is_digit` | string | `chs_rt_str.c` |
 | `oo_char_is_alpha` | string | `chs_rt_str.c` |

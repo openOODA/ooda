@@ -134,7 +134,7 @@ else
   bad "runtime joinable path A missing"
 fi
 if grep -q 'pthread_mutex_lock' runtime/chs_rt_libfloor.c \
-  && grep -q 'gpu residual: path A seal only' runtime/chs_rt_libfloor.c; then
+  && grep -q 'gpu residual: no device shaders' runtime/chs_rt_libfloor.c; then
   pass "mutex path A + GPU residual remain"
 else
   bad "mutex/gpu path A broken"

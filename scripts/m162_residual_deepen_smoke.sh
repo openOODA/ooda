@@ -53,9 +53,11 @@ else
 fi
 
 # 3) HITL auto-approve path A
+rm -rf "$ROOT/.ooda-cache/check" 2>/dev/null || true
 cp "$ROOT/fixtures/hitl_pause_fail.oo" "$TMPDIR/hitl.oo"
 set +e
-"$OODAC_BIN" check "$TMPDIR/hitl.oo" >"$TMPDIR/hitl_deny.out" 2>"$TMPDIR/hitl_deny.err"
+env -u OODA_HITL_ALLOW -u OODA_HITL_AUTO_APPROVE "$OODAC_BIN" check "$TMPDIR/hitl.oo" \
+  >"$TMPDIR/hitl_deny.out" 2>"$TMPDIR/hitl_deny.err"
 drc=$?
 set -e
 [[ $drc -ne 0 ]] && pass "HITL deny without allow" || bad "HITL should deny"
@@ -86,7 +88,7 @@ fi
 cat >"$TMPDIR/aes.oo" <<'EOF'
 pub fn main() {
     // 16-byte key and 16-byte plain → hex ciphertext (not STUB)
-    let c = crypto_aes_encrypt_internal("0123456789abcdef", "0123456789abcdef");
+    let c: String = crypto_aes_encrypt_internal("0123456789abcdef", "0123456789abcdef");
     println(c);
 }
 EOF
@@ -104,7 +106,7 @@ else
   bad "build aes"; head -12 "$TMPDIR/aes_b.err" || true
 fi
 
-# 6) OS dlopen allowlist
+# 6) OS dlopen allowlist (M165: system dirs when ALLOWDIR empty)
 cat >"$TMPDIR/dlo.oo" <<'EOF'
 pub fn main(ffi: &UnsafeFFICap) {
     let r: Result[String, String] = dlopen(ffi, "/lib/x86_64-linux-gnu/libc.so.6");
@@ -118,7 +120,7 @@ if OODAC_BIN="$OODAC_BIN" "$OODAC_BIN" build "$TMPDIR/dlo.oo" "$TMPDIR/dlob" \
   echo "$out" | grep -q 'dlopen-err' && pass "dlopen residual without allow env" || bad "dlopen default out=$out"
   # allowlisted (path may vary — try common)
   LIB=""
-  for p in /lib/x86_64-linux-gnu/libc.so.6 /lib64/libc.so.6 /usr/lib/libc.so.6; do
+  for p in /lib/x86_64-linux-gnu/libc.so.6 /lib64/libc.so.6 /usr/lib/libc.so.6 /usr/lib64/libc.so.6; do
     [[ -f "$p" ]] && LIB="$p" && break
   done
   if [[ -n "$LIB" ]]; then
@@ -132,6 +134,10 @@ EOF
     if [[ -x "$TMPDIR/dlob2" ]]; then
       out=$(OODA_FFI_ALLOW_DLOPEN=1 OODA_FFI_ALLOWDIR="$(dirname "$LIB")" "$TMPDIR/dlob2" 2>&1) || true
       echo "$out" | grep -q 'dlopen-ok' && pass "OS dlopen allowlist path A" || bad "allow dlopen out=$out"
+      # M165: ALLOWDIR empty → system lib dirs only
+      out=$(OODA_FFI_ALLOW_DLOPEN=1 env -u OODA_FFI_ALLOWDIR "$TMPDIR/dlob2" 2>&1) || true
+      echo "$out" | grep -q 'dlopen-ok' && pass "OS dlopen system dirs (ALLOWDIR empty)" \
+        || bad "sys dirs dlopen out=$out"
     fi
   else
     pass "skip OS dlopen (no libc path)"

@@ -81,8 +81,14 @@ int oo_char_is_space(OoStr s);
 OoStr oo_int_to_str(long long n);
 OoStr oo_str_trim(OoStr s);
 OoStr oo_str_to_lowercase(OoStr s);
+OoStr oo_str_to_uppercase(OoStr s);
 int oo_str_eq(OoStr a, OoStr b);
 int oo_str_contains(OoStr hay, OoStr needle);
+/* Path A M165: owned string ops (byte index). Not &str borrow. */
+int oo_str_starts_with(OoStr s, OoStr pre);
+int oo_str_ends_with(OoStr s, OoStr suf);
+long long oo_str_index_of(OoStr s, OoStr sub);
+OoStr oo_str_repeat(OoStr s, long long n);
 
 /* List API */
 OoIList oo_ilist_new(void);
@@ -131,6 +137,8 @@ void oo_cap_require_rand(long long got, const char *op);
 void oo_cap_require_alloc(long long got, const char *op);
 void oo_cap_require_ffi(long long got, const char *op);
 OoResS oo_dlopen(long long cap, OoStr path);
+OoResS oo_dlsym(long long cap, OoStr handle, OoStr name);
+OoResS oo_dlclose(long long cap, OoStr handle);
 long long oo_cap_grant_thread(void);
 long long oo_cap_grant_gpu(void);
 void oo_cap_require_thread(long long got, const char *op);
@@ -164,6 +172,11 @@ OoResS oo_thread_join_s(long long cap, OoStr tid);
 OoResS oo_channel_new(long long cap);
 OoResS oo_channel_send(long long cap, long long slot, OoStr msg);
 OoResS oo_channel_recv(long long cap, long long slot);
+/* M165 path A: thin actors under ThreadCap + HITL free builtin */
+OoResS oo_actor_spawn(long long cap, OoStr name);
+OoResS oo_actor_send(long long cap, long long id, OoStr msg);
+OoResS oo_actor_recv(long long cap, long long id);
+OoResS oo_verify_human(OoStr msg);
 OoResS oo_gpu_launch(long long cap, OoStr shader);
 OoResS oo_sys_exec(long long cap, int argc, OoStr *argv);
 OoResS oo_sys_exec1(long long cap, OoStr cmd);

@@ -81,3 +81,32 @@ OoStr oo_str_to_lowercase(OoStr s) {
   }
   return r;
 }
+
+/* Path A M165 free name: owned ASCII upper; not &str. Method: to_lowercase exists. */
+OoStr oo_str_to_uppercase(OoStr s) {
+  if (!s.data || s.len == 0) {
+    OoStr empty;
+    empty.len = 0;
+    empty.data = oo_str_alloc_payload(0);
+    return empty;
+  }
+  int needs = 0;
+  for (long long i = 0; i < s.len; i++) {
+    unsigned char c = (unsigned char)s.data[i];
+    if (c >= 'a' && c <= 'z') {
+      needs = 1;
+      break;
+    }
+  }
+  if (!needs) {
+    oo_str_retain(s);
+    return s;
+  }
+  OoStr r;
+  r.len = s.len;
+  r.data = oo_str_alloc_payload((size_t)r.len);
+  for (long long i = 0; i < s.len; i++) {
+    r.data[i] = (char)toupper((unsigned char)s.data[i]);
+  }
+  return r;
+}
