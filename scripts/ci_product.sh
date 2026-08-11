@@ -96,6 +96,9 @@ for rail in \
   hitl_product_floor_smoke.sh \
   cap_ffi_runtime_smoke.sh \
   ecap_autofix_smoke.sh \
+  secret_eprintln_smoke.sh \
+  contracts_and_smoke.sh \
+  etc_autofix_smoke.sh \
   outline_reflect_smoke.sh \
   patch_smoke.sh \
   std_smoke.sh \

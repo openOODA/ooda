@@ -9,4 +9,5 @@ if [[ -z "${OODAC_BIN:-}" || ! -x "${OODAC_BIN:-}" ]]; then
   elif [[ -x ./oodac/oodac ]]; then export OODAC_BIN=./oodac/oodac
   fi
 fi
-exec python3 "$ROOT/scripts/ooda_apply_ecap_fix.py" "$@"
+# Dispatcher: E_CAP and E_TC undefined-var (M158)
+exec python3 "$ROOT/scripts/ooda_apply_fix.py" "$@"

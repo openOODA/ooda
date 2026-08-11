@@ -9,7 +9,7 @@
 | Form | Status |
 |------|--------|
 | `// SECRET: name` tag | **In** |
-| path A bare IDENT **println** refuse | **In** |
+| path A bare IDENT **println/eprintln** refuse | **In** |
 | Assign / concat / call prop (same file) | **In** |
 | `write_file` content + path | **In** |
 | `fetch` URL | **In** |
@@ -40,3 +40,8 @@ Fail-closed residual: unfinished sinks stay residual, not soft-pass.
 - `scripts/secret_sink_enforce_smoke.sh` — path A emit refuse  
 - `scripts/secret_taint_residual_smoke.sh` — honesty  
 - `scripts/secret_product_floor_smoke.sh` — umbrella  
+
+## Phase 2 depth (M160)
+
+**In:** `eprintln` bare SECRET IDENT refuse at check (same as println).
+**Rails:** `scripts/secret_eprintln_smoke.sh`

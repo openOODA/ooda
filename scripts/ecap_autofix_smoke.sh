@@ -87,16 +87,16 @@ else
   cat "$WORK/fetch.oo"
 fi
 
-# --- fail-closed: non-applicable (undefined var, not E_CAP class alone as sole fix) ---
-cp "$ROOT/bootstrap/corpus/typecheck/fail/undefined_var.oo" "$WORK/undef.oo"
+# --- fail-closed: parse fail is not E_CAP/E_TC-undefined apply class ---
+cp "$ROOT/bootstrap/corpus/parse/fail/missing_brace.oo" "$WORK/parse.oo"
 set +e
-bash "$ROOT/scripts/ooda_apply_ecap_fix.sh" "$WORK/undef.oo" >"$WORK/na.out" 2>"$WORK/na.err"
+bash "$ROOT/scripts/ooda_apply_ecap_fix.sh" "$WORK/parse.oo" >"$WORK/na.out" 2>"$WORK/na.err"
 nrc=$?
 set -e
 if [[ $nrc -ne 0 ]]; then
-  pass "non-applicable fail-closed"
+  pass "non-applicable parse fail-closed"
 else
-  bad "non-applicable should fail"
+  bad "parse should not auto-fix"
 fi
 
 # --- product CLI: non-NetCap E_CAP (FsCap / read_file) must succeed ---
