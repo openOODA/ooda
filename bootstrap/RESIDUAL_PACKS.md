@@ -43,3 +43,4 @@ Mechanical residual docs + smokes. **Not DESIGN-complete.**
 | `TOOLCHAINS_ADV.md` | `TOOLCHAINS_ADV_RESIDUAL_ALPHA` | `toolchains_adv_residual_smoke.sh` |
 | `TYPE_STATE.md` | `TYPE_STATE_RESIDUAL_ALPHA` | `type_state_residual_smoke.sh` |
 | `WASM_SMOKE.md` | `WASM_SMOKE_RESIDUAL_ALPHA` | `wasm_smoke_residual_smoke.sh` |
+| `RESIDUAL_PATH_A.md` | `RESIDUAL_PATH_A_ALPHA` | `residual_path_a_floor_smoke.sh` |

@@ -18,6 +18,15 @@ Do **not** treat partial product depth as DESIGN-complete for this item.
 
 - No biometric caps; no cryptographic object-caps
 
+
+## Path A product floor (alpha) — M153
+
+**Path A marker:** `BIOMETRIC_CAPS_PATH_A_ALPHA`  
+**Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
+**In:** biometric object-caps still residual; process-local caps In under 3.1  
+**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
+**Still residual:** full DESIGN implementation of this moonshot (not claimed).
+
 ## Rails
 
 - Doc marker: `BIOMETRIC_CAPS_RESIDUAL_ALPHA`

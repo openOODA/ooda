@@ -15,6 +15,15 @@ Do **not** treat partial product depth as DESIGN-complete for this item.
 
 - No full interactive web playground product shipped
 
+
+## Path A product floor (alpha) — M153
+
+**Path A marker:** `PLAYGROUND_PATH_A_ALPHA`  
+**Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
+**In:** playground_eval free call refused at check  
+**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
+**Still residual:** full DESIGN implementation of this moonshot (not claimed).
+
 ## Rails
 
 - Doc marker: `PLAYGROUND_RESIDUAL_ALPHA`

@@ -19,6 +19,15 @@ Do **not** treat the named surface as a security or product boundary. Absence of
 
 - No time-travel state, snapshot/restore runtime, or temporal cap shipped
 
+
+## Path A product floor (alpha) — M153
+
+**Path A marker:** `TEMPORAL_MEM_PATH_A_ALPHA`  
+**Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
+**In:** checkpoint/rollback/snapshot_state free calls refused at check  
+**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
+**Still residual:** full DESIGN implementation of this moonshot (not claimed).
+
 ## Rails
 
 - Doc marker: `TEMPORAL_MEM_RESIDUAL_ALPHA`

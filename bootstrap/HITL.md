@@ -31,6 +31,15 @@ Either form **names** a HITL pause point. At alpha neither opens an interactive 
 - Capability-gated human attestation (`&HumanCap`-class)  
 - Full DESIGN `verify_human` CLI approval before marking a build passing
 
+
+## Path A product floor (alpha) — M153
+
+**Path A marker:** `HITL_PATH_A_ALPHA`  
+**Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
+**In:** verify_human free call refused at check (E_RESIDUAL)  
+**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
+**Still residual:** full DESIGN implementation of this moonshot (not claimed).
+
 ## Rails
 
 - Doc marker: this file must contain `HITL_RESIDUAL_ALPHA`

@@ -19,6 +19,15 @@ Do **not** treat the named surface as a security or product boundary. Absence of
 
 - No metamorphic product path; input_fp is content fingerprint only (M20)
 
+
+## Path A product floor (alpha) — M153
+
+**Path A marker:** `META_VS_DET_PATH_A_ALPHA`  
+**Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
+**In:** metamorphic_vs_det free call refused at check; input_fp path A already In  
+**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
+**Still residual:** full DESIGN implementation of this moonshot (not claimed).
+
 ## Rails
 
 - Doc marker: `META_VS_DET_RESIDUAL_ALPHA`

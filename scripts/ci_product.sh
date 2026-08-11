@@ -133,6 +133,7 @@ for rail in \
   bare_metal_residual_smoke.sh \
   ast_macros_residual_smoke.sh \
   cap_ffi_product_floor_smoke.sh \
+  residual_path_a_floor_smoke.sh \
   cap_ffi_residual_smoke.sh \
   biometric_caps_residual_smoke.sh \
   arc_temporal_tension_residual_smoke.sh \

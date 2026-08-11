@@ -11,6 +11,7 @@ run(){ echo "=== $1 ==="; bash "$ROOT/scripts/$1" || { echo "FAIL $1" >&2; fail=
 for s in \
   caps_product_floor_smoke.sh \
   cap_ffi_product_floor_smoke.sh \
+  residual_path_a_floor_smoke.sh \
   time_entropy_product_floor_smoke.sh \
   memory_quota_product_floor_smoke.sh \
   max_cycles_product_floor_smoke.sh \

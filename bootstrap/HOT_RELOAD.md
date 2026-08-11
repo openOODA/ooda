@@ -19,6 +19,15 @@ Do **not** treat the named surface as a security or product boundary. Absence of
 
 - No native hot-reload product path shipped
 
+
+## Path A product floor (alpha) — M153
+
+**Path A marker:** `HOT_RELOAD_PATH_A_ALPHA`  
+**Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
+**In:** hot_reload/live_reload free calls refused at check  
+**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
+**Still residual:** full DESIGN implementation of this moonshot (not claimed).
+
 ## Rails
 
 - Doc marker: `HOT_RELOAD_RESIDUAL_ALPHA`
