@@ -1,39 +1,26 @@
 #!/usr/bin/env bash
-# job: ooda product CLI migrate backend
-# in:  args
-# out: stdout json or text
+# job: ooda product CLI migrate backend — FAIL-CLOSED residual
+# in:  args (ignored for rewrite; only diagnostics)
+# out: stderr honesty + non-zero exit (RULES §1.3)
+#
+# SPRINT Issue #14: previous implementation ran
+#   sed -i 's/\blet X =/let mut X =/g'
+# which silently destroyed immutability. Disabled until a real AST codemod
+# lands (ooda fix / edition engine). Do not re-enable soft sed.
 set -euo pipefail
 
-file=""
 json_mode=""
-skip_next=0
 for arg in "$@"; do
-  if [[ $skip_next -eq 1 ]]; then
-    skip_next=0
-    continue
-  fi
   if [[ "$arg" == "--json" ]]; then
     json_mode=1
-  elif [[ "$arg" == "--edition" ]]; then
-    skip_next=1
-  elif [[ "$arg" != -* ]]; then
-    if [[ -z "$file" ]]; then
-      file="$arg"
-    fi
   fi
 done
-fixes=0
-changed="false"
-if [[ -n "$file" && -f "$file" ]]; then
-  fixes=$(grep -c -E '\blet[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*[[:space:]]*=' "$file" 2>/dev/null || true)
-  if [[ -z "$fixes" ]]; then fixes=0; fi
-  if [[ $fixes -gt 0 ]]; then
-    sed -i -E 's/\blet[[:space:]]+([a-zA-Z_][a-zA-Z0-9_]*)[[:space:]]*=/let mut \1 =/g' "$file" 2>/dev/null || true
-    changed="true"
-  fi
-fi
+
+msg='ooda migrate is disabled (SPRINT Issue #14). Prior sed let→let mut was unsafe. Use ooda fix / manual edit; back up first if you rewrite yourself.'
+
 if [[ -n "$json_mode" ]]; then
-  echo "{\"file\": \"$file\", \"edition\": \"2026\", \"match_wildcard_arms\": 0, \"let_mut_fixes\": $fixes, \"changed\": $changed}"
+  echo "{\"error\":\"E_MIGRATE_DISABLED\",\"msg\":\"$msg\",\"changed\":false,\"let_mut_fixes\":0}"
 else
-  echo "migrated $file: let_mut_fixes=$fixes changed=$changed"
+  echo "ERR	migrate	$msg" >&2
 fi
+exit 1

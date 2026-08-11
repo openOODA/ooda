@@ -58,7 +58,14 @@ Human mode (default) still prints `ERR\t<kind>\t<message>` tab lines.
   - **E_CAP** — non-empty `fix_hint` with capability guidance (AllocCap path included in table)
   - **E_TC** — non-empty `fix_hint` (undefined var)
   - **E_PARSE** — non-empty `fix_hint` with parse/brace/token guidance (`corpus/parse/fail/missing_brace.oo`)
+- `scripts/typecheck_line_smoke.sh` — single-file type errors report **local** `LINE < 50` (path A Issue #9)
 - Corpus: `bootstrap/corpus/check/pass|fail`, `bootstrap/corpus/typecheck/fail/undefined_var.oo`, `bootstrap/corpus/parse/fail/`
 | E_RESIDUAL | residual | Residual DESIGN free-call path A default-deny (M153) |
 
 | E_HITL | hitl | Non-interactive // HITL: pause deny-mode (M157); bounded `ooda fix` remove exact pause line (M165) |
+
+## Typecheck LINE:COL residual (Issue #9)
+
+- **Helper:** `oodac/tc_diag.oo` — `tc_err_at(toks, i, msg)` / `tc_err_lc(line, col, msg)` print `ERR\ttype\tType error at LINE:COL: msg`.
+- **Path A floor:** single-file (no import expansion) token lines are already local.
+- **Residual:** `load_import` concatenates imports into one expanded source; typecheck LINE is the **expanded-stream** offset, not per-file local. Full per-file line/path needs `load_import` (line_base / per-file tokenize) change.
