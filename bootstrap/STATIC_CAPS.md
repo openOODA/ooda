@@ -82,7 +82,16 @@ Pattern to copy:
 2. Sealed call **cap IDENT first**: `sys_exec(sys, …)`, `tcp_connect(net, …)`  
 3. Bare call without cap → `oodac check` non-zero (`E_CAP` / capability)
 
-**Residual (do not claim closed):** cap forgery via `as fn(...)` cast (AGY: cast a sealed name to a forged `&…Cap` signature and bypass static check) remains open — process-local magic-token runtime seal is still the only Backend-C floor; not full forgery fix / object-caps. See also classic magic-int forge deny above (closed on the claimed path) vs cast-bypass residual.
+## M169 path A — cast forgery posture
+
+| Claim | Path A status |
+|-------|----------------|
+| Check default-deny sealed free names without `&…Cap` param | **In** (e.g. bare `dlopen` → E_CAP) |
+| Runtime zero / classic magic-int forge deny | **In** (Backend-C `oo_cap_require`) |
+| Product `as fn(&UnsafeFFICap, …)` cast syntax | **Not a product surface** — `as` is reserved IDENT; no KW_AS cast form in emit/check |
+| AGY reported cast-bypass | **Residual if/when cast surface lands** — not proven closed against future `as`/coerce syntax |
+
+**Residual (do not claim closed):** full cryptographic / unforgeable object-caps; any future cast/coerce surface must re-seal under check. Classic magic-int forge deny remains the claimed Backend-C floor.
 
 ---
 

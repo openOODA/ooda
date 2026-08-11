@@ -93,6 +93,8 @@ for rail in \
   malloc_path_a_smoke.sh \
   m167_residual_deepen_smoke.sh \
   agy_lang_blockers_smoke.sh \
+  cap_forge_path_a_smoke.sh \
+  m169_residual_closeout_smoke.sh \
   bitwise_ops_smoke.sh \
   math_trig_smoke.sh \
   tcp_io_smoke.sh \
