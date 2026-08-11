@@ -41,14 +41,15 @@ cat <<'EOF'
 EOF
 echo
 
-echo "## prefer (token-cheap orient)"
+echo "## prefer (product CLI — token-cheap orient)"
 cat <<'EOF'
-- oodac outline <file.oo>          # signatures only (~1% of source)
-- oodac reflect <file.oo>          # JSON caps+sig
-- scripts/ooda_product_context.sh <file> <symbol>
-- scripts/ooda_emit_health.sh [mods…]
-- scripts/ooda_err_digest.sh <log>
-- scripts/ooda_agent_digest.sh     # this pack
+- ooda outline <file.oo>           # signatures only (~1% of source)
+- ooda reflect <file.oo> [sym]     # JSON caps+sig
+- ooda context <file> [sym]        # JSON slice + outline + est_tokens
+- ooda pack <file> [sym]           # human-readable outline+slice
+- ooda digest [--emit-sample]      # session orient pack
+- ooda health [mod…]               # emit OK/SEGV matrix (no C)
+- ooda err-digest [log|-]          # compress gcc/ERR logs
 EOF
 echo
 

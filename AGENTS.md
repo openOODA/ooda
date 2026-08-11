@@ -1,60 +1,43 @@
-# openOODA — agent token discipline
+# openOODA — agent token discipline (product CLI)
 
-Agents blow budgets by pasting pure-C dumps, full SPRINT, and multi-hundred-line
-gcc logs. **Orient with compression tools first.** Full source is a last resort.
+Token minimization is a **product capability** of openOODA (`ooda` / `oodac`),
+not an external skill. Use the CLI; do not invent parallel agent workflows.
+
+## Product commands (built-in)
+
+```bash
+# from ooda/ (or PATH with OODA_SRC_ROOT set)
+./bin/ooda help
+
+./bin/ooda outline <file.oo>              # pub signatures only
+./bin/ooda reflect <file.oo> [sym]        # JSON caps + sig
+./bin/ooda context <file> [sym]           # JSON + est_tokens_full/slice
+./bin/ooda pack <file> [sym]              # human outline+slice
+./bin/ooda digest [--emit-sample]         # session orient pack
+./bin/ooda health [mod…]                  # emit OK/SEGV matrix (no C)
+./bin/ooda err-digest [log|-]             # compress gcc/ERR logs
+
+# compiler surface (same orient tools)
+./oodac/oodac outline|reflect|context <file> [sym]
+```
 
 ## Hard rules (token traps)
 
 | Never auto-read | Why |
 |-----------------|-----|
 | `~/.cache/ooda-tmp/**/all*.c` | ~700KB pure emit |
-| Full `openOODA/SPRINT.md` | multi-k lines; use residual slice |
-| Full `emit-c` stdout of oodac modules | use emit_health / outline |
-| 500+ line gcc logs | use `ooda_err_digest.sh` |
-| Entire `oodac/*.oo` tree in one prompt | 152 modules; outline per file |
+| Full `openOODA/SPRINT.md` | use `ooda digest` residual slice |
+| Full `emit-c` stdout | use `ooda health` / outline |
+| 500+ line gcc logs | use `ooda err-digest` |
 
-## Prefer (cheap orient)
+## Work loop
 
-```bash
-# session start (~1–3k tokens)
-./scripts/ooda_agent_digest.sh --emit-sample
+1. `ooda digest` — orient (≤ few KB)
+2. `ooda outline` / `context` on 1–3 files
+3. Minimal repro; edit; smoke with **exit code + last line only**
+4. Leave-off ≤15 lines
 
-# one module surface (~1% of source for outline)
-./oodac/oodac outline oodac/c_emit_let_ext.oo
-./oodac/oodac reflect oodac/c_emit_let_ext.oo
+## Measured
 
-# symbol + outline JSON
-./scripts/ooda_context_pack.sh oodac/check_caps.oo check_function
-./scripts/ooda_product_context.sh oodac/check_caps.oo check_function
-
-# emit matrix (status only, no C)
-./scripts/ooda_emit_health.sh check_caps check_drive c_emit_fn main
-
-# compress a log
-./scripts/ooda_err_digest.sh /tmp/pure_build.err
-```
-
-## Work loop (OODA, token-aware)
-
-1. **Observe:** `ooda_agent_digest.sh` + emit_health on suspects — not full tree.
-2. **Orient:** `outline` / `reflect` / `context_pack` for the 1–3 files in the critical path.
-3. **Decide:** one residual claim; write a **minimal repro** (.oo ≤30 lines) before editing.
-4. **Act:** surgical edit; smoke with **exit code + last line only**.
-5. **Leave-off:** ≤15 lines (tip hash, green list, residual, next). No all.c.
-
-## When full source is justified
-
-- File ≤80 lines, or
-- You already have a SEGV/hang line number and need ±20 lines, or
-- `--force-source` on `ooda_context_pack.sh` after outline proved insufficient.
-
-## Product floors (don’t re-litigate every session)
-
-- Tip host: pure multi seed+ABI (`oodac.m17x`) — product AGY/m169 green.
-- M171: untyped `field_at` let SEGV fixed in `c_emit_let_ext.oo`.
-- Residual: pure self-host **emit quality** (double `fs`, mangled idents), not SEGV.
-
-## Complement, don’t race
-
-Library surface / std growth may be owned by other agents. This tree’s
-high-leverage agent work is **compiler self-host integrity + token tooling**.
+`c_emit_ty.oo` outline ≈ **1.3%** of full source bytes.
+`context` reports `est_tokens_full` vs `est_tokens_slice`.

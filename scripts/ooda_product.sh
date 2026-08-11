@@ -199,8 +199,38 @@ case "$MODE" in
     exec "$S" "$@"
     ;;
   context)
+    # Token-min: outline + optional symbol slice JSON (file#sym or file sym)
     S="$ROOT/scripts/ooda_product_context.sh"
     [[ -x "$S" ]] || S=./scripts/ooda_product_context.sh
+    [[ -x "$S" ]] || { echo ERR_NO_CONTEXT_SCRIPT >&2; exit 1; }
+    exec "$S" "$@"
+    ;;
+  digest)
+    # Token-min: session orient pack (never dumps all.c / full SPRINT)
+    S="$ROOT/scripts/ooda_agent_digest.sh"
+    [[ -x "$S" ]] || S=./scripts/ooda_agent_digest.sh
+    [[ -x "$S" ]] || { echo ERR_NO_DIGEST_SCRIPT >&2; exit 1; }
+    exec "$S" "$@"
+    ;;
+  health|emit-health)
+    # Token-min: emit OK/SEGV/TO matrix (no C bodies)
+    S="$ROOT/scripts/ooda_emit_health.sh"
+    [[ -x "$S" ]] || S=./scripts/ooda_emit_health.sh
+    [[ -x "$S" ]] || { echo ERR_NO_HEALTH_SCRIPT >&2; exit 1; }
+    exec "$S" "$@"
+    ;;
+  err-digest|errdigest)
+    # Token-min: compress gcc / ERR logs
+    S="$ROOT/scripts/ooda_err_digest.sh"
+    [[ -x "$S" ]] || S=./scripts/ooda_err_digest.sh
+    [[ -x "$S" ]] || { echo ERR_NO_ERR_DIGEST_SCRIPT >&2; exit 1; }
+    exec "$S" "$@"
+    ;;
+  pack|context-pack)
+    # Token-min: outline+reflect+symbol slice (human-readable pack)
+    S="$ROOT/scripts/ooda_context_pack.sh"
+    [[ -x "$S" ]] || S=./scripts/ooda_context_pack.sh
+    [[ -x "$S" ]] || { echo ERR_NO_CONTEXT_PACK_SCRIPT >&2; exit 1; }
     exec "$S" "$@"
     ;;
   run)

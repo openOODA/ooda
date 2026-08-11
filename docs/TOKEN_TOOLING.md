@@ -1,38 +1,38 @@
-# Token-minimized agent tooling (path A)
+# Token-minimized APIs — product surface (path A)
 
 ## Why
 
-Agent sessions on openOODA die from context bloat: pure `all.c` (~700KB), full
-SPRINT, emit-c dumps, and gcc walls. SPEC already claims outline/reflect/context
-for 80–90% savings; these scripts make that operational **now**.
+Agent sessions die from pure `all.c` (~700KB), full SPRINT, emit dumps, gcc walls.
+SPEC §12 requires outline/reflect/context. **Product CLI is the capability.**
 
-## Tools
+## Product commands (`./bin/ooda`)
 
-| Script | Tokens out | Use |
-|--------|------------|-----|
-| `scripts/ooda_agent_digest.sh` | ~1–3k | Session start orient |
-| `scripts/ooda_emit_health.sh` | ~20B/module | SEGV/TO/OK matrix |
-| `scripts/ooda_err_digest.sh` | ~0.5–1k | Compress gcc/ERR logs |
-| `scripts/ooda_context_pack.sh` | ~0.2–2k | outline+reflect+symbol slice |
-| `scripts/ooda_product_context.sh` | JSON ~0.5k | CLI context backend |
+| Command | Tokens out | Use |
+|---------|------------|-----|
+| `ooda outline <file>` | ~1% source | public signatures |
+| `ooda reflect <file> [sym]` | tiny JSON | caps + sig |
+| `ooda context <file> [sym]` | slice JSON | est_tokens_full vs slice |
+| `ooda pack <file> [sym]` | human pack | outline+reflect+slice |
+| `ooda digest` | ~3k chars | session orient |
+| `ooda health [mods]` | ~20B/mod | emit OK/SEGV (no C) |
+| `ooda err-digest [log]` | ~0.5–1k | gcc/ERR compression |
 
-Built-ins (prefer over `cat`):
+Also: `oodac outline|reflect|context` on the compiler binary.
 
-```text
-oodac outline <file>   # signatures only (often ~1% of source)
-oodac reflect <file>   # JSON caps + sigs
-```
+Backend scripts live under `scripts/ooda_*.sh` and are **dispatched only** via
+`scripts/ooda_product.sh` (invoked by pure `cli/main.oo`). Agents should call
+`ooda …`, not invent parallel tooling.
 
 ## Measured
 
-`oodac/c_emit_ty.oo` (11665 bytes) → outline ~154 bytes (~1.3%).
+`c_emit_ty.oo` (11665 bytes) → outline ~154 bytes (~1.3%).
 
 ## Residual
 
-- `ooda context file#sym` product CLI wiring if not yet dispatched to these scripts
 - `--json-minimal` diagnostics (SPEC) not fully product
-- Package-distributed outlines (RP-2.2 future)
+- Package-distributed outlines (RP-2.2)
+- Full dual-green rebuild of tip after every CLI edit (tip host is m172+)
 
-## Agent rule file
+## See also
 
-See `AGENTS.md` in this package for hard token traps.
+`AGENTS.md` — hard token traps for any agent on this tree.
