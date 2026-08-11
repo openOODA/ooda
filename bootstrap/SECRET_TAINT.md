@@ -16,7 +16,7 @@
 | `sys_exec` argv | **In** |
 | `env_get` key | **In** |
 | `read_file` / `path_exists` / `file_size` path | **In** |
-| `seed` / `sleep_ms` / `alloc_bytes` / `free_bytes` values | **In** |
+| `seed` / `sleep_ms` / `alloc_bytes` / `free_bytes` / `malloc` / `free` / `realloc` values | **In** |
 | `process_exit` code | **In** |
 | LLVM `emit-llvm` dual-path (same refuse) | **In** |
 | `#[Secret]` attribute | **residual** |

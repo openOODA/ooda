@@ -233,9 +233,8 @@ If `tc_calls.oo` would exceed 256 after move: split **`tc_call_arity.oo`** vs **
 | `is_value_token_kind` | 17 |
 | `typecheck_unary_minus_lit` | 70 |
 | `typecheck_cmp_numeric_lits` | 59 |
-| `typecheck_reject_shift_ops` | 50 |
-| `typecheck_reject_amp_pipe_binop` | 39 |
 | `typecheck_logic_binop_lits` | 120 |
+| *(M166: reject_shift / reject_amp_pipe removed — bitops product In)* | |
 
 #### `tc_struct.oo`
 

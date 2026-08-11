@@ -108,8 +108,17 @@ void oo_print_str(OoStr s);
 void oo_eprint_str(OoStr s);
 void oo_print_int(long long n);
 void oo_print_bool(int b);
+void oo_print_double(double x);
 void oo_println(void);
 void oo_eprintln(void);
+
+/* Path A M166: IEEE-754 double trig/exp (Float type alias → double). No decimal. */
+double oo_sin(double x);
+double oo_cos(double x);
+double oo_ln(double x);
+double oo_exp(double x);
+double oo_sqrt(double x);
+double oo_pow(double base, double expn);
 
 /* FS & System API */
 OoResS oo_read_file(long long cap, OoStr path);
@@ -160,10 +169,19 @@ OoStr oo_bytes_to_str(OoIList l);
 OoResS oo_tcp_bind(long long cap, long long port);
 OoResS oo_tcp_connect(long long cap, OoStr host, long long port);
 OoResS oo_bind_udp(long long cap, long long port);
+OoResS oo_tcp_write(long long cap, long long slot, OoStr data);
+OoResS oo_tcp_read(long long cap, long long slot, long long max_n);
+OoResS oo_udp_recv(long long cap, long long slot, long long max_n);
+OoResS oo_tcp_close(long long cap, long long slot);
+OoResS oo_sock_raw(long long cap, long long proto);
 OoResS oo_tls_connect(long long cap, OoStr host, long long port);
 OoResS oo_sys_spawn(long long cap, OoStr cmd);
 OoResS oo_sys_wait(long long cap, long long pid);
 OoResS oo_sys_kill(long long cap, long long pid, long long sig);
+/* M166 path A: OS syscall seals under SysCap — residual Err (not full async I/O) */
+OoResS oo_sys_epoll_create(long long cap, long long flags);
+OoResS oo_sys_inotify_init(long long cap);
+OoResS oo_sys_prctl(long long cap, long long option);
 OoResS oo_mutex_lock(long long cap, long long mid);
 OoResS oo_mutex_unlock(long long cap, long long mid);
 OoResS oo_thread_spawn(long long cap, OoStr name);

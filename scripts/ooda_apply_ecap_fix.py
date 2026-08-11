@@ -26,6 +26,7 @@ SEALED = {
     "now_ms": "TimeCap", "sleep_ms": "TimeCap",
     "random": "RandCap", "seed": "RandCap",
     "alloc_bytes": "AllocCap", "free_bytes": "AllocCap",
+    "malloc": "AllocCap", "free": "AllocCap", "realloc": "AllocCap",
 }
 
 PARAM_NAME = {

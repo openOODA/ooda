@@ -20,14 +20,14 @@ Security for sealed effects on the claimed path:
 2. **Runtime seal** — wrong token → `oo_cap_require` exit  
 3. **Net** — `fetch` + TCP/UDP product-lowered; `tls_connect` residual without OpenSSL (M163; see `CAPS_MATRIX.md`)  
 4. **Time / Rand** — `now_ms` / `sleep_ms` need `&TimeCap`; `random` / `seed` need `&RandCap` (process-local seal only)  
-5. **Alloc** — `alloc_bytes` / `free_bytes` need `&AllocCap` (process-local seal only; **not** OS rlimit / heap isolation)
+5. **Alloc** — `alloc_bytes` / `free_bytes` / M166 aliases `malloc` / `free` / `realloc` need `&AllocCap` (process-local seal only; **not** OS rlimit / heap isolation / GC)
 
 **Honest ceiling:** process-local tokens stop accidental ambient effects (I/O, clock, entropy, explicit alloc helpers) and classic magic forges on Backend-C. They do **not** stop a hostile binary that calls `oo_cap_grant_*` or patches `oo_cap_require` out.
 
 Classic `0x4F4F*` constants are **forged values that must be denied**, not ambient grants.  
 `oo_random` uses host entropy when available (else process LCG) — **not** a cryptographic CSPRNG guarantee.
 
-**Ambient residual (intentional):** `list_new` / `list_push` / string concat stay free for alpha — sealing them would brick the pure compiler and fixtures. Only the narrow `alloc_bytes` / `free_bytes` surface is sealed under AllocCap.
+**Ambient residual (intentional):** `list_new` / `list_push` / string concat stay free for alpha — sealing them would brick the pure compiler and fixtures. Only the narrow `alloc_bytes` / `free_bytes` / `malloc` / `free` / `realloc` surface is sealed under AllocCap.
 
 ---
 
@@ -53,6 +53,36 @@ Classic `0x4F4F*` constants are **forged values that must be denied**, not ambie
 - Runtime pass: Fs roundtrip, path_exists, Env, Sys argv, Time `now_ms`, Rand `random`, Alloc `alloc_bytes`  
 - Runtime forge deny: Fs/Sys/Env/Net/Time/Rand/Alloc (zero + classic magic)  
 - Emit fail-closed: fetch without NetCap arg; `now_ms` without TimeCap IDENT; `alloc_bytes` without AllocCap IDENT; magic-int forge build  
+
+---
+
+## M166 path A — std cap scoping samples
+
+**AGY finding:** std samples “often lack” `&SysCap` / `&NetCap`. **Product floor (path A):** effectful `std/os/*` wrappers **do** take leading cap params; sealed free names require cap first arg at check.
+
+| Sample | Cap | Shape |
+|--------|-----|--------|
+| `std/os/process.oo` | `&SysCap` | wrappers + `main(sys: &SysCap)` honesty probe |
+| `std/os/net.oo` | `&NetCap` | `fetch` / TCP-UDP / M166 slot IO take `net` first |
+| `std/os/sync.oo`, `std/os/thread.oo` | `&ThreadCap` | mutex / spawn / join |
+| `std/os/fs.oo` | `&FsCap` | read/write/path/size |
+| `fixtures/sys_syscall_path_a.oo` | `&SysCap` | `main(sys)` + sealed `sys_epoll_*` first-arg |
+| `fixtures/libfloor_tcp_io.oo` | `&NetCap` | `main(net)` + `tcp_*` / `sock_raw` |
+| `fixtures/malloc_path_a.oo` | `&AllocCap` | `malloc`/`free` under alloc |
+| `fixtures/libfloor_thread_cap.oo` | `&ThreadCap` | spawn + mutex |
+
+**Smokes (path A rails):**
+
+- `scripts/sys_syscall_path_a_smoke.sh` — granted SysCap check/emit/runtime residual; **bare** `sys_epoll_create(0)` refused by `oodac check`
+- `scripts/tcp_io_smoke.sh` — seal table honesty; **bare** `tcp_read` refused by `oodac check` when product `oodac` present
+
+Pattern to copy:
+
+1. `pub fn main(sys: &SysCap)` / `main(net: &NetCap)` (or library fn with leading cap param)  
+2. Sealed call **cap IDENT first**: `sys_exec(sys, …)`, `tcp_connect(net, …)`  
+3. Bare call without cap → `oodac check` non-zero (`E_CAP` / capability)
+
+**Residual (do not claim closed):** cap forgery via `as fn(...)` cast (AGY: cast a sealed name to a forged `&…Cap` signature and bypass static check) remains open — process-local magic-token runtime seal is still the only Backend-C floor; not full forgery fix / object-caps. See also classic magic-int forge deny above (closed on the claimed path) vs cast-bypass residual.
 
 ---
 

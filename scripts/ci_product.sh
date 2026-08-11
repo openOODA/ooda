@@ -90,6 +90,13 @@ for rail in \
   libfloor_net_smoke.sh \
   alloc_cap_smoke.sh \
   list_quota_smoke.sh \
+  malloc_path_a_smoke.sh \
+  bitwise_ops_smoke.sh \
+  math_trig_smoke.sh \
+  tcp_io_smoke.sh \
+  list_index_path_a_smoke.sh \
+  tensor_path_a_smoke.sh \
+  sys_syscall_path_a_smoke.sh \
   import_load_smoke.sh \
   contracts_native_smoke.sh \
   contracts_multi_clause_smoke.sh \

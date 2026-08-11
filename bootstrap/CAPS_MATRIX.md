@@ -27,17 +27,21 @@ Status legend:
 | `file_size` | `&FsCap` | sealed free call | `oo_file_size(cap, path)` | require + ftell | **real** |
 | `sys_exec` | `&SysCap` | sealed free call + arg-flow | multi-arg → `oo_sys_exec`; single → `oo_sys_exec1` | `fork`+`execvp` (AUDIT R2/R3 closed; not `system(3)`) | **real** |
 | `sys_spawn` / `sys_wait` / `sys_kill` | `&SysCap` | sealed free call + arg-flow | `oo_sys_spawn` / `oo_sys_wait` / `oo_sys_kill` | require Sys then **Err residual** (path A seal; no real fork/wait/kill) | **fail-closed residual** — use `sys_exec` for blocking spawn+wait; `std/os/process.oo` wrappers |
+| `sys_epoll_create` / `sys_inotify_init` / `sys_prctl` | `&SysCap` | sealed free call + arg-flow | `oo_sys_epoll_create` / `oo_sys_inotify_init` / `oo_sys_prctl` | require Sys then **Err residual** (M166 path A; not full async I/O) | **fail-closed residual** — `std/os/process.oo` thin wrappers |
 | `env_get` | `&EnvCap` | sealed free call | `oo_env_get(cap, key)` | require + getenv | **real** |
 | `fetch` | `&NetCap` | sealed free call; allow only with `NetCap` | `oo_fetch(cap, url)` | `chs_rt_sys.c` + net cap require; HTTP/1.0 GET | **real** (AUDIT R9) |
-| `tcp_bind` / `tcp_connect` / `bind_udp` | `&NetCap` | sealed free call | `oo_tcp_bind` / `oo_tcp_connect` / `oo_bind_udp` | `chs_rt_netfloor.c` + net require; real sockets | **real** (M162) |
+| `tcp_bind` / `tcp_connect` / `bind_udp` | `&NetCap` | sealed free call | `oo_tcp_bind` / `oo_tcp_connect` / `oo_bind_udp` | `chs_rt_netfloor.c` + net require; real sockets; **keep fd open** in process-local slot table; Ok(`"fd:N"`) | **real** (M162; M166 keep-open path A) |
+| `tcp_write` / `tcp_read` / `tcp_close` / `udp_recv` | `&NetCap` | sealed free call | `oo_tcp_write` / `oo_tcp_read` / `oo_tcp_close` / `oo_udp_recv` | fd-slot table; write/read String bytes; close frees slot | **real** (M166) — not full HTTP/3/gRPC |
+| `sock_raw` / `raw_socket` | `&NetCap` | sealed free call | `oo_sock_raw` | always **Err** residual (`SOCK_RAW not product`) | **fail-closed residual** (M166) |
 | `tls_connect` | `&NetCap` | sealed free call | `oo_tls_connect` | `chs_rt_tls.c` + net require; TCP then residual **or** OpenSSL 1.2+ when `OO_HAVE_OPENSSL=1` | **residual default** / **real TLS when OpenSSL linked** (M163). Default Err `tls residual: OpenSSL not linked`. Optional `OODA_TLS_INSECURE_TCP=1` → Ok TCP-only (**insecure residual**, not TLS) |
 | `http_get` / `net_get` / `net_connect` / `downloadData` / `query_remote_api` | `&NetCap` | sealed free call | **explicit `ERR\tc_emit\tnet residual`** | none | **fail-closed residual** |
 | `now_ms` | `&TimeCap` | sealed free call | `oo_now_ms(cap)` | `chs_rt_sys.c` + time require; `CLOCK_REALTIME` ms | **real** (M12) |
 | `sleep_ms` | `&TimeCap` | sealed free call | `oo_sleep_ms(cap, ms)` | time require + `nanosleep` | **real** (M12) |
 | `random` | `&RandCap` | sealed free call | `oo_random(cap)` | rand require + host entropy / LCG fallback (not crypto claim) | **real** (M12) |
 | `seed` | `&RandCap` | sealed free call | `oo_seed(cap, s)` | rand require; seeds process LCG | **real** (M12) |
-| `alloc_bytes` | `&AllocCap` | sealed free call | `oo_alloc_bytes(cap, n)` | alloc require; returns n as smoke size token (not real heap sandbox) | **real** (M17) |
-| `free_bytes` | `&AllocCap` | sealed free call | `oo_free_bytes(cap, p)` | alloc require; no-op free by handle | **real** (M17) |
+| `alloc_bytes` / **`malloc`** | `&AllocCap` | sealed free call | `oo_alloc_bytes(cap, n)` | alloc require; returns n as smoke size token (not real heap sandbox) | **real** (M17; M166 alias) |
+| `free_bytes` / **`free`** | `&AllocCap` | sealed free call | `oo_free_bytes(cap, p)` | alloc require; no-op free by handle | **real** (M17; M166 alias) |
+| **`realloc`** | `&AllocCap` | sealed free call | free then `oo_alloc_bytes` | path A quota-token adjust (not OS realloc) | **path A** (M166) |
 | `mutex_lock` / `mutex_unlock` | `&ThreadCap` | sealed free call | `oo_mutex_lock` / `oo_mutex_unlock` | `chs_rt_libfloor.c` pthread mutex slots | **real** (M162) |
 | `thread_spawn` | `&ThreadCap` | sealed free call | `oo_thread_spawn` | `chs_rt_thread.c` joinable pthread; Ok(`"tid:N"`) | **real** (M163 join path A) |
 | `thread_join` | `&ThreadCap` | sealed free call | `oo_thread_join` (Int) / `oo_thread_join_s` (String `"tid:N"`) | `pthread_join` slot table | **real** (M163) |
@@ -63,7 +67,7 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 - Cap tokens compile to `long long`; `main` injects `oo_cap_grant_fs/sys/env/net/time/rand/alloc/ffi/thread/gpu()` (process-local; grant idents match param names).
 - Sealed FS/Env/Sys/Net/Time/Rand/Alloc/FFI/Thread/Gpu lowers **pass the leading cap arg** (ABI with runtime).
 - Sealed **ThreadCap product (M162/M163/M164):** `mutex_lock`/`mutex_unlock` real pthread mutex; `thread_spawn` joinable pthread → Ok(`"tid:N"`); `thread_join(slot)` joins slot (or `oo_thread_join_s` parses `"tid:N"`); `channel_new`/`channel_send`/`channel_recv` process-local bounded string queues. Not detach-by-default. **GpuCap** `gpu_launch` (M165): noop/`cpu:` Ok honesty; device shaders **Err residual**. Actor model residual.
-- Net libfloor: `tcp_*` / `bind_udp` **real** (M162); `tls_connect` residual without OpenSSL (M163).
+- Net libfloor: `tcp_bind`/`tcp_connect`/`bind_udp` **real** keep-open Ok(`"fd:N"`) (M162/M166); `tcp_read`/`tcp_write`/`tcp_close`/`udp_recv` **real** slot IO (M166); `sock_raw` residual Err; `tls_connect` residual without OpenSSL (M163).
 - Non-IDENT first arg on sealed ops: `ERR\tc_emit\t… requires &…Cap` (fail-closed).
 
 ### Runtime: process-local token seal
@@ -71,7 +75,7 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 - Each lowered sealed op calls `oo_cap_require_*` before ambient libc/clock/entropy/explicit alloc helper.
 - Forged / zero / classic `0x4F4F*` token → non-zero exit + `ERR\tcap\t…` (not ambient effect).
 - Not unforgeable object-caps across hostile binary rewrite; not crypto CSPRNG / attested time / OS rlimit heap isolation.
-- Net: `fetch` + TCP/UDP product-lowered; **TLS residual** unless `OO_HAVE_OPENSSL=1` links OpenSSL (`-lssl -lcrypto`). Do **not** claim full TLS product without OpenSSL. `OODA_TLS_INSECURE_TCP=1` is **insecure residual** (TCP-only), not encryption. Smoke: `scripts/tls_path_a_smoke.sh`.
+- Net: `fetch` + TCP/UDP product-lowered; **fd slots keep sockets open** after connect/bind (M166 breaking vs early close). Byte IO is `tcp_read`/`tcp_write`/`udp_recv` as String (not true `&[u8]`). **TLS residual** unless `OO_HAVE_OPENSSL=1`. **No** full HTTP/3/gRPC/SOCK_RAW product. Smokes: `scripts/libfloor_net_smoke.sh`, `scripts/tcp_io_smoke.sh`, `scripts/tls_path_a_smoke.sh`.
 - Alloc: smoke returns size token / no-op free — **not** a claim of heap sandboxing.
 
 ---
@@ -94,6 +98,8 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 | Runtime seal | `emit-c/pass/cap_runtime_read.oo` + forge deny in smoke | — |
 
 Runtime round-trip: `fixtures/chs_fs_roundtrip.oo` (Fs). Smoke: `scripts/caps_matrix_smoke.sh` (Fs/Sys/Env/Net/Time/Rand) + `scripts/alloc_cap_smoke.sh` (Alloc + forge-cap deny).
+
+**M166 std cap scoping samples (path A):** effectful `std/os/*` take leading `&SysCap`/`&NetCap`/`&ThreadCap`/`&FsCap`; pedagogical fixtures `sys_syscall_path_a.oo` / `libfloor_tcp_io.oo` + smokes `sys_syscall_path_a_smoke.sh` / `tcp_io_smoke.sh` prove main-with-cap, sealed first-arg, bare refuse. **Residual open:** cap forgery via `as fn(...)` cast (AGY) — not full forgery fix. Canonical writeup: [`STATIC_CAPS.md`](STATIC_CAPS.md) § M166 path A.
 
 ---
 

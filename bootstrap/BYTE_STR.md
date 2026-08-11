@@ -19,6 +19,8 @@
 | **Bytes** | Runtime `OoStr` is length-prefixed bytes internally; there is **no** language `Byte` / `List[Byte]` / `&[Byte]` product type. |
 | **std floor** | `type Byte = Int` convention in `std/byte.oo` (0..255 clamp helpers) + thin wrappers over path A free names. **Not** a sealed u8 primitive; **not** true `List[Byte]`. |
 | **byte_at (M162)** | Free name `byte_at(s, i) -> Int` returns raw 0..255 or -1 OOB. **Not** `&str` borrow; **not** `List[Byte]`. |
+| **ord (M166)** | Free name `ord(s) -> Int` = first byte 0..255, or **-1** if empty. Path A String→byte conversion (via `byte_at(s,0)`). **Not** Unicode codepoint; **not** `&str`. |
+| **bitwise ops (M166)** | Product operators `<<` `>>` `&` `|` `^` on **Int** (`long long` C). Residual: no float bitops, no rotate. |
 | **bytes_len / byte_slice / bytes_eq (M163 path A)** | Free names: `bytes_len(s) -> Int` (byte length); `byte_slice(s, start, end) -> String` (**owned** copy of raw bytes `[start,end)` by **byte index**); `bytes_eq(a, b) -> Bool`. Path A is honest owned copy — **not** true borrowed `&str`. |
 | **Byte buffer (M164 path A)** | Free names: `bytes_new() -> List[Int]`, `bytes_push(bs, b) -> List[Int]` (clamp 0..255), `bytes_get(bs, i) -> Int` (-1 OOB), `bytes_to_str(bs) -> String`. **Honest:** Byte buffer is **`List[Int]` elements in 0..255** — **not** native `List[Byte]` ABI. |
 | **String byte view (M164)** | `bytes_from_str(s) -> String` owned identity (byte-string view of String still `OoStr`); `bytes_concat(a, b) -> String` raw concat. **Not** `&str` borrow. |
@@ -40,7 +42,8 @@ Do **not** treat native `&str` lifetimes / `List[Byte]` as DESIGN-complete produ
 
 **In (path A product free names + honesty rails):**
 
-- Free names: `byte_at`, `bytes_len`, `byte_slice`, `bytes_eq` (CHS runtime + C emit)
+- Free names: `byte_at`, `ord`, `bytes_len`, `byte_slice`, `bytes_eq` (CHS runtime + C emit)
+- Int bitwise operators: `<<` `>>` `&` `|` `^` (C/LLVM lower; residual: no float bitops / rotate)
 - Free names: `bytes_from_str`, `bytes_concat` (owned String byte view / raw concat)
 - Free names: `bytes_new`, `bytes_push`, `bytes_get`, `bytes_to_str` (**List[Int] 0..255** Byte buffer)
 - Owned byte-indexed slice as new `String` (`OoStr` copy) — useful for crypto/encoding without faking lifetimes
@@ -61,7 +64,8 @@ Do **not** treat native `&str` lifetimes / `List[Byte]` as DESIGN-complete produ
 - Byte buffer smoke: `scripts/bytes_buffer_smoke.sh`
 - Fixture residual: `fixtures/byte_str_marker.oo` (marker comment only)
 - Fixture path A: `fixtures/byte_at_main.oo`, `fixtures/byte_slice_main.oo`, `fixtures/bytes_buffer_main.oo`
-- Optional floor: `std/byte.oo` (Int convention + path A wrappers; residual documented in-file)
+- Bitwise + ord: `fixtures/bitwise_ops.oo`, smoke `scripts/bitwise_ops_smoke.sh`
+- Optional floor: `std/byte.oo` (Int convention + path A wrappers + `byte_ord`; residual documented in-file)
 
 ## Next (not claimed here)
 

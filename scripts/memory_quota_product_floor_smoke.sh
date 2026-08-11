@@ -11,5 +11,6 @@ fail=0
 run(){ echo "=== $1 ==="; bash "$ROOT/scripts/$1" || { echo "FAIL $1" >&2; fail=1; }; }
 run alloc_cap_smoke.sh
 run list_quota_smoke.sh
+run malloc_path_a_smoke.sh
 [[ $fail -eq 0 ]] || { echo "memory_quota_product_floor_smoke: FAILED" >&2; exit 1; }
 echo "memory_quota_product_floor_smoke: PASSED"

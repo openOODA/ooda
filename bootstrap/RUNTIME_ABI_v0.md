@@ -44,6 +44,8 @@
 | `oo_ilist_new` / `push` / `get` / `len` | list int | `chs_rt_list.c` |
 | `oo_slist_new` / `push` / `get` / `len` | list str | `chs_rt_list.c` |
 | `oo_print_str` / `oo_print_int` / `oo_print_bool` / `oo_println` | print | `chs_rt_print.c` |
+| `oo_print_double` | print double (`%g`) | `chs_rt_math.c` (M166) |
+| `oo_sin` / `oo_cos` / `oo_ln` / `oo_exp` / `oo_sqrt` / `oo_pow` | IEEE double math | `chs_rt_math.c` (M166) |
 | `oo_read_file(long long cap, OoStr)` / `oo_write_file(long long cap, OoStr, OoStr)` | fs + runtime cap | `chs_rt_fs.c` |
 | `oo_path_exists(long long cap, OoStr)` / `oo_file_size(long long cap, OoStr)` | fs + runtime cap | `chs_rt_fs.c` |
 | `oo_env_get(long long cap, OoStr)` | env + runtime cap | `chs_rt_fs.c` |

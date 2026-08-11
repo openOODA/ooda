@@ -12,6 +12,7 @@ Sibling org repo `openOODA/std` (json/crypto/net/fs aspirational APIs) is
 |--------|------|------|
 | `result.oo` | `Result[String,String]` helpers (`res_ok` / `res_err` / `res_unwrap_or` / …) | none |
 | `str.oo` | thin string wrappers (`str_len`, `str_eq`, `str_contains`, `str_concat`, `str_sub`, …) | none |
+| `math.oo` | IEEE-754 **double** wrappers (`math_sin`/`cos`/`ln`/`exp`/`sqrt`/`pow`); Float≠decimal | none |
 | `option.oo` | optional-string helpers encoded as `Result` (`opt_some` / `opt_none` / …) | none |
 | `byte.oo` | docs-only `type Byte = Int` + `byte_clamp` / `byte_in_range` (0..255 convention); check floor only | none |
 | `markup/toml.oo` | path A single-line `key = value` / quoted string → `key\tvalue` | none |
@@ -19,12 +20,19 @@ Sibling org repo `openOODA/std` (json/crypto/net/fs aspirational APIs) is
 | `markup/xml.oo` | path A tag-strip text extract (no attributes) | none |
 | `markup/json_schema.oo` | trivial `{}` schema id only; `validate` always false | none |
 | `archive/{tar,zip,gzip}.oo` | path A magic detect only (not decompress) | none |
+| `math/tensor.oo` | flat row-major `List[Int]` tensor_new/get/set (M166 path A) | none |
+| `os/fs.oo` | FsCap wrappers: `fs_read_file` / `fs_write_file` / `fs_path_exists` / `fs_file_size` | `&FsCap` |
+| `os/net.oo` | NetCap wrappers: http/tcp/udp/tls + M166 slot IO | `&NetCap` |
+| `os/process.oo` | SysCap wrappers: spawn/wait/kill/exec + M166 syscall residual | `&SysCap` |
+
+**Cap scoping samples (path A / M166):** leading `&*Cap` on effectful std/os wrappers is required (not ambient). Rails: `fixtures/sys_syscall_path_a.oo` + `scripts/sys_syscall_path_a_smoke.sh`, `fixtures/libfloor_tcp_io.oo` + `scripts/tcp_io_smoke.sh`. Bootstrap: `bootstrap/STATIC_CAPS.md` § M166. Residual: `as fn(...)` cast forgery still open.
 
 **Fixtures:**
 
 - Check: `oodac check std/result.oo` (and `str.oo`, `option.oo`, `byte.oo`) — library OK without `main`.
 - Build: `fixtures/std_result_main.oo`, `fixtures/std_str_main.oo` via
   `scripts/oodac_pure_build.sh` (multi-module emit + `chs_rt` only).
+- Math: `fixtures/math_trig.oo` + `scripts/math_trig_smoke.sh` (free names; see `bootstrap/MATH_TRIG.md`)
 - Markup: `fixtures/std_markup_main.oo` + `scripts/std_markup_smoke.sh`
 - Archive: `fixtures/std_archive_main.oo` + `scripts/std_archive_smoke.sh`
 
@@ -32,15 +40,18 @@ Sibling org repo `openOODA/std` (json/crypto/net/fs aspirational APIs) is
 
 | Module | Role | Caps |
 |--------|------|------|
-| `os/sync.oo` | ThreadCap wrappers: `sync_mutex_lock` / `sync_mutex_unlock` / `sync_thread_spawn` | residual **Err** (no OS pthreads) |
-| `os/thread.oo` | ThreadCap wrappers: `thr_mutex_*` / `thr_spawn` | residual **Err** |
+| `os/sync.oo` | ThreadCap wrappers: mutex/spawn | product under ThreadCap (see CAPS_MATRIX) |
+| `os/thread.oo` | ThreadCap wrappers: `thr_mutex_*` / `thr_spawn` / `thr_join` | product pthread path A |
 | `os/gpu.oo` | GpuCap wrapper: `gpu_launch_shader` | Path A: noop/cpu Ok; else residual **Err** (no device) |
+| `os/process` syscall seals | `sys_epoll_create` / `sys_inotify_init` / `sys_prctl` | residual **Err** (not full async I/O) |
+| nested `List[List]` / ndarray | tensor path A uses flat `List[Int]` only | residual |
 
 | Item | Honesty |
 |------|---------|
 | `Option[T]` / `Some` / `None` as sum types | Typecheck may accept; **Backend-C does not lower** constructors → use `option.oo` Result encoding |
 | Generic `Result[T,E]` beyond String | Runtime `OoResS` is string payload only on pure path |
 | Native `&str` borrow + real `Byte` arrays | **Residual** — see `bootstrap/BYTE_STR.md` + `STR_OPS.md`; path A Byte buffer is `List[Int]` 0..255; owned str ops In; `String` remains value-copy |
+| Decimal / BigDecimal float | **Residual** — product `Float` is IEEE-754 **double** only (`bootstrap/MATH_TRIG.md`) |
 | `std::fs` / `std::net` / json / crypto (org sibling) | Cap-gated or host-era; **not** imported by pure std here |
 | Thread/mutex free names | Path A product under ThreadCap (pthread/channels); actor residual |
 | GPU free names | Path A: noop/`cpu:` honesty Ok; device shaders residual Err (no CUDA) |

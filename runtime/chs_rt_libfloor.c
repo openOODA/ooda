@@ -76,6 +76,32 @@ OoResS oo_sys_kill(long long cap, long long pid, long long sig) {
   return r;
 }
 
+/* M166 path A: OS syscall free names — SysCap require then residual Err.
+ * Honesty: not full async I/O / epoll loop / inotify watches / prctl product. */
+OoResS oo_sys_epoll_create(long long cap, long long flags) {
+  OoResS r;
+  oo_cap_require_sys(cap, "sys_epoll_create");
+  r.ok = 0;
+  r.val = oo_str_lit("sys_epoll_create residual: not full async I/O");
+  (void)flags;
+  return r;
+}
+OoResS oo_sys_inotify_init(long long cap) {
+  OoResS r;
+  oo_cap_require_sys(cap, "sys_inotify_init");
+  r.ok = 0;
+  r.val = oo_str_lit("sys_inotify_init residual: path A seal only");
+  return r;
+}
+OoResS oo_sys_prctl(long long cap, long long option) {
+  OoResS r;
+  oo_cap_require_sys(cap, "sys_prctl");
+  r.ok = 0;
+  r.val = oo_str_lit("sys_prctl residual: path A seal only");
+  (void)option;
+  return r;
+}
+
 #define OO_MUTEX_SLOTS 64
 static pthread_mutex_t g_mutexes[OO_MUTEX_SLOTS];
 static int g_mutex_inited[OO_MUTEX_SLOTS];
