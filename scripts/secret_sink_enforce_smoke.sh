@@ -12,6 +12,21 @@ DOC="$ROOT/bootstrap/SECRET_TAINT.md"
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; exit 1; }
 
+# Path A floor fixtures must exist (hard require)
+_REQ=(
+  secret_sink_fail secret_sink_pass
+  secret_write_file_fail secret_write_file_pass
+  secret_fetch_fail secret_fetch_pass
+  secret_sys_exec_fail secret_sys_exec_pass
+  secret_env_get_fail secret_env_get_pass
+  secret_read_file_fail secret_read_file_pass
+  secret_process_exit_fail secret_process_exit_pass
+)
+for b in "${_REQ[@]}"; do
+  [[ -f "$ROOT/fixtures/${b}.oo" ]] || bad "missing floor fixture $b.oo"
+done
+
+
 expect_refuse() {
   local label="$1" src="$2"
   set +e
