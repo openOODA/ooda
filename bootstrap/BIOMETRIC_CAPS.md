@@ -1,5 +1,8 @@
 # Biometric / crypto object-caps residual
 
+**Status:** path A process-local caps = product floor (alpha). Biometric/crypto object-caps = residual.
+
+
 **Status:** residual honesty (not full DESIGN green). PM **3.1**.  
 **Marker:** `BIOMETRIC_CAPS_RESIDUAL_ALPHA`
 

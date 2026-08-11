@@ -1,7 +1,7 @@
 # Capability seals (static + runtime)
 
-**Status:** product truth on pure Backend-C path (M8 + M12 Time/Rand + M17 Alloc matrix rails).  
-**Product rule:** claim only process-local magic-token re-check — **not** cryptographic object-caps.
+**Status:** product floor (alpha) on pure Backend-C — PM **3.1 done (alpha)** for process-local seals (M8 + M12 Time/Rand + M17 Alloc).  
+**Product rule:** claim only process-local magic-token re-check — **not** cryptographic object-caps / biometric / OS isolation.
 
 ---
 

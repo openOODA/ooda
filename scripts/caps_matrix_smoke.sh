@@ -47,7 +47,7 @@ for f in "$CHECK_PASS"/*.oo; do
 done
 # Product static deny ×7 families (M8 + M12 Time/Rand + M17 Alloc)
 if [[ -x "$OODA" ]]; then
-  for base in no_cap_read_file no_cap_sys_exec no_cap_env_get no_cap_fetch no_cap_now_ms no_cap_random no_cap_alloc_bytes; do
+  for base in no_cap_read_file no_cap_write_file no_cap_path_exists no_cap_file_size no_cap_sys_exec no_cap_env_get no_cap_fetch no_cap_now_ms no_cap_sleep_ms no_cap_random no_cap_seed no_cap_alloc_bytes; do
     ff="$CHECK_FAIL/${base}.oo"
     [[ -f "$ff" ]] || continue
     set +e

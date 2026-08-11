@@ -3,6 +3,7 @@
 # job: grep residual doc marker; forbid false "FFI fully sealed/enforced shipped" claims
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 DOC="$ROOT/bootstrap/CAP_FFI.md"
 FIX="$ROOT/fixtures/ffi_marker.oo"
 fail=0
