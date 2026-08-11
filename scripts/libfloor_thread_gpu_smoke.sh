@@ -85,8 +85,9 @@ for m in thread.oo gpu.oo sync.oo; do
   fi
 done
 
-# M162: real pthread; GPU residual remains
-if grep -q 'pthread_create' runtime/chs_rt_libfloor.c \
+# M162/M163: real pthread + joinable; GPU residual remains
+if grep -q 'pthread_create' runtime/chs_rt_thread.c \
+  && grep -q 'pthread_join' runtime/chs_rt_thread.c \
   && grep -q 'pthread_mutex_lock' runtime/chs_rt_libfloor.c \
   && grep -q 'gpu residual: path A seal only' runtime/chs_rt_libfloor.c; then
   pass "runtime pthread path A + GPU residual present"
@@ -94,7 +95,7 @@ else
   bad "runtime thread/gpu path A missing"
 fi
 if grep -nE 'cudaLaunch|clEnqueue|vkCmdDispatch' \
-  runtime/chs_rt_libfloor.c 2>/dev/null | head -3; then
+  runtime/chs_rt_libfloor.c runtime/chs_rt_thread.c 2>/dev/null | head -3; then
   bad "libfloor must not claim GPU shader product"
 else
   pass "no GPU shader product in libfloor"

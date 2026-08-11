@@ -185,7 +185,25 @@ if ! grep -q 'int main\|long long main' "$TMP/all.c" && ! grep -q 'main(int argc
   echo "int main(void) { return 0; }" >> "$TMP/all.c"
 fi
 
-gcc -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" -lm -ldl -lpthread -o "$OUT"
+# TLS path A: -lssl -lcrypto only when OO_HAVE_OPENSSL=1 (or auto if headers present).
+OO_SSL_CFLAGS=()
+OO_SSL_LIBS=()
+if [[ -z "${OO_HAVE_OPENSSL:-}" ]]; then
+  if [[ -f /usr/include/openssl/ssl.h || -f /usr/local/include/openssl/ssl.h ]]; then
+    OO_HAVE_OPENSSL=1
+  else
+    OO_HAVE_OPENSSL=0
+  fi
+fi
+if [[ "${OO_HAVE_OPENSSL}" == "1" ]]; then
+  OO_SSL_CFLAGS=(-DOO_HAVE_OPENSSL)
+  OO_SSL_LIBS=(-lssl -lcrypto)
+  echo "pure_build: OO_HAVE_OPENSSL=1 (-lssl -lcrypto)"
+else
+  echo "pure_build: OO_HAVE_OPENSSL=0 (TLS residual; no -lssl)"
+fi
+gcc -O2 -I"$ROOT/runtime" "${OO_SSL_CFLAGS[@]}" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" \
+  -lm -ldl -lpthread "${OO_SSL_LIBS[@]}" -o "$OUT"
 test -x "$OUT"
 echo "pure_build: input_fp=$PURE_INPUT_FP"
 echo OK_PURE_MULTI

@@ -18,7 +18,7 @@ Security for sealed effects on the claimed path:
 
 1. **Compile-time refuse** — missing / wrong cap param → check fail  
 2. **Runtime seal** — wrong token → `oo_cap_require` exit  
-3. **Net** — `fetch` product-lowered + runtime (`oo_fetch`); other net names may still residual at emit  
+3. **Net** — `fetch` + TCP/UDP product-lowered; `tls_connect` residual without OpenSSL (M163; see `CAPS_MATRIX.md`)  
 4. **Time / Rand** — `now_ms` / `sleep_ms` need `&TimeCap`; `random` / `seed` need `&RandCap` (process-local seal only)  
 5. **Alloc** — `alloc_bytes` / `free_bytes` need `&AllocCap` (process-local seal only; **not** OS rlimit / heap isolation)
 
@@ -35,7 +35,8 @@ Classic `0x4F4F*` constants are **forged values that must be denied**, not ambie
 
 - Cryptographic / unforgeable object capabilities  
 - Biometric or OS-level caps  
-- Full net surface beyond `fetch`  
+- Full TLS product without OpenSSL (`OO_HAVE_OPENSSL=1`); `OODA_TLS_INSECURE_TCP` is not encryption  
+- Full net surface beyond `fetch` / TCP-UDP / residual-or-OpenSSL `tls_connect`  
 - Cryptographically secure randomness or attested clocks  
 - Heap sandboxing, ASAN, or OS `rlimit` isolation for AllocCap  
 - Ambient effects without an explicit cap param on the product path  

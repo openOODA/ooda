@@ -78,6 +78,35 @@ long long oo_byte_at(OoStr s, long long idx) {
   return (long long)(unsigned char)s.data[idx];
 }
 
+/* Path A (M163): byte length alias of oo_str_byte_len. Not UTF-8 char count. */
+long long oo_bytes_len(OoStr s) { return oo_str_byte_len(s); }
+
+/* Path A: owned copy of raw bytes [start,end). Not &str borrow / no lifetime. */
+OoStr oo_byte_slice(OoStr s, long long start, long long end) {
+  if (!s.data || s.len < 0) {
+    OoStr empty;
+    empty.len = 0;
+    empty.data = oo_str_alloc_payload(0);
+    return empty;
+  }
+  if (start < 0) start = 0;
+  if (end > s.len) end = s.len;
+  if (start > end || start >= s.len) {
+    OoStr empty;
+    empty.len = 0;
+    empty.data = oo_str_alloc_payload(0);
+    return empty;
+  }
+  OoStr r;
+  r.len = end - start;
+  r.data = oo_str_alloc_payload((size_t)r.len);
+  memcpy(r.data, s.data + (size_t)start, (size_t)r.len);
+  return r;
+}
+
+/* Path A: raw byte equality (len + memcmp). Not &str borrow. */
+int oo_bytes_eq(OoStr a, OoStr b) { return oo_str_eq(a, b); }
+
 long long oo_chars_len(OoStr s) {
   /* UTF-8 scalar count (ASCII-fast path covers CHS corpus). */
   long long n = 0;

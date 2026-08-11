@@ -113,7 +113,7 @@ These gates are **necessary** for an honest beta tag. They are **not sufficient*
 | complex `requires` / `ensures` | not `&&` / SMT / full contract language | simple `IDENT OP lit|ident` / `result OP lit|ident` runtime In; **multi-clause simple AND In (M51)**; complex fail-closed at emit |
 | **`for` non-INT bounds** | only `INT..INT` range-for lowered | emit `for residual` (use `while`) |
 | **`match` non-Result / incomplete** | Result Ok/Err stmt + match-let **In** | other shapes fail-closed (`FOR_MATCH_RESIDUAL.md`) |
-| **Net ops** beyond `fetch` | `fetch` lowers + runtime exists (AUDIT R9); other net names residual | friends still `ERR … net residual` |
+| **Net ops** beyond `fetch` | `fetch` + TCP/UDP real (M162); `tls_connect` residual without OpenSSL (M163) | friends still `ERR … net residual`; no full TLS claim without OpenSSL |
 | **Object-caps / unforgeable tokens** | magic-int runtime seal only | not cryptographic caps ([`STATIC_CAPS.md`](STATIC_CAPS.md)) |
 | Non-`c` as **self-host floor** | product rebuild is Backend-C | `llvm`/`wasm` backends are emit scaffolding, not alternate self-host floors |
 | Full SPEC beyond CHS + explicit B.1 promotions | post-beta | fail-closed or not advertised |

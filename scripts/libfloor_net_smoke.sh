@@ -154,18 +154,23 @@ else
   fi
 fi
 
-# M162 honesty: real TCP/UDP present; TLS residual remains
-if grep -q 'tls residual: path A seal only' runtime/chs_rt_netfloor.c \
-  && grep -q 'getaddrinfo' runtime/chs_rt_netfloor.c \
-  && grep -q 'socket(' runtime/chs_rt_netfloor.c; then
+# M162/M163 honesty: real TCP/UDP in netfloor; TLS in chs_rt_tls.c
+if grep -q 'getaddrinfo' runtime/chs_rt_netfloor.c \
+  && grep -q 'socket(' runtime/chs_rt_netfloor.c \
+  && grep -q 'tls residual: OpenSSL not linked' runtime/chs_rt_tls.c; then
   pass "runtime real TCP/UDP + TLS residual present"
 else
-  bad "runtime net path A missing"
+  bad "runtime net/tls path A missing"
 fi
-if grep -nE 'openssl|SSL_' runtime/chs_rt_netfloor.c 2>/dev/null | head -3; then
-  bad "netfloor must not claim TLS/SSL product"
+if grep -nE 'openssl|SSL_|oo_tls_connect' runtime/chs_rt_netfloor.c 2>/dev/null | head -3; then
+  bad "netfloor must not own TLS/SSL"
 else
-  pass "no TLS/SSL product in netfloor"
+  pass "TLS split to chs_rt_tls.c (not netfloor)"
+fi
+if grep -q 'chs_rt_tls.c' runtime/chs_rt.c; then
+  pass "chs_rt.c includes tls"
+else
+  bad "chs_rt.c missing chs_rt_tls.c"
 fi
 
 if [[ $fail -ne 0 ]]; then

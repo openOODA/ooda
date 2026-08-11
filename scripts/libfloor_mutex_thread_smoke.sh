@@ -113,15 +113,16 @@ emit_run "$ROOT/fixtures/libfloor_mutex.oo" "lf_mutex" "mutex-lock-ok" "mutex" "
 emit_run "$ROOT/fixtures/libfloor_thread_spawn.oo" "lf_tspawn" "thread-spawn-ok" "thread_spawn" "thread"
 emit_run "$ROOT/fixtures/libfloor_gpu_launch.oo" "lf_gpu" "gpu-residual-ok" "gpu_launch" "gpu"
 
-# M162: real pthread mutex/spawn; GPU residual remains
+# M162/M163: real pthread mutex + joinable spawn; GPU residual remains
 if grep -q 'pthread_mutex_lock' runtime/chs_rt_libfloor.c \
-  && grep -q 'pthread_create' runtime/chs_rt_libfloor.c \
+  && grep -q 'pthread_create' runtime/chs_rt_thread.c \
+  && grep -q 'pthread_join' runtime/chs_rt_thread.c \
   && grep -q 'gpu residual: path A seal only' runtime/chs_rt_libfloor.c; then
   pass "runtime pthread path A + GPU residual present"
 else
   bad "runtime thread/gpu path A missing"
 fi
-if grep -nE 'cudaLaunch|clEnqueue|vkCmdDispatch' runtime/chs_rt_libfloor.c 2>/dev/null | head -3; then
+if grep -nE 'cudaLaunch|clEnqueue|vkCmdDispatch' runtime/chs_rt_libfloor.c runtime/chs_rt_thread.c 2>/dev/null | head -3; then
   bad "libfloor must not claim GPU shader product"
 else
   pass "no GPU shader product in libfloor"

@@ -3,6 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+rm -rf "$ROOT/.ooda-cache/check" 2>/dev/null || true
 export OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
 export OODA="${OODA:-$ROOT/bin/ooda}"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"

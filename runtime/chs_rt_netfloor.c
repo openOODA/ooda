@@ -1,4 +1,4 @@
-/* M162: real TCP/UDP under NetCap; TLS residual. */
+/* M162: real TCP/UDP under NetCap. TLS lives in chs_rt_tls.c (M163). */
 #include "chs_rt.h"
 #include <unistd.h>
 #include <errno.h>
@@ -100,10 +100,4 @@ OoResS oo_bind_udp(long long cap, long long port) {
   r.ok = 1;
   r.val = oo_str_lit(buf);
   return r;
-}
-
-OoResS oo_tls_connect(long long cap, OoStr host, long long port) {
-  (void)host; (void)port;
-  oo_cap_require_net(cap, "tls_connect");
-  return net_err("tls residual: path A seal only (no TLS handshake product)");
 }

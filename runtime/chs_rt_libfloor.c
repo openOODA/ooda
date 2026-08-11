@@ -1,4 +1,5 @@
-/* M161/M162: ThreadCap/GpuCap + process residual; pthread mutex/spawn path A. */
+/* M161/M162: ThreadCap/GpuCap + process residual; pthread mutex path A.
+ * Joinable threads: see chs_rt_thread.c (M163). */
 #include "chs_rt.h"
 #include <unistd.h>
 #include <pthread.h>
@@ -113,27 +114,6 @@ OoResS oo_mutex_unlock(long long cap, long long mid) {
   }
   r.ok = 1;
   r.val = oo_str_lit("unlocked");
-  return r;
-}
-
-static void *oo_thread_noop(void *arg) {
-  (void)arg;
-  return NULL;
-}
-
-OoResS oo_thread_spawn(long long cap, OoStr name) {
-  OoResS r;
-  pthread_t th;
-  oo_cap_require_thread(cap, "thread_spawn");
-  (void)name;
-  if (pthread_create(&th, NULL, oo_thread_noop, NULL) != 0) {
-    r.ok = 0;
-    r.val = oo_str_lit("thread_spawn failed");
-    return r;
-  }
-  pthread_detach(th);
-  r.ok = 1;
-  r.val = oo_str_lit("thread-spawned");
   return r;
 }
 
