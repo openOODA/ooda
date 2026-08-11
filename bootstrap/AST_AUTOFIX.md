@@ -7,13 +7,15 @@ Do not treat residual gaps as DESIGN-complete.
 ## What we do **not** claim
 Full DESIGN depth for this item is not product alpha.
 
-## Path A product floor (alpha) — M153
+## Path A product floor (alpha) — M153 + M154 agent loop
 
 **Path A marker:** `AST_AUTOFIX_PATH_A_ALPHA`  
-**Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
-**In:** json-errors fix_hint In; full AST auto-apply still residual (E_RESIDUAL for residual free names)  
-**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
-**Still residual:** full DESIGN implementation of this moonshot (not claimed).
+**Status:** path A **In** for **hints**, not full auto-apply.  
+**In:**  
+- `--json-errors` `fix_hint` on codes (E_CAP/E_TC/E_PARSE/E_SECRET/…)  
+- **E_CAP** also ships machine `kind` + `suggested_fix` for agent apply guidance  
+- Full agent loop floor: `scripts/ai_native_product_floor_smoke.sh`  
+**Still residual:** automatic AST rewrite / apply of `suggested_fix` without human/agent patch step (`ooda patch` is manual surgical apply, not auto-apply).
 
 ## Rails
 - `AST_AUTOFIX_RESIDUAL_ALPHA`

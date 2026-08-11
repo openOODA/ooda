@@ -21,6 +21,7 @@ for s in \
   contracts_multi_clause_smoke.sh \
   contracts_complex_residual_smoke.sh \
   json_errors_smoke.sh \
+  ai_native_product_floor_smoke.sh \
   patch_smoke.sh \
   ast_autofix_residual_smoke.sh \
   arc_smoke.sh \

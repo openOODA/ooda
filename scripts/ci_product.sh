@@ -92,6 +92,7 @@ for rail in \
   contracts_native_smoke.sh \
   contracts_multi_clause_smoke.sh \
   json_errors_smoke.sh \
+  ai_native_product_floor_smoke.sh \
   outline_reflect_smoke.sh \
   patch_smoke.sh \
   std_smoke.sh \

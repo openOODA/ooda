@@ -77,10 +77,15 @@ fh = d.get("fix_hint")
 assert "fix_hint" in d and isinstance(fh, str) and len(fh) > 0, d
 fl = fh.lower()
 assert "cap" in fl or "capability" in fl or "add matching" in fl, fh
+# AI-native agent surface: machine suggested_fix + kind (not AST auto-apply)
+sf = d.get("suggested_fix")
+assert isinstance(sf, str) and len(sf) > 0, d
+assert "cap" in sf.lower() or "NetCap" in sf or "FsCap" in sf, sf
+assert d.get("kind") == "CapabilitySecurityViolation", d
 print("shape ok")
 PY
   then
-    pass "oodac check --json-errors cap → E_CAP + fix_hint"
+    pass "oodac check --json-errors cap → E_CAP + fix_hint + suggested_fix"
   else
     bad "oodac cap JSON: $(head -c 300 "$TMPDIR/je_cap.out")"
   fi
