@@ -5,8 +5,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-/* Cap seals: process-local tokens from chs_rt_sys.c (R1). */
-void oo_cap_require_fs(long long got, const char *op);
+/* Cap seals: process-local tokens from chs_rt_sys.c (R1 / CAP-G2).
+ * require_fsread/fswrite accept granular OR full FsCap (g_tok_fs). */
+void oo_cap_require_fsread(long long got, const char *op);
+void oo_cap_require_fswrite(long long got, const char *op);
 void oo_cap_require_env(long long got, const char *op);
 
 /* Split absolute path into parent dir + final basename.
@@ -91,7 +93,7 @@ static int writedir_open_trunc(const char *path) {
 }
 
 OoResS oo_read_file(long long cap, OoStr path) {
-  oo_cap_require_fs(cap, "read_file");
+  oo_cap_require_fsread(cap, "read_file");
   OoResS r;
   FILE *f = fopen(path.data, "rb");
   if (!f) {
@@ -137,7 +139,7 @@ OoResS oo_read_file(long long cap, OoStr path) {
 }
 
 OoResV oo_write_file(long long cap, OoStr path, OoStr content) {
-  oo_cap_require_fs(cap, "write_file");
+  oo_cap_require_fswrite(cap, "write_file");
   OoResV r;
   const char *p;
   const char *dir;
@@ -184,7 +186,7 @@ OoResV oo_write_file(long long cap, OoStr path, OoStr content) {
 }
 
 int oo_path_exists(long long cap, OoStr path) {
-  oo_cap_require_fs(cap, "path_exists");
+  oo_cap_require_fsread(cap, "path_exists");
   FILE *f = fopen(path.data, "rb");
   if (f) {
     fclose(f);
@@ -194,7 +196,7 @@ int oo_path_exists(long long cap, OoStr path) {
 }
 
 long long oo_file_size(long long cap, OoStr path) {
-  oo_cap_require_fs(cap, "file_size");
+  oo_cap_require_fsread(cap, "file_size");
   FILE *f = fopen(path.data, "rb");
   if (!f) return -1;
   fseek(f, 0, SEEK_END);

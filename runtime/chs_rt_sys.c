@@ -162,6 +162,22 @@ void oo_cap_require_bind(long long got, const char *op) {
     exit(1);
   }
 }
+/* Path A CAP-G2: soft-granular fs accept exact g_tok_fsread/fswrite OR full FsCap (g_tok_fs).
+ * Wrong granular (e.g. FsWriteCap for read_file) fails closed — FsCap supersedes only. */
+void oo_cap_require_fsread(long long got, const char *op) {
+  oo_caps_init();
+  if (got != g_tok_fsread && got != g_tok_fs) {
+    fprintf(stderr, "ERR\tcap\t%s: missing or forged capability\n", op ? op : "fsread");
+    exit(1);
+  }
+}
+void oo_cap_require_fswrite(long long got, const char *op) {
+  oo_caps_init();
+  if (got != g_tok_fswrite && got != g_tok_fs) {
+    fprintf(stderr, "ERR\tcap\t%s: missing or forged capability\n", op ? op : "fswrite");
+    exit(1);
+  }
+}
 
 /* R2/R3: fork + execvp with full argv (no system(3) shell). */
 OoResS oo_sys_exec(long long cap, int argc, OoStr *argv) {

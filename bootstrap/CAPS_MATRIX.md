@@ -1,7 +1,9 @@
 # Capability matrix (claimed pure path)
 
-**Catalog (token list):** process doc [`../../openOODA/CAPS.oot`](../../openOODA/CAPS.oot) — 27 V2 names; **type accept ≠ CAP-G1 FIXED**.  
-**Net (CAP-G1):** **OPEN residual** — close FAIL 2026-08-12 (`../../openOODA/audit/cap_g1_phalanx_rollup.oot`). Tip check still seals net ops as **`NetCap`** via `sealed_kind_of`; preferred granular map / wrong-granular deny is WIP (live host observed HttpCap+`tcp_bind` accept). Dirty runtime may wire per-op `oo_cap_require_{http,tcp,udp,bind}` — not a close prove. Non-net op→granular still residual (SPRINT **CAP-G2+**).  
+**Catalog (token list):** process doc [`../../openOODA/CAPS.oot`](../../openOODA/CAPS.oot) — 27 V2 names; **type accept ≠ full CAP-G* FIXED**.  
+**Net (CAP-G1):** path-A preferred map — `sealed_net_kind_of` → Http/Tcp/Udp/Bind/NetCap; exact preferred **or** legacy **`&NetCap` supersede**; wrong granular deny. Runtime `oo_cap_require_{http,tcp,udp,bind}` accept granular **or** NetCap; `sock_raw` NetCap-only. Smoke: `scripts/cap_g1_net_granular_smoke.sh`.  
+**Fs (CAP-G2):** path-A preferred map — `sealed_fs_kind_of` → FsReadCap/FsWriteCap; exact preferred **or** legacy **`&FsCap` supersede**; wrong granular deny (FsReadCap↛write; FsWriteCap↛read/path/size). Runtime `oo_cap_require_fsread` / `oo_cap_require_fswrite` accept granular **or** FsCap. Keep **`OODA_FS_WRITEDIR`** write overlay. Helpers: `cap_fs_granted_ok` / `cap_fs_argflow_ok` in `check_cap_util.oo`.  
+**Other families:** Sys/Env/Time/Rand/Alloc/FFI/Thread/Gpu still legacy sealed kinds; Process/Sync/Mem/HW/UI enforce residual (SPRINT **CAP-G3/G4+**).  
 **Purpose:** Map each sealed effect op through **check → emit-c → runtime → product**.  
 **Rules:** Default-deny. Unfinished = fail-closed, never silent ambient I/O. `fetch` is product-lowered; other http-ish names residual emit.  
 **Runtime seal:** sealed FS/Sys/Env/Net/Time/Rand/Alloc ops re-check process-local capability tokens at native runtime. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md). **Not** full OS isolation / complete `seccomp-bpf` product claim.  
@@ -23,10 +25,10 @@ Status legend:
 
 | Op | Cap | Check (`check_caps`) | Emit lower | Runtime | Product status |
 |----|-----|----------------------|------------|---------|----------------|
-| `read_file` | `&FsCap` | sealed free call; deny without param | `oo_read_file(cap, path)` | `chs_rt_fs.c` + `oo_cap_require` | **real** (static+runtime) |
-| `write_file` | `&FsCap` | sealed free call | `oo_write_file(cap, path, content)` | require + **`OODA_FS_WRITEDIR` fail-closed** (path realpath under dir; empty/unset → deny) | **real** path A — residual: **parent-realpath for new files** (nonexistent leaf `realpath` fails) |
-| `path_exists` | `&FsCap` | sealed free call | `oo_path_exists(cap, path)` | require + fopen probe | **real** |
-| `file_size` | `&FsCap` | sealed free call | `oo_file_size(cap, path)` | require + ftell | **real** |
+| `read_file` | **preferred `&FsReadCap`** (legacy **`&FsCap` supersede**) | sealed free call; exact preferred **or** FsCap; wrong granular refuse | `oo_read_file(cap, path)` | `chs_rt_fs.c` + `oo_cap_require_fsread` (fsread **or** fs token) | **real** (static+runtime; CAP-G2) |
+| `write_file` | **preferred `&FsWriteCap`** (`&FsCap` supersede) | sealed free call; exact preferred **or** FsCap; wrong granular refuse | `oo_write_file(cap, path, content)` | `oo_cap_require_fswrite` + **`OODA_FS_WRITEDIR` fail-closed** (path under dir; empty/unset → deny; parent-realpath for new leaves) | **real** path A (CAP-G2) |
+| `path_exists` | **preferred `&FsReadCap`** (`&FsCap` supersede) | sealed free call; exact preferred **or** FsCap | `oo_path_exists(cap, path)` | require_fsread + fopen probe | **real** (CAP-G2) |
+| `file_size` | **preferred `&FsReadCap`** (`&FsCap` supersede) | sealed free call; exact preferred **or** FsCap | `oo_file_size(cap, path)` | require_fsread + ftell | **real** (CAP-G2) |
 | `sys_exec` | `&SysCap` | sealed free call + arg-flow | multi-arg → `oo_sys_exec`; single → `oo_sys_exec1` | `fork`+`execvp` (not `system(3)`); child env **filtered** to `OODA_`/`OO_` + minimal `PATH=/usr/bin:/bin` | **real** path A (T3) |
 | `sys_spawn` / `sys_wait` / `sys_kill` | `&SysCap` | sealed free call + arg-flow | `oo_sys_spawn` / `oo_sys_wait` / `oo_sys_kill` | require Sys then **Err residual** (path A seal; no real fork/wait/kill) | **fail-closed residual** — use `sys_exec` for blocking spawn+wait; `std/os/process.oo` wrappers |
 | `sys_epoll_create` / `sys_inotify_init` / `sys_prctl` | `&SysCap` | sealed free call + arg-flow | `oo_sys_epoll_create` / `oo_sys_inotify_init` / `oo_sys_prctl` | require Sys then **Err residual** (M166 path A; not full async I/O) | **fail-closed residual** — `std/os/process.oo` thin wrappers |
@@ -55,7 +57,7 @@ Status legend:
 | `process_exit` | none (ambient) | not sealed | `oo_process_exit` | `exit` | **real** (not a cap class) |
 | `list_new` / `list_push` / string concat | **none (ambient residual)** | not sealed | ambient CHS | no AllocCap gate | **intentional alpha residual** — sealing would brick pure compiler |
 
-Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn_process`/`async_spawn_internal` (Sys), `env_set`/`getenv` (Env) — check deny without cap; emit leaves name as-is → link fail if used (fail-closed residual).
+Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs preferred map as above; emit residual), `exec`/`spawn_process`/`async_spawn_internal` (Sys), `env_set`/`getenv` (Env) — check deny without cap; emit leaves name as-is → link fail if used (fail-closed residual).
 
 ---
 
@@ -64,16 +66,18 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 ### Check
 - Free-call scan inside each `fn` body: `IDENT` + `LPAREN` matched against `sealed_kind_of` / `is_sealed_{net,fs,sys,env,time,rand,alloc}`.
 - **CAP-G1 net:** `sealed_kind_of` → `sealed_net_kind_of` preferred (`HttpCap`/`TcpCap`/`UdpCap`/`BindCap`/`NetCap`). Grant bag: exact preferred **or** legacy `NetCap` supersede for soft-granular. Arg-flow: `preferred:id` **or** `NetCap:id`. Wrong granular (e.g. only `HttpCap` on `tcp_bind`) → deny. Helpers: `cap_net_granted_ok` / `cap_net_argflow_ok` in `check_cap_util.oo`.
-- Cap **param** grant only for type after `COLON` + `AMP` + Cap IDENT (e.g. `http: &HttpCap`, `net: &NetCap`, `fs: &FsCap`, `time: &TimeCap`).
+- **CAP-G2 fs:** `sealed_kind_of` → `sealed_fs_kind_of` preferred (`FsReadCap` / `FsWriteCap`). Grant bag: exact preferred **or** legacy `FsCap` supersede for soft-granular. Arg-flow: `preferred:id` **or** `FsCap:id`. Wrong granular (e.g. only `FsWriteCap` on `read_file`) → deny. Helpers: `cap_fs_granted_ok` / `cap_fs_argflow_ok` in `check_cap_util.oo`.
+- Cap **param** grant only for type after `COLON` + `AMP` + Cap IDENT (e.g. `http: &HttpCap`, `net: &NetCap`, `fs: &FsCap`, `fsr: &FsReadCap`, `fsw: &FsWriteCap`, `time: &TimeCap`).
 - Cap **arg-flow (F01):** free call first arg (or method receiver `fs.read_file`) must be an IDENT naming a param of that cap class — not merely “param present somewhere.”
-- Fixtures: `check/fail/cap_arg_not_passed.oo`, `cap_arg_wrong_name.oo`; pass method: `check/pass/ok_method_fs_read.oo`; net legacy pass: `check/pass/ok_net_cap_fetch.oo` (still `&NetCap` supersede).
-- Residual: dynamic/computed callees not scanned; cap only as param name (not expression). Ambient `list_new` not sealed. CAP-G1 preferred pass fixtures exist (`ok_http_cap_fetch` / `ok_tcp_cap_connect` / `ok_net_cap_fetch_tcp`); dedicated wrong-granular fail fixtures still residual.
+- Fixtures: `check/fail/cap_arg_not_passed.oo`, `cap_arg_wrong_name.oo`; pass method: `check/pass/ok_method_fs_read.oo`; fs legacy pass: `check/pass/ok_fs_read.oo` / `ok_fs_write.oo` (still `&FsCap` supersede). Net legacy pass: `check/pass/ok_net_cap_fetch.oo` (still `&NetCap` supersede).
+- Residual: dynamic/computed callees not scanned; cap only as param name (not expression). Ambient `list_new` not sealed. CAP-G1 preferred pass fixtures exist (`ok_http_cap_fetch` / `ok_tcp_cap_connect` / `ok_net_cap_fetch_tcp`); CAP-G2 preferred pass + wrong-granular fail fixtures landed (`ok_fs_read_cap_read` / `ok_fs_write_cap_write` / `ok_fs_cap_read_write` / `wrong_granular_fs*`). Smoke: `cap_g2_fs_granular_smoke.sh`.
 
 ### Emit (Backend-C)
 - Cap tokens compile to `long long`; `main` injects `oo_cap_grant_fs/sys/env/net/time/rand/alloc/ffi/thread/gpu()` plus **partial** granular (`tcp` / `fsread` / `process` today) — full V2 grant matrix residual (**CAP-G3**).
 - Sealed FS/Env/Sys/Net/Time/Rand/Alloc/FFI/Thread/Gpu lowers **pass the leading cap arg** (ABI with runtime).
 - Sealed **ThreadCap product (M162/M163/M164):** `mutex_lock`/`mutex_unlock` real pthread mutex; `thread_spawn` joinable pthread → Ok(`"tid:N"`); `thread_join(slot)` joins slot (or `oo_thread_join_s` parses `"tid:N"`); `channel_new`/`channel_send`/`channel_recv` process-local bounded string queues. Not detach-by-default. **GpuCap** `gpu_launch` (M165): noop/`cpu:` Ok honesty; device shaders **Err residual**. Actor model residual.
 - Net libfloor (CAP-G1): `tcp_bind` → require_bind; `tcp_connect`/`tcp_*` IO → require_tcp; `bind_udp`/`udp_recv` → require_udp; `fetch` → require_http; each accepts matching granular **or** NetCap token. `sock_raw` NetCap-only residual Err; `tls_connect` require_tcp (OpenSSL residual — M163).
+- Fs product (CAP-G2): `read_file` / `path_exists` / `file_size` → require_fsread; `write_file` → require_fswrite; each accepts matching granular **or** FsCap token. Write still fail-closed under `OODA_FS_WRITEDIR`.
 - Non-IDENT first arg on sealed ops: `ERR\tc_emit\t… requires &…Cap` (fail-closed).
 
 ### Runtime: process-local token seal
@@ -83,8 +87,9 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 - **Not** unforgeable object-caps across hostile binary rewrite; **not** crypto CSPRNG / attested time / OS rlimit heap isolation; **not** full OS isolation / complete `seccomp-bpf`/`SIGSYS` product floor (CAP-G5 residual honesty).
 - **T3 path A (runtime ZT):** `sys_exec` child env = `OODA_`/`OO_` only + minimal PATH; FFI handle table mutex + same-thread nested `oo_dlopen` hard refuse ([`CAP_FFI.md`](CAP_FFI.md)); `write_file` fail-closed under `OODA_FS_WRITEDIR`.
 - **T4 hygiene residuals (not closed):** bak/side binary ignore policy; `tools/minisign` not vendored; `chs_rt_ffi.c` monofile >350; 8.1 DEBUG reclassified as product ERR diagnostics — see [`AUDIT_RESIDUAL.md`](AUDIT_RESIDUAL.md) §T4.
-- **T3 residuals (explicit):** full IFC; unrestricted any-path `dlopen`; refcount UAF beyond ARC path-A free-on-ref0; parent-realpath for **new** write paths; full C TCB seal.
+- **T3 residuals (explicit):** full IFC; unrestricted any-path `dlopen`; refcount UAF beyond ARC path-A free-on-ref0; full C TCB seal.
 - Net (CAP-G1 path-A): `fetch` + TCP/UDP product-lowered with **per-op** require_http/tcp/udp/bind (NetCap supersede); **fd slots keep sockets open** after connect/bind (M166). Byte IO is `tcp_read`/`tcp_write`/`udp_recv` as String (not true `&[u8]`). **TLS residual** unless `OO_HAVE_OPENSSL=1`. **No** full HTTP/3/gRPC/SOCK_RAW product. Smokes: `scripts/libfloor_net_smoke.sh`, `scripts/tcp_io_smoke.sh`, `scripts/tls_path_a_smoke.sh`.
+- Fs (CAP-G2 path-A): `read_file` / `path_exists` / `file_size` → `oo_cap_require_fsread` (g_tok_fsread **or** g_tok_fs); `write_file` → `oo_cap_require_fswrite` (g_tok_fswrite **or** g_tok_fs) + writedir allowlist. **Not** landlock / full FS OS isolation. Smoke: `scripts/cap_g2_fs_granular_smoke.sh` (legacy matrix smoke still uses `&FsCap`).
 - Alloc: smoke returns size token / no-op free — **not** a claim of heap sandboxing.
 
 ---
@@ -94,9 +99,9 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 | Class | Pass (has cap) | Fail (no cap) |
 |-------|----------------|---------------|
 | Net (legacy supersede) | `check/pass/ok_net_cap_fetch.oo` (`&NetCap` on `fetch`) | `check/fail/no_cap_fetch.oo` |
-| Net CAP-G1 preferred | `check/pass/ok_http_cap_fetch.oo` (`&HttpCap`); `ok_tcp_cap_connect.oo` (`&TcpCap`); `ok_net_cap_fetch_tcp.oo` (NetCap supersede multi-op) | `no_cap_fetch.oo` (missing); dedicated wrong-granular fail fixtures residual (check rules refuse wrong preferred) |
-| Fs read | `check/pass/ok_fs_read.oo` | `check/fail/no_cap_read_file.oo` |
-| Fs write | `check/pass/ok_fs_write.oo` | `check/fail/no_cap_write_file.oo` |
+| Net CAP-G1 preferred | `check/pass/ok_http_cap_fetch.oo` (`&HttpCap`); `ok_tcp_cap_connect.oo` (`&TcpCap`); `ok_net_cap_fetch_tcp.oo` (NetCap supersede multi-op) | `no_cap_fetch.oo` (missing); wrong-granular: `wrong_granular_http_for_tcp.oo` / `wrong_granular_tcp_for_fetch.oo` |
+| Fs (legacy supersede) | `check/pass/ok_fs_read.oo` / `ok_fs_write.oo` (`&FsCap`) | `check/fail/no_cap_read_file.oo` / `no_cap_write_file.oo` |
+| Fs CAP-G2 preferred | `check/pass/ok_fs_read_cap_read.oo` (`&FsReadCap`); `ok_fs_write_cap_write.oo` (`&FsWriteCap`); `ok_fs_cap_read_write.oo` (FsCap supersede multi-op); also `ok_fsread_path_size.oo` | wrong-granular: `wrong_granular_fsread_for_write.oo` / `wrong_granular_fswrite_for_read.oo` / `wrong_granular_fswrite_for_path.oo` |
 | Fs path | `check/pass/ok_path_exists.oo` | `check/fail/no_cap_path_exists.oo` |
 | Sys | `check/pass/ok_sys_exec.oo` | `check/fail/no_cap_sys_exec.oo` |
 | Sys spawn (path A residual) | `check/pass/ok_sys_spawn.oo` | `check/fail/no_cap_sys_spawn.oo` |
@@ -107,16 +112,16 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 | Pure no-effect | `check/pass/ok_main.oo` | — |
 | Runtime seal | `emit-c/pass/cap_runtime_read.oo` + forge deny in smoke | — |
 
-Runtime round-trip: `fixtures/chs_fs_roundtrip.oo` (Fs). Smoke: `scripts/caps_matrix_smoke.sh` (Fs/Sys/Env/Net/Time/Rand) + `scripts/alloc_cap_smoke.sh` (Alloc + forge-cap deny).
+Runtime round-trip: `fixtures/chs_fs_roundtrip.oo` (Fs). Smoke: `scripts/caps_matrix_smoke.sh` (Fs/Sys/Env/Net/Time/Rand) + `scripts/alloc_cap_smoke.sh` (Alloc + forge-cap deny). CAP-G1 net granular: `scripts/cap_g1_net_granular_smoke.sh`. CAP-G2 fs granular: `scripts/cap_g2_fs_granular_smoke.sh`.
 
-**M166 std cap scoping samples (path A):** effectful `std/os/*` take leading `&SysCap`/`&NetCap`/`&ThreadCap`/`&FsCap`; pedagogical fixtures `sys_syscall_path_a.oo` / `libfloor_tcp_io.oo` + smokes `sys_syscall_path_a_smoke.sh` / `tcp_io_smoke.sh` prove main-with-cap, sealed first-arg, bare refuse. **CAP-G1:** prefer `&HttpCap`/`&TcpCap`/`&UdpCap`/`&BindCap` on new net APIs; `&NetCap` remains valid supersede. Std majority still legacy NetCap (CAP-G6 migration). **Residual open:** cap forgery via `as fn(...)` cast (AGY) — not full forgery fix; full OS isolation not claimed. Canonical writeup: [`STATIC_CAPS.md`](STATIC_CAPS.md) § M166 path A + [`CAPS.oot`](../../openOODA/CAPS.oot) CAP-G1 map.
+**M166 std cap scoping samples (path A):** effectful `std/os/*` take leading `&SysCap`/`&NetCap`/`&ThreadCap`/`&FsCap`; pedagogical fixtures `sys_syscall_path_a.oo` / `libfloor_tcp_io.oo` + smokes `sys_syscall_path_a_smoke.sh` / `tcp_io_smoke.sh` prove main-with-cap, sealed first-arg, bare refuse. **CAP-G1:** prefer `&HttpCap`/`&TcpCap`/`&UdpCap`/`&BindCap` on new net APIs; `&NetCap` remains valid supersede. **CAP-G2:** prefer `&FsReadCap`/`&FsWriteCap` on new fs APIs; `&FsCap` remains valid supersede. Std majority still legacy NetCap/FsCap (CAP-G6 migration). **Residual open:** cap forgery via `as fn(...)` cast (AGY) — not full forgery fix; full OS isolation not claimed. Canonical writeup: [`STATIC_CAPS.md`](STATIC_CAPS.md) § M166 path A + [`CAPS.oot`](../../openOODA/CAPS.oot) CAP-G1/G2 maps.
 
 ---
 
 ## Expanding the sealed table
 
-1. Add name to `is_sealed_*` / `sealed_kind_of` in `check_cap_util.oo`.
-2. Add **pass + fail** check fixtures.
+1. Add name to `is_sealed_*` / `sealed_kind_of` in `check_cap_util.oo` (prefer `sealed_*_kind_of` when fracturing a family).
+2. Add **pass + fail** check fixtures (include wrong-granular when soft preferred kinds exist).
 3. Either lower in `c_emit_lower.oo` + runtime symbol with `oo_cap_require`, **or** explicit emit residual (like net).
 4. Never widen allow without re-running deny fixtures. Do **not** seal ambient `list_new` without a full compiler redesign.
 
