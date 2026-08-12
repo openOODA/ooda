@@ -136,7 +136,19 @@ These V2 names are in `is_cap_type` and have process-local `oo_cap_grant_*` + **
 
 Runtime round-trip: `fixtures/chs_fs_roundtrip.oo` (Fs). Smoke: `scripts/caps_matrix_smoke.sh` (Fs/Sys/Env/Net/Time/Rand) + `scripts/alloc_cap_smoke.sh` (Alloc + forge-cap deny). CAP-G1 net granular: `scripts/cap_g1_net_granular_smoke.sh`. CAP-G2 fs granular: `scripts/cap_g2_fs_granular_smoke.sh`.
 
-**M166 std cap scoping samples (path A):** effectful `std/os/*` take leading `&SysCap`/`&NetCap`/`&ThreadCap`/`&FsCap`; pedagogical fixtures `sys_syscall_path_a.oo` / `libfloor_tcp_io.oo` + smokes `sys_syscall_path_a_smoke.sh` / `tcp_io_smoke.sh` prove main-with-cap, sealed first-arg, bare refuse. **CAP-G1:** prefer `&HttpCap`/`&TcpCap`/`&UdpCap`/`&BindCap` on new net APIs; `&NetCap` remains valid supersede. **CAP-G2:** prefer `&FsReadCap`/`&FsWriteCap` on new fs APIs; `&FsCap` remains valid supersede. Std majority still legacy NetCap/FsCap (CAP-G6 migration). **Residual open:** cap forgery via `as fn(...)` cast (AGY) — not full forgery fix; full OS isolation not claimed. Canonical writeup: [`STATIC_CAPS.md`](STATIC_CAPS.md) § M166 path A + [`CAPS.oot`](../../openOODA/CAPS.oot) CAP-G1/G2 maps.
+**M166 + CAP-G6 std cap scoping (path A):** effectful `std/os/*` take leading cap params; sealed free names require cap first arg at check. Pedagogical fixtures `sys_syscall_path_a.oo` / `libfloor_tcp_io.oo` + smokes `sys_syscall_path_a_smoke.sh` / `tcp_io_smoke.sh` prove main-with-cap, sealed first-arg, bare refuse.
+
+| Sample (product) | Cap (CAP-G6 path-A) | Notes |
+|------------------|---------------------|-------|
+| `std/os/net.oo` | **Http/Tcp/Udp/Bind** preferred; `sock_raw` **NetCap-only** | CAP-G6 FIXED net facade wave |
+| `std/os/fs.oo` | **FsReadCap** read/path/size; **FsWriteCap** write | CAP-G6 FIXED fs facade wave |
+| `std/os/process.oo` | still **`&SysCap`** | ProcessCap facade residual (CAP-G4 prefers ProcessCap at sealed ops) |
+| `std/os/async.oo` / `python.oo` | **`&SysCap`** | hard Sys residual (join/python_embed) or unsplit facade |
+| `std/os/sync.oo` / `thread.oo` | **`&ThreadCap`** | pre-G6 path-A |
+
+**CAP-G1/G2 enforce maps** already path-A (preferred + legacy supersede + wrong-granular deny). **CAP-G6** moves **std call-site contracts** onto preferred tokens for product net+fs facades. Smoke: `scripts/cap_g6_std_migrate_smoke.sh` (exit 0 = path-A wave; reports residual bare NetCap/FsCap counts; **SysCap bulk residual is NOTE not FAIL** — ~571 hits under external `std/src`, inventory [`cap_g6_syscap_inventory.oot`](../../openOODA/audit/cap_g6_syscap_inventory.oot)).
+
+**Honesty — not claimed:** full std SysCap/NetCap/FsCap purge; ProcessCap std facades; domain stub least-privilege. **Residual open:** cap forgery via `as fn(...)` cast (AGY); full OS isolation not claimed. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md) § M166 + [`CAPS.oot`](../../openOODA/CAPS.oot) CAP-G6 row + [`cap_g6_phalanx_rollup.oot`](../../openOODA/audit/cap_g6_phalanx_rollup.oot).
 
 ---
 

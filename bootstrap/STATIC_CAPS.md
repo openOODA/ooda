@@ -58,30 +58,33 @@ Classic `0x4F4F*` constants are **forged values that must be denied**, not ambie
 
 ---
 
-## M166 path A — std cap scoping samples
+## M166 path A — std cap scoping samples (+ CAP-G6)
 
 **AGY finding:** std samples “often lack” `&SysCap` / `&NetCap`. **Product floor (path A):** effectful `std/os/*` wrappers **do** take leading cap params; sealed free names require cap first arg at check.
 
 | Sample | Cap | Shape |
 |--------|-----|--------|
-| `std/os/process.oo` | `&SysCap` | wrappers + `main(sys: &SysCap)` honesty probe |
-| `std/os/net.oo` | `&NetCap` | `fetch` / TCP-UDP / M166 slot IO take `net` first |
+| `std/os/process.oo` | `&SysCap` | wrappers + `main(sys: &SysCap)` honesty probe; **ProcessCap facade residual** (CAP-G4 prefers ProcessCap at sealed `sys_exec` et al.) |
+| `std/os/net.oo` | **CAP-G6:** Http/Tcp/Udp/Bind preferred; `sock_raw` NetCap-only | product facades take preferred granular first; legacy NetCap supersede remains at check+runtime |
 | `std/os/sync.oo`, `std/os/thread.oo` | `&ThreadCap` | mutex / spawn / join |
-| `std/os/fs.oo` | `&FsCap` | read/write/path/size |
+| `std/os/fs.oo` | **CAP-G6:** FsReadCap read/path/size; FsWriteCap write | preferred granular; legacy FsCap supersede remains |
 | `fixtures/sys_syscall_path_a.oo` | `&SysCap` | `main(sys)` + sealed `sys_epoll_*` first-arg |
-| `fixtures/libfloor_tcp_io.oo` | `&NetCap` | `main(net)` + `tcp_*` / `sock_raw` |
+| `fixtures/libfloor_tcp_io.oo` | `&NetCap` (legacy supersede fixture) | `main(net)` + `tcp_*` / `sock_raw` |
 | `fixtures/malloc_path_a.oo` | `&AllocCap` | `malloc`/`free` under alloc |
 | `fixtures/libfloor_thread_cap.oo` | `&ThreadCap` | spawn + mutex |
+
+**CAP-G6 honesty:** net+fs **product facade wave FIXED** (`cap_g6_std_migrate_smoke.sh`). **SysCap bulk residual** under external `std/src` (~571 hits) + process/async/python facades — inventory [`cap_g6_syscap_inventory.oot`](../../openOODA/audit/cap_g6_syscap_inventory.oot). Full SysCap purge **not** claimed.
 
 **Smokes (path A rails):**
 
 - `scripts/sys_syscall_path_a_smoke.sh` — granted SysCap check/emit/runtime residual; **bare** `sys_epoll_create(0)` refused by `oodac check`
 - `scripts/tcp_io_smoke.sh` — seal table honesty; **bare** `tcp_read` refused by `oodac check` when product `oodac` present
+- `scripts/cap_g6_std_migrate_smoke.sh` — product `http_get`/`fs_read_file` preferred tokens; SysCap bulk residual **NOTE** (not hard fail)
 
 Pattern to copy:
 
-1. `pub fn main(sys: &SysCap)` / `main(net: &NetCap)` (or library fn with leading cap param)  
-2. Sealed call **cap IDENT first**: `sys_exec(sys, …)`, `tcp_connect(net, …)`  
+1. `pub fn main(sys: &SysCap)` / `main(http: &HttpCap)` / `main(fs: &FsReadCap)` (or library fn with leading preferred cap param)  
+2. Sealed call **cap IDENT first**: `sys_exec(sys, …)`, `tcp_connect(tcp, …)`, `read_file(fs, …)`  
 3. Bare call without cap → `oodac check` non-zero (`E_CAP` / capability)
 
 ## M169 path A — cast forgery posture
