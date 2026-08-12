@@ -34,6 +34,23 @@ else
   pass "check multi_ok (in-tree load)"
 fi
 
+# --- digit-0 module name (R2: false NUL reject regression) ---
+set +e
+"$OODAC" check "$PASS_DIR/multi_digit0.oo" >"$TMPDIR/imp_d0.out" 2>"$TMPDIR/imp_d0.err"
+rc=$?
+set -e
+if [[ $rc -ne 0 ]]; then
+  bad "check multi_digit0 exit=$rc"
+  cat "$TMPDIR/imp_d0.out" "$TMPDIR/imp_d0.err" | head -20 || true
+elif ! grep -q '^OK' "$TMPDIR/imp_d0.out" 2>/dev/null; then
+  bad "check multi_digit0 missing OK"
+  cat "$TMPDIR/imp_d0.out" "$TMPDIR/imp_d0.err" | head -20 || true
+elif grep -q 'NUL' "$TMPDIR/imp_d0.out" "$TMPDIR/imp_d0.err" 2>/dev/null; then
+  bad "check multi_digit0 false NUL reject"
+else
+  pass "check multi_digit0 (digit-0 module name)"
+fi
+
 # --- missing import fail-closed ---
 set +e
 "$OODAC" check "$FAIL_DIR/missing.oo" >"$TMPDIR/imp_miss.out" 2>"$TMPDIR/imp_miss.err"

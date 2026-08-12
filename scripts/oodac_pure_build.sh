@@ -85,8 +85,8 @@ if [[ -n "${PURE_BUILD_FP_OUT:-}" ]]; then
   printf '%s\n' "$PURE_INPUT_FP" >"$PURE_BUILD_FP_OUT"
 fi
 
-# Check gate always runs (R4). Fail-closed.
-# Product `oodac check` uses native .oo module cache (.ooda-cache/check):
+# Check gate runs unless PURE_SKIP_CHECK=1 (R4; skip ⇒ multi typecheck not proven).
+# Fail-closed when enabled. Product `oodac check` uses .ooda-cache/check:
 #   warm tree hit is sub-second; cold re-parses only uncached modules.
 if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
   nmods=${#MODS[@]}
@@ -111,6 +111,7 @@ FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) 
 MCS=()
 for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
+  # Note: cli_emit probes EMIT_NO_CONCAT via sys_exec; non-OO_* keys are env-stripped → often expands anyway (residual).
   EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" || true
   if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
     echo "ERR_EMIT $src" >&2
