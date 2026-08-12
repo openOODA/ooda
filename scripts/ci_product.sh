@@ -91,6 +91,7 @@ for rail in \
   cap_g3_grant_inject_smoke.sh \
   cap_g4_process_smoke.sh \
   cap_g5_seccomp_honesty_smoke.sh \
+  cap_g6_std_migrate_smoke.sh \
   libfloor_process_smoke.sh \
   libfloor_net_smoke.sh \
   alloc_cap_smoke.sh \
