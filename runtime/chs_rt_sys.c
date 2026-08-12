@@ -5,26 +5,26 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <pthread.h>
 #if defined(__linux__)
 #include <sys/random.h>
 #endif
 
 /* Process-local capability tokens (R1). Fixed magic ints no longer grant.
  * Time/Rand tokens live in chs_rt_time_rand.c (M12). */
+static pthread_once_t g_caps_once = PTHREAD_ONCE_INIT;
 static long long g_tok_fs, g_tok_sys, g_tok_env, g_tok_net;
-static int g_tok_ready;
 
-static void oo_caps_init(void) {
+static void caps_once_init(void) {
   unsigned char b[32];
   size_t i;
   unsigned long long acc;
-  if (g_tok_ready) return;
 #if defined(__linux__) || defined(__APPLE__)
   if (getentropy(b, sizeof b) != 0)
 #endif
   {
     /* Fallback: ASLR + pid + clock — still not a fixed published magic. */
-    acc = (unsigned long long)(uintptr_t)&g_tok_ready;
+    acc = (unsigned long long)(uintptr_t)&g_tok_fs;
     acc ^= (unsigned long long)getpid() << 16;
     acc ^= (unsigned long long)oo_monotonic_us();
     for (i = 0; i < sizeof b; i++) {
@@ -32,16 +32,19 @@ static void oo_caps_init(void) {
       b[i] = (unsigned char)(acc >> 8);
     }
   }
-  g_tok_fs = 0x100000000LL | (long long)((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
-  g_tok_sys = 0x200000000LL | (long long)((b[4] << 24) | (b[5] << 16) | (b[6] << 8) | b[7]);
-  g_tok_env = 0x300000000LL | (long long)((b[8] << 24) | (b[9] << 16) | (b[10] << 8) | b[11]);
-  g_tok_net = 0x400000000LL | (long long)((b[12] << 24) | (b[13] << 16) | (b[14] << 8) | b[15]);
+  g_tok_fs = 0x1000000000000000LL | (long long)((((unsigned long long)b[0]) << 56) | (((unsigned long long)b[1]) << 48) | (((unsigned long long)b[2]) << 40) | (((unsigned long long)b[3]) << 32) | (((unsigned long long)b[4]) << 24) | (((unsigned long long)b[5]) << 16) | (((unsigned long long)b[6]) << 8) | ((unsigned long long)b[7]));
+  g_tok_sys = 0x2000000000000000LL | (long long)((((unsigned long long)b[8]) << 56) | (((unsigned long long)b[9]) << 48) | (((unsigned long long)b[10]) << 40) | (((unsigned long long)b[11]) << 32) | (((unsigned long long)b[12]) << 24) | (((unsigned long long)b[13]) << 16) | (((unsigned long long)b[14]) << 8) | ((unsigned long long)b[15]));
+  g_tok_env = 0x3000000000000000LL | (long long)((((unsigned long long)b[16]) << 56) | (((unsigned long long)b[17]) << 48) | (((unsigned long long)b[18]) << 40) | (((unsigned long long)b[19]) << 32) | (((unsigned long long)b[20]) << 24) | (((unsigned long long)b[21]) << 16) | (((unsigned long long)b[22]) << 8) | ((unsigned long long)b[23]));
+  g_tok_net = 0x4000000000000000LL | (long long)((((unsigned long long)b[24]) << 56) | (((unsigned long long)b[25]) << 48) | (((unsigned long long)b[26]) << 40) | (((unsigned long long)b[27]) << 32) | (((unsigned long long)b[28]) << 24) | (((unsigned long long)b[29]) << 16) | (((unsigned long long)b[30]) << 8) | ((unsigned long long)b[31]));
   /* Never equal classic forgeable magics */
   if (g_tok_fs == 0x4F4F4653LL) g_tok_fs ^= 0x11111111LL;
   if (g_tok_sys == 0x4F4F5359LL) g_tok_sys ^= 0x11111111LL;
   if (g_tok_env == 0x4F4F454ELL) g_tok_env ^= 0x11111111LL;
   if (g_tok_net == 0x4F4F4E54LL) g_tok_net ^= 0x11111111LL;
-  g_tok_ready = 1;
+}
+
+static void oo_caps_init(void) {
+  pthread_once(&g_caps_once, caps_once_init);
 }
 
 long long oo_cap_grant_fs(void) { oo_caps_init(); return g_tok_fs; }
@@ -119,6 +122,42 @@ OoResS oo_sys_exec(long long cap, int argc, OoStr *argv) {
     return r;
   }
   if (pid == 0) {
+    /* DE1.8: filter env before execvp so child does not inherit full parent env.
+     * Walk original environ, keep only OODA_/OO_ keys per oo_process_policy_getenv,
+     * then set a minimal PATH so the child can locate the executable. */
+    extern char **environ;
+    char **src, **saved = environ;
+    char **newenv = NULL;
+    size_t n = 0, cap = 0;
+#if defined(__GLIBC__) || defined(__APPLE__)
+    clearenv();
+#else
+    environ = NULL;
+#endif
+    if (saved) {
+      for (src = saved; *src; src++) {
+        const char *eq = strchr(*src, '=');
+        size_t klen;
+        char kbuf[256];
+        if (!eq) continue;
+        klen = (size_t)(eq - *src);
+        if (klen == 0 || klen >= sizeof kbuf) continue;
+        memcpy(kbuf, *src, klen);
+        kbuf[klen] = 0;
+        if (oo_process_policy_getenv(kbuf) == NULL) continue;
+        if (n + 1 >= cap) {
+          cap = cap ? cap * 2 : 16;
+          newenv = (char **)realloc(newenv, cap * sizeof(char *));
+          if (!newenv) _exit(127);
+        }
+        newenv[n++] = *src;
+      }
+    }
+    if (newenv) {
+      newenv[n] = NULL;
+      environ = newenv;
+    }
+    setenv("PATH", "/usr/bin:/bin", 1);
     execvp(av[0], av);
     _exit(127);
   }

@@ -7,18 +7,18 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <string.h>
+#include <pthread.h>
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/random.h>
 #endif
 
+static pthread_once_t g_ffi_once = PTHREAD_ONCE_INIT;
 static long long g_tok_ffi;
-static int g_ffi_ready;
 
-static void oo_ffi_init(void) {
+static void ffi_once_init(void) {
   unsigned char b[8];
   size_t i;
   unsigned long long acc;
-  if (g_ffi_ready) return;
 #if defined(__linux__) || defined(__APPLE__)
   if (getentropy(b, sizeof b) != 0)
 #endif
@@ -33,7 +33,10 @@ static void oo_ffi_init(void) {
   }
   g_tok_ffi = 0x5000000000000000LL | (long long)((((unsigned long long)b[0]) << 56) | (((unsigned long long)b[1]) << 48) | (((unsigned long long)b[2]) << 40) | (((unsigned long long)b[3]) << 32) | (((unsigned long long)b[4]) << 24) | (((unsigned long long)b[5]) << 16) | (((unsigned long long)b[6]) << 8) | ((unsigned long long)b[7]));
   if (g_tok_ffi == 0x4F4F4649LL) g_tok_ffi ^= 0x11111111LL;
-  g_ffi_ready = 1;
+}
+
+static void oo_ffi_init(void) {
+  pthread_once(&g_ffi_once, ffi_once_init);
 }
 
 long long oo_cap_grant_ffi(void) {
@@ -86,6 +89,7 @@ static int path_under_sys_lib(const char *path) {
  * looked-up symbols as product. */
 #define OO_FFI_HANDLE_SLOTS 16
 static void *g_ffi_handles[OO_FFI_HANDLE_SLOTS];
+static pthread_mutex_t g_ffi_handles_mu = PTHREAD_MUTEX_INITIALIZER;
 
 /* Register h in a free slot; 0 on success, -1 if full. Idempotent if h already
  * present. Keys are the returned handle:%p strings (lookup by format match). */
@@ -93,34 +97,43 @@ static int ffi_handle_register(void *h) {
   int i;
   int free_i = -1;
   if (!h) return -1;
+  pthread_mutex_lock(&g_ffi_handles_mu);
   for (i = 0; i < OO_FFI_HANDLE_SLOTS; i++) {
-    if (g_ffi_handles[i] == h) return 0;
+    if (g_ffi_handles[i] == h) { pthread_mutex_unlock(&g_ffi_handles_mu); return 0; }
     if (g_ffi_handles[i] == NULL && free_i < 0) free_i = i;
   }
-  if (free_i < 0) return -1;
+  if (free_i < 0) { pthread_mutex_unlock(&g_ffi_handles_mu); return -1; }
   g_ffi_handles[free_i] = h;
+  pthread_mutex_unlock(&g_ffi_handles_mu);
   return 0;
 }
 
 /* Lookup by handle string key "handle:%p". Returns slot index or -1. */
 static int ffi_handle_lookup(const char *key, void **out) {
   int i;
+  int rc;
   char buf[96];
   if (!key || !key[0]) return -1;
+  pthread_mutex_lock(&g_ffi_handles_mu);
   for (i = 0; i < OO_FFI_HANDLE_SLOTS; i++) {
     if (!g_ffi_handles[i]) continue;
     snprintf(buf, sizeof buf, "handle:%p", g_ffi_handles[i]);
     if (strcmp(buf, key) == 0) {
       if (out) *out = g_ffi_handles[i];
-      return i;
+      rc = i;
+      pthread_mutex_unlock(&g_ffi_handles_mu);
+      return rc;
     }
   }
+  pthread_mutex_unlock(&g_ffi_handles_mu);
   return -1;
 }
 
 static void ffi_handle_clear(int slot) {
-  if (slot >= 0 && slot < OO_FFI_HANDLE_SLOTS)
-    g_ffi_handles[slot] = NULL;
+  if (slot < 0 || slot >= OO_FFI_HANDLE_SLOTS) return;
+  pthread_mutex_lock(&g_ffi_handles_mu);
+  g_ffi_handles[slot] = NULL;
+  pthread_mutex_unlock(&g_ffi_handles_mu);
 }
 
 OoResS oo_dlopen(long long cap, OoStr path) {

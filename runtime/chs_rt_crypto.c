@@ -1,5 +1,18 @@
 #include "chs_rt.h"
 #include <stdint.h>
+#if defined(__GLIBC__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+#include <strings.h> /* explicit_bzero */
+#endif
+
+/* Wipe secrets: explicit_bzero when available, else volatile byte store (compiler-resistant). */
+static void crypto_secure_wipe(void *p, size_t n) {
+#if defined(__GLIBC__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+  explicit_bzero(p, n);
+#else
+  volatile unsigned char *v = (volatile unsigned char *)p;
+  while (n--) *v++ = 0;
+#endif
+}
 
 /* Genuine NIST FIPS 180-4 SHA-256 & HMAC-SHA256 Implementation */
 
@@ -51,12 +64,15 @@ static void sha256_bytes(const unsigned char *data, size_t len, unsigned char ou
       h = g; g = f; f = e; e = d + T1; d = c; c = b; b = a; a = T1 + T2;
     }
     s[0]+=a; s[1]+=b; s[2]+=c; s[3]+=d; s[4]+=e; s[5]+=f; s[6]+=g; s[7]+=h;
+    crypto_secure_wipe(W, sizeof(W));
   }
+  crypto_secure_wipe(buf, total_len);
   free(buf);
   for (int i = 0; i < 8; i++) {
     out[i*4] = (unsigned char)(s[i] >> 24); out[i*4+1] = (unsigned char)(s[i] >> 16);
     out[i*4+2] = (unsigned char)(s[i] >> 8); out[i*4+3] = (unsigned char)(s[i]);
   }
+  crypto_secure_wipe(s, sizeof(s));
 }
 
 OoStr crypto_sha256_internal(OoStr data) {
@@ -86,6 +102,7 @@ OoStr crypto_hmac_sha256_internal(OoStr key, OoStr msg) {
 
   unsigned char inner_digest[32];
   sha256_bytes(inner_buf, inner_len, inner_digest);
+  crypto_secure_wipe(inner_buf, inner_len);
   free(inner_buf);
 
   unsigned char outer_buf[64 + 32];
@@ -95,9 +112,17 @@ OoStr crypto_hmac_sha256_internal(OoStr key, OoStr msg) {
   unsigned char outer_digest[32];
   sha256_bytes(outer_buf, 64 + 32, outer_digest);
 
+  /* Wipe key material and intermediate HMAC state before return. */
+  crypto_secure_wipe(k, sizeof(k));
+  crypto_secure_wipe(ipad, sizeof(ipad));
+  crypto_secure_wipe(opad, sizeof(opad));
+  crypto_secure_wipe(outer_buf, sizeof(outer_buf));
+  crypto_secure_wipe(inner_digest, sizeof(inner_digest));
+
   char *hex = oo_str_alloc_payload(64);
   for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", outer_digest[i]);
   hex[64] = '\0';
+  crypto_secure_wipe(outer_digest, sizeof(outer_digest));
   OoStr r; r.data = hex; r.len = 64; return r;
 }
 

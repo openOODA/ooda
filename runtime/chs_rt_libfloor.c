@@ -7,14 +7,13 @@
 #include <sys/random.h>
 #endif
 
+static pthread_once_t g_tg_once = PTHREAD_ONCE_INIT;
 static long long g_tok_thread, g_tok_gpu;
-static int g_tg_ready;
 
-static void oo_tg_init(void) {
+static void tg_once_init(void) {
   unsigned char b[16];
   size_t i;
   unsigned long long acc;
-  if (g_tg_ready) return;
 #if defined(__linux__) || defined(__APPLE__)
   if (getentropy(b, sizeof b) != 0)
 #endif
@@ -26,11 +25,14 @@ static void oo_tg_init(void) {
       b[i] = (unsigned char)(acc >> 8);
     }
   }
-  g_tok_thread = 0x600000000LL | (long long)((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
-  g_tok_gpu = 0x700000000LL | (long long)((b[4] << 24) | (b[5] << 16) | (b[6] << 8) | b[7]);
+  g_tok_thread = 0x6000000000000000LL | (long long)((((unsigned long long)b[0]) << 56) | (((unsigned long long)b[1]) << 48) | (((unsigned long long)b[2]) << 40) | (((unsigned long long)b[3]) << 32) | (((unsigned long long)b[4]) << 24) | (((unsigned long long)b[5]) << 16) | (((unsigned long long)b[6]) << 8) | ((unsigned long long)b[7]));
+  g_tok_gpu = 0x7000000000000000LL | (long long)((((unsigned long long)b[8]) << 56) | (((unsigned long long)b[9]) << 48) | (((unsigned long long)b[10]) << 40) | (((unsigned long long)b[11]) << 32) | (((unsigned long long)b[12]) << 24) | (((unsigned long long)b[13]) << 16) | (((unsigned long long)b[14]) << 8) | ((unsigned long long)b[15]));
   if (g_tok_thread == 0x4F4F5448LL) g_tok_thread ^= 0x11111111LL;
   if (g_tok_gpu == 0x4F4F4750LL) g_tok_gpu ^= 0x11111111LL;
-  g_tg_ready = 1;
+}
+
+static void oo_tg_init(void) {
+  pthread_once(&g_tg_once, tg_once_init);
 }
 
 long long oo_cap_grant_thread(void) { oo_tg_init(); return g_tok_thread; }

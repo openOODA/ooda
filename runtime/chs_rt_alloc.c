@@ -4,6 +4,7 @@
 #include "chs_rt.h"
 #include <unistd.h>
 #include <pthread.h>
+#include <limits.h>
 #if defined(__linux__)
 #include <sys/random.h>
 #endif
@@ -34,8 +35,8 @@ static void alloc_init_once(void) {
     }
   }
   /* 0x7… band (fs=1 sys=2 env=3 net=4 time=5 rand=6 alloc=7) */
-  g_tok_alloc = 0x700000000LL
-      | (long long)((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
+  g_tok_alloc = 0x7000000000000000LL
+      | (long long)((((unsigned long long)b[0]) << 56) | (((unsigned long long)b[1]) << 48) | (((unsigned long long)b[2]) << 40) | (((unsigned long long)b[3]) << 32) | (((unsigned long long)b[4]) << 24) | (((unsigned long long)b[5]) << 16) | (((unsigned long long)b[6]) << 8) | ((unsigned long long)b[7]));
   if (g_tok_alloc == OO_CLASSIC_ALLOC) g_tok_alloc ^= 0x11111111LL;
 }
 
@@ -71,7 +72,8 @@ extern pthread_mutex_t g_quota_mu;
 
 /* Smoke-friendly: re-check cap then return n as opaque size token (not real mmap).
  * Raises ambient List ceiling after env init (so OO_LIST_AMBIENT_QUOTA is base).
- * n < 0 or n > OO_ALLOC_BYTES_MAX → clamp to 0 (no-op raise). */
+ * n < 0 or n > OO_ALLOC_BYTES_MAX → clamp to 0 (no-op raise).
+ * Quota add saturates at LLONG_MAX (no signed overflow wrap). */
 long long oo_alloc_bytes(long long cap, long long n) {
   extern void oo_list_quota_init_public(void);
   oo_cap_require_alloc(cap, "alloc_bytes");
@@ -79,22 +81,26 @@ long long oo_alloc_bytes(long long cap, long long n) {
   if (n > OO_ALLOC_BYTES_MAX) n = 0; /* oversize: no-op raise (not OS rlimit) */
   oo_list_quota_init_public();
   pthread_mutex_lock(&g_quota_mu);
-  oo_list_ambient_quota += n;
+  /* Sprint 1.7: check before add; saturate at LLONG_MAX on overflow. */
+  if (n > LLONG_MAX - oo_list_ambient_quota)
+    oo_list_ambient_quota = LLONG_MAX;
+  else
+    oo_list_ambient_quota += n;
   pthread_mutex_unlock(&g_quota_mu);
   return n;
 }
 
 /* Smoke-friendly: re-check cap; free is a no-op by handle.
  * Negative p must not inflate ambient quota (Seventh queue CRIT).
- * Oversize p clamps to zero — no wrap under unsigned promotion. */
+ * Sprint 1.6: oversize free (p > quota) is a no-op reclaim — leave quota
+ * unchanged. Only subtract when p <= quota (exact free-to-zero is allowed). */
 void oo_free_bytes(long long cap, long long p) {
   oo_cap_require_alloc(cap, "free_bytes");
   if (p < 0) p = 0;
   pthread_mutex_lock(&g_quota_mu);
-  if (p >= oo_list_ambient_quota) {
-    oo_list_ambient_quota = 0;
-  } else {
+  if (p <= oo_list_ambient_quota) {
     oo_list_ambient_quota -= p;
   }
+  /* else: p > quota → reject oversize free as no-op reclaim */
   pthread_mutex_unlock(&g_quota_mu);
 }

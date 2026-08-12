@@ -186,6 +186,10 @@ void oo_cap_require_fsread(long long got, const char *op);
 void oo_cap_require_fswrite(long long got, const char *op);
 
 OoResS oo_dlopen(long long cap, OoStr path);
+OoStr oo_host_ast_dump(long long cap, OoStr path);
+OoStr oo_host_check(long long cap, OoStr path);
+OoStr oo_host_token_dump(long long cap, OoStr path);
+OoResS oo_chs_build(long long cap, OoStr src, OoStr out_bin);
 OoResS oo_dlsym(long long cap, OoStr handle, OoStr name);
 OoResS oo_dlclose(long long cap, OoStr handle);
 long long oo_cap_grant_thread(void);

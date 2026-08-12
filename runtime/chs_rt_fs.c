@@ -99,7 +99,7 @@ long long oo_file_size(long long cap, OoStr path) {
 OoResS oo_env_get(long long cap, OoStr key) {
   oo_cap_require_env(cap, "env_get");
   OoResS r;
-  char *val = getenv(key.data);
+  const char *val = oo_process_policy_getenv(key.data ? key.data : "");
   if (val) {
     r.ok = 1;
     r.val = oo_str_lit(val);

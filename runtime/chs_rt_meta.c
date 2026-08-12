@@ -2,19 +2,19 @@
  * Not runtime assembly mutation. Full DESIGN metamorphic product is residual. */
 #include "chs_rt.h"
 #include <unistd.h>
+#include <pthread.h>
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/random.h>
 #endif
 
+static pthread_once_t g_meta_once = PTHREAD_ONCE_INIT;
 static long long g_meta_epoch;
-static int g_meta_ready;
 static volatile long long g_meta_decoy_sink;
 
-static void oo_meta_init(void) {
+static void meta_once_init(void) {
   unsigned char b[8];
   size_t i;
   unsigned long long acc;
-  if (g_meta_ready) return;
 #if defined(__linux__) || defined(__APPLE__)
   if (getentropy(b, sizeof b) != 0)
 #endif
@@ -36,7 +36,10 @@ static void oo_meta_init(void) {
       | (((unsigned long long)b[6]) << 8)
       | ((unsigned long long)b[7]));
   if (g_meta_epoch == 0) g_meta_epoch = 1;
-  g_meta_ready = 1;
+}
+
+static void oo_meta_init(void) {
+  pthread_once(&g_meta_once, meta_once_init);
 }
 
 /* Process-local random epoch fixed at first call. Residual: not .text rewrite. */
