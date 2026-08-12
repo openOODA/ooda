@@ -3,7 +3,7 @@
 **Catalog (token list):** process doc [`../../openOODA/CAPS.oot`](../../openOODA/CAPS.oot) — 27 V2 names; **type accept ≠ full CAP-G* FIXED**.  
 **Net (CAP-G1):** path-A preferred map — `sealed_net_kind_of` → Http/Tcp/Udp/Bind/NetCap; exact preferred **or** legacy **`&NetCap` supersede**; wrong granular deny. Runtime `oo_cap_require_{http,tcp,udp,bind}` accept granular **or** NetCap; `sock_raw` NetCap-only. Smoke: `scripts/cap_g1_net_granular_smoke.sh`.  
 **Fs (CAP-G2):** path-A preferred map — `sealed_fs_kind_of` → FsReadCap/FsWriteCap; exact preferred **or** legacy **`&FsCap` supersede**; wrong granular deny (FsReadCap↛write; FsWriteCap↛read/path/size). Runtime `oo_cap_require_fsread` / `oo_cap_require_fswrite` accept granular **or** FsCap. Keep **`OODA_FS_WRITEDIR`** write overlay. Helpers: `cap_fs_granted_ok` / `cap_fs_argflow_ok` in `check_cap_util.oo`.  
-**Other families:** Sys/Env/Time/Rand/Alloc/FFI/Thread/Gpu still legacy sealed kinds. **CAP-G3 residual-only:** Process/Sync/Mem/HW/UI/Sign — type accept + grant + exact require stubs; **no** sealed product ops (do not greenwash). ProcessCap vs `sys_exec` = **CAP-G4**.  
+**Other families:** Sys/Env/Time/Rand/Alloc/FFI/Thread/Gpu still legacy sealed kinds. **CAP-G3 residual-only:** Process/Sync/Mem/HW/UI/Sign — type accept + grant + exact require stubs; **no** sealed product ops (do not greenwash). **CAP-G4 FIXED path-A:** ProcessCap preferred for `sys_exec`/spawn/wait/kill; SysCap supersede; ProcessCap↛`sys_prctl`/python_embed.  
 **Purpose:** Map each sealed effect op through **check → emit-c → runtime → product**.  
 **Rules:** Default-deny. Unfinished = fail-closed, never silent ambient I/O. `fetch` is product-lowered; other http-ish names residual emit.  
 **Runtime seal:** sealed FS/Sys/Env/Net/Time/Rand/Alloc ops re-check process-local capability tokens at native runtime. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md). **Not** full OS isolation / complete `seccomp-bpf` product claim.  
@@ -30,8 +30,8 @@ Status legend:
 | `write_file` | **preferred `&FsWriteCap`** (`&FsCap` supersede) | sealed free call; exact preferred **or** FsCap; wrong granular refuse | `oo_write_file(cap, path, content)` | `oo_cap_require_fswrite` + **`OODA_FS_WRITEDIR` fail-closed** (path under dir; empty/unset → deny; parent-realpath for new leaves) | **real** path A (CAP-G2) |
 | `path_exists` | **preferred `&FsReadCap`** (`&FsCap` supersede) | sealed free call; exact preferred **or** FsCap | `oo_path_exists(cap, path)` | require_fsread + fopen probe | **real** (CAP-G2) |
 | `file_size` | **preferred `&FsReadCap`** (`&FsCap` supersede) | sealed free call; exact preferred **or** FsCap | `oo_file_size(cap, path)` | require_fsread + ftell | **real** (CAP-G2) |
-| `sys_exec` | `&SysCap` | sealed free call + arg-flow | multi-arg → `oo_sys_exec`; single → `oo_sys_exec1` | `fork`+`execvp` (not `system(3)`); child env **filtered** to `OODA_`/`OO_` + minimal `PATH=/usr/bin:/bin` | **real** path A (T3) |
-| `sys_spawn` / `sys_wait` / `sys_kill` | `&SysCap` | sealed free call + arg-flow | `oo_sys_spawn` / `oo_sys_wait` / `oo_sys_kill` | require Sys then **Err residual** (path A seal; no real fork/wait/kill) | **fail-closed residual** — use `sys_exec` for blocking spawn+wait; `std/os/process.oo` wrappers |
+| `sys_exec` | **`&ProcessCap`** (or legacy `&SysCap`) | sealed free call + arg-flow; preferred ProcessCap | multi-arg → `oo_sys_exec`; single → `oo_sys_exec1` | `require_process` (ProcessCap **or** SysCap); `fork`+`execvp`; child env filtered (T3) | **real** path A (T3 + **CAP-G4**) |
+| `sys_spawn` / `sys_wait` / `sys_kill` | **`&ProcessCap`** (or `&SysCap`) | sealed free call + arg-flow | `oo_sys_spawn` / `oo_sys_wait` / `oo_sys_kill` | `require_process` then **Err residual** | **fail-closed residual** — use `sys_exec` for real spawn; CAP-G4 |
 | `sys_epoll_create` / `sys_inotify_init` / `sys_prctl` | `&SysCap` | sealed free call + arg-flow | `oo_sys_epoll_create` / `oo_sys_inotify_init` / `oo_sys_prctl` | require Sys then **Err residual** (M166 path A; not full async I/O) | **fail-closed residual** — `std/os/process.oo` thin wrappers |
 | `env_get` | `&EnvCap` | sealed free call | `oo_env_get(cap, key)` | require + `oo_process_policy_getenv` (**only** `OODA_`/`OO_` keys) | **real** path A |
 | `fetch` | **preferred `&HttpCap`** (legacy **`&NetCap` supersede**) | sealed free call; exact preferred **or** `NetCap`; wrong granular refuse | `oo_fetch(cap, url)` | `chs_rt_sys.c` + `oo_cap_require_http` (http **or** net token); HTTP/1.0 GET | **real** path-A (R9 + CAP-G1) |
@@ -66,7 +66,7 @@ These V2 names are in `is_cap_type` and have process-local `oo_cap_grant_*` + **
 
 | Cap | Grant | Require (exact only) | Sealed free-call ops | Notes |
 |-----|-------|----------------------|----------------------|-------|
-| `&ProcessCap` | `oo_cap_grant_process` | `oo_cap_require_process` | **none** | `sys_exec` remains `&SysCap` (CAP-G4) |
+| `&ProcessCap` | `oo_cap_grant_process` | `oo_cap_require_process` (or SysCap) | `sys_exec` / spawn / wait / kill | CAP-G4 path-A preferred; hard SysCap residual: python_embed, epoll, prctl |
 | `&SyncCap` | `oo_cap_grant_sync` | `oo_cap_require_sync` | **none** | mutex/channel sealed under `&ThreadCap` |
 | `&MemCap` | `oo_cap_grant_mem` | `oo_cap_require_mem` | **none** | heap helpers sealed under `&AllocCap` |
 | `&AudioCap` | `oo_cap_grant_audio` | `oo_cap_require_audio` | **none** | no mic/speaker product |

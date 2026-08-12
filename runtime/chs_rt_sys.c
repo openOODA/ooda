@@ -186,8 +186,14 @@ void oo_cap_require_fswrite(long long got, const char *op) {
 void oo_cap_require_sign(long long got, const char *op) {
   oo_cap_require(got, g_tok_sign, op ? op : "sign");
 }
+/* CAP-G4: ProcessCap OR legacy SysCap (mirror require_http/tcp accepting NetCap). */
 void oo_cap_require_process(long long got, const char *op) {
-  oo_cap_require(got, g_tok_process, op ? op : "process");
+  oo_caps_init();
+  if (got != g_tok_process && got != g_tok_sys) {
+    fprintf(stderr, "ERR\tcap\t%s: missing or forged capability\n",
+            op ? op : "process");
+    exit(1);
+  }
 }
 void oo_cap_require_sync(long long got, const char *op) {
   oo_cap_require(got, g_tok_sync, op ? op : "sync");
@@ -220,7 +226,7 @@ OoResS oo_sys_exec(long long cap, int argc, OoStr *argv) {
   char **av;
   int i, st;
   pid_t pid;
-  oo_cap_require_sys(cap, "sys_exec");
+  oo_cap_require_process(cap, "sys_exec");
   r.ok = 0;
   r.val = oo_str_lit("sys_exec failed");
   if (argc < 1 || !argv || !argv[0].data) return r;

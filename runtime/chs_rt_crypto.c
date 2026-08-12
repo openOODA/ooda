@@ -181,8 +181,10 @@ OoResS json_parse_internal(OoStr raw) {
 
 OoStr json_stringify_internal(OoStr obj) { return obj; }
 
+/* CAP-G4: spawn prefers ProcessCap (or SysCap supersede). */
+void oo_cap_require_process(long long got, const char *op);
 OoStr async_spawn_internal(long long sys, OoStr name) {
-  oo_cap_require_sys(sys, "async_spawn");
+  oo_cap_require_process(sys, "async_spawn");
   return oo_str_concat(oo_str_lit("thread#"), name);
 }
 

@@ -52,10 +52,11 @@ void oo_cap_require_gpu(long long got, const char *op) {
   }
 }
 
-/* Process residual seals (real process still via sys_exec) */
+/* CAP-G4: process residual seals — ProcessCap OR SysCap; real process via sys_exec */
+void oo_cap_require_process(long long got, const char *op);
 OoResS oo_sys_spawn(long long cap, OoStr cmd) {
   OoResS r;
-  oo_cap_require_sys(cap, "sys_spawn");
+  oo_cap_require_process(cap, "sys_spawn");
   r.ok = 0;
   r.val = oo_str_lit("sys_spawn residual: use sys_exec for blocking spawn+wait");
   (void)cmd;
@@ -63,7 +64,7 @@ OoResS oo_sys_spawn(long long cap, OoStr cmd) {
 }
 OoResS oo_sys_wait(long long cap, long long pid) {
   OoResS r;
-  oo_cap_require_sys(cap, "sys_wait");
+  oo_cap_require_process(cap, "sys_wait");
   r.ok = 0;
   r.val = oo_str_lit("sys_wait residual: path A seal only");
   (void)pid;
@@ -71,7 +72,7 @@ OoResS oo_sys_wait(long long cap, long long pid) {
 }
 OoResS oo_sys_kill(long long cap, long long pid, long long sig) {
   OoResS r;
-  oo_cap_require_sys(cap, "sys_kill");
+  oo_cap_require_process(cap, "sys_kill");
   r.ok = 0;
   r.val = oo_str_lit("sys_kill residual: path A seal only");
   (void)pid; (void)sig;
