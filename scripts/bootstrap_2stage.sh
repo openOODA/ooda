@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Trust anchor: hardcoded minisign public-key fingerprint (NOT the sidecar).
+# Anyone who can rewrite the .sha256 sidecar can substitute the seed; the
+# fingerprint below is the published root the build refuses to bypass.
+# Fingerprint = minisign key id from oodac.pub untrusted comment
+#   ("untrusted comment: minisign public key <KEY_ID>"). Real gate is minisign -V.
+# Residual escape (dev/research only, never product trust):
+#   OODA_SEED_ALLOW_UNSIGNED=1  — loud WARN, still prefer sha256sum -c
+SEED_PUBKEY_FP="645069A34E6058B7"
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
@@ -7,6 +15,72 @@ mkdir -p "$TMPDIR" "$ROOT/bin" "$ROOT/oodac"
 SEED="$ROOT/bootstrap/seed/oodac"
 STAGE1="$ROOT/oodac/stage1_noarc"
 STAGE2="$ROOT/oodac/oodac"
+
+SEED_PUB="${SEED_PUB:-$ROOT/bootstrap/seed/oodac.pub}"
+# minisign: PATH first, then repo-local tools/minisign (no system install required).
+_MINISIGN=""
+if command -v minisign >/dev/null 2>&1; then
+  _MINISIGN="$(command -v minisign)"
+elif [[ -x "$ROOT/tools/minisign" ]]; then
+  _MINISIGN="$ROOT/tools/minisign"
+fi
+# Audit: seed-binary verification before the seed is used in the bootstrap chain.
+# Integrity (sha256) always preferred; minisign is product trust (fail closed).
+if [[ ! -f "${SEED}.sha256" ]]; then
+  echo "audit: no seed SHA sidecar — refusing" >&2
+  exit 1
+fi
+# Compare hash field only (sidecar path may be basename or repo-relative).
+_seed_expect="$(awk 'NF>=1 {print $1; exit}' "${SEED}.sha256")"
+_seed_actual="$(sha256sum "$SEED" | awk '{print $1}')"
+if [[ -z "$_seed_expect" || "$_seed_expect" != "$_seed_actual" ]]; then
+  echo "audit: seed SHA mismatch — refusing" >&2
+  echo "audit: expected ${_seed_expect:-<empty>} actual ${_seed_actual}" >&2
+  exit 1
+fi
+echo "audit: seed SHA OK"
+
+_residual_why=""
+if [[ "$SEED_PUBKEY_FP" == "TODO_PUBKEY_FP" || -z "$SEED_PUBKEY_FP" ]]; then
+  _residual_why="SEED_PUBKEY_FP is still placeholder TODO_PUBKEY_FP"
+elif [[ ! -f "$SEED_PUB" ]]; then
+  _residual_why="SEED_PUB missing: $SEED_PUB"
+elif [[ -z "$_MINISIGN" ]]; then
+  _residual_why="minisign not on PATH and no $ROOT/tools/minisign"
+elif [[ ! -f "${SEED}.sha256.minisig" ]]; then
+  _residual_why="no seed SHA signature (${SEED}.sha256.minisig)"
+fi
+
+if [[ -n "$_residual_why" ]]; then
+  if [[ "${OODA_SEED_ALLOW_UNSIGNED:-0}" == "1" ]]; then
+    cat >&2 <<'EOF'
+WARN: ============================================================
+WARN: OODA_SEED_ALLOW_UNSIGNED=1 — seed signature verification SKIPPED
+WARN: This is a residual / dev-research escape hatch, NOT product trust.
+WARN: Anyone who can rewrite the seed (or its .sha256) can substitute code.
+WARN: For product trust: install minisign (or tools/minisign), publish
+WARN: oodac.pub + .minisig, set SEED_PUBKEY_FP (see bootstrap/seed/SIGNING.oot).
+WARN: ============================================================
+EOF
+    echo "audit: residual reason: ${_residual_why}" >&2
+    echo "audit: sha256 sidecar checked; minisign SKIPPED (unsigned residual)" >&2
+  else
+    cat >&2 <<EOF
+audit: residual seed signing — refusing (${_residual_why})
+audit: product path requires: minisign on PATH or \$ROOT/tools/minisign,
+audit: SEED_PUB ($SEED_PUB), non-placeholder SEED_PUBKEY_FP, and ${SEED}.sha256.minisig
+audit: see bootstrap/seed/SIGNING.oot
+audit: dev/research only: OODA_SEED_ALLOW_UNSIGNED=1 (loud skip, not trust)
+EOF
+    exit 1
+  fi
+else
+  if ! "$_MINISIGN" -V -p "$SEED_PUB" -m "${SEED}.sha256"; then
+    echo "audit: minisign signature invalid — refusing" >&2
+    exit 1
+  fi
+  echo "audit: seed SHA + minisign OK (fp=${SEED_PUBKEY_FP})"
+fi
 
 echo "=== STAGE 1: seed builds stage1_noarc (PURE_NO_ARC=1) ==="
 (cd "$ROOT" && env -u OODA PURE_NO_ARC=1 OODAC_BIN="$SEED" "$SEED" build "$ROOT/oodac/main.oo" "$STAGE1")

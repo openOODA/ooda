@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # M165 FFI dlopen Path A — ALLOW_DLOPEN + system dirs / ALLOWDIR; dlsym residual
-# Residual: no unrestricted any-path dlopen; no product dlsym.
+# Residual: no unrestricted any-path dlopen; no typed ffi_call of dlsym results.
+# Path-A: registered-handle dlsym/dlclose (unknown handle → Err).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -15,9 +16,9 @@ RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm -ldl -lpthread)
 
 # honesty strings in runtime
 if grep -q 'path not under system lib dirs' runtime/chs_rt_ffi.c \
-  && grep -q 'dlsym not product' runtime/chs_rt_ffi.c \
-  && grep -q 'dlclose not product' runtime/chs_rt_ffi.c; then
-  pass "runtime Path A ffi honesty present"
+  && grep -q 'unknown handle' runtime/chs_rt_ffi.c \
+  && grep -q 'g_ffi_handles\|handle table' runtime/chs_rt_ffi.c; then
+  pass "runtime Path A ffi honesty present (dlopen allowlist + handle-table dlsym)"
 else
   bad "runtime Path A ffi honesty missing"
 fi
@@ -98,7 +99,7 @@ EOF
   fi
 fi
 
-# dlsym residual seal (needs rebuilt oodac for lower; runtime always Err)
+# dlsym path-A: unknown handle must Err (not product typed call)
 cat >"$TMPDIR/ffi_sym.oo" <<'EOF'
 pub fn main(ffi: &UnsafeFFICap) {
     let r: Result[String, String] = dlsym(ffi, "handle:0", "sym");
@@ -114,12 +115,12 @@ if grep -q 'oo_dlsym' "$TMPDIR/ffi_sym.c" 2>/dev/null; then
   gcc "${RT[@]}" "$TMPDIR/ffi_sym.c" -o "$TMPDIR/ffi_sym.bin" 2>/dev/null || true
   if [[ -x "$TMPDIR/ffi_sym.bin" ]]; then
     out=$("$TMPDIR/ffi_sym.bin" 2>&1) || true
-    echo "$out" | grep -q 'dlsym-err' && pass "runtime dlsym residual Err" \
+    # unknown handle 0 → Err (path-A fail-closed)
+    echo "$out" | grep -q 'dlsym-err' && pass "runtime dlsym unknown-handle Err" \
       || bad "dlsym out=$out"
   fi
 elif grep -qE $'^ERR\tc_emit\tffi residual' "$TMPDIR/ffi_sym.c" "$TMPDIR/ffi_sym.err" 2>/dev/null \
   || [[ $src -ne 0 ]]; then
-  # pre-rebuild oodac: fail-closed residual still honest
   pass "dlsym emit residual (oodac lower pending rebuild)"
 else
   bad "dlsym emit unexpected"

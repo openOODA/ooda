@@ -18,6 +18,7 @@ trap 'rm -rf "$WORK"' EXIT
 rm -rf "$ROOT/.ooda-cache/check" 2>/dev/null || true
 cp "$ROOT/fixtures/hitl_pause_fail.oo" "$WORK/h.oo"
 set +e
+# Deny E_HITL: no --hitl-allowed. OODA_HITL_ALLOW env is not the check gate (M-CTZ-2 CLI is).
 env -u OODA_HITL_ALLOW -u OODA_HITL_AUTO_APPROVE \
   "$OODAC_BIN" check "$WORK/h.oo" --json-errors >"$WORK/before.json" 2>"$WORK/before.err"
 brc=$?

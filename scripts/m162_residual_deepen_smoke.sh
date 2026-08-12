@@ -53,16 +53,20 @@ else
 fi
 
 # 3) HITL auto-approve path A
+# M-CTZ-2: check gate is CLI --hitl-allowed (not OODA_HITL_ALLOW env).
+# OODA_HITL_AUTO_APPROVE=1 still drives the non-TTY auto-approve path once allowed.
 rm -rf "$ROOT/.ooda-cache/check" 2>/dev/null || true
 cp "$ROOT/fixtures/hitl_pause_fail.oo" "$TMPDIR/hitl.oo"
 set +e
+# Deny: no --hitl-allowed (env alone must not open harness)
 env -u OODA_HITL_ALLOW -u OODA_HITL_AUTO_APPROVE "$OODAC_BIN" check "$TMPDIR/hitl.oo" \
   >"$TMPDIR/hitl_deny.out" 2>"$TMPDIR/hitl_deny.err"
 drc=$?
 set -e
 [[ $drc -ne 0 ]] && pass "HITL deny without allow" || bad "HITL should deny"
 set +e
-OODA_HITL_ALLOW=1 OODA_HITL_AUTO_APPROVE=1 "$OODAC_BIN" check "$TMPDIR/hitl.oo" \
+# Allow: CLI --hitl-allowed + OODA_HITL_AUTO_APPROVE for non-TTY agent/CI
+OODA_HITL_AUTO_APPROVE=1 "$OODAC_BIN" --hitl-allowed check "$TMPDIR/hitl.oo" \
   >"$TMPDIR/hitl_ok.out" 2>"$TMPDIR/hitl_ok.err"
 arc2=$?
 set -e

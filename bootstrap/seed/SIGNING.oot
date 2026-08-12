@@ -1,0 +1,152 @@
+# Seed signing runbook (product trust)
+
+Bootstrap treats the seed binary as a trust root. SHA-256 alone only proves the
+bytes match a sidecar that an attacker who rewrote the tree could also rewrite.
+minisign binds that checksum to a **maintainer public key** whose fingerprint is
+hardcoded in the bootstrap scripts (not taken from the seed directory alone).
+
+**This tree:** product keys are published under `bootstrap/seed/`:
+
+| Item | Status |
+|------|--------|
+| `oodac.pub` | Published (commit) |
+| `oodac.sha256` | Public integrity sidecar (hash field only is checked) |
+| `oodac.sha256.minisig` | Published signature over the `.sha256` file |
+| `SEED_PUBKEY_FP` | `645069A34E6058B7` in both bootstrap scripts |
+| Secret key | **Not** in git — local only (see Residual below) |
+
+Fingerprint source: minisign **key id** from the public key untrusted comment line
+(`untrusted comment: minisign public key 645069A34E6058B7`). Scripts refuse the
+placeholder `TODO_PUBKEY_FP`; the real cryptographic gate is `minisign -V`.
+
+Do **not** invent or commit placeholder keys. Do **not** commit the secret key.
+
+## What product trust needs
+
+| File / value | Role | Commit? |
+|--------------|------|---------|
+| `bootstrap/seed/oodac` | Seed binary | No (gitignored) |
+| `bootstrap/seed/oodac.sha256` | SHA-256 of `oodac` | Optional / public integrity |
+| `bootstrap/seed/oodac.sha256.minisig` | minisign of the `.sha256` file | Yes when published |
+| `bootstrap/seed/oodac.pub` | minisign public key | Yes when published |
+| `SEED_PUBKEY_FP` in bootstrap scripts | Hardcoded fingerprint of that pub | Yes (not a secret) |
+| minisign secret key | Signs releases / seeds | **Never** commit |
+
+Scripts: `scripts/bootstrap_no_cargo.sh`, `scripts/bootstrap_2stage.sh`.
+
+## 1. Install minisign
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install -y minisign
+
+# Fedora
+# sudo dnf install minisign
+
+# From source / releases: https://jedisct1.github.io/minisign/
+# Or use the repo-local binary (x86_64):
+#   tools/minisign   (bootstrap scripts prefer PATH, then $ROOT/tools/minisign)
+command -v minisign || test -x tools/minisign
+```
+
+## 2. Create a key pair (once, on a secure machine)
+
+```bash
+# Creates oodac.pub and oodac.sec (or oodac.secret.key)
+# Store the secret key offline; never put it in the repo.
+minisign -G -p oodac.pub -s oodac.secret.key
+# Optional unencrypted local residual (still never commit):
+# minisign -G -W -p bootstrap/seed/oodac.pub -s bootstrap/seed/.keys-local/oodac.sec
+```
+
+- Copy **only** `oodac.pub` into `bootstrap/seed/oodac.pub` when ready to publish.
+- Keep the secret key (and any password) out of git, CI logs, and seed dirs.
+- Record the public-key fingerprint: the **key id** after
+  `untrusted comment: minisign public key ` on the first line of `.pub`
+  (e.g. `645069A34E6058B7`). That string replaces `TODO_PUBKEY_FP` in both
+  bootstrap scripts. (Scripts only require a non-TODO string; `minisign -V` is
+  the cryptographic check.)
+
+## 3. Hash and sign the seed
+
+From a tree that already has a pure product seed:
+
+```bash
+cd bootstrap/seed
+# integrity sidecar (public) — basename path so `sha256sum -c` works from seed dir
+sha256sum oodac | awk '{print $1"  oodac"}' > oodac.sha256
+
+# sign the checksum file (not a substitute for hashing the binary first)
+minisign -S -s /path/to/oodac.secret.key -m oodac.sha256
+# produces oodac.sha256.minisig
+```
+
+Verify locally before shipping:
+
+```bash
+(cd bootstrap/seed && sha256sum -c oodac.sha256)
+minisign -V -p bootstrap/seed/oodac.pub -m bootstrap/seed/oodac.sha256
+# or: tools/minisign -V -p bootstrap/seed/oodac.pub -m bootstrap/seed/oodac.sha256
+```
+
+## 4. Wire the fingerprint into bootstrap scripts
+
+In both:
+
+- `scripts/bootstrap_no_cargo.sh`
+- `scripts/bootstrap_2stage.sh`
+
+set:
+
+```bash
+SEED_PUBKEY_FP="645069A34E6058B7"   # minisign key id from oodac.pub
+```
+
+Leave `SEED_PUB` defaulting to `bootstrap/seed/oodac.pub` (or point
+`SEED_PUB=/path/to/oodac.pub` for an alternate published key).
+
+Scripts resolve minisign as: first `command -v minisign`, else `$ROOT/tools/minisign`.
+
+Until `SEED_PUBKEY_FP` is a real fingerprint **and** `oodac.pub` +
+`oodac.sha256.minisig` are present **and** minisign is available, bootstrap
+refuses with a residual error.
+
+## 5. Operator escape (dev/research only)
+
+```bash
+OODA_SEED_ALLOW_UNSIGNED=1 ./scripts/bootstrap_no_cargo.sh
+```
+
+- Still checks the SHA-256 hash field when `oodac.sha256` exists (mismatch always fails).
+- Skips minisign with a multi-line **WARN** — never a silent skip.
+- **Not** product trust. Do not document this as “signed enough.”
+
+## 6. Never commit secrets
+
+| OK | Never |
+|----|--------|
+| `oodac.pub` | `*.secret.key`, `*.sec`, `minisign.key`, passwords |
+| `oodac.sha256`, `oodac.sha256.minisig` | Private mirrors of the secret key |
+| Real `SEED_PUBKEY_FP` string in scripts | Fake keys invented to satisfy CI |
+| This runbook | Tokens / `.env` next to the seed |
+| | `bootstrap/seed/.keys-local/` (gitignored) |
+
+## Residual checklist
+
+1. [x] minisign available (system PATH and/or `tools/minisign`)
+2. [x] Real key generated; secret not in repo
+3. [x] `oodac.pub` published under `bootstrap/seed/`
+4. [x] `oodac.sha256` + `oodac.sha256.minisig` next to seed
+5. [x] `TODO_PUBKEY_FP` replaced in both bootstrap scripts (`645069A34E6058B7`)
+6. [x] Strict path green without `OODA_SEED_ALLOW_UNSIGNED` (sha256 + minisign -V)
+
+### Residual (honest)
+
+- **Secret key location (local only, gitignored):**  
+  `bootstrap/seed/.keys-local/oodac.sec`  
+  (or offline HSM / password store for production maintainers).  
+  Directory is listed in `ooda/.gitignore` as `/bootstrap/seed/.keys-local/`.
+- Operators who lack both PATH minisign and `tools/minisign` still hit residual
+  unless they set `OODA_SEED_ALLOW_UNSIGNED=1` (dev only).
+- Rotating keys: generate new pair offline, re-sign `.sha256`, update
+  `oodac.pub` + `SEED_PUBKEY_FP`, never commit the new secret.

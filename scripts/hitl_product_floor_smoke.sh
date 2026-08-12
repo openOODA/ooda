@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # HITL non-interactive deny-mode product floor (M157)
+# M-CTZ-2: check gate is CLI --hitl-allowed (not OODA_HITL_ALLOW env). This floor
+# exercises deny without --hitl-allowed; allow/auto is covered by m162 deepen smoke.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -14,7 +16,9 @@ pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
 
 set +e
-"$OODAC_BIN" check "$ROOT/fixtures/hitl_pause_fail.oo" >"$TMPDIR/hitl_f.out" 2>"$TMPDIR/hitl_f.err"
+# Deny without --hitl-allowed (OODA_HITL_ALLOW env alone must not open harness)
+env -u OODA_HITL_ALLOW -u OODA_HITL_AUTO_APPROVE \
+  "$OODAC_BIN" check "$ROOT/fixtures/hitl_pause_fail.oo" >"$TMPDIR/hitl_f.out" 2>"$TMPDIR/hitl_f.err"
 frc=$?
 set -e
 if [[ $frc -ne 0 ]] && grep -qE $'ERR\thitl|non-interactive deny' "$TMPDIR/hitl_f.out" "$TMPDIR/hitl_f.err" 2>/dev/null; then
@@ -34,9 +38,10 @@ else
   bad "clean file should pass"
 fi
 
-# json-errors E_HITL
+# json-errors E_HITL (deny without --hitl-allowed)
 set +e
-"$OODAC_BIN" check "$ROOT/fixtures/hitl_pause_fail.oo" --json-errors >"$TMPDIR/hitl_j.out" 2>"$TMPDIR/hitl_j.err"
+env -u OODA_HITL_ALLOW -u OODA_HITL_AUTO_APPROVE \
+  "$OODAC_BIN" check "$ROOT/fixtures/hitl_pause_fail.oo" --json-errors >"$TMPDIR/hitl_j.out" 2>"$TMPDIR/hitl_j.err"
 jrc=$?
 set -e
 if [[ $jrc -ne 0 ]] && python3 - "$TMPDIR/hitl_j.out" <<'PY'
