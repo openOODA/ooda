@@ -31,6 +31,69 @@
 | **R5** | Expanded typecheck cost/hang on large trees | Per-file 64KiB load; expanded 1MiB; pure_build timeout | Incremental check |
 | **R6** | No automatic `OoStr` free; list free is manual API (`oo_*list_free`) — process-lifetime arena for strings | Short-lived CLI processes; list free available | Emit-side drop / arena API for strings + lists |
 | **R8** | Dynamic/computed sealed callees not scanned by check | IDENT+LPAREN only | Full call-graph check |
+| **T3-R** | Full IFC; unrestricted any-path `dlopen`; refcount UAF beyond free-on-ref0; parent-realpath for **new** `write_file` paths | Path A: secret floor + allowlisted dlopen + ARC free-on-ref0 + `OODA_FS_WRITEDIR` fail-closed (existing leaf) | Full IFC product; parent-dir realpath create; OS isolation |
+
+### T3 path A (landed runtime ZT — not residual)
+
+| Piece | Path A claim | Where |
+|-------|--------------|-------|
+| `sys_exec` filtered env | Child keeps only `OODA_`/`OO_` keys + minimal `PATH` | `chs_rt_sys.c` |
+| FFI handle mutex + nested `oo_dlopen` refuse | Table ops mutexed; TLS depth hard-refuses same-thread nested `oo_dlopen`; raw `dlopen(3)` in ctors still residual | `chs_rt_ffi.c` / [`CAP_FFI.md`](CAP_FFI.md) |
+| `OODA_FS_WRITEDIR` | Fail-closed writes; empty/unset → deny | `chs_rt_fs.c` |
+
+### T4 hygiene honesty (SPRINT 8.1 / 9.x — residual ledger; **not** closed)
+
+Live snapshot tip `344defe` + WIP tree (2026-08-12). Prefer residual over silent soft-pass. **Do not** mark SPRINT T4 done from this section alone.
+
+#### 1. Bak / side binary ignore policy
+
+| Policy | Detail |
+|--------|--------|
+| **Ignore (do not ship)** | Local rebuild debris under `ooda/`: `/oodac/oodac.bak*`, `/oodac/oodac.new`, `/oodac/oodac.alias`, `/oodac/oodac*.tmp*`, `/oodac/*.tmp.c`, `/oodac_new` |
+| **Where** | `ooda/.gitignore` (WIP land with product hygiene; product `oodac/oodac` already ignored) |
+| **On disk** | Files may still exist (`oodac.bak`, `oodac.bak.t3pre`, `oodac_new`) — **ignored**, not deleted by docs; operators may `rm` locally |
+| **Do not** | Commit bak hosts, force-add ignored binaries, or treat bak as a second product tip |
+
+#### 2. DEBUG diagnostic vs leak (ID **8.1**)
+
+| Claim | Live truth |
+|-------|------------|
+| SPRINT text | `oodac/tc_control_cond.oo` DEBUG println — strip “DEBUG leak” |
+| Live `tc_control_cond.oo` | **Zero** `DEBUG` tokens. All `println` are fail-closed **`ERR\ttype\t…`** product diagnostics (wrong cond/body types) + `process_exit(1)` |
+| Classification | **Diagnostic, not a secret/taint leak.** Not ambient stdout chatter; structured typecheck refuse |
+| Residual | If a future `DEBUG`/`dbg` println reappears on non-ERR paths → strip or gate. Re-score 8.1 only with a live hit — do not re-litigate absent strings |
+
+#### 3. minisign tool path residual
+
+| Item | Status |
+|------|--------|
+| Bootstrap resolve | `command -v minisign` → else `$ROOT/tools/minisign` → fail-closed (`bootstrap_no_cargo.sh` / `bootstrap_2stage.sh`) |
+| Vendored `tools/minisign` | **Absent** — no `ooda/tools/`; do not invent placeholder ELF |
+| Host PATH minisign | Operator/CI install residual (this tree often has neither) |
+| Escape | `OODA_SEED_ALLOW_UNSIGNED=1` → loud WARN; still SHA-checks when sidecar present |
+| Policy doc | [`bootstrap/seed/SIGNING.oot`](seed/SIGNING.oot) §`tools/minisign` policy |
+| Seed pure multi | Orthogonal (`OODAC_BIN` / `seed_pure_multi_smoke`) — not a minisign substitute |
+
+#### 4. Monofile pressure (ffi **>350** and peers)
+
+Pack watch (T3 hygiene used ≤350 for runtime OWN units). Global strict lock is **MAX_LINES=256** (`check_file_lines.sh`).
+
+| File | Live lines | Notes |
+|------|----------:|-------|
+| `runtime/chs_rt_ffi.c` | **359** | **>350** pack pressure after T3 mutex/nested/minisig; peel residual (see [`CAP_FFI.md`](CAP_FFI.md)) |
+| `runtime/chs_rt_hitl.c` | **370** | Out of T3 OWN; HITL monofile residual |
+| `runtime/chs_rt_sys.c` | 329 | Under 350 pack watch; still over global 256 |
+| `runtime/chs_rt_fs.c` | 225 | Under both |
+
+Close monofile residual when units peel under pack watch **and** strict 256 (or ratchet documents accepted oversize with split plan).
+
+#### 5. Supply-chain script policy
+
+| Claim | Status |
+|-------|--------|
+| No `patch_awk.sh` / `boot_dbg*` / cap-gate **strip** scripts in tree | **PASS** (absent; SPRINT names were debris checklist, not present files) |
+| Cap smokes that `sed` zero/`magic` grants on **temp emit C** | **Keep** — prove runtime forge deny; they do not patch product sources |
+| `OODA_SEED_ALLOW_UNSIGNED=1` | Loud multi-line WARN only; still SHA-checks when sidecar present |
 
 ---
 
@@ -38,7 +101,8 @@
 
 - **MAX_LINES=256** on owned `.oo` `.c` `.h` `.sh` **and** product `scripts/*.py`.  
 - Python outline/test helpers split into modules under the cap.
-- **Proven:** `./scripts/check_file_lines.sh --ratchet` → **O=0** (post R1–R9 runtime work).
+- **Honest live (post T1–T3 growth):** strict `check_file_lines.sh` reports **O>0** (includes `chs_rt_ffi.c` 359, `chs_rt_hitl.c` 370, fat emit units). Older “O=0 proven” notes are **stale** — do not re-claim O=0 without a fresh green run.
+- Ratchet mode only blocks **growth** of existing oversize; splits still required for strict Lock.
 
 ---
 
@@ -58,11 +122,14 @@
 | Product `sys_exec(sys,"true")` + multi-arg | PASS |
 | Magic `0x4F4F4653` / forge at check+runtime | PASS |
 | Product `fetch` to local HTTP body | PASS |
-| Line lock ratchet O=0 | PASS |
-| `c_emit_smoke` / `caps_matrix_smoke` / `shell_safety` / `import_load` | PASS |
+| Line lock strict O=0 | **OPEN residual** (post T1–T3 monofile pressure) |
+| `c_emit_smoke` / `caps_matrix_smoke` / `shell_safety` / `import_load` | PASS (when re-run) |
 | Full `oodac check oodac/main.oo` (120s) | **TIMEOUT** — R4 remains open |
 | Bootstrap | `PURE_SKIP_CHECK=1` used (honest: full self-check not proven) |
+| Bak ignore policy | **Documented + gitignore patterns WIP** — debris may remain on disk |
+| 8.1 DEBUG leak | **STALE / reclassified** — product ERR diagnostics only |
+| `tools/minisign` | **Residual** — not vendored; host install or unsigned escape |
 
 ---
 
-*Revisit when DESIGN adds object-caps, incremental check, or GC. Prefer residual over silent soft-pass.*
+*Revisit when DESIGN adds object-caps, incremental check, or GC. Prefer residual over silent soft-pass. T4 hygiene close needs owner prove + SPRINT mark — not this residual alone.*

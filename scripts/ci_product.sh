@@ -130,6 +130,7 @@ for rail in \
   patch_smoke.sh \
   std_smoke.sh \
   shell_safety_smoke.sh \
+  hygiene_t4_smoke.sh \
   arc_smoke.sh \
   fuzz_int_depth_smoke.sh \
   fuzz_bool_smoke.sh \

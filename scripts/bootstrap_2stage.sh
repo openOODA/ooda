@@ -7,6 +7,8 @@
 # Residual escape (dev/research only, never product trust):
 #   OODA_SEED_ALLOW_UNSIGNED=1  — loud WARN, still prefer sha256sum -c
 SEED_PUBKEY_FP="645069A34E6058B7"
+# Full minisign pubkey body (line 2 of oodac.pub) — real pin; comment key id is untrusted.
+SEED_PUBKEY_B64="RWS3WGBOo2lQZGh3eFa0Gq0h6vDb9rCE5ZoaExEGdSko44OiPDdTVm8i"
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
@@ -17,12 +19,20 @@ STAGE1="$ROOT/oodac/stage1_noarc"
 STAGE2="$ROOT/oodac/oodac"
 
 SEED_PUB="${SEED_PUB:-$ROOT/bootstrap/seed/oodac.pub}"
-# minisign: PATH first, then repo-local tools/minisign (no system install required).
+# minisign resolver (supply-chain): absolute paths first, then tools/, then PATH.
+# Prefer abs so attacker-controlled PATH cannot inject a fake verifier.
 _MINISIGN=""
-if command -v minisign >/dev/null 2>&1; then
-  _MINISIGN="$(command -v minisign)"
-elif [[ -x "$ROOT/tools/minisign" ]]; then
+for _ms in /usr/bin/minisign /bin/minisign; do
+  if [[ -x "$_ms" ]]; then
+    _MINISIGN="$_ms"
+    break
+  fi
+done
+if [[ -z "$_MINISIGN" && -x "$ROOT/tools/minisign" ]]; then
   _MINISIGN="$ROOT/tools/minisign"
+fi
+if [[ -z "$_MINISIGN" ]] && command -v minisign >/dev/null 2>&1; then
+  _MINISIGN="$(command -v minisign)"
 fi
 # Audit: seed-binary verification before the seed is used in the bootstrap chain.
 # Integrity (sha256) always preferred; minisign is product trust (fail closed).
@@ -75,11 +85,25 @@ EOF
     exit 1
   fi
 else
-  if ! "$_MINISIGN" -V -p "$SEED_PUB" -m "${SEED}.sha256"; then
+  # Pin pubkey *body* (base64 line), not only untrusted-comment key id.
+  # Comment key id is attacker-writable; body is what minisign -V actually uses.
+  _pub_body="$(awk '!/^untrusted comment/ && NF { print $1; exit }' "$SEED_PUB")"
+  _pub_fp="$(awk '/^untrusted comment: minisign public key / { print $NF; exit }' "$SEED_PUB")"
+  if [[ -z "$_pub_body" || "$_pub_body" != "$SEED_PUBKEY_B64" ]]; then
+    echo "audit: SEED_PUB body mismatch — refusing (pinned pubkey body != $SEED_PUB)" >&2
+    echo "audit: expected SEED_PUBKEY_B64 from bootstrap script; pub may be substituted" >&2
+    exit 1
+  fi
+  if [[ -n "$_pub_fp" && "$_pub_fp" != "$SEED_PUBKEY_FP" ]]; then
+    echo "audit: SEED_PUBKEY_FP mismatch — refusing (script=${SEED_PUBKEY_FP} comment=${_pub_fp})" >&2
+    exit 1
+  fi
+  # Clean env for verifier: drop LD_PRELOAD / LD_LIBRARY_PATH / gadget vars (T3 parity).
+  if ! env -i PATH="/usr/bin:/bin" "$_MINISIGN" -V -p "$SEED_PUB" -m "${SEED}.sha256"; then
     echo "audit: minisign signature invalid — refusing" >&2
     exit 1
   fi
-  echo "audit: seed SHA + minisign OK (fp=${SEED_PUBKEY_FP})"
+  echo "audit: seed SHA + minisign OK (fp=${SEED_PUBKEY_FP} verifier=${_MINISIGN})"
 fi
 
 echo "=== STAGE 1: seed builds stage1_noarc (PURE_NO_ARC=1) ==="

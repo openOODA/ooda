@@ -41,12 +41,16 @@
 16. Host toolenv is **local** (`~/.local/ooda-toolenv`) — CI matrix must install wasmtime/clang or fail closed (already does)
 17. Monorepo SPRINT.md must track tip SHA after each push
 18. Avoid concurrent pure_build + ci_product (race deletes `oodac/oodac`)
+19. **T4 bak ignore:** `oodac/oodac.bak*`, `oodac_new`, emit temps gitignored — do not commit; local `rm` optional (see `AUDIT_RESIDUAL.md` §T4)
+20. **T4 minisign tool path:** no vendored `tools/minisign`; PATH or operator-local binary or loud `OODA_SEED_ALLOW_UNSIGNED` (`seed/SIGNING.oot`)
+21. **T4 monofile pressure:** `chs_rt_ffi.c` >350 (359); peel residual — not a silent Lock green
+22. **8.1 DEBUG:** live `tc_control_cond.oo` has product `ERR\ttype` diagnostics only — not a DEBUG leak residual until re-found
 
 ### M21/M48/M54 MaxCycles (while + range-for fuel In; residual remains)
-19. Path A/B: file-level `// MAX_CYCLES: N` → Backend-C `while` + INT..INT `for` body fuel (`ERR\tmax_cycles\texceeded`); still residual: OS cgroup, recursion / non-range for, `#[MaxCycles]` attribute — see `MAX_CYCLES.md`
+23. Path A/B: file-level `// MAX_CYCLES: N` → Backend-C `while` + INT..INT `for` body fuel (`ERR\tmax_cycles\texceeded`); still residual: OS cgroup, recursion / non-range for, `#[MaxCycles]` attribute — see `MAX_CYCLES.md`
 
 ### M22/M52–M55 Static taint (path A/B In; residual remains)
-20. **In:** line-start `// SECRET: name` → bare `println(ident)` refuse (emit + check dual-path) + direct IDENT assign-prop; **residual:** interproc, concat/call taint, NetCap/non-println sinks, `#[Secret]` attr — see `SECRET_TAINT.md`
+24. **In:** line-start `// SECRET: name` → bare `println(ident)` refuse (emit + check dual-path) + direct IDENT assign-prop; **residual:** interproc, concat/call taint, NetCap/non-println sinks, `#[Secret]` attr — see `SECRET_TAINT.md`
 
 ## Softeners inventory (do not delete without free plan)
 - `scripts/pure_rewrite_formals.py`

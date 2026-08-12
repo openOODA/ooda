@@ -22,13 +22,13 @@ Status legend:
 | Op | Cap | Check (`check_caps`) | Emit lower | Runtime | Product status |
 |----|-----|----------------------|------------|---------|----------------|
 | `read_file` | `&FsCap` | sealed free call; deny without param | `oo_read_file(cap, path)` | `chs_rt_fs.c` + `oo_cap_require` | **real** (static+runtime) |
-| `write_file` | `&FsCap` | sealed free call | `oo_write_file(cap, path, content)` | `oo_write_file` + require | **real** (static+runtime) |
+| `write_file` | `&FsCap` | sealed free call | `oo_write_file(cap, path, content)` | require + **`OODA_FS_WRITEDIR` fail-closed** (path realpath under dir; empty/unset → deny) | **real** path A — residual: **parent-realpath for new files** (nonexistent leaf `realpath` fails) |
 | `path_exists` | `&FsCap` | sealed free call | `oo_path_exists(cap, path)` | require + fopen probe | **real** |
 | `file_size` | `&FsCap` | sealed free call | `oo_file_size(cap, path)` | require + ftell | **real** |
-| `sys_exec` | `&SysCap` | sealed free call + arg-flow | multi-arg → `oo_sys_exec`; single → `oo_sys_exec1` | `fork`+`execvp` (AUDIT R2/R3 closed; not `system(3)`) | **real** |
+| `sys_exec` | `&SysCap` | sealed free call + arg-flow | multi-arg → `oo_sys_exec`; single → `oo_sys_exec1` | `fork`+`execvp` (not `system(3)`); child env **filtered** to `OODA_`/`OO_` + minimal `PATH=/usr/bin:/bin` | **real** path A (T3) |
 | `sys_spawn` / `sys_wait` / `sys_kill` | `&SysCap` | sealed free call + arg-flow | `oo_sys_spawn` / `oo_sys_wait` / `oo_sys_kill` | require Sys then **Err residual** (path A seal; no real fork/wait/kill) | **fail-closed residual** — use `sys_exec` for blocking spawn+wait; `std/os/process.oo` wrappers |
 | `sys_epoll_create` / `sys_inotify_init` / `sys_prctl` | `&SysCap` | sealed free call + arg-flow | `oo_sys_epoll_create` / `oo_sys_inotify_init` / `oo_sys_prctl` | require Sys then **Err residual** (M166 path A; not full async I/O) | **fail-closed residual** — `std/os/process.oo` thin wrappers |
-| `env_get` | `&EnvCap` | sealed free call | `oo_env_get(cap, key)` | require + getenv | **real** |
+| `env_get` | `&EnvCap` | sealed free call | `oo_env_get(cap, key)` | require + `oo_process_policy_getenv` (**only** `OODA_`/`OO_` keys) | **real** path A |
 | `fetch` | `&NetCap` | sealed free call; allow only with `NetCap` | `oo_fetch(cap, url)` | `chs_rt_sys.c` + net cap require; HTTP/1.0 GET | **real** (AUDIT R9) |
 | `tcp_bind` / `tcp_connect` / `bind_udp` | `&NetCap` | sealed free call | `oo_tcp_bind` / `oo_tcp_connect` / `oo_bind_udp` | `chs_rt_netfloor.c` + net require; real sockets; **keep fd open** in process-local slot table; Ok(`"fd:N"`) | **real** (M162; M166 keep-open path A) |
 | `tcp_write` / `tcp_read` / `tcp_close` / `udp_recv` | `&NetCap` | sealed free call | `oo_tcp_write` / `oo_tcp_read` / `oo_tcp_close` / `oo_udp_recv` | fd-slot table; write/read String bytes; close frees slot | **real** (M166) — not full HTTP/3/gRPC |
@@ -75,6 +75,9 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs), `exec`/`spawn
 - Each lowered sealed op calls `oo_cap_require_*` before ambient libc/clock/entropy/explicit alloc helper.
 - Forged / zero / classic `0x4F4F*` token → non-zero exit + `ERR\tcap\t…` (not ambient effect).
 - Not unforgeable object-caps across hostile binary rewrite; not crypto CSPRNG / attested time / OS rlimit heap isolation.
+- **T3 path A (runtime ZT):** `sys_exec` child env = `OODA_`/`OO_` only + minimal PATH; FFI handle table mutex + same-thread nested `oo_dlopen` hard refuse ([`CAP_FFI.md`](CAP_FFI.md)); `write_file` fail-closed under `OODA_FS_WRITEDIR`.
+- **T4 hygiene residuals (not closed):** bak/side binary ignore policy; `tools/minisign` not vendored; `chs_rt_ffi.c` monofile >350; 8.1 DEBUG reclassified as product ERR diagnostics — see [`AUDIT_RESIDUAL.md`](AUDIT_RESIDUAL.md) §T4.
+- **T3 residuals (explicit):** full IFC; unrestricted any-path `dlopen`; refcount UAF beyond ARC path-A free-on-ref0; parent-realpath for **new** write paths; full C TCB seal.
 - Net: `fetch` + TCP/UDP product-lowered; **fd slots keep sockets open** after connect/bind (M166 breaking vs early close). Byte IO is `tcp_read`/`tcp_write`/`udp_recv` as String (not true `&[u8]`). **TLS residual** unless `OO_HAVE_OPENSSL=1`. **No** full HTTP/3/gRPC/SOCK_RAW product. Smokes: `scripts/libfloor_net_smoke.sh`, `scripts/tcp_io_smoke.sh`, `scripts/tls_path_a_smoke.sh`.
 - Alloc: smoke returns size token / no-op free — **not** a claim of heap sandboxing.
 

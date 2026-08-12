@@ -2,8 +2,8 @@
 
 **Marker:** `CAP_FFI_PATH_A_ALPHA`  
 **Residual marker (full seal):** `CAP_FFI_RESIDUAL_ALPHA`  
-**Status:** PM **6.3 done (alpha)** — check seal + process-local FFI token + allowlisted OS dlopen Path A.  
-**Not claimed:** full C TCB / unrestricted any-path `dlopen` / raw-pointer / compile-time FFI gen / product `dlsym`.
+**Status:** PM **6.3 done (alpha)** — check seal + process-local FFI token + allowlisted OS dlopen Path A + handle-table mutex.  
+**Not claimed:** full C TCB / unrestricted any-path `dlopen` / raw-pointer / compile-time FFI gen / typed `ffi_call` of symbols.
 
 ## Product surface (path A In)
 
@@ -13,7 +13,7 @@
 | Sealed free names | `dlopen` / `dlsym` / `dlclose` / `chs_build` / `host_*` / `ooda_host_*` |
 | **Check** | Default-deny bare FFI free calls without matching `&UnsafeFFICap` + first-arg token |
 | **Emit (Backend-C)** | `dlopen` → `oo_dlopen`; `dlsym` → `oo_dlsym`; `dlclose` → `oo_dlclose`; other host-FFI free names still emit residual |
-| **Runtime** | Process-local `oo_cap_grant_ffi` / `oo_cap_require_ffi`; allowlisted OS `dlopen` Path A |
+| **Runtime** | Process-local `oo_cap_grant_ffi` / `oo_cap_require_ffi`; allowlisted OS `dlopen`; registered-handle `dlsym`/`dlclose` |
 | `// FFI: residual` | Comment form for residual honesty (full seal still residual) |
 
 ## What is true today
@@ -22,7 +22,7 @@
 |-------|----------|
 | **Process-local Fs/Sys/Net/…** | Seal their own ops; they do **NOT** seal arbitrary C TCB or raw pointers |
 | **FFI free names (check)** | Bare `dlopen` / host-FFI free calls need explicit `&UnsafeFFICap` |
-| **FFI runtime (M156/M162/M165)** | Process-local FFI token + forge deny; OS `dlopen` only under env allow rules |
+| **FFI runtime (M156/M162/M165 + T3)** | Process-local FFI token + forge deny; OS `dlopen` under env allow rules; handle-table mutex |
 | **Honesty** | This file + `cap_ffi_*` / `ffi_dlopen_path_a_smoke` |
 
 **DESIGN tension residual:** Capability sandboxing and C/C++ FFI pull opposite directions. Path A seals named free calls and a process-local token; it does **not** sandbox the whole C runtime TCB.
@@ -33,9 +33,9 @@
 
 - “FFI fully sealed” / “FFI fully enforced” / “FFI sandbox shipped” over all C  
 - Process-local Fs/Sys/… as a seal over C FFI, OS `dlopen`, or raw pointers  
-- Unrestricted any-path OS `dlopen` / product `dlsym` loading under control  
+- Unrestricted any-path OS `dlopen` / typed call of looked-up symbols  
 - Compile-time FFI generation (`import "C" "…"`) with cap taint  
-- Full DESIGN capability taint-tracking across every FFI boundary  
+- Full DESIGN capability taint-tracking / full IFC across every FFI boundary  
 
 ## Path A runtime — In
 
@@ -43,8 +43,9 @@
 |-------|----------|
 | `oo_cap_grant_ffi` | Process-local token (main inject `ffi = oo_cap_grant_ffi()`) |
 | `oo_cap_require_ffi` | Zero / classic magic forge → `ERR\tcap\t…` + exit |
-| `oo_dlopen` | After require (M165): see allow table below |
-| `oo_dlsym` / `oo_dlclose` | After require: **Err residual** stubs (`dlsym`/`dlclose` not product) |
+| `oo_dlopen` | After require (M165): allow rules below; register handle |
+| `oo_dlsym` / `oo_dlclose` | After require: **registered handles only** → opaque `sym:%p` / close (no typed invoke) |
+| Handle table mutex | `g_ffi_handles_mu` serializes register / lookup / clear |
 
 ### OS `dlopen` allow rules (M165)
 
@@ -55,7 +56,27 @@ Requires `OODA_FFI_ALLOW_DLOPEN=1`. Without it → residual Err after seal.
 | set (non-empty) | Prefix allowlist under that absolute dir (M162) |
 | empty / unset | Only under `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64` (safe system dirs) |
 
-Still residual: unrestricted any-path load, raw-pointer grammar, compile-time FFI gen (`FFI_GEN.md`), product `dlsym` resolve.
+Also path A: re-`realpath` + leaf `O_NOFOLLOW`; adjacent `.minisig` verify (M166) before `dlopen(RTLD_NOW)`.
+
+### Nested `dlopen` policy (T3 path A)
+
+| Claim | Path A |
+|-------|--------|
+| Handle table races | Mutex around table ops only (`g_ffi_handles_mu`) |
+| Concurrent loaders | Process-wide non-recursive `g_ffi_dlopen_mu` serializes allow→verify→`dlopen`→register |
+| Same-thread nested `oo_dlopen` | **Hard refuse** via TLS `g_ffi_dlopen_depth` **before** taking `g_ffi_dlopen_mu` → residual string `nested dlopen refused` (constructor re-entry fail-closed; no self-deadlock) |
+| OS `dlopen` / `dlsym` / `dlclose` | Run **outside** the handle-table mutex (avoids deadlock if a ctor re-enters via other paths) |
+| Dep loads of an allowed `.so` | Dynamic linker’s job (**residual** isolation) |
+| Raw `dlopen(3)` inside a signed ctor | **Residual** — path A seals `oo_dlopen` only, not the whole C TCB |
+
+## Explicit residuals (not path A)
+
+- Unrestricted any-path OS `dlopen`  
+- Typed `ffi_call` / raw-pointer grammar / compile-time FFI gen (`FFI_GEN.md`)  
+- Full IFC / secrecy lattice across FFI payloads (see `SECRET_TAINT.md`)  
+- Full C TCB / OS-level load isolation (still residual — do not treat path A as OS sandbox)
+- Minisig verify→`dlopen` TOCTOU (no `fdlopen` / verify-by-fd)
+- **Monofile pressure (T4 hygiene):** `runtime/chs_rt_ffi.c` live **359** lines (pack watch **>350**; global `MAX_LINES=256` ratchet also oversize). Prefer peel (minisig / allowlist / handle table) over further growth. See `AUDIT_RESIDUAL.md` §T4.
 
 **Rails:** `scripts/cap_ffi_runtime_smoke.sh`, `scripts/ffi_dlopen_path_a_smoke.sh`, `scripts/m162_residual_deepen_smoke.sh`.
 
