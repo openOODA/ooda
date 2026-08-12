@@ -142,13 +142,14 @@ Runtime round-trip: `fixtures/chs_fs_roundtrip.oo` (Fs). Smoke: `scripts/caps_ma
 |------------------|---------------------|-------|
 | `std/os/net.oo` | **Http/Tcp/Udp/Bind** preferred; `sock_raw` **NetCap-only** | CAP-G6 FIXED net facade wave |
 | `std/os/fs.oo` | **FsReadCap** read/path/size; **FsWriteCap** write | CAP-G6 FIXED fs facade wave |
-| `std/os/process.oo` | still **`&SysCap`** | ProcessCap facade residual (CAP-G4 prefers ProcessCap at sealed ops) |
-| `std/os/async.oo` / `python.oo` | **`&SysCap`** | hard Sys residual (join/python_embed) or unsplit facade |
+| `std/os/process.oo` | **ProcessCap** spawn/wait/kill/exec; **SysCap** epoll/inotify/prctl | ProcessCap facade FIXED; smoke `cap_process_facade_smoke.sh` |
+| `std/os/async.oo` | spawn **ProcessCap**; join **SysCap** | honest split (join hard Sys residual) |
+| `std/os/python.oo` | **`&SysCap` only** | hard residual `python_embed` — **not** ProcessCap |
 | `std/os/sync.oo` / `thread.oo` | **`&ThreadCap`** | pre-G6 path-A |
 
-**CAP-G1/G2 enforce maps** already path-A (preferred + legacy supersede + wrong-granular deny). **CAP-G6** moves **std call-site contracts** onto preferred tokens for product net+fs facades. Smoke: `scripts/cap_g6_std_migrate_smoke.sh` (exit 0 = path-A wave; reports residual bare NetCap/FsCap counts; **SysCap bulk residual is NOTE not FAIL** — ~571 hits under external `std/src`, inventory [`cap_g6_syscap_inventory.oot`](../../openOODA/audit/cap_g6_syscap_inventory.oot)).
+**CAP-G1/G2 enforce maps** already path-A (preferred + legacy supersede + wrong-granular deny). **CAP-G6** moves **std call-site contracts** onto preferred tokens for product net+fs facades. Smokes: `scripts/cap_g6_std_migrate_smoke.sh` (exit 0 = path-A wave; residual bare NetCap/FsCap counts; **SysCap bulk residual is NOTE not FAIL** — ~571 hits under external `std/src`, inventory [`cap_g6_syscap_inventory.oot`](../../openOODA/audit/cap_g6_syscap_inventory.oot)); **ProcessCap facades:** `scripts/cap_process_facade_smoke.sh` exit 0 (process spawn/exec ProcessCap; prctl SysCap; async split; **python stays SysCap**).
 
-**Honesty — not claimed:** full std SysCap/NetCap/FsCap purge; ProcessCap std facades; domain stub least-privilege. **Residual open:** cap forgery via `as fn(...)` cast (AGY); full OS isolation not claimed. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md) § M166 + [`CAPS.oot`](../../openOODA/CAPS.oot) CAP-G6 row + [`cap_g6_phalanx_rollup.oot`](../../openOODA/audit/cap_g6_phalanx_rollup.oot).
+**Honesty — not claimed:** full std SysCap/NetCap/FsCap purge; domain stub least-privilege; ProcessCap for `python_embed`. **ProcessCap product facades green** (process spawn/exec/wait/kill + async spawn). **Residual open:** domain SysCap bulk (~571); cap forgery via `as fn(...)` cast (AGY); full OS isolation not claimed. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md) § M166 + [`CAPS.oot`](../../openOODA/CAPS.oot) + [`cap_process_facade_rollup.oot`](../../openOODA/audit/cap_process_facade_rollup.oot) + [`cap_g6_process_facades.oot`](../../openOODA/audit/cap_g6_process_facades.oot).
 
 ---
 

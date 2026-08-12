@@ -64,7 +64,9 @@ Classic `0x4F4F*` constants are **forged values that must be denied**, not ambie
 
 | Sample | Cap | Shape |
 |--------|-----|--------|
-| `std/os/process.oo` | `&SysCap` | wrappers + `main(sys: &SysCap)` honesty probe; **ProcessCap facade residual** (CAP-G4 prefers ProcessCap at sealed `sys_exec` et al.) |
+| `std/os/process.oo` | **ProcessCap** spawn/wait/kill/exec; **SysCap** epoll/inotify/prctl | dual-cap facade green (smoke `cap_process_facade_smoke.sh`); ProcessCap↛hard Sys |
+| `std/os/async.oo` | **ProcessCap** spawn; **SysCap** join | honest split; ProcessCap alone ↛ join |
+| `std/os/python.oo` | **`&SysCap` only** | **python stays SysCap** (`python_embed` hard residual) |
 | `std/os/net.oo` | **CAP-G6:** Http/Tcp/Udp/Bind preferred; `sock_raw` NetCap-only | product facades take preferred granular first; legacy NetCap supersede remains at check+runtime |
 | `std/os/sync.oo`, `std/os/thread.oo` | `&ThreadCap` | mutex / spawn / join |
 | `std/os/fs.oo` | **CAP-G6:** FsReadCap read/path/size; FsWriteCap write | preferred granular; legacy FsCap supersede remains |
@@ -73,7 +75,7 @@ Classic `0x4F4F*` constants are **forged values that must be denied**, not ambie
 | `fixtures/malloc_path_a.oo` | `&AllocCap` | `malloc`/`free` under alloc |
 | `fixtures/libfloor_thread_cap.oo` | `&ThreadCap` | spawn + mutex |
 
-**CAP-G6 honesty:** net+fs **product facade wave FIXED** (`cap_g6_std_migrate_smoke.sh`). **SysCap bulk residual** under external `std/src` (~571 hits) + process/async/python facades — inventory [`cap_g6_syscap_inventory.oot`](../../openOODA/audit/cap_g6_syscap_inventory.oot). Full SysCap purge **not** claimed.
+**CAP-G6 honesty:** net+fs **product facade wave FIXED** (`cap_g6_std_migrate_smoke.sh`). **ProcessCap product facades FIXED** (`std/os/process.oo` spawn/exec; async spawn; smoke `cap_process_facade_smoke.sh`). **python.oo stays SysCap** (hard residual — do not greenwash as ProcessCap). **SysCap bulk residual** under external `std/src` (~571 hits) — inventory [`cap_g6_syscap_inventory.oot`](../../openOODA/audit/cap_g6_syscap_inventory.oot). Full SysCap purge **not** claimed.
 
 **Smokes (path A rails):**
 
