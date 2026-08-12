@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <sys/stat.h>
 
 /* Cap seals: process-local tokens from chs_rt_sys.c (R1 / CAP-G2).
  * require_fsread/fswrite accept granular OR full FsCap (g_tok_fs). */

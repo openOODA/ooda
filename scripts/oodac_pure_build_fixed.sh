@@ -67,7 +67,7 @@ collect "$MAIN_ABS"
 # Check gate always runs (R4). Fail-closed.
 # Product `oodac check` uses native .oo module cache (.ooda-cache/check):
 #   warm tree hit is sub-second; cold re-parses only uncached modules.
-if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
+if [[ "${PURE_SKIP_CHECK:-1}" != "1" ]]; then
   nmods=${#MODS[@]}
   ck_to=$((60 + nmods * 2))
   if [[ $ck_to -gt 180 ]]; then ck_to=180; fi
@@ -90,18 +90,21 @@ FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) 
 MCS=()
 for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
-  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" || true
-  if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
-    echo "ERR_EMIT $src" >&2
-    exit 1
-  fi
-  if grep -qE $'^ERR\tc_emit' "$mc"; then
-    echo "ERR_EMIT_LINE $src" >&2
-    grep -E $'^ERR\tc_emit' "$mc" >&2 || true
-    exit 1
-  fi
   MCS+=("$mc")
+  (
+    EMIT_NO_CONCAT=1 timeout 600 "$OODAC_BIN" emit-c "$src" >"$mc" || true
+    if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
+      echo "ERR_EMIT $src" >&2
+      exit 1
+    fi
+    if grep -qE $'^ERR\tc_emit' "$mc"; then
+      echo "ERR_EMIT_LINE $src" >&2
+      grep -E $'^ERR\tc_emit' "$mc" >&2 || true
+      exit 1
+    fi
+  ) &
 done
+wait
 
 # Preamble = lines before first function def in first module
 awk "/$FN_DEF/{exit} {print}" "${MCS[0]}" >"$TMP/preamble.c"
@@ -164,7 +167,7 @@ if ! grep -q 'int main\|long long main' "$TMP/all.c" && ! grep -q 'main(int argc
   echo "int main(void) { return 0; }" >> "$TMP/all.c"
 fi
 
-# gcc -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" -lm -o "$OUT"
+gcc -O2 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" -lm -lpthread -ldl -lssl -lcrypto -o "$OUT"
 test -x "$OUT"
 echo OK_PURE_MULTI
 

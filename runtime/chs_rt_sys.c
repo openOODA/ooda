@@ -407,11 +407,13 @@ OoResS oo_fetch(long long cap, OoStr url) {
   while ((nr = read(fd, req, sizeof req)) > 0) {
     if (acc_len + (size_t)nr + 1 > acc_cap) {
       acc_cap = (acc_len + (size_t)nr + 1) * 2;
-      acc = (char *)realloc(acc, acc_cap);
-      if (!acc) {
+      char *nacc = (char *)realloc(acc, acc_cap);
+      if (!nacc) {
+        free(acc);
         close(fd);
         return r;
       }
+      acc = nacc;
     }
     memcpy(acc + acc_len, req, (size_t)nr);
     acc_len += (size_t)nr;
@@ -453,7 +455,10 @@ OoSList sys_args(long long cap) {
     if (buf[i] == '\0') {
       if (!first) {
         OoStr arg = oo_str_lit(buf + start);
-        l = oo_slist_push(l, arg);
+        OoSList next = oo_slist_push(l, arg);
+        oo_slist_release(l);
+        l = next;
+        oo_str_release(arg);
       }
       first = 0;
       start = i + 1;
