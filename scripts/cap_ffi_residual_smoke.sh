@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-DOC="$ROOT/bootstrap/CAP_FFI.md"
+DOC="$ROOT/bootstrap/CAP_FFI.oot"
 FIX="$ROOT/fixtures/ffi_marker.oo"
 fail=0
 pass() { echo "OK $*"; }
@@ -21,7 +21,7 @@ fi
 # Residual doc must not claim FFI fully sealed/enforced as product truth
 # (affirmative verbs only — denial list may quote the forbidden phrases)
 if grep -nE '(ships|implements|enforces|provides) (full )?(FFI (sandbox|seal)|sealed FFI)|FFI (sandbox|boundary) is (shipped|enforced|product.?green)|FFI fully (sealed|enforced) shipped' "$DOC"; then
-  bad "CAP_FFI.md claims FFI fully sealed/enforced shipped"
+  bad "CAP_FFI.oot claims FFI fully sealed/enforced shipped"
 else
   pass "doc does not claim FFI fully sealed/enforced shipped"
 fi
@@ -73,7 +73,7 @@ fi
 
 # Residual honesty: residual docs must not claim FFI fully sealed elsewhere
 # Scope: bootstrap residual surface only (not DESIGN aspirational)
-_hits="$(grep -rn --include='*.md' --exclude='CAP_FFI.md' --exclude-dir=dist \
+_hits="$(grep -rn --include='*.oot' --exclude='CAP_FFI.oot' --exclude-dir=dist \
   -E 'FFI fully (sealed|enforced)|FFI sandbox (shipped|enforced|green)' \
   "$ROOT/bootstrap" 2>/dev/null || true)"
 if [[ -n "$_hits" ]] && echo "$_hits" | grep -vE 'not |residual|not-started|no false|do NOT' | grep -q .; then
@@ -92,12 +92,12 @@ fi
 
 
 # M25 strengthen: dual-claim ceiling + product truth + ci wire
-if ! grep -qE 'CAP_FFI|do not.*seal C FFI|C FFI' bootstrap/STATIC_CAPS.md; then
+if ! grep -qE 'CAP_FFI|do not.*seal C FFI|C FFI' bootstrap/STATIC_CAPS.oot; then
   echo "FAIL STATIC_CAPS missing Cap/FFI residual link" >&2; fail=1
 else
   echo "OK STATIC_CAPS names Cap/FFI residual ceiling"
 fi
-if ! grep -qE 'CAP_FFI|do not.*seal C|interop' bootstrap/CAPS_MATRIX.md; then
+if ! grep -qE 'CAP_FFI|do not.*seal C|interop' bootstrap/CAPS_MATRIX.oot; then
   echo "FAIL CAPS_MATRIX missing Cap/FFI residual note" >&2; fail=1
 else
   echo "OK CAPS_MATRIX names Cap/FFI residual ceiling"

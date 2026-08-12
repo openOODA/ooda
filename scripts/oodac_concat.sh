@@ -13,6 +13,8 @@ fi
 # stack / done as newline-separated absolute-ish paths
 STACK=""
 DONE=""
+NL='
+'
 
 abspath() {
     # $1 path relative to $2 dir
@@ -26,17 +28,24 @@ abspath() {
 
 # Recursive expand: prints body to stdout
 expand_file() {
-    _path="$1"
-    _stack="$2"
+    local _path="$1"
+    local _stack="$2"
+    local _stack2
+    local _dir
+    local _ip
+    local IMPORT_NAME
+    local line
 
+    NL='
+'
     case "$_stack" in
-        *"$(printf '\n')$_path$(printf '\n')"*)
+        *"${NL}${_path}${NL}"*)
             echo "ERR_IMPORT_CYCLE $_path" >&2
             exit 1
             ;;
     esac
     case "$DONE" in
-        *"$(printf '\n')$_path$(printf '\n')"*) return 0 ;;
+        *"${NL}${_path}${NL}"*) return 0 ;;
     esac
 
     if [ ! -f "$_path" ]; then
@@ -44,7 +53,7 @@ expand_file() {
         exit 1
     fi
 
-    _stack2="${_stack}${_path}$(printf '\n')"
+    _stack2="${_stack}${_path}${NL}"
     _dir=$(dirname "$_path")
     # shellcheck disable=SC2162
     while IFS= read -r line || [ -n "$line" ]; do
@@ -60,7 +69,7 @@ expand_file() {
             echo "$line"
         fi
     done < "$_path"
-    DONE="${DONE}${_path}$(printf '\n')"
+    DONE="${DONE}${_path}${NL}"
 }
 
 # Resolve MAIN to a concrete path
@@ -73,4 +82,4 @@ if command -v realpath >/dev/null 2>&1; then
     MAIN_ABS=$(realpath "$MAIN_FILE")
 fi
 
-expand_file "$MAIN_ABS" "$(printf '\n')"
+expand_file "$MAIN_ABS" "${NL}"

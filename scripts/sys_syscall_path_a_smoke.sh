@@ -42,8 +42,8 @@ else
   bad "process.oo missing wrappers"
 fi
 # M166 std cap scoping samples path A — bootstrap honesty (AGY)
-if grep -q 'M166 path A — std cap scoping samples' bootstrap/STATIC_CAPS.md \
-  && grep -q 'as fn' bootstrap/STATIC_CAPS.md \
+if grep -q 'M166 path A — std cap scoping samples' bootstrap/STATIC_CAPS.oot \
+  && grep -q 'as fn' bootstrap/STATIC_CAPS.oot \
   && grep -q '&NetCap' std/os/net.oo; then
   pass "STATIC_CAPS std cap scoping + as-fn residual; net.oo NetCap"
 else

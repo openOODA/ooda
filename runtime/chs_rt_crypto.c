@@ -203,3 +203,14 @@ OoResS python_embed_internal(long long sys, OoStr model) {
   oo_cap_require_sys(sys, "python_embed");
   (void)model; OoResS r; r.ok = 0; r.val = oo_str_lit("Err (Not Implemented)"); return r;
 }
+
+long long oo_cg_sign(long long cap) {
+  oo_cap_require_sign(cap, "oo_cg_sign");
+  return 0;
+}
+
+int oo_cg_verify(long long cap, long long sig) {
+  oo_cap_require_sign(cap, "oo_cg_verify");
+  (void)sig;
+  return 1;
+}

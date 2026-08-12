@@ -91,7 +91,7 @@ else
 fi
 
 # Cap forgery residual honesty (still open — not fixed this mile)
-if grep -qiE 'as fn|forgery|cast' bootstrap/STATIC_CAPS.md; then
+if grep -qiE 'as fn|forgery|cast' bootstrap/STATIC_CAPS.oot; then
   pass "STATIC_CAPS documents as-fn cast forgery residual"
 else
   bad "STATIC_CAPS missing cast forgery residual"

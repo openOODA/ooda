@@ -1,0 +1,189 @@
+// job: cheap fn-name scan for P7 modular check (no tokenize)
+// in: module source String; out: "\tname\t" table / depth-0 binds
+// Darwin: tokenize_lines lost (1.8GiB RSS / 120s on 150 modules).
+// Char-walk wins. Skip // comments and "strings" so fake names
+// cannot seed extra_binds (typecheck fail-open).
+// peer1 ACCEPT: tokenize_lines grepped out of scan path.
+
+// Seed emit cannot lower `.contains` (types String as int). Char walk only.
+fn scan_charset_has(set: String, c: String) -> Bool {
+    let n = chars_len(set);
+    let mut i = 0;
+    while i < n {
+        if char_at(set, i) == c {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn scan_is_ident_start(c: String) -> Bool {
+    return scan_charset_has("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_", c);
+}
+
+fn scan_has_name(names: String, fname: String) -> Bool {
+    let marker: String = "\t" + fname + "\t";
+    let nn = chars_len(names);
+    let mn = chars_len(marker);
+    if mn > nn {
+        return false;
+    }
+    let mut i = 0;
+    while i + mn <= nn {
+        let mut j = 0;
+        let mut ok = true;
+        while j < mn {
+            if char_at(names, i + j) != char_at(marker, j) {
+                ok = false;
+                j = mn;
+            } else {
+                j = j + 1;
+            }
+        }
+        if ok {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn scan_is_ident_char(c: String) -> Bool {
+    if scan_is_ident_start(c) {
+        return true;
+    }
+    return scan_charset_has("0123456789", c);
+}
+
+fn scan_skip_line_comment(src: String, n: Int, i0: Int) -> Int {
+    let mut i = i0;
+    while i < n {
+        if char_at(src, i) == "\n" {
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+fn scan_skip_string(src: String, n: Int, i0: Int) -> Int {
+    let mut i = i0;
+    while i < n {
+        let q = char_at(src, i);
+        if q == "\\" {
+            i = i + 2;
+        } else if q == "\"" {
+            return i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    return i;
+}
+
+// Light scan: "\tfnName\tfnName2\t" for all fn names in source.
+// Immune: comments + strings are not names.
+pub fn scan_fn_names(src: String) -> String {
+    let mut names: String = "\t";
+    let n = chars_len(src);
+    let mut i = 0;
+    while i < n {
+        let c = char_at(src, i);
+        if c == "/" {
+            if i + 1 < n {
+                if char_at(src, i + 1) == "/" {
+                    i = scan_skip_line_comment(src, n, i + 2);
+                } else {
+                    i = i + 1;
+                }
+            } else {
+                i = i + 1;
+            }
+        } else if c == "\"" {
+            i = scan_skip_string(src, n, i + 1);
+        } else if c == "f" {
+            let mut is_fn = false;
+            if i + 1 < n {
+                if char_at(src, i + 1) == "n" {
+                    let mut prev_ok = true;
+                    if i > 0 {
+                        if scan_is_ident_char(char_at(src, i - 1)) {
+                            prev_ok = false;
+                        }
+                    }
+                    let mut next_ok = true;
+                    if i + 2 < n {
+                        if scan_is_ident_char(char_at(src, i + 2)) {
+                            next_ok = false;
+                        }
+                    }
+                    if prev_ok {
+                        if next_ok {
+                            is_fn = true;
+                        }
+                    }
+                }
+            }
+            if is_fn {
+                let mut j = i + 2;
+                while j < n {
+                    let w = char_at(src, j);
+                    if w == " " || w == "\t" {
+                        j = j + 1;
+                    } else {
+                        break;
+                    }
+                }
+                if j < n {
+                    if scan_is_ident_start(char_at(src, j)) {
+                        let mut fname = "";
+                        while j < n {
+                            let fc = char_at(src, j);
+                            if scan_is_ident_char(fc) {
+                                fname = fname + fc;
+                                j = j + 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        if !scan_has_name(names, fname) {
+                            names = names + fname + "\t";
+                        }
+                    }
+                }
+                i = j;
+            } else {
+                i = i + 1;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    return names;
+}
+
+// Convert scan_fn_names "\tfoo\tbar\t" → depth-0 binds for
+// typecheck_undefined_vars_ext. Residual: shared sig tables not wired.
+pub fn names_to_depth0_binds(names: String) -> String {
+    let mut binds = "\t";
+    let n = chars_len(names);
+    let mut i = 0;
+    let mut cur = "";
+    while i < n {
+        let c = char_at(names, i);
+        if c == "\t" {
+            if chars_len(cur) > 0 {
+                binds = binds + cur + "@0\t";
+                cur = "";
+            }
+        } else {
+            cur = cur + c;
+        }
+        i = i + 1;
+    }
+    if chars_len(cur) > 0 {
+        binds = binds + cur + "@0\t";
+    }
+    return binds;
+}

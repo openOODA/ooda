@@ -8,7 +8,7 @@ export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 [[ -x "$OODAC" ]] || { echo "ERR_NO_OODAC: need $OODAC" >&2; exit 1; }
 
-DOC="$ROOT/bootstrap/SECRET_TAINT.md"
+DOC="$ROOT/bootstrap/SECRET_TAINT.oot"
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; exit 1; }
 

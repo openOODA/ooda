@@ -10,8 +10,8 @@ fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
 
-if grep -q 'M169 path A — cast forgery' bootstrap/STATIC_CAPS.md \
-  && grep -qiE 'Not a product surface|as fn' bootstrap/STATIC_CAPS.md; then
+if grep -q 'M169 path A — cast forgery' bootstrap/STATIC_CAPS.oot \
+  && grep -qiE 'Not a product surface|as fn' bootstrap/STATIC_CAPS.oot; then
   pass "STATIC_CAPS M169 cast forgery posture"
 else
   bad "STATIC_CAPS missing M169 cast section"

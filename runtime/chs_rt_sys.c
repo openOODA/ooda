@@ -272,7 +272,9 @@ OoResS oo_sys_exec(long long cap, int argc, OoStr *argv) {
 #if defined(__GLIBC__) || defined(__APPLE__)
     clearenv();
 #else
-    environ = NULL;
+    if (environ) {
+      environ[0] = NULL;
+    }
 #endif
     if (newenv) {
       newenv[n] = NULL;
@@ -328,6 +330,9 @@ OoResS oo_fetch(long long cap, OoStr url) {
   ulen -= 7;
   i = 0;
   while (i < ulen && u[i] != '/' && u[i] != ':' && i < sizeof(host) - 1) {
+    if (u[i] == '\r' || u[i] == '\n' || u[i] == ' ') {
+      return r;
+    }
     host[i] = u[i];
     i++;
   }
@@ -345,7 +350,12 @@ OoResS oo_fetch(long long cap, OoStr url) {
   }
   if (i < ulen && u[i] == '/') {
     j = 0;
-    while (i < ulen && j < sizeof(path) - 1) path[j++] = u[i++];
+    while (i < ulen && j < sizeof(path) - 1) {
+      if (u[i] == '\r' || u[i] == '\n' || u[i] == ' ') {
+        return r;
+      }
+      path[j++] = u[i++];
+    }
     path[j] = 0;
   } else {
     path[0] = '/';
@@ -372,9 +382,21 @@ OoResS oo_fetch(long long cap, OoStr url) {
   }
   n = snprintf(req, sizeof req,
                "GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n", path, host);
-  if (n <= 0 || (size_t)n >= sizeof req || write(fd, req, (size_t)n) != n) {
+  if (n <= 0 || (size_t)n >= sizeof req) {
     close(fd);
     return r;
+  }
+  {
+    ssize_t nw = 0;
+    while (nw < n) {
+      ssize_t w = write(fd, req + nw, (size_t)(n - nw));
+      if (w <= 0) {
+        if (errno == EINTR) continue;
+        close(fd);
+        return r;
+      }
+      nw += w;
+    }
   }
   acc_cap = 4096;
   acc = (char *)malloc(acc_cap);
@@ -413,4 +435,29 @@ OoResS oo_fetch(long long cap, OoStr url) {
     r.val.len = (long long)blen;
   }
   return r;
+}
+
+OoSList sys_args(long long cap) {
+  oo_cap_require_process(cap, "sys_args");
+  OoSList l = oo_slist_new();
+  FILE *f = fopen("/proc/self/cmdline", "rb");
+  if (!f) return l;
+  char buf[4096];
+  size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+  fclose(f);
+  if (n == 0) return l;
+  size_t start = 0;
+  size_t i;
+  int first = 1;
+  for (i = 0; i < n; i++) {
+    if (buf[i] == '\0') {
+      if (!first) {
+        OoStr arg = oo_str_lit(buf + start);
+        l = oo_slist_push(l, arg);
+      }
+      first = 0;
+      start = i + 1;
+    }
+  }
+  return l;
 }

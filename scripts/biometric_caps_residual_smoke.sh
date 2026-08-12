@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 fail=0
 pass(){ echo "OK $*"; }; bad(){ echo "FAIL $*" >&2; fail=1; }
-DOC="bootstrap/BIOMETRIC_CAPS.md"; MARKER="BIOMETRIC_CAPS_RESIDUAL_ALPHA"; FIX="fixtures/biometric_marker.oo"; FIXLINE="BIOMETRIC: residual"
+DOC="bootstrap/BIOMETRIC_CAPS.oot"; MARKER="BIOMETRIC_CAPS_RESIDUAL_ALPHA"; FIX="fixtures/biometric_marker.oo"; FIXLINE="BIOMETRIC: residual"
 [[ -f "$DOC" ]] || { echo missing $DOC; exit 1; }
 grep -q "$MARKER" "$DOC" && pass "marker" || bad "marker"
 grep -qiE 'fail-closed residual|Fail-closed residual' "$DOC" && pass "fail-closed" || bad "fail-closed"

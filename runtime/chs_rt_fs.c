@@ -4,6 +4,7 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <dirent.h>
 
 /* Cap seals: process-local tokens from chs_rt_sys.c (R1 / CAP-G2).
  * require_fsread/fswrite accept granular OR full FsCap (g_tok_fs). */
@@ -224,4 +225,37 @@ long long oo_monotonic_us(void) {
   clock_gettime(CLOCK_MONOTONIC, &ts);
   long long us = (long long)ts.tv_sec * 1000000LL + (long long)ts.tv_nsec / 1000LL;
   return us > 0LL ? us : 1LL;
+}
+
+OoSList fs_read_dir(long long cap, OoStr path) {
+  oo_cap_require_fsread(cap, "fs_read_dir");
+  OoSList l = oo_slist_new();
+  const char *p = path.data ? path.data : "";
+  DIR *d = opendir(p);
+  if (!d) return l;
+  struct dirent *dir;
+  while ((dir = readdir(d)) != NULL) {
+    if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) continue;
+    OoStr part = oo_str_lit(dir->d_name);
+    OoSList next = oo_slist_push(l, part);
+    oo_slist_release(l);
+    l = next;
+    oo_str_release(part);
+  }
+  closedir(d);
+  return l;
+}
+
+int fs_is_dir(long long cap, OoStr path) {
+  oo_cap_require_fsread(cap, "fs_is_dir");
+  char cpath[1024];
+  long long n = path.len;
+  if (n >= 1024) n = 1023;
+  memcpy(cpath, path.data ? path.data : "", n);
+  cpath[n] = '\0';
+  struct stat st;
+  if (stat(cpath, &st) == 0) {
+    return S_ISDIR(st.st_mode) ? 1 : 0;
+  }
+  return 0;
 }

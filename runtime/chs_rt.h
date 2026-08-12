@@ -128,6 +128,12 @@ OoResV oo_write_file(long long cap, OoStr path, OoStr content);
 int oo_path_exists(long long cap, OoStr path);
 long long oo_file_size(long long cap, OoStr path);
 OoResS oo_env_get(long long cap, OoStr key);
+long long fs_file_size(long long cap, OoStr path);
+OoSList fs_read_dir(long long cap, OoStr path);
+int fs_is_dir(long long cap, OoStr path);
+
+// sys capability functions
+OoSList sys_args(long long cap);
 
 /* Process-local caps (chs_rt_sys.c) */
 long long oo_cap_grant_fs(void);
@@ -258,7 +264,11 @@ long long oo_random(long long cap);
 void oo_seed(long long cap, long long s);
 long long oo_alloc_bytes(long long cap, long long n);
 void oo_free_bytes(long long cap, long long p);
-long long oo_cg_sign(void);
-int oo_cg_verify(long long sig);
+long long oo_cg_sign(long long cap);
+int oo_cg_verify(long long cap, long long sig);
+
+OoSList str_split(OoStr s, OoStr delim);
+OoStr str_trim(OoStr s);
+OoSList fs_read_dir(long long cap, OoStr path);
 
 #endif
