@@ -237,8 +237,11 @@ OoResS oo_actor_send(long long cap, long long id, OoStr msg);
 OoResS oo_actor_recv(long long cap, long long id);
 /* Process-policy env: only OODA_* / OO_* keys (not product env_get). */
 const char *oo_process_policy_getenv(const char *key);
-/* Path-A metamorphic floor: process-local epoch (not runtime code mutation). */
+/* Path-A metamorphic floor: process-local epoch / mix (not runtime code mutation). */
 long long oo_meta_epoch(void);
+long long oo_meta_mix(long long salt);
+int oo_meta_is_path_a(void);
+void oo_meta_decoy_touch(void);
 /* HITL requires process EnvCap + FsCap (TTY / policy env). */
 OoResS oo_verify_human(long long env, long long fs, OoStr msg);
 OoResS oo_gpu_launch(long long cap, OoStr shader);

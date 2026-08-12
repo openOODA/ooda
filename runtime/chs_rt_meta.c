@@ -1,4 +1,4 @@
-/* Path-A metamorphic floor: process-local epoch for future immune layouts.
+/* Path-A metamorphic floor: process-local epoch + mix helpers for immune layouts.
  * Not runtime assembly mutation. Full DESIGN metamorphic product is residual. */
 #include "chs_rt.h"
 #include <unistd.h>
@@ -8,6 +8,7 @@
 
 static long long g_meta_epoch;
 static int g_meta_ready;
+static volatile long long g_meta_decoy_sink;
 
 static void oo_meta_init(void) {
   unsigned char b[8];
@@ -38,9 +39,36 @@ static void oo_meta_init(void) {
   g_meta_ready = 1;
 }
 
-/* Process-local random epoch fixed at first call. For layout/immune hooks.
- * Residual: does not re-morph code after load. */
+/* Process-local random epoch fixed at first call. Residual: not .text rewrite. */
 long long oo_meta_epoch(void) {
   oo_meta_init();
   return g_meta_epoch;
+}
+
+/* Diversify seeds: epoch mixed with salt (not CSPRNG product claim). */
+long long oo_meta_mix(long long salt) {
+  unsigned long long x;
+  oo_meta_init();
+  x = (unsigned long long)g_meta_epoch ^ (unsigned long long)salt;
+  x ^= x << 13;
+  x ^= x >> 7;
+  x ^= x << 17;
+  x *= 0x9E3779B97F4A7C15ULL;
+  return (long long)(x >> 1);
+}
+
+/* Advisory: OODA_METAMORPHIC=1 or OO_METAMORPHIC=1. Does not morph .text. */
+int oo_meta_is_path_a(void) {
+  const char *a = oo_process_policy_getenv("OODA_METAMORPHIC");
+  const char *b = oo_process_policy_getenv("OO_METAMORPHIC");
+  if (a && a[0] == '1' && a[1] == '\0') return 1;
+  if (b && b[0] == '1' && b[1] == '\0') return 1;
+  return 0;
+}
+
+/* Volatile sink so meta symbols stay live when only this is referenced. */
+void oo_meta_decoy_touch(void) {
+  oo_meta_init();
+  g_meta_decoy_sink = g_meta_epoch;
+  (void)g_meta_decoy_sink;
 }
