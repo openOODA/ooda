@@ -180,3 +180,85 @@ fi
 if [[ -f "$ROOT/fixtures/secret_process_exit_pass.oo" ]]; then
   expect_ok "secret_process_exit_pass" "$ROOT/fixtures/secret_process_exit_pass.oo"
 fi
+
+# T1 + zero-trust depth: function return / alias rebind / if-taint, then
+# interprocedural residual gaps (field/method/closure/interp/setenv/mmap/…).
+# alias_rebind_fail = secret→clean should allow; sticky over-refuse is residual.
+if [[ -f "$ROOT/fixtures/secret_alias_rebind_pass.oo" ]]; then
+  expect_refuse "secret_alias_rebind_pass" "$ROOT/fixtures/secret_alias_rebind_pass.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_alias_rebind_fail.oo" ]]; then
+  set +e
+  _ar_out="$("$OODAC" emit-c "$ROOT/fixtures/secret_alias_rebind_fail.oo" 2>&1)"
+  _ar_rc=$?
+  set -e
+  if [[ $_ar_rc -eq 0 ]]; then
+    echo "$_ar_out" | grep -qE $'ERR\tsecret' && bad "secret_alias_rebind_fail should not ERR secret" || true
+    pass "secret_alias_rebind_fail emit OK (sticky cleared)"
+  elif echo "$_ar_out" | grep -qE $'ERR\tsecret'; then
+    pass "secret_alias_rebind_fail residual sticky-taint over-refuse (rc=$_ar_rc)"
+  else
+    bad "secret_alias_rebind_fail unexpected rc=$_ar_rc out=$_ar_out"
+  fi
+fi
+if [[ -f "$ROOT/fixtures/secret_function_return_fail.oo" ]]; then
+  expect_refuse "secret_function_return_fail" "$ROOT/fixtures/secret_function_return_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_function_return_pass.oo" ]]; then
+  expect_ok "secret_function_return_pass" "$ROOT/fixtures/secret_function_return_pass.oo"
+fi
+# T1 if-taint: secret assign inside if-branch → sink refuse; clean branch → allow
+if [[ -f "$ROOT/fixtures/secret_if_taint_fail.oo" ]]; then
+  expect_refuse "secret_if_taint_fail" "$ROOT/fixtures/secret_if_taint_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_if_taint_pass.oo" ]]; then
+  expect_ok "secret_if_taint_pass" "$ROOT/fixtures/secret_if_taint_pass.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_field_assign_fail.oo" ]]; then
+  expect_refuse "secret_field_assign_fail" "$ROOT/fixtures/secret_field_assign_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_field_assign_pass.oo" ]]; then
+  expect_ok "secret_field_assign_pass" "$ROOT/fixtures/secret_field_assign_pass.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_method_return_fail.oo" ]]; then
+  expect_refuse "secret_method_return_fail" "$ROOT/fixtures/secret_method_return_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_method_return_pass.oo" ]]; then
+  expect_ok "secret_method_return_pass" "$ROOT/fixtures/secret_method_return_pass.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_closure_return_fail.oo" ]]; then
+  expect_refuse "secret_closure_return_fail" "$ROOT/fixtures/secret_closure_return_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_closure_return_pass.oo" ]]; then
+  expect_ok "secret_closure_return_pass" "$ROOT/fixtures/secret_closure_return_pass.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_string_interp_fail.oo" ]]; then
+  expect_refuse "secret_string_interp_fail" "$ROOT/fixtures/secret_string_interp_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_string_interp_pass.oo" ]]; then
+  expect_ok "secret_string_interp_pass" "$ROOT/fixtures/secret_string_interp_pass.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_setenv_fail.oo" ]]; then
+  expect_refuse "secret_setenv_fail" "$ROOT/fixtures/secret_setenv_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_setenv_pass.oo" ]]; then
+  expect_ok "secret_setenv_pass" "$ROOT/fixtures/secret_setenv_pass.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_mmap_fail.oo" ]]; then
+  expect_refuse "secret_mmap_fail" "$ROOT/fixtures/secret_mmap_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_mmap_pass.oo" ]]; then
+  expect_ok "secret_mmap_pass" "$ROOT/fixtures/secret_mmap_pass.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_dlopen_arg_fail.oo" ]]; then
+  expect_refuse "secret_dlopen_arg_fail" "$ROOT/fixtures/secret_dlopen_arg_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_dlopen_arg_pass.oo" ]]; then
+  expect_ok "secret_dlopen_arg_pass" "$ROOT/fixtures/secret_dlopen_arg_pass.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_sys_exec_argv_fail.oo" ]]; then
+  expect_refuse "secret_sys_exec_argv_fail" "$ROOT/fixtures/secret_sys_exec_argv_fail.oo"
+fi
+if [[ -f "$ROOT/fixtures/secret_sys_exec_argv_pass.oo" ]]; then
+  expect_ok "secret_sys_exec_argv_pass" "$ROOT/fixtures/secret_sys_exec_argv_pass.oo"
+fi

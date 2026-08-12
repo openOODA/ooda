@@ -79,6 +79,10 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
     if sec_env != "" {
         fn_env = fn_env + sec_env;
     }
+    // DE2.1+PV2.1: shared __fr_secret__ mark (emit + check). Requires sec_env merge
+    // first so file-level SECRET names are visible when marking fns. Does not touch
+    // HITL or metamorphic pre-passes below.
+    fn_env = c_secret_mark_returning_fns(src, toks, fn_env);
     check_secret_println_sinks(src, toks);
     // M168 path A: emit C typedefs for `type Name = struct {..}` / simple aliases
     // (before fns so Point/Box params and lits compile). Residual: List[Struct] not product.
@@ -88,6 +92,8 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
         c_emit_type_aliases(toks);
     }
     // Pre-pass: collect all fn return types to populate fn_env with __fr__ flags
+    // (secret returning-fn marks already applied via c_secret_mark_returning_fns).
+    // Must still brace-skip each body so nested KW_FN/idents are not re-scanned.
     let mut pre_pos: Int = 0;
     while pre_pos < n {
         let k: String = field_at(list_get(toks, pre_pos), 0);
@@ -107,9 +113,37 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
             }
             if p < n && field_at(list_get(toks, p), 0) == "ARROW" {
                 p = p + 1;
-                let ret_ty: String = field_at(list_get(toks, p), 3);
-                if ret_ty == "String" {
-                    fn_env = c_env_put(fn_env, "__fr__" + fn_name, "T");
+                if p < n {
+                    let ret_ty: String = field_at(list_get(toks, p), 3);
+                    if ret_ty == "String" {
+                        fn_env = c_env_put(fn_env, "__fr__" + fn_name, "T");
+                    }
+                }
+                // Advance to body LBRACE (multi-token ret types: List[String], etc.)
+                while p < n {
+                    let rk: String = field_at(list_get(toks, p), 0);
+                    if rk == "LBRACE" {
+                        break;
+                    }
+                    if rk == "KW_FN" || rk == "KW_PUB" || rk == "KW_TYPE" || rk == "SEMI" {
+                        break;
+                    }
+                    p = p + 1;
+                }
+            }
+            // Skip body so next top-level item is found correctly (no secret walk here).
+            if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+                let mut bd: Int = 1;
+                p = p + 1;
+                while p < n && bd > 0 {
+                    let bk: String = field_at(list_get(toks, p), 0);
+                    if bk == "LBRACE" {
+                        bd = bd + 1;
+                    } else if bk == "RBRACE" {
+                        bd = bd - 1;
+                        if bd == 0 { break; }
+                    }
+                    p = p + 1;
                 }
             }
             pre_pos = p;
@@ -372,4 +406,54 @@ pub fn c_find_enclosing_fn(toks: List[String], brace_pos: Int, n: Int) -> String
         i = i - 1;
     }
     return "";
+}
+
+// DE2.1+PV2.1: true iff the (trimmed) line carries a `// SECRET:` directive
+// (mirrors c_is_hitl_required_line grammar). Used by the __fr_secret__<fn>
+// pre-pass to detect bodies that declare SECRET tags even when no tagged
+// IDENT is referenced in token form.
+pub fn c_is_secret_directive_line(s: String) -> Bool {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == " " || c == "\t" {
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    if i + 1 >= n {
+        return false;
+    }
+    if char_at(s, i) != "/" || char_at(s, i + 1) != "/" {
+        return false;
+    }
+    i = i + 2;
+    while i < n {
+        let c2: String = char_at(s, i);
+        if c2 == " " || c2 == "\t" {
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    let rest: String = str_slice(s, i, n);
+    let rn: Int = chars_len(rest);
+    if rn < 8 {
+        return false;
+    }
+    if char_at(rest, 0) != "S" || char_at(rest, 1) != "E" || char_at(rest, 2) != "C"
+        || char_at(rest, 3) != "R" || char_at(rest, 4) != "E" || char_at(rest, 5) != "T"
+        || char_at(rest, 6) != ":" {
+        return false;
+    }
+    if rn == 7 {
+        return false;
+    }
+    let fc: String = char_at(rest, 7);
+    if fc != " " && fc != "\t" {
+        return false;
+    }
+    return true;
 }
