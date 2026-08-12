@@ -24,6 +24,8 @@ Security for sealed effects on the claimed path:
 
 **Honest ceiling:** process-local tokens stop accidental ambient effects (I/O, clock, entropy, explicit alloc helpers) and classic magic forges on Backend-C. They do **not** stop a hostile binary that calls `oo_cap_grant_*` or patches `oo_cap_require` out.
 
+**CAP-G3 residual-only (not product seal):** Process/Sync/Mem/Audio/Camera/Usb/Hid/Window/Frame/Sign have grant + **exact** `oo_cap_require_*` stubs (`chs_rt_sys.c`) but **no** sealed free-call ops / product lowers. Catalog honesty in [`CAPS.oot`](../../openOODA/CAPS.oot) + matrix residual table. Do **not** claim HW/UI product enforce.
+
 Classic `0x4F4F*` constants are **forged values that must be denied**, not ambient grants.  
 `oo_random` uses host entropy when available (else process LCG) — **not** a cryptographic CSPRNG guarantee.
 

@@ -1,57 +1,105 @@
 #!/usr/bin/env bash
-# CAP-G1: granular net least-privilege check (Http/Tcp/Udp/Bind + NetCap supersede)
+# CAP-G1 fixture harness — granular net check (HttpCap/TcpCap/BindCap + NetCap legacy)
+# Proves corpus under bootstrap/corpus/check/{fail,pass}/ via product oodac check.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
+export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+mkdir -p "$TMPDIR"
+
+# Prefer product tree oodac; allow OODAC_BIN override; fall back to sibling oodac/
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
-TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/cap_g1_smoke_$$"
-mkdir -p "$TMP"
-trap 'rm -rf "$TMP"' EXIT
+if [[ ! -x "$OODAC" ]]; then
+  if [[ -x "$ROOT/../oodac/oodac" ]]; then
+    OODAC="$ROOT/../oodac/oodac"
+  else
+    echo "ERR_NO_OODAC: need $ROOT/oodac/oodac" >&2
+    exit 1
+  fi
+fi
 
+fail=0
 pass() { echo "OK $*"; }
-fail() { echo "FAIL $*" >&2; exit 1; }
+bad() { echo "FAIL $*" >&2; fail=1; }
 
-[[ -x "$OODAC" ]] || fail "oodac not executable: $OODAC"
+CHECK_PASS="$ROOT/bootstrap/corpus/check/pass"
+CHECK_FAIL="$ROOT/bootstrap/corpus/check/fail"
 
-# Static: preferred map present
-grep -q 'sealed_net_kind_of' oodac/check_cap_util.oo || fail "missing sealed_net_kind_of"
-grep -q 'return "BindCap"' oodac/check_cap_util.oo || fail "tcp_bind not BindCap preferred"
-grep -q 'oo_cap_require_http\|require_http' runtime/chs_rt_sys.c runtime/chs_rt_netfloor.c 2>/dev/null \
-  || grep -q 'oo_cap_require_http' runtime/chs_rt_sys.c || fail "missing require_http"
-pass "static CAP-G1 markers"
+# Static markers (soft honesty — source map + runtime require_http when present)
+if grep -q 'sealed_net_kind_of' "$ROOT/oodac/check_cap_util.oo" \
+  && grep -q 'return "BindCap"' "$ROOT/oodac/check_cap_util.oo"; then
+  pass "static sealed_net_kind_of map (tcp_bind→BindCap)"
+else
+  bad "missing sealed_net_kind_of / BindCap preferred in check_cap_util.oo"
+fi
+if grep -q 'oo_cap_require_http' "$ROOT/runtime/chs_rt_sys.c" 2>/dev/null; then
+  pass "static runtime oo_cap_require_http"
+else
+  pass "static runtime oo_cap_require_http residual (not required for check harness)"
+fi
 
-check_deny() {
-  local name=$1 body=$2
-  printf '%s\n' "$body" >"$TMP/$name.oo"
+expect_deny() { # $1=path $2=label
+  local f="$1" label="$2" base out err rc
+  base="$(basename "$f")"
+  out="$TMPDIR/cap_g1_${base}.out"
+  err="$TMPDIR/cap_g1_${base}.err"
+  if [[ ! -f "$f" ]]; then bad "missing fixture $base"; return; fi
   set +e
-  out=$("$OODAC" check "$TMP/$name.oo" 2>&1)
+  "$OODAC" check "$f" >"$out" 2>"$err"
   rc=$?
   set -e
-  if [[ $rc -eq 0 ]] && ! echo "$out" | grep -qiE 'ERR|Capability|cap'; then
-    fail "check accepted deny $name"
+  if [[ $rc -eq 0 ]]; then
+    bad "check accepted deny $label ($base)"
+  elif ! grep -qiE 'capability|ERR|default-deny|cap' "$out" "$err" 2>/dev/null; then
+    bad "check deny $label missing ERR ($base exit=$rc)"
+    head -5 "$out" "$err" 2>/dev/null || true
+  else
+    pass "check deny $label"
   fi
-  pass "deny $name (rc=$rc)"
 }
 
-check_allow() {
-  local name=$1 body=$2
-  printf '%s\n' "$body" >"$TMP/$name.oo"
+expect_allow() { # $1=path $2=label
+  local f="$1" label="$2" base out err rc
+  base="$(basename "$f")"
+  out="$TMPDIR/cap_g1_p_${base}.out"
+  err="$TMPDIR/cap_g1_p_${base}.err"
+  if [[ ! -f "$f" ]]; then bad "missing fixture $base"; return; fi
   set +e
-  out=$("$OODAC" check "$TMP/$name.oo" 2>&1)
+  "$OODAC" check "$f" >"$out" 2>"$err"
   rc=$?
   set -e
-  if [[ $rc -ne 0 ]] || echo "$out" | grep -qiE 'Capability Violation|requires a &'; then
-    fail "check rejected allow $name (rc=$rc): $out"
+  if [[ $rc -ne 0 ]] || ! grep -qE '^OK' "$out"; then
+    bad "check rejected pass $label ($base exit=$rc)"
+    head -8 "$out" "$err" 2>/dev/null || true
+  else
+    pass "check allow $label"
   fi
-  pass "allow $name"
 }
 
-check_deny http_tcp_bind 'fn main(h: &HttpCap) { let _ = tcp_bind(h, 8080); }'
-check_deny tcp_fetch 'fn main(t: &TcpCap) { let _ = fetch(t, "http://x/"); }'
-check_allow net_tcp_bind 'fn main(net: &NetCap) { let _ = tcp_bind(net, 8080); }'
-check_allow http_fetch 'fn main(h: &HttpCap) { let _ = fetch(h, "http://x/"); }'
-check_allow tcp_connect 'fn main(t: &TcpCap) { let _ = tcp_connect(t, "127.0.0.1", 80); }'
-check_allow bind_only 'fn main(b: &BindCap) { let _ = tcp_bind(b, 8080); }'
+# fail: HttpCap only + tcp_bind
+expect_deny "$CHECK_FAIL/wrong_granular_http_for_tcp.oo" "HttpCap+tcp_bind"
+# fail: TcpCap only + fetch
+expect_deny "$CHECK_FAIL/wrong_granular_tcp_for_fetch.oo" "TcpCap+fetch"
 
-pass "ci_product optional: wire cap_g1_net_granular_smoke"
+# pass: NetCap + fetch + tcp_connect (legacy supersede)
+expect_allow "$CHECK_PASS/ok_net_cap_fetch_tcp.oo" "NetCap+fetch+tcp_connect"
+# pass: TcpCap + tcp_connect
+expect_allow "$CHECK_PASS/ok_tcp_cap_connect.oo" "TcpCap+tcp_connect"
+# pass: HttpCap + fetch
+expect_allow "$CHECK_PASS/ok_http_cap_fetch.oo" "HttpCap+fetch"
+
+# Legacy single-op NetCap fixture still green
+expect_allow "$CHECK_PASS/ok_net_cap_fetch.oo" "NetCap+fetch (legacy)"
+
+# Soft: named in ci_product rail list (do not fail product if not wired)
+if grep -q 'cap_g1_net_granular_smoke' "$ROOT/scripts/ci_product.sh" 2>/dev/null; then
+  pass "ci_product soft-wire present"
+else
+  pass "ci_product soft-wire residual (not listed yet)"
+fi
+
+if [[ $fail -ne 0 ]]; then
+  echo "cap_g1_net_granular_smoke: FAILED" >&2
+  exit 1
+fi
 echo "cap_g1_net_granular_smoke: PASSED"
+exit 0

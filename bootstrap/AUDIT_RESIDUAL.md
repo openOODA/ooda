@@ -32,6 +32,7 @@
 | **R6** | No automatic `OoStr` free; list free is manual API (`oo_*list_free`) — process-lifetime arena for strings | Short-lived CLI processes; list free available | Emit-side drop / arena API for strings + lists |
 | **R8** | Dynamic/computed sealed callees not scanned by check | IDENT+LPAREN only | Full call-graph check |
 | **T3-R** | Full IFC; unrestricted any-path `dlopen`; refcount UAF beyond free-on-ref0; parent-realpath for **new** `write_file` paths | Path A: secret floor + allowlisted dlopen + ARC free-on-ref0 + `OODA_FS_WRITEDIR` fail-closed (existing leaf) | Full IFC product; parent-dir realpath create; OS isolation |
+| **CAP-G3** | Unused V2 grants (Process/Sync/Mem/HW/UI/Sign) had grant symbols / type accept without sealed product path | **Residual-only honesty FIXED:** catalog + CAPS_MATRIX residual table; exact-token `oo_cap_require_*` stubs in `chs_rt_sys.c`; **no** sealed ops / product lowers. Emit type-driven inject for G1/G2 main params = **DE1 residual** | Product sealed ops only when a real lower exists; CAP-G4 ProcessCap/`sys_exec` |
 
 ### T3 path A (landed runtime ZT — not residual)
 
@@ -82,7 +83,7 @@ Pack watch (T3 hygiene used ≤350 for runtime OWN units). Global strict lock is
 |------|----------:|-------|
 | `runtime/chs_rt_ffi.c` | **359** | **>350** pack pressure after T3 mutex/nested/minisig; peel residual (see [`CAP_FFI.md`](CAP_FFI.md)) |
 | `runtime/chs_rt_hitl.c` | **370** | Out of T3 OWN; HITL monofile residual |
-| `runtime/chs_rt_sys.c` | 329 | Under 350 pack watch; still over global 256 |
+| `runtime/chs_rt_sys.c` | **410** | Over pack watch after CAP-G3 exact require stubs; still over global 256; peel residual |
 | `runtime/chs_rt_fs.c` | 225 | Under both |
 
 Close monofile residual when units peel under pack watch **and** strict 256 (or ratchet documents accepted oversize with split plan).

@@ -179,6 +179,41 @@ void oo_cap_require_fswrite(long long got, const char *op) {
   }
 }
 
+/* CAP-G3 path-A residual: exact-token require stubs only.
+ * Type-accept + grant exist; sealed product ops do NOT (no Camera/Audio/…).
+ * Callers that wire a require before a future residual op fail closed on
+ * forge/zero. Do not invent product HW/UI/Process/Sync/Mem ops here. */
+void oo_cap_require_sign(long long got, const char *op) {
+  oo_cap_require(got, g_tok_sign, op ? op : "sign");
+}
+void oo_cap_require_process(long long got, const char *op) {
+  oo_cap_require(got, g_tok_process, op ? op : "process");
+}
+void oo_cap_require_sync(long long got, const char *op) {
+  oo_cap_require(got, g_tok_sync, op ? op : "sync");
+}
+void oo_cap_require_mem(long long got, const char *op) {
+  oo_cap_require(got, g_tok_mem, op ? op : "mem");
+}
+void oo_cap_require_audio(long long got, const char *op) {
+  oo_cap_require(got, g_tok_audio, op ? op : "audio");
+}
+void oo_cap_require_camera(long long got, const char *op) {
+  oo_cap_require(got, g_tok_camera, op ? op : "camera");
+}
+void oo_cap_require_usb(long long got, const char *op) {
+  oo_cap_require(got, g_tok_usb, op ? op : "usb");
+}
+void oo_cap_require_hid(long long got, const char *op) {
+  oo_cap_require(got, g_tok_hid, op ? op : "hid");
+}
+void oo_cap_require_window(long long got, const char *op) {
+  oo_cap_require(got, g_tok_window, op ? op : "window");
+}
+void oo_cap_require_frame(long long got, const char *op) {
+  oo_cap_require(got, g_tok_frame, op ? op : "frame");
+}
+
 /* R2/R3: fork + execvp with full argv (no system(3) shell). */
 OoResS oo_sys_exec(long long cap, int argc, OoStr *argv) {
   OoResS r;
