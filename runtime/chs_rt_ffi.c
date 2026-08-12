@@ -8,6 +8,9 @@
 #include <dlfcn.h>
 #include <string.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <errno.h>
 #if defined(__linux__) || defined(__APPLE__)
 #include <sys/random.h>
 #endif
@@ -79,6 +82,63 @@ static int path_under_sys_lib(const char *path) {
       || path_under_allowdir(path, "/usr/lib64");
 }
 
+/* M166 (fixes 6.5): require minisign signature on every .so loaded.
+ * Trust anchor is the .pub at OO_FFI_PUBKEY_PATH + fingerprint
+ * OO_FFI_PUBKEY_FP_DEFAULT. OODA_FFI_PUBKEY_FP env overrides fp for
+ * roll-over; pattern mirrors oo_process_policy_getenv in ffi_once_init. */
+#define OO_FFI_PUBKEY_PATH  "/etc/ooda/ffi.pub"
+#define OO_FFI_PUBKEY_FP_DEFAULT \
+  "0000000000000000000000000000000000000000000000000000000000000000"
+
+/* Verify <path>.minisig adjacent via `minisign -V -p <pk> -m <path> -P <fp>`.
+ * Returns 1 on valid signature matching expected fingerprint, 0 otherwise. */
+static int ffi_verify_signature(const char *path) {
+  char sig[PATH_MAX];
+  const char *pub_path = OO_FFI_PUBKEY_PATH;
+  pid_t pid;
+  int status;
+  size_t path_len;
+  struct stat st;
+
+  /* Residual: OODA_FFI_PUBKEY_FP / OO_FFI_PUBKEY_FP_DEFAULT are not applied
+   * here — minisign -P is a base64 pubkey, not a hex fingerprint. Path-A
+   * trust anchor is OO_FFI_PUBKEY_PATH only until a real FP pin lands. */
+  (void)OO_FFI_PUBKEY_FP_DEFAULT;
+  path_len = strlen(path);
+  if (path_len + 9 >= sizeof sig) return 0;
+  memcpy(sig, path, path_len);
+  memcpy(sig + path_len, ".minisig", 9);
+  if (stat(sig, &st) != 0) return 0;
+  if (!S_ISREG(st.st_mode)) return 0;
+  pid = fork();
+  if (pid < 0) return 0;
+  if (pid == 0) {
+    /* T3 CRITICAL: scrub child env so parent LD_PRELOAD / PATH cannot
+     * hijack the verifier into a always-success gadget. Then try absolute
+     * minisign paths before PATH. Mirrors oo_sys_exec env floor. */
+#if defined(__GLIBC__) || defined(__APPLE__)
+    clearenv();
+#else
+    {
+      extern char **environ;
+      environ = NULL;
+    }
+#endif
+    setenv("PATH", "/usr/bin:/bin", 1);
+    execl("/usr/bin/minisign", "minisign", "-V",
+          "-p", pub_path, "-m", path, (char *)NULL);
+    execl("/bin/minisign", "minisign", "-V",
+          "-p", pub_path, "-m", path, (char *)NULL);
+    execlp("minisign", "minisign", "-V",
+           "-p", pub_path, "-m", path, (char *)NULL);
+    _exit(127);
+  }
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) return 0;
+  }
+  return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
 /* Path A OS dlopen:
  * - Without OODA_FFI_ALLOW_DLOPEN=1 → residual Err after seal
  * - ALLOW=1 + ALLOWDIR set → prefix allowlist (M162)
@@ -86,13 +146,26 @@ static int path_under_sys_lib(const char *path) {
  * TOCTOU: allow check + open + dlopen is best-effort reduced via re-realpath
  * (canonical path for open/dlopen) + O_NOFOLLOW at leaf. Full fdlopen is not
  * portable. Still residual: unrestricted any-path load; no ffi_call of
- * looked-up symbols as product. */
+ * looked-up symbols as product.
+ *
+ * Concurrency (T3 / 1.10 + 4.5):
+ * - g_ffi_handles[] is only touched under g_ffi_handles_mu (register/lookup/take).
+ * - oo_dlopen body runs under process-wide non-recursive g_ffi_dlopen_mu (path-A
+ *   serialize concurrent loaders). TLS depth refuses same-thread re-entry
+ *   (constructor / nested oo_dlopen) fail-closed — no deadlock on non-recursive mu.
+ * - Residual: no handle refcount → concurrent dlsym after dlclose is use-after-
+ *   free risk; product path-A documents, does not claim multi-thread handle safety. */
 #define OO_FFI_HANDLE_SLOTS 16
 static void *g_ffi_handles[OO_FFI_HANDLE_SLOTS];
 static pthread_mutex_t g_ffi_handles_mu = PTHREAD_MUTEX_INITIALIZER;
+/* Process-wide serialize for entire oo_dlopen critical path (not recursive). */
+static pthread_mutex_t g_ffi_dlopen_mu = PTHREAD_MUTEX_INITIALIZER;
+/* Same-thread nested oo_dlopen depth (constructor re-entry). */
+static __thread int g_ffi_dlopen_depth;
 
 /* Register h in a free slot; 0 on success, -1 if full. Idempotent if h already
- * present. Keys are the returned handle:%p strings (lookup by format match). */
+ * present. Keys are the returned handle:%p strings (lookup by format match).
+ * Holds g_ffi_handles_mu for the whole scan/write only (no dlopen under it). */
 static int ffi_handle_register(void *h) {
   int i;
   int free_i = -1;
@@ -108,7 +181,8 @@ static int ffi_handle_register(void *h) {
   return 0;
 }
 
-/* Lookup by handle string key "handle:%p". Returns slot index or -1. */
+/* Lookup by handle string key "handle:%p". Returns slot index or -1.
+ * Copies void* out while still holding g_ffi_handles_mu. */
 static int ffi_handle_lookup(const char *key, void **out) {
   int i;
   int rc;
@@ -129,11 +203,25 @@ static int ffi_handle_lookup(const char *key, void **out) {
   return -1;
 }
 
-static void ffi_handle_clear(int slot) {
-  if (slot < 0 || slot >= OO_FFI_HANDLE_SLOTS) return;
+/* Atomically lookup + clear slot (ownership transfer for dlclose). Prevents
+ * double-dlclose of the same registration. dlclose itself runs outside the lock. */
+static int ffi_handle_take(const char *key, void **out) {
+  int i;
+  char buf[96];
+  if (!key || !key[0]) return -1;
   pthread_mutex_lock(&g_ffi_handles_mu);
-  g_ffi_handles[slot] = NULL;
+  for (i = 0; i < OO_FFI_HANDLE_SLOTS; i++) {
+    if (!g_ffi_handles[i]) continue;
+    snprintf(buf, sizeof buf, "handle:%p", g_ffi_handles[i]);
+    if (strcmp(buf, key) == 0) {
+      if (out) *out = g_ffi_handles[i];
+      g_ffi_handles[i] = NULL;
+      pthread_mutex_unlock(&g_ffi_handles_mu);
+      return i;
+    }
+  }
   pthread_mutex_unlock(&g_ffi_handles_mu);
+  return -1;
 }
 
 OoResS oo_dlopen(long long cap, OoStr path) {
@@ -154,47 +242,69 @@ OoResS oo_dlopen(long long cap, OoStr path) {
     r.val = oo_str_lit("ffi residual: set OODA_FFI_ALLOW_DLOPEN=1 for OS dlopen");
     return r;
   }
+  /* 4.5 path-A: refuse nested / re-entrant oo_dlopen (constructor callback).
+   * Checked before taking g_ffi_dlopen_mu so same-thread re-entry fails closed
+   * instead of deadlocking the non-recursive process-wide lock. */
+  if (g_ffi_dlopen_depth > 0) {
+    r.val = oo_str_lit("ffi residual: nested dlopen refused");
+    return r;
+  }
+  /* Serialize concurrent loaders across the full allowlist→…→register path. */
+  pthread_mutex_lock(&g_ffi_dlopen_mu);
+  g_ffi_dlopen_depth = 1;
+
   if (dir && dir[0]) {
     if (!path_under_allowdir(p, dir)) {
       r.val = oo_str_lit("ffi residual: path not under OODA_FFI_ALLOWDIR");
-      return r;
+      goto out_unlock;
     }
   } else if (!path_under_sys_lib(p)) {
     r.val = oo_str_lit("ffi residual: path not under system lib dirs");
-    return r;
+    goto out_unlock;
   }
   /* Re-canonicalize after allow check; open/dlopen must use rp_path, not p. */
   if (!realpath(p, rp_path)) {
     r.val = oo_str_lit("ffi residual: realpath failed after allow check");
-    return r;
+    goto out_unlock;
   }
   /* Reject symlinks at the leaf on the canonical path (O_NOFOLLOW). */
   {
     int fd = open(rp_path, O_RDONLY | O_NOFOLLOW);
     if (fd < 0) {
       r.val = oo_str_lit("ffi residual: leaf is symlink or not openable");
-      return r;
+      goto out_unlock;
     }
     close(fd);
+  }
+  /* M166: require valid minisig on the canonical path before dlopen. */
+  if (!ffi_verify_signature(rp_path)) {
+    r.val = oo_str_lit("ffi residual: missing or invalid minisig");
+    goto out_unlock;
   }
   h = dlopen(rp_path, RTLD_NOW);
   if (!h) {
     r.val = oo_str_lit("dlopen failed");
-    return r;
+    goto out_unlock;
   }
+  /* Register under handles_mu after open (no dlopen while holding handles_mu). */
   if (ffi_handle_register(h) != 0) {
     dlclose(h);
     r.val = oo_str_lit("ffi residual: handle table full");
-    return r;
+    goto out_unlock;
   }
   snprintf(buf, sizeof buf, "handle:%p", h);
   r.ok = 1;
   r.val = oo_str_lit(buf);
+
+out_unlock:
+  g_ffi_dlopen_depth = 0;
+  pthread_mutex_unlock(&g_ffi_dlopen_mu);
   return r;
 }
 
 /* Path A: real dlsym for handles registered by oo_dlopen.
- * Residual: no typed ffi_call through the returned symbol pointer. */
+ * Residual: no typed ffi_call through the returned symbol pointer.
+ * Residual: no refcount — concurrent oo_dlclose can invalidate h (UAF). */
 OoResS oo_dlsym(long long cap, OoStr handle, OoStr name) {
   OoResS r;
   const char *hk;
@@ -226,7 +336,9 @@ OoResS oo_dlsym(long long cap, OoStr handle, OoStr name) {
   return r;
 }
 
-/* Path A: dlclose + free table slot for registered handles only. */
+/* Path A: dlclose + free table slot for registered handles only.
+ * Take-under-lock prevents double-dlclose of the same registration; dlclose
+ * runs outside g_ffi_handles_mu. Residual: no refcount vs concurrent dlsym. */
 OoResS oo_dlclose(long long cap, OoStr handle) {
   OoResS r;
   const char *hk;
@@ -235,13 +347,12 @@ OoResS oo_dlclose(long long cap, OoStr handle) {
   oo_cap_require_ffi(cap, "dlclose");
   r.ok = 0;
   hk = handle.data ? handle.data : "";
-  slot = ffi_handle_lookup(hk, &h);
+  slot = ffi_handle_take(hk, &h);
   if (slot < 0 || !h) {
     r.val = oo_str_lit("ffi residual: unknown handle");
     return r;
   }
   dlclose(h);
-  ffi_handle_clear(slot);
   r.ok = 1;
   r.val = oo_str_lit("closed");
   return r;

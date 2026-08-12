@@ -1,8 +1,94 @@
 #include "chs_rt.h"
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 /* Cap seals: process-local tokens from chs_rt_sys.c (R1). */
 void oo_cap_require_fs(long long got, const char *op);
 void oo_cap_require_env(long long got, const char *op);
+
+/* Split absolute path into parent dir + final basename.
+ * parent_out gets the parent path (not necessarily realpath'd).
+ * Returns basename pointer into `path`, or NULL on refuse. */
+static const char *fs_split_parent(const char *path, char *parent_out, size_t parent_sz) {
+  const char *slash;
+  size_t plen;
+  if (!path || path[0] != '/' || !parent_out || parent_sz < 2) return NULL;
+  slash = strrchr(path, '/');
+  if (!slash) return NULL;
+  if (slash == path) {
+    /* "/leaf" → parent "/" */
+    if (path[1] == '\0') return NULL; /* path is "/" alone */
+    parent_out[0] = '/';
+    parent_out[1] = '\0';
+    return path + 1;
+  }
+  plen = (size_t)(slash - path);
+  if (plen + 1 > parent_sz) return NULL;
+  memcpy(parent_out, path, plen);
+  parent_out[plen] = '\0';
+  if (slash[1] == '\0') return NULL; /* trailing slash */
+  return slash + 1;
+}
+
+/* Canonical-path prefix allow (mirror chs_rt_ffi.c path_under_allowdir).
+ * Closes `..` traversal, symlink hops, and case-insensitive FS games.
+ * Refuses root "/" as the allowed dir.
+ * Create case: if leaf does not exist, realpath(parent) + basename check
+ * (basename must not be "."/".."/empty). Residual: TOCTOU between check
+ * and open is reduced by openat(O_NOFOLLOW) on the resolved parent. */
+static int path_under_writedir(const char *path, const char *dir) {
+  char rp_path[PATH_MAX];
+  char rp_dir[PATH_MAX];
+  char parent[PATH_MAX];
+  const char *base;
+  size_t n;
+  if (!path || !dir || path[0] != '/' || dir[0] != '/') return 0;
+  if (strcmp(dir, "/") == 0) return 0;
+  if (!realpath(dir, rp_dir)) return 0;
+  n = strlen(rp_dir);
+  if (n == 0) return 0;
+
+  /* Existing path: full realpath prefix compare. */
+  if (realpath(path, rp_path)) {
+    if (strncmp(rp_path, rp_dir, n) != 0) return 0;
+    if (rp_path[n] != '\0' && rp_path[n] != '/') return 0;
+    return 1;
+  }
+
+  /* Create / missing leaf: resolve parent only; require parent under dir. */
+  base = fs_split_parent(path, parent, sizeof parent);
+  if (!base || !base[0]) return 0;
+  if (strcmp(base, ".") == 0 || strcmp(base, "..") == 0) return 0;
+  if (strchr(base, '/')) return 0;
+  if (!realpath(parent, rp_path)) return 0;
+  if (strncmp(rp_path, rp_dir, n) != 0) return 0;
+  if (rp_path[n] != '\0' && rp_path[n] != '/') return 0;
+  return 1;
+}
+
+/* Open path for write truncate under resolved parent with O_NOFOLLOW leaf.
+ * Reduces symlink-escape after allow: intermediate hops resolved via
+ * realpath(parent); leaf symlink → ELOOP (fail-closed). Residual: rename
+ * races on the parent dentry between realpath and openat (no landlock). */
+static int writedir_open_trunc(const char *path) {
+  char parent[PATH_MAX];
+  char rp_parent[PATH_MAX];
+  const char *base;
+  int dfd, fd;
+  base = fs_split_parent(path, parent, sizeof parent);
+  if (!base || !base[0]) return -1;
+  if (strcmp(base, ".") == 0 || strcmp(base, "..") == 0) return -1;
+  if (!realpath(parent, rp_parent)) return -1;
+  dfd = open(rp_parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dfd < 0) return -1;
+  fd = openat(dfd, base,
+              O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0666);
+  close(dfd);
+  return fd;
+}
 
 OoResS oo_read_file(long long cap, OoStr path) {
   oo_cap_require_fs(cap, "read_file");
@@ -53,8 +139,29 @@ OoResS oo_read_file(long long cap, OoStr path) {
 OoResV oo_write_file(long long cap, OoStr path, OoStr content) {
   oo_cap_require_fs(cap, "write_file");
   OoResV r;
-  FILE *f = fopen(path.data, "wb");
+  const char *p;
+  const char *dir;
+  int fd;
+  FILE *f;
+  /* HIGH 6.4: write allowlist — path must canonicalize under OODA_FS_WRITEDIR.
+   * Empty/unset dir → fail closed (no any-path writes). Policy key via
+   * oo_process_policy_getenv only (OODA_* prefix). */
+  p = path.data ? path.data : "";
+  dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
+  if (!dir || !dir[0] || !path_under_writedir(p, dir)) {
+    r.ok = 0;
+    r.err = oo_str_lit("write_file denied: path not under OODA_FS_WRITEDIR");
+    return r;
+  }
+  fd = writedir_open_trunc(p);
+  if (fd < 0) {
+    r.ok = 0;
+    r.err = oo_str_lit("write_file failed");
+    return r;
+  }
+  f = fdopen(fd, "wb");
   if (!f) {
+    close(fd);
     r.ok = 0;
     r.err = oo_str_lit("write_file failed");
     return r;

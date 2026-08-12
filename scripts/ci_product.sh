@@ -148,6 +148,7 @@ for rail in \
   secret_t1_return_smoke.sh \
   secret_t2_depth_smoke.sh \
   secret_taint_residual_smoke.sh \
+  runtime_zt_t3_smoke.sh \
   hitl_residual_smoke.sh \
   type_state_residual_smoke.sh \
   toolchains_adv_residual_smoke.sh \

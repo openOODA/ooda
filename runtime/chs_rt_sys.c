@@ -14,9 +14,10 @@
  * Time/Rand tokens live in chs_rt_time_rand.c (M12). */
 static pthread_once_t g_caps_once = PTHREAD_ONCE_INIT;
 static long long g_tok_fs, g_tok_sys, g_tok_env, g_tok_net;
+static long long g_tok_sign, g_tok_process, g_tok_sync, g_tok_mem, g_tok_http, g_tok_tcp, g_tok_udp, g_tok_bind, g_tok_audio, g_tok_camera, g_tok_usb, g_tok_hid, g_tok_window, g_tok_frame, g_tok_fsread, g_tok_fswrite;
 
 static void caps_once_init(void) {
-  unsigned char b[32];
+  unsigned char b[160];
   size_t i;
   unsigned long long acc;
 #if defined(__linux__) || defined(__APPLE__)
@@ -36,6 +37,22 @@ static void caps_once_init(void) {
   g_tok_sys = 0x2000000000000000LL | (long long)((((unsigned long long)b[8]) << 56) | (((unsigned long long)b[9]) << 48) | (((unsigned long long)b[10]) << 40) | (((unsigned long long)b[11]) << 32) | (((unsigned long long)b[12]) << 24) | (((unsigned long long)b[13]) << 16) | (((unsigned long long)b[14]) << 8) | ((unsigned long long)b[15]));
   g_tok_env = 0x3000000000000000LL | (long long)((((unsigned long long)b[16]) << 56) | (((unsigned long long)b[17]) << 48) | (((unsigned long long)b[18]) << 40) | (((unsigned long long)b[19]) << 32) | (((unsigned long long)b[20]) << 24) | (((unsigned long long)b[21]) << 16) | (((unsigned long long)b[22]) << 8) | ((unsigned long long)b[23]));
   g_tok_net = 0x4000000000000000LL | (long long)((((unsigned long long)b[24]) << 56) | (((unsigned long long)b[25]) << 48) | (((unsigned long long)b[26]) << 40) | (((unsigned long long)b[27]) << 32) | (((unsigned long long)b[28]) << 24) | (((unsigned long long)b[29]) << 16) | (((unsigned long long)b[30]) << 8) | ((unsigned long long)b[31]));
+  g_tok_sign = ((long long)5ULL << 56) | (long long)((((unsigned long long)b[32]) << 56) | (((unsigned long long)b[33]) << 48) | (((unsigned long long)b[34]) << 40) | (((unsigned long long)b[35]) << 32) | (((unsigned long long)b[36]) << 24) | (((unsigned long long)b[37]) << 16) | (((unsigned long long)b[38]) << 8) | ((unsigned long long)b[39]));
+  g_tok_process = ((long long)6ULL << 56) | (long long)((((unsigned long long)b[40]) << 56) | (((unsigned long long)b[41]) << 48) | (((unsigned long long)b[42]) << 40) | (((unsigned long long)b[43]) << 32) | (((unsigned long long)b[44]) << 24) | (((unsigned long long)b[45]) << 16) | (((unsigned long long)b[46]) << 8) | ((unsigned long long)b[47]));
+  g_tok_sync = ((long long)7ULL << 56) | (long long)((((unsigned long long)b[48]) << 56) | (((unsigned long long)b[49]) << 48) | (((unsigned long long)b[50]) << 40) | (((unsigned long long)b[51]) << 32) | (((unsigned long long)b[52]) << 24) | (((unsigned long long)b[53]) << 16) | (((unsigned long long)b[54]) << 8) | ((unsigned long long)b[55]));
+  g_tok_mem = ((long long)8ULL << 56) | (long long)((((unsigned long long)b[56]) << 56) | (((unsigned long long)b[57]) << 48) | (((unsigned long long)b[58]) << 40) | (((unsigned long long)b[59]) << 32) | (((unsigned long long)b[60]) << 24) | (((unsigned long long)b[61]) << 16) | (((unsigned long long)b[62]) << 8) | ((unsigned long long)b[63]));
+  g_tok_http = ((long long)9ULL << 56) | (long long)((((unsigned long long)b[64]) << 56) | (((unsigned long long)b[65]) << 48) | (((unsigned long long)b[66]) << 40) | (((unsigned long long)b[67]) << 32) | (((unsigned long long)b[68]) << 24) | (((unsigned long long)b[69]) << 16) | (((unsigned long long)b[70]) << 8) | ((unsigned long long)b[71]));
+  g_tok_tcp = ((long long)10ULL << 56) | (long long)((((unsigned long long)b[72]) << 56) | (((unsigned long long)b[73]) << 48) | (((unsigned long long)b[74]) << 40) | (((unsigned long long)b[75]) << 32) | (((unsigned long long)b[76]) << 24) | (((unsigned long long)b[77]) << 16) | (((unsigned long long)b[78]) << 8) | ((unsigned long long)b[79]));
+  g_tok_udp = ((long long)11ULL << 56) | (long long)((((unsigned long long)b[80]) << 56) | (((unsigned long long)b[81]) << 48) | (((unsigned long long)b[82]) << 40) | (((unsigned long long)b[83]) << 32) | (((unsigned long long)b[84]) << 24) | (((unsigned long long)b[85]) << 16) | (((unsigned long long)b[86]) << 8) | ((unsigned long long)b[87]));
+  g_tok_bind = ((long long)12ULL << 56) | (long long)((((unsigned long long)b[88]) << 56) | (((unsigned long long)b[89]) << 48) | (((unsigned long long)b[90]) << 40) | (((unsigned long long)b[91]) << 32) | (((unsigned long long)b[92]) << 24) | (((unsigned long long)b[93]) << 16) | (((unsigned long long)b[94]) << 8) | ((unsigned long long)b[95]));
+  g_tok_audio = ((long long)13ULL << 56) | (long long)((((unsigned long long)b[96]) << 56) | (((unsigned long long)b[97]) << 48) | (((unsigned long long)b[98]) << 40) | (((unsigned long long)b[99]) << 32) | (((unsigned long long)b[100]) << 24) | (((unsigned long long)b[101]) << 16) | (((unsigned long long)b[102]) << 8) | ((unsigned long long)b[103]));
+  g_tok_camera = ((long long)14ULL << 56) | (long long)((((unsigned long long)b[104]) << 56) | (((unsigned long long)b[105]) << 48) | (((unsigned long long)b[106]) << 40) | (((unsigned long long)b[107]) << 32) | (((unsigned long long)b[108]) << 24) | (((unsigned long long)b[109]) << 16) | (((unsigned long long)b[110]) << 8) | ((unsigned long long)b[111]));
+  g_tok_usb = ((long long)15ULL << 56) | (long long)((((unsigned long long)b[112]) << 56) | (((unsigned long long)b[113]) << 48) | (((unsigned long long)b[114]) << 40) | (((unsigned long long)b[115]) << 32) | (((unsigned long long)b[116]) << 24) | (((unsigned long long)b[117]) << 16) | (((unsigned long long)b[118]) << 8) | ((unsigned long long)b[119]));
+  g_tok_hid = ((long long)16ULL << 56) | (long long)((((unsigned long long)b[120]) << 56) | (((unsigned long long)b[121]) << 48) | (((unsigned long long)b[122]) << 40) | (((unsigned long long)b[123]) << 32) | (((unsigned long long)b[124]) << 24) | (((unsigned long long)b[125]) << 16) | (((unsigned long long)b[126]) << 8) | ((unsigned long long)b[127]));
+  g_tok_window = ((long long)17ULL << 56) | (long long)((((unsigned long long)b[128]) << 56) | (((unsigned long long)b[129]) << 48) | (((unsigned long long)b[130]) << 40) | (((unsigned long long)b[131]) << 32) | (((unsigned long long)b[132]) << 24) | (((unsigned long long)b[133]) << 16) | (((unsigned long long)b[134]) << 8) | ((unsigned long long)b[135]));
+  g_tok_frame = ((long long)18ULL << 56) | (long long)((((unsigned long long)b[136]) << 56) | (((unsigned long long)b[137]) << 48) | (((unsigned long long)b[138]) << 40) | (((unsigned long long)b[139]) << 32) | (((unsigned long long)b[140]) << 24) | (((unsigned long long)b[141]) << 16) | (((unsigned long long)b[142]) << 8) | ((unsigned long long)b[143]));
+  g_tok_fsread = ((long long)19ULL << 56) | (long long)((((unsigned long long)b[144]) << 56) | (((unsigned long long)b[145]) << 48) | (((unsigned long long)b[146]) << 40) | (((unsigned long long)b[147]) << 32) | (((unsigned long long)b[148]) << 24) | (((unsigned long long)b[149]) << 16) | (((unsigned long long)b[150]) << 8) | ((unsigned long long)b[151]));
+  g_tok_fswrite = ((long long)20ULL << 56) | (long long)((((unsigned long long)b[152]) << 56) | (((unsigned long long)b[153]) << 48) | (((unsigned long long)b[154]) << 40) | (((unsigned long long)b[155]) << 32) | (((unsigned long long)b[156]) << 24) | (((unsigned long long)b[157]) << 16) | (((unsigned long long)b[158]) << 8) | ((unsigned long long)b[159]));
   /* Never equal classic forgeable magics */
   if (g_tok_fs == 0x4F4F4653LL) g_tok_fs ^= 0x11111111LL;
   if (g_tok_sys == 0x4F4F5359LL) g_tok_sys ^= 0x11111111LL;
@@ -51,6 +68,22 @@ long long oo_cap_grant_fs(void) { oo_caps_init(); return g_tok_fs; }
 long long oo_cap_grant_sys(void) { oo_caps_init(); return g_tok_sys; }
 long long oo_cap_grant_env(void) { oo_caps_init(); return g_tok_env; }
 long long oo_cap_grant_net(void) { oo_caps_init(); return g_tok_net; }
+long long oo_cap_grant_sign(void) { oo_caps_init(); return g_tok_sign; }
+long long oo_cap_grant_process(void) { oo_caps_init(); return g_tok_process; }
+long long oo_cap_grant_sync(void) { oo_caps_init(); return g_tok_sync; }
+long long oo_cap_grant_mem(void) { oo_caps_init(); return g_tok_mem; }
+long long oo_cap_grant_http(void) { oo_caps_init(); return g_tok_http; }
+long long oo_cap_grant_tcp(void) { oo_caps_init(); return g_tok_tcp; }
+long long oo_cap_grant_udp(void) { oo_caps_init(); return g_tok_udp; }
+long long oo_cap_grant_bind(void) { oo_caps_init(); return g_tok_bind; }
+long long oo_cap_grant_audio(void) { oo_caps_init(); return g_tok_audio; }
+long long oo_cap_grant_camera(void) { oo_caps_init(); return g_tok_camera; }
+long long oo_cap_grant_usb(void) { oo_caps_init(); return g_tok_usb; }
+long long oo_cap_grant_hid(void) { oo_caps_init(); return g_tok_hid; }
+long long oo_cap_grant_window(void) { oo_caps_init(); return g_tok_window; }
+long long oo_cap_grant_frame(void) { oo_caps_init(); return g_tok_frame; }
+long long oo_cap_grant_fsread(void) { oo_caps_init(); return g_tok_fsread; }
+long long oo_cap_grant_fswrite(void) { oo_caps_init(); return g_tok_fswrite; }
 
 void oo_cap_require(long long got, long long want, const char *op) {
   oo_caps_init();
@@ -123,36 +156,37 @@ OoResS oo_sys_exec(long long cap, int argc, OoStr *argv) {
   }
   if (pid == 0) {
     /* DE1.8: filter env before execvp so child does not inherit full parent env.
-     * Walk original environ, keep only OODA_/OO_ keys per oo_process_policy_getenv,
-     * then set a minimal PATH so the child can locate the executable. */
+     * Snapshot OODA_/OO_ entries from parent environ by key-prefix only (no getenv).
+     * Using oo_process_policy_getenv/getenv after clearenv sees an empty env and
+     * would drop every key. Then install filtered env + minimal PATH. */
     extern char **environ;
-    char **src, **saved = environ;
+    char **src;
     char **newenv = NULL;
-    size_t n = 0, cap = 0;
-#if defined(__GLIBC__) || defined(__APPLE__)
-    clearenv();
-#else
-    environ = NULL;
-#endif
-    if (saved) {
-      for (src = saved; *src; src++) {
+    size_t n = 0, env_cap = 0;
+    if (environ) {
+      for (src = environ; *src; src++) {
         const char *eq = strchr(*src, '=');
         size_t klen;
-        char kbuf[256];
         if (!eq) continue;
         klen = (size_t)(eq - *src);
-        if (klen == 0 || klen >= sizeof kbuf) continue;
-        memcpy(kbuf, *src, klen);
-        kbuf[klen] = 0;
-        if (oo_process_policy_getenv(kbuf) == NULL) continue;
-        if (n + 1 >= cap) {
-          cap = cap ? cap * 2 : 16;
-          newenv = (char **)realloc(newenv, cap * sizeof(char *));
+        if (klen == 0) continue;
+        /* Prefix allowlist on the key name — not getenv (post-clearenv empty). */
+        if (!((klen >= 5 && strncmp(*src, "OODA_", 5) == 0) ||
+              (klen >= 3 && strncmp(*src, "OO_", 3) == 0)))
+          continue;
+        if (n + 1 >= env_cap) {
+          env_cap = env_cap ? env_cap * 2 : 16;
+          newenv = (char **)realloc(newenv, env_cap * sizeof(char *));
           if (!newenv) _exit(127);
         }
         newenv[n++] = *src;
       }
     }
+#if defined(__GLIBC__) || defined(__APPLE__)
+    clearenv();
+#else
+    environ = NULL;
+#endif
     if (newenv) {
       newenv[n] = NULL;
       environ = newenv;
@@ -183,7 +217,7 @@ OoResS oo_sys_exec1(long long cap, OoStr cmd) {
 OoResS oo_fetch(long long cap, OoStr url) {
   OoResS r;
   const char *u;
-  char host[256], path[1024], portstr[8];
+  char host[256], path[1024], portstr[12];
   int port = 80, fd = -1, n;
   size_t ulen, i, j;
   struct addrinfo hints, *res = NULL, *rp;
