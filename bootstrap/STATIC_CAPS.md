@@ -103,3 +103,6 @@ Pattern to copy:
 - `bootstrap/CAP_FFI.md` — Cap vs FFI residual (PM 6.3 / M25); process-local seals ≠ FFI sandbox  
 - `runtime/chs_rt_sys.c`, `chs_rt_fs.c`, `chs_rt_time_rand.c`, `chs_rt_alloc.c`  
 - `oodac/check_caps.oo`, `check_cap_util.oo`, `c_emit_fn.oo`, `c_emit_lower.oo`  
+
+## CAP-G5 isolation honesty (2026-08-12)
+Product floor is **process-local capability tokens** + check refuse. There is **no** product `seccomp-bpf` / `SIGSYS` install path: dead `oo_seccomp_init` was removed from `c_emit_preamble` (never called; lacked includes; broke `gcc` of emit-c). Optional OS filter remains residual research.
