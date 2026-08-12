@@ -3,13 +3,13 @@
 **Catalog (token list):** process doc [`../../openOODA/CAPS.oot`](../../openOODA/CAPS.oot) — 27 V2 names; **type accept ≠ full CAP-G* FIXED**.  
 **Net (CAP-G1):** path-A preferred map — `sealed_net_kind_of` → Http/Tcp/Udp/Bind/NetCap; exact preferred **or** legacy **`&NetCap` supersede**; wrong granular deny. Runtime `oo_cap_require_{http,tcp,udp,bind}` accept granular **or** NetCap; `sock_raw` NetCap-only. Smoke: `scripts/cap_g1_net_granular_smoke.sh`.  
 **Fs (CAP-G2):** path-A preferred map — `sealed_fs_kind_of` → FsReadCap/FsWriteCap; exact preferred **or** legacy **`&FsCap` supersede**; wrong granular deny (FsReadCap↛write; FsWriteCap↛read/path/size). Runtime `oo_cap_require_fsread` / `oo_cap_require_fswrite` accept granular **or** FsCap. Keep **`OODA_FS_WRITEDIR`** write overlay. Helpers: `cap_fs_granted_ok` / `cap_fs_argflow_ok` in `check_cap_util.oo`.  
-**Other families:** Sys/Env/Time/Rand/Alloc/FFI/Thread/Gpu still legacy sealed kinds; Process/Sync/Mem/HW/UI enforce residual (SPRINT **CAP-G3/G4+**).  
+**Other families:** Sys/Env/Time/Rand/Alloc/FFI/Thread/Gpu still legacy sealed kinds. **CAP-G3 residual-only:** Process/Sync/Mem/HW/UI/Sign — type accept + grant + exact require stubs; **no** sealed product ops (do not greenwash). ProcessCap vs `sys_exec` = **CAP-G4**.  
 **Purpose:** Map each sealed effect op through **check → emit-c → runtime → product**.  
 **Rules:** Default-deny. Unfinished = fail-closed, never silent ambient I/O. `fetch` is product-lowered; other http-ish names residual emit.  
 **Runtime seal:** sealed FS/Sys/Env/Net/Time/Rand/Alloc ops re-check process-local capability tokens at native runtime. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md). **Not** full OS isolation / complete `seccomp-bpf` product claim.  
 **Cap vs FFI (PM 6.3 path A):** bare `dlopen` / host-FFI free names need `&UnsafeFFICap` at check. Process-local Fs/Sys/… do **not** seal full C TCB / OS `dlopen` / raw pointers / `import "C"` — see [`CAP_FFI.md`](CAP_FFI.md).  
 
-**Sources:** `oodac/check_caps.oo`, `oodac/check_cap_util.oo`, `oodac/c_emit_lower.oo`, `runtime/chs_rt_fs.c`, `runtime/chs_rt_sys.c`, `runtime/chs_rt_netfloor.c`, `chs_rt_time_rand.c`, `chs_rt_alloc.c`.
+**Sources:** `oodac/check_caps.oo`, `oodac/check_cap_util.oo`, `oodac/c_emit_lower.oo`, `runtime/chs_rt_fs.c`, `runtime/chs_rt_sys.c`, `runtime/chs_rt_netfloor.c`, `chs_rt_time_rand.c`, `chs_rt_alloc.c`. Catalog residual: [`../../openOODA/CAPS.oot`](../../openOODA/CAPS.oot) CAP-G3 table.
 
 Status legend:
 
@@ -18,6 +18,7 @@ Status legend:
 | **real** | Implemented end-to-end on pure Backend-C path |
 | **fail-closed residual** | Denied or hard-fail; not silently ambient |
 | **check-only** | Cap gate works; no product runtime yet |
+| **residual-only (CAP-G3)** | Cap type + grant + exact require stub; **no** sealed op / product lower |
 
 ---
 
@@ -59,6 +60,25 @@ Status legend:
 
 Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs preferred map as above; emit residual), `exec`/`spawn_process`/`async_spawn_internal` (Sys), `env_set`/`getenv` (Env) — check deny without cap; emit leaves name as-is → link fail if used (fail-closed residual).
 
+### CAP-G3 residual-only (no sealed product ops)
+
+These V2 names are in `is_cap_type` and have process-local `oo_cap_grant_*` + **exact-token** `oo_cap_require_*` stubs in `chs_rt_sys.c`. **`sealed_kind_of` has no branch** for them — check does not enforce a free-call table. Emit does **not** inject main grants by residual type (DE1 residual). **Do not invent** CameraCap/AudioCap/… product free names.
+
+| Cap | Grant | Require (exact only) | Sealed free-call ops | Notes |
+|-----|-------|----------------------|----------------------|-------|
+| `&ProcessCap` | `oo_cap_grant_process` | `oo_cap_require_process` | **none** | `sys_exec` remains `&SysCap` (CAP-G4) |
+| `&SyncCap` | `oo_cap_grant_sync` | `oo_cap_require_sync` | **none** | mutex/channel sealed under `&ThreadCap` |
+| `&MemCap` | `oo_cap_grant_mem` | `oo_cap_require_mem` | **none** | heap helpers sealed under `&AllocCap` |
+| `&AudioCap` | `oo_cap_grant_audio` | `oo_cap_require_audio` | **none** | no mic/speaker product |
+| `&CameraCap` | `oo_cap_grant_camera` | `oo_cap_require_camera` | **none** | no webcam product |
+| `&UsbCap` | `oo_cap_grant_usb` | `oo_cap_require_usb` | **none** | no USB/I2C product |
+| `&HidCap` | `oo_cap_grant_hid` | `oo_cap_require_hid` | **none** | no keylog/input product |
+| `&WindowCap` | `oo_cap_grant_window` | `oo_cap_require_window` | **none** | no compositor window product |
+| `&FrameCap` | `oo_cap_grant_frame` | `oo_cap_require_frame` | **none** | no framebuffer product |
+| `&SignCap` | `oo_cap_grant_sign` | `oo_cap_require_sign` | **none** | enclave sign residual |
+
+**Status:** **residual-only (CAP-G3)** — honest catalog + fail-closed require symbols if hand-wired; **not** product feature complete. Evidence: [`../../openOODA/audit/cap_g3_residual.oot`](../../openOODA/audit/cap_g3_residual.oot).
+
 ---
 
 ## Layer notes
@@ -73,11 +93,12 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs preferred map a
 - Residual: dynamic/computed callees not scanned; cap only as param name (not expression). Ambient `list_new` not sealed. CAP-G1 preferred pass fixtures exist (`ok_http_cap_fetch` / `ok_tcp_cap_connect` / `ok_net_cap_fetch_tcp`); CAP-G2 preferred pass + wrong-granular fail fixtures landed (`ok_fs_read_cap_read` / `ok_fs_write_cap_write` / `ok_fs_cap_read_write` / `wrong_granular_fs*`). Smoke: `cap_g2_fs_granular_smoke.sh`.
 
 ### Emit (Backend-C)
-- Cap tokens compile to `long long`; `main` injects `oo_cap_grant_fs/sys/env/net/time/rand/alloc/ffi/thread/gpu()` plus **partial** granular (`tcp` / `fsread` / `process` today) — full V2 grant matrix residual (**CAP-G3**).
+- Cap tokens compile to `long long`; `main` injects fixed-name `oo_cap_grant_fs/sys/env/net/time/rand/alloc/ffi/thread/gpu()` — **not** type-driven for residual V2 names. Full main-param grant matrix (incl. `fsread`/`tcp`/Process/HW) residual (**DE1 emit inject**; CAP-G3 residual-only family needs no inject until sealed ops exist).
 - Sealed FS/Env/Sys/Net/Time/Rand/Alloc/FFI/Thread/Gpu lowers **pass the leading cap arg** (ABI with runtime).
 - Sealed **ThreadCap product (M162/M163/M164):** `mutex_lock`/`mutex_unlock` real pthread mutex; `thread_spawn` joinable pthread → Ok(`"tid:N"`); `thread_join(slot)` joins slot (or `oo_thread_join_s` parses `"tid:N"`); `channel_new`/`channel_send`/`channel_recv` process-local bounded string queues. Not detach-by-default. **GpuCap** `gpu_launch` (M165): noop/`cpu:` Ok honesty; device shaders **Err residual**. Actor model residual.
 - Net libfloor (CAP-G1): `tcp_bind` → require_bind; `tcp_connect`/`tcp_*` IO → require_tcp; `bind_udp`/`udp_recv` → require_udp; `fetch` → require_http; each accepts matching granular **or** NetCap token. `sock_raw` NetCap-only residual Err; `tls_connect` require_tcp (OpenSSL residual — M163).
 - Fs product (CAP-G2): `read_file` / `path_exists` / `file_size` → require_fsread; `write_file` → require_fswrite; each accepts matching granular **or** FsCap token. Write still fail-closed under `OODA_FS_WRITEDIR`.
+- CAP-G3 residual caps: **no** emit lower / **no** sealed free-call map.
 - Non-IDENT first arg on sealed ops: `ERR\tc_emit\t… requires &…Cap` (fail-closed).
 
 ### Runtime: process-local token seal
@@ -90,6 +111,7 @@ Aliases sealed but not product-lowered: `fs_read`/`fs_write` (Fs preferred map a
 - **T3 residuals (explicit):** full IFC; unrestricted any-path `dlopen`; refcount UAF beyond ARC path-A free-on-ref0; full C TCB seal.
 - Net (CAP-G1 path-A): `fetch` + TCP/UDP product-lowered with **per-op** require_http/tcp/udp/bind (NetCap supersede); **fd slots keep sockets open** after connect/bind (M166). Byte IO is `tcp_read`/`tcp_write`/`udp_recv` as String (not true `&[u8]`). **TLS residual** unless `OO_HAVE_OPENSSL=1`. **No** full HTTP/3/gRPC/SOCK_RAW product. Smokes: `scripts/libfloor_net_smoke.sh`, `scripts/tcp_io_smoke.sh`, `scripts/tls_path_a_smoke.sh`.
 - Fs (CAP-G2 path-A): `read_file` / `path_exists` / `file_size` → `oo_cap_require_fsread` (g_tok_fsread **or** g_tok_fs); `write_file` → `oo_cap_require_fswrite` (g_tok_fswrite **or** g_tok_fs) + writedir allowlist. **Not** landlock / full FS OS isolation. Smoke: `scripts/cap_g2_fs_granular_smoke.sh` (legacy matrix smoke still uses `&FsCap`).
+- **CAP-G3 residual-only:** `oo_cap_require_{process,sync,mem,audio,camera,usb,hid,window,frame,sign}` = exact `g_tok_*` match only (no supersede). **No** product op calls them. Grants exist for same set. **Not** a HW/UI product claim.
 - Alloc: smoke returns size token / no-op free — **not** a claim of heap sandboxing.
 
 ---

@@ -88,6 +88,7 @@ for rail in \
   caps_matrix_smoke.sh \
   cap_g1_net_granular_smoke.sh \
   cap_g2_fs_granular_smoke.sh \
+  cap_g3_grant_inject_smoke.sh \
   libfloor_process_smoke.sh \
   libfloor_net_smoke.sh \
   alloc_cap_smoke.sh \
