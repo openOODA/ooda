@@ -1,6 +1,126 @@
 // package: backend-c — emit floor (see bootstrap/FLOOR.md)
-// job: emit IDENT stmts (println/assert/assign/expr)
+// job: emit IDENT stmts (println/assert/assign/expr) + T2 field assign taint
 // stage: emit
+//
+// T2 field taint model (path A):
+//   b.v = secret → __sec__b=1 AND __sec__b.v=1 (root + field path).
+//   Root tag required: sink scanners only refuse bare IDENTs, so
+//   println(b.v) refuses via IDENT b. Path tag covers let x = b.v.
+//   Object taint sticky: clean field rebind does not clear __sec__root.
+//   arr[i] = secret → __sec__arr=1 when index-assign form exists.
+//   x = obj.m() → prop via __fr_secret__m / secret recv (c_secret_tok_is_sec).
+
+// IDENT at i is secret-bearing: bare tag, free call, field path, or method.
+// Field keys may use dots (__sec__root.f1.f2).
+pub fn c_secret_tok_is_sec(toks: List[String], i: Int, n: Int, env: String) -> Bool {
+    let sn: String = field_at(list_get(toks, i), 3);
+    if c_env_get(env, "__sec__" + sn) == "1" {
+        return true;
+    }
+    if i + 1 < n && field_at(list_get(toks, i + 1), 0) == "LPAREN" {
+        if c_env_get(env, "__fr_secret__" + sn) == "1" {
+            return true;
+        }
+    }
+    // Field path IDENT (DOT IDENT)* → __sec__root.f1.f2; method last.m(
+    let mut path: String = sn;
+    let mut t: Int = i + 1;
+    let mut last_m: String = "";
+    while t + 1 < n {
+        if field_at(list_get(toks, t), 0) != "DOT" {
+            break;
+        }
+        if field_at(list_get(toks, t + 1), 0) != "IDENT" {
+            break;
+        }
+        last_m = field_at(list_get(toks, t + 1), 3);
+        path = path + "." + last_m;
+        if c_env_get(env, "__sec__" + path) == "1" {
+            return true;
+        }
+        t = t + 2;
+    }
+    if last_m != "" && t < n && field_at(list_get(toks, t), 0) == "LPAREN" {
+        if c_env_get(env, "__fr_secret__" + last_m) == "1" {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Secret RHS of field assign → tag root + path (never clear root on clean).
+pub fn c_secret_prop_field_assign(toks: List[String], pos: Int, n: Int, env: String, root: String, path: String) -> String {
+    let e2: String = c_secret_prop_from_rhs(toks, pos, n, env, "__t2fp__");
+    if c_env_get(e2, "__sec____t2fp__") == "1" {
+        env = c_env_put(env, "__sec__" + root, "1");
+        if path != "" {
+            env = c_env_put(env, "__sec__" + path, "1");
+        }
+    }
+    return env;
+}
+
+// Check walk: at IDENT i, note bare / field / index assign taint.
+// Skips field-name tokens after DOT so `b.v = s` does not false-tag bare `v`.
+pub fn c_secret_note_lhs_assign(toks: List[String], i: Int, n: Int, env: String) -> String {
+    if i >= n || field_at(list_get(toks, i), 0) != "IDENT" {
+        return env;
+    }
+    if i > 0 && field_at(list_get(toks, i - 1), 0) == "DOT" {
+        return env;
+    }
+    let id: String = field_at(list_get(toks, i), 3);
+    // Field assign: id (. IDENT)+ EQ rhs
+    if i + 3 < n && field_at(list_get(toks, i + 1), 0) == "DOT" {
+        let mut q: Int = i + 1;
+        let mut path: String = id;
+        let mut found: Bool = false;
+        let mut rhs: Int = 0;
+        while q + 1 < n && field_at(list_get(toks, q), 0) == "DOT"
+            && field_at(list_get(toks, q + 1), 0) == "IDENT" {
+            path = path + "." + field_at(list_get(toks, q + 1), 3);
+            q = q + 2;
+            if q < n && field_at(list_get(toks, q), 0) == "EQ" {
+                found = true;
+                rhs = q + 1;
+                break;
+            }
+            if q >= n || field_at(list_get(toks, q), 0) != "DOT" {
+                break;
+            }
+        }
+        if found {
+            return c_secret_prop_field_assign(toks, rhs, n, env, id, path);
+        }
+    }
+    // Index assign: id [ ... ] = rhs → tag base list
+    if i + 1 < n && field_at(list_get(toks, i + 1), 0) == "LBRACKET" {
+        let mut depth: Int = 1;
+        let mut q: Int = i + 2;
+        while q < n && depth > 0 {
+            let kk: String = field_at(list_get(toks, q), 0);
+            if kk == "LBRACKET" {
+                depth = depth + 1;
+            } else if kk == "RBRACKET" {
+                depth = depth - 1;
+            }
+            q = q + 1;
+        }
+        if q < n && field_at(list_get(toks, q), 0) == "EQ" {
+            let e2: String = c_secret_prop_from_rhs(toks, q + 1, n, env, "__t2ix__");
+            if c_env_get(e2, "__sec____t2ix__") == "1" {
+                return c_env_put(env, "__sec__" + id, "1");
+            }
+            return env;
+        }
+    }
+    // Bare assign: id = rhs
+    if i + 1 < n && field_at(list_get(toks, i + 1), 0) == "EQ" {
+        env = c_secret_note_bare_alias(toks, i + 2, n, env, id);
+        return c_secret_prop_from_rhs(toks, i + 2, n, env, id);
+    }
+    return env;
+}
 
 pub fn c_emit_ident_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
     let mut p: Int = pos;
@@ -45,9 +165,12 @@ pub fn c_emit_ident_stmt(toks: List[String], pos: Int, n: Int, env: String) -> L
         // String: field path text (M169 mistyped Int → pure dual long long = oo_str_concat)
         let lhs: String = id + "." + fname;
         p = p + 4;
+        // T2: secret RHS → tag __sec__root + __sec__root.field (emit env dual-path)
+        let rhs_pos: Int = p;
         let pra: List[String] = c_emit_expr_c(toks, p, n, e);
         p = parse_int(list_get(pra, 0));
         let rhs: String = list_get(pra, 1);
+        e = c_secret_prop_field_assign(toks, rhs_pos, n, e, id, lhs);
         println("  " + lhs + " = " + rhs + ";");
         if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
             p = p + 1;

@@ -2,8 +2,9 @@
 
 **Marker:** `SECRET_TAINT_RESIDUAL_ALPHA`  
 **Status:** **Path A product floor In (alpha).** PM **3.5** → **done (alpha)** for path A.  
+**T2 path A (scan depth) In (named):** full `args` scan, comment/string skip, field taint model.  
 **Not full DESIGN taint.** Not a complete secrecy / IFC product.  
-**Residual listed:** `#[Secret]` attr, full IFC, interproc beyond path A, every OS/log sink, crypto redaction, NetCap friends beyond the table, T2 scan-depth items — not soft-pass.
+**Residual listed:** `#[Secret]` attr, **full IFC**, interproc beyond path A, nested RHS exhaustiveness, index / method-return lattice beyond path A, every OS/log sink, crypto redaction, NetCap friends beyond the table — not soft-pass.
 
 ## Product surface (In — path A floor alpha)
 
@@ -25,7 +26,11 @@
 | Function return taint via `__fr_secret__` | **In** (path A) |
 | Alias chain for sinks (`__alias__` walk) | **In** (path A) |
 | Sticky clear on clean rebind | **In** (path A) |
+| **T2** full `args` string scan (multi-arg sinks) | **In** (path A) |
+| **T2** comment / string skip (false-positive harden) | **In** (path A) |
+| **T2** field taint model (assign + field read at sink) | **In** (path A) |
 | `#[Secret]` attribute | **residual** |
+| Full IFC / secrecy lattice | **residual** |
 
 ## Path A depth (named mechanisms)
 
@@ -53,12 +58,36 @@ These are the path-A claims for the current emit/check secret floor. They are **
 - Example path A: `y = api_key; println(y)` — still refuse (rebind *to* secret).
 - **Path A only:** local name tag clear on clean RHS — not cryptographic wipe, not object-field deep clear.
 
+### 4. T2 — Full `args` string scan (path A)
+
+- Sink guards walk the full lowered C `args` text (`c_guard_scan_idents`) for bare IDENT spans, not only `a0`/`a1`/`a2` slots.
+- Multi-arg sinks refuse when **any** arg position names a SECRET (e.g. `println(n, s)` with `// SECRET: s`).
+- Check-path call scanners (`c_secret_scan_call` / println arg walk) cover all arg indices for named sinks; call-arg prop taints results when a secret is passed into a returning helper (`secret_call_arg_fail`).
+- Named multi-SECRET directives (`// SECRET: a` + `// SECRET: b`) are both live at sinks.
+- **Path A only:** string-level ident scan of call-arg text + same-file prop. Not a full AST multi-arg lattice, not nested call-graph arg tracking.
+
+### 5. T2 — Comment / string skip (path A)
+
+- **Directive parse:** `// SECRET: name` is recognized only at **line-start** (`c_parse_secret_env`). Mid-line mentions (e.g. a comment that only *mentions* `// SECRET: x`) do **not** tag the name — `secret_midline_safe` must emit OK.
+- **Args scan:** `c_guard_scan_idents` skips interiors of C string literals (`"..."` with `\\` escapes) so idents that appear only inside string text do not false-positive refuse.
+- Lex already strips `//` line comments before secret token walks; path A does not re-parse comment bodies as code.
+- **Path A only:** line-start directive + string-literal skip in args scan. Not full block-comment / raw-string / interpolation `${}` hardening.
+
+### 6. T2 — Field taint model (path A)
+
+- **Assign into field:** secret RHS into a field write (`b.v = api_key`) propagates taint so a later field read at a sealed sink refuses (`secret_field_assign_fail`).
+- **Clean field:** a field that was never assigned a secret stays clean at the sink (`secret_field_assign_pass` — `println(b.v)` OK when `v` was initialized public).
+- Model is name/base-path path A: taint keys attach so field access at println/write_file/… is refused when the field path carries secret.
+- **Path A only:** simple struct field assign + field read at sink. **Not** full IFC, not deep heap/index/`[]` lattice, not method-receiver deep taint, not cross-module field maps.
+
 ## What we do **not** claim
 
-- Full DESIGN / full IFC taint  
+- Full DESIGN / **full IFC** taint  
 - Taint tracking **shipped/enforced** as a complete product story  
 - Full interprocedural analysis beyond path-A `__fr_secret__`  
-- **T2 scan depth** as done (do **not** claim): full `args` string scan completeness, nested RHS walker exhaustiveness, string/comment false-positive hardening, **field / index / method-return** taint, FFI payload-arg taint, closure-return lattice, string-interp `${}` deep taint  
+- Nested RHS walker **exhaustiveness** (every control-flow form)  
+- Index / method-return / closure-return lattice beyond path-A fixtures  
+- String-interp `${}` deep taint  
 - Attribute grammar `#[Secret]`  
 - Cryptographic redaction  
 - Whole secrecy story as product-green  
@@ -69,11 +98,12 @@ These are the path-A claims for the current emit/check secret floor. They are **
 
 | Area | Status |
 |------|--------|
-| Full IFC / secrecy lattice | **residual** |
+| **Full IFC** / secrecy lattice | **residual** |
 | Interproc beyond path-A `__fr_secret__` (cross-module, parametric, higher-order) | **residual** |
-| Field / index / method-return / closure-return taint (T2) | **residual** — not claimed done |
-| Nested scan / false-positive hardening (T2) | **residual** — not claimed done |
-| FFI / dlopen payload taint (T2) | **residual** — not claimed done |
+| Nested RHS walker exhaustiveness | **residual** |
+| Index / method-return / closure-return beyond path-A model | **residual** |
+| String-interp `${}` deep taint | **residual** |
+| FFI / dlopen payload beyond named path-A args scan | **residual** (partial In via args scan + named sinks) |
 | `#[Secret]` attr | **residual** |
 | Crypto redaction / wipe of secret bytes | **residual** (runtime crypto wipe is separate) |
 | NetCap / non-println friends beyond the In table | **residual** |
@@ -81,13 +111,15 @@ These are the path-A claims for the current emit/check secret floor. They are **
 ## Fail-closed residual
 
 Do **not** claim the whole secrecy story is product-green.  
-Fail-closed residual: unfinished sinks and T2 depth stay residual, not soft-pass.  
-Path A is a named emit/check floor — **not** full DESIGN taint.
+Fail-closed residual: unfinished sinks and **full IFC** stay residual, not soft-pass.  
+Path A + T2 path-A scan depth are a named emit/check floor — **not** full DESIGN / full IFC taint.
 
 ## Rails (must stay green)
 
 - `scripts/secret_sink_enforce_smoke.sh` — path A emit refuse  
-- `scripts/secret_taint_residual_smoke.sh` — honesty  
+- `scripts/secret_t1_return_smoke.sh` — T1 return / alias / if-taint  
+- `scripts/secret_t2_depth_smoke.sh` — T2 field / method / args / comment-skip  
+- `scripts/secret_taint_residual_smoke.sh` — honesty (full IFC residual marker)  
 - `scripts/secret_product_floor_smoke.sh` — umbrella  
 - `scripts/secret_eprintln_smoke.sh` — eprintln dual  
 
