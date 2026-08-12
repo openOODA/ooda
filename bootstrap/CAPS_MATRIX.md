@@ -1,5 +1,6 @@
 # Capability matrix (claimed pure path)
 
+**Catalog (token list):** process doc [`../../openOODA/CAPS.oot`](../../openOODA/CAPS.oot) — 27 V2 names; **type accept ≠ op-level granular enforce** (see SPRINT **CAP-G*** for meta).  
 **Purpose:** Map each sealed effect op through **check → emit-c → runtime → product**.  
 **Rules:** Default-deny. Unfinished = fail-closed, never silent ambient I/O. `fetch` is product-lowered; other net names residual.  
 **Runtime seal:** sealed FS/Sys/Env/Net/Time/Rand/Alloc ops re-check process-local capability tokens at native runtime. Canonical: [`STATIC_CAPS.md`](STATIC_CAPS.md).  
