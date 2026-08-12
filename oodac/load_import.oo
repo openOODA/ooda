@@ -5,6 +5,9 @@
 // residual Issue #9: concat renumbers lines across imports — typecheck
 //   reports expanded-stream LINE:COL, not per-file local. Fix needs
 //   line_base / per-file tokenize or path markers in expanded source.
+// residual OODA_STD_PATH: not read on product path A. load has FsCap only;
+//   env_get needs EnvCap; process-policy getenv is C-runtime, not .oo here.
+//   No absolute /home probes. Relative std probes only (see resolve below).
 
 fn path_marker(path: String) -> String {
     return "\t" + path + "\t";
@@ -58,6 +61,8 @@ pub fn path_join(dir: String, name: String) -> String {
 }
 
 // Parse leading `import "name";` (same surface as scripts/oodac_concat.sh).
+// Empty string = not an import line. Non-empty names are zero-trust checked
+// via reject_bad_import_name before resolution.
 pub fn parse_import_line(line: String) -> String {
     let n = chars_len(line);
     if n < 10 {
@@ -83,6 +88,39 @@ pub fn parse_import_line(line: String) -> String {
         i = i + 1;
     }
     return "";
+}
+
+// Fail-closed: relative module names only (no abs, home, parent, or slash tricks).
+fn reject_bad_import_name(imp: String) {
+    if chars_len(imp) == 0 {
+        println("ERR\timport\tempty name");
+        process_exit(1);
+    }
+    if char_at(imp, 0) == "/" {
+        println("ERR\timport\tabsolute path rejected: " + imp);
+        process_exit(1);
+    }
+    if char_at(imp, 0) == "~" {
+        println("ERR\timport\thome path rejected: " + imp);
+        process_exit(1);
+    }
+    if imp.contains("..") {
+        println("ERR\timport\tpath escape rejected: " + imp);
+        process_exit(1);
+    }
+    if imp.contains("\\") {
+        println("ERR\timport\tbackslash path rejected: " + imp);
+        process_exit(1);
+    }
+    let n = chars_len(imp);
+    let mut j = 0;
+    while j < n {
+        if char_at(imp, j) == "\0" {
+            println("ERR\timport\tNUL in name rejected");
+            process_exit(1);
+        }
+        j = j + 1;
+    }
 }
 
 // DFS expand: imports first (once), then body without import lines.
@@ -128,17 +166,32 @@ fn load_expand(fs: &FsCap, path: String, stack: String, done: String) -> List[St
         if c == "\n" || at_end {
             let imp: String = parse_import_line(line);
             if imp != "" {
+                reject_bad_import_name(imp);
+                // Relative-only std probes (no OODA_STD_PATH, no abs /home).
+                // Extra probe via literal ../../../std — still relative-only.
                 let mut ipath: String = path_join(dir, imp);
-                if !path_exists(fs, ipath) {
+                let mut found = path_exists(fs, ipath);
+                if !found {
                     if path_exists(fs, path_join("std", imp)) {
                         ipath = path_join("std", imp);
+                        found = true;
                     } else if path_exists(fs, path_join("../std", imp)) {
                         ipath = path_join("../std", imp);
+                        found = true;
                     } else if path_exists(fs, path_join("../../std", imp)) {
                         ipath = path_join("../../std", imp);
-                    } else if path_exists(fs, path_join("/home/jeryd/Projects/openOODA/std", imp)) {
-                        ipath = path_join("/home/jeryd/Projects/openOODA/std", imp);
+                        found = true;
+                    } else if path_exists(fs, path_join("../../../std", imp)) {
+                        ipath = path_join("../../../std", imp);
+                        found = true;
                     }
+                }
+                if !found {
+                    println(
+                        "ERR\timport\tnot found after relative probes (dir/std/../std/../../std/../../../std): "
+                            + imp
+                    );
+                    process_exit(1);
                 }
                 let sub: List[String] = load_expand(fs, ipath, stack2, done_cur);
                 done_cur = list_get(sub, 0);
