@@ -1,6 +1,7 @@
 /* M162/M166: real TCP/UDP under NetCap + process-local fd slots (path A).
+ * CAP-G1: per-op require_tcp/udp/bind (or NetCap supersede); sock_raw = NetCap only.
  * Breaking: connect/bind keep fds open; Ok("fd:N") not immediate close.
- * SOCK_RAW residual. TLS stays in chs_rt_tls.c. */
+ * SOCK_RAW residual. TLS stays in chs_rt_tls.c (TcpCap|NetCap). */
 #include "chs_rt.h"
 #include <unistd.h>
 #include <errno.h>
@@ -70,7 +71,7 @@ static OoResS net_ok_fd(int slot) {
 OoResS oo_tcp_bind(long long cap, long long port) {
   int fd, slot;
   struct sockaddr_in addr;
-  oo_cap_require_net(cap, "tcp_bind");
+  oo_cap_require_bind(cap, "tcp_bind");
   if (port < 1 || port > 65535) return net_err("tcp_bind: bad port");
   fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) return net_err("tcp_bind: socket failed");
@@ -103,7 +104,7 @@ OoResS oo_tcp_connect(long long cap, OoStr host, long long port) {
   struct addrinfo hints, *res = NULL, *rp;
   int fd = -1, slot;
   const char *h;
-  oo_cap_require_net(cap, "tcp_connect");
+  oo_cap_require_tcp(cap, "tcp_connect");
   h = host.data ? host.data : "";
   if (!h[0] || port < 1 || port > 65535) return net_err("tcp_connect: bad host/port");
   snprintf(portstr, sizeof portstr, "%lld", (long long)port);
@@ -131,7 +132,7 @@ OoResS oo_tcp_connect(long long cap, OoStr host, long long port) {
 OoResS oo_bind_udp(long long cap, long long port) {
   int fd, slot;
   struct sockaddr_in addr;
-  oo_cap_require_net(cap, "bind_udp");
+  oo_cap_require_udp(cap, "bind_udp");
   if (port < 1 || port > 65535) return net_err("bind_udp: bad port");
   fd = socket(AF_INET, SOCK_DGRAM, 0);
   if (fd < 0) return net_err("bind_udp: socket failed");
@@ -156,7 +157,7 @@ OoResS oo_tcp_write(long long cap, long long slot, OoStr data) {
   ssize_t n;
   const char *p;
   size_t left;
-  oo_cap_require_net(cap, "tcp_write");
+  oo_cap_require_tcp(cap, "tcp_write");
   fd = net_lookup(slot, OO_NET_TCP);
   if (fd == -2) return net_err("tcp_write: not connected tcp");
   if (fd < 0) return net_err("tcp_write: bad slot");
@@ -186,7 +187,7 @@ OoResS oo_tcp_read(long long cap, long long slot, long long max_n) {
   char *buf;
   OoResS r;
   size_t want;
-  oo_cap_require_net(cap, "tcp_read");
+  oo_cap_require_tcp(cap, "tcp_read");
   fd = net_lookup(slot, OO_NET_TCP);
   if (fd == -2) return net_err("tcp_read: not connected tcp");
   if (fd < 0) return net_err("tcp_read: bad slot");
@@ -212,7 +213,7 @@ OoResS oo_udp_recv(long long cap, long long slot, long long max_n) {
   char *buf;
   OoResS r;
   size_t want;
-  oo_cap_require_net(cap, "udp_recv");
+  oo_cap_require_udp(cap, "udp_recv");
   fd = net_lookup(slot, OO_NET_UDP);
   if (fd == -2) return net_err("udp_recv: not udp");
   if (fd < 0) return net_err("udp_recv: bad slot");
@@ -235,7 +236,7 @@ OoResS oo_udp_recv(long long cap, long long slot, long long max_n) {
 OoResS oo_tcp_close(long long cap, long long slot) {
   int s = (int)slot;
   OoResS r;
-  oo_cap_require_net(cap, "tcp_close");
+  oo_cap_require_tcp(cap, "tcp_close");
   net_boot();
   if (s < 0 || s >= OO_NET_SLOTS || g_net_kind[s] == OO_NET_EMPTY)
     return net_err("tcp_close: bad slot");

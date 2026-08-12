@@ -120,7 +120,7 @@ OoResS oo_tls_connect(long long cap, OoStr host, long long port) {
   const char *h;
   const char *err = NULL;
   int fd;
-  oo_cap_require_net(cap, "tls_connect");
+  oo_cap_require_tcp(cap, "tls_connect");
   h = host.data ? host.data : "";
   fd = tls_tcp_fd(h, port, &err);
   if (fd < 0) return tls_err(err ? err : "tls_connect: connection refused");

@@ -86,6 +86,7 @@ for rail in \
   bc_vm_smoke.sh \
   problem_hunt_smoke.sh \
   caps_matrix_smoke.sh \
+  cap_g1_net_granular_smoke.sh \
   libfloor_process_smoke.sh \
   libfloor_net_smoke.sh \
   alloc_cap_smoke.sh \

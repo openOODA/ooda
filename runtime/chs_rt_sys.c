@@ -132,6 +132,36 @@ void oo_cap_require_net(long long got, const char *op) {
     exit(1);
   }
 }
+/* Path A CAP-G1: soft-granular net accept exact g_tok_* OR full NetCap (g_tok_net).
+ * Wrong granular (e.g. TcpCap for fetch) fails closed — NetCap supersedes only. */
+void oo_cap_require_http(long long got, const char *op) {
+  oo_caps_init();
+  if (got != g_tok_http && got != g_tok_net) {
+    fprintf(stderr, "ERR\tcap\t%s: missing or forged capability\n", op ? op : "http");
+    exit(1);
+  }
+}
+void oo_cap_require_tcp(long long got, const char *op) {
+  oo_caps_init();
+  if (got != g_tok_tcp && got != g_tok_net) {
+    fprintf(stderr, "ERR\tcap\t%s: missing or forged capability\n", op ? op : "tcp");
+    exit(1);
+  }
+}
+void oo_cap_require_udp(long long got, const char *op) {
+  oo_caps_init();
+  if (got != g_tok_udp && got != g_tok_net) {
+    fprintf(stderr, "ERR\tcap\t%s: missing or forged capability\n", op ? op : "udp");
+    exit(1);
+  }
+}
+void oo_cap_require_bind(long long got, const char *op) {
+  oo_caps_init();
+  if (got != g_tok_bind && got != g_tok_net) {
+    fprintf(stderr, "ERR\tcap\t%s: missing or forged capability\n", op ? op : "bind");
+    exit(1);
+  }
+}
 
 /* R2/R3: fork + execvp with full argv (no system(3) shell). */
 OoResS oo_sys_exec(long long cap, int argc, OoStr *argv) {
@@ -224,7 +254,7 @@ OoResS oo_fetch(long long cap, OoStr url) {
   char req[1400], *body = NULL, *acc = NULL;
   size_t acc_len = 0, acc_cap = 0;
   ssize_t nr;
-  oo_cap_require_net(cap, "fetch");
+  oo_cap_require_http(cap, "fetch");
   r.ok = 0;
   r.val = oo_str_lit("fetch failed");
   u = url.data ? url.data : "";
