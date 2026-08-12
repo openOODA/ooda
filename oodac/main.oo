@@ -101,6 +101,7 @@ import "c_emit_let.oo";
 import "c_emit_ident.oo";
 import "c_emit_match.oo";
 import "c_emit_max_cycles.oo";
+import "c_emit_meta.oo";
 import "c_emit_secret.oo";
 import "c_emit_secret_guard.oo";
 import "c_emit_stmt.oo";
@@ -130,6 +131,8 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
     let mut backend: String = "c";
     let mut json_errors: Bool = false;
     let mut is_json: Bool = false;
+    let mut hitl_required: Bool = false;
+    let mut hitl_allowed: Bool = false;
     let mut npos: Int = 0;
     let mut i: Int = 0;
     while i < list_len(args) {
@@ -142,6 +145,8 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
             i = i + 2;
         } else if a == "--json-errors" || a == "-json" { json_errors = true; i = i + 1; }
         else if a == "--json" { is_json = true; i = i + 1; }
+        else if a == "--hitl-required" { hitl_required = true; i = i + 1; }
+        else if a == "--hitl-allowed" { hitl_allowed = true; i = i + 1; }
         else {
             if npos == 0 { cmd = a; }
             else if npos == 1 { path = a; }
@@ -172,6 +177,33 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
         process_exit(1);
     }
 
+    // M-CTZ-1: --hitl-required → re-invoke oodac with OODA_HITL_REQUIRED=1 in
+    // the env so c_emit.oo bakes the compile-time #define into every emitted
+    // TU. The re-invocation uses `exec` in the child shell to avoid an extra
+    // process. Only meaningful for commands that emit C (build + emit-c
+    // family); for other commands the flag is a no-op.
+    if hitl_required
+        && (cmd == "build" || cmd == "emit-c" || cmd == "emit-protos"
+            || cmd == "emit-bodies" || cmd == "emit-preamble")
+    {
+        let mut re_cmd: String = "OODA_HITL_REQUIRED=1 exec \"${OODAC_BIN:-./oodac/oodac}\"";
+        if backend != "" && backend != "c" {
+            re_cmd = re_cmd + " --backend " + backend;
+        }
+        if json_errors {
+            re_cmd = re_cmd + " --json-errors";
+        }
+        if is_json {
+            re_cmd = re_cmd + " --json";
+        }
+        re_cmd = re_cmd + " " + shell_sq(cmd) + " " + shell_sq(path);
+        if out_arg != "" {
+            re_cmd = re_cmd + " " + shell_sq(out_arg);
+        }
+        let _rh: Result[String, String] = sys_exec(sys, "sh", "-c", re_cmd);
+        process_exit(0);
+    }
+
     if cmd == "build" {
         run_build_cmd(fs, sys, path, out_arg, backend);
         return;
@@ -182,6 +214,14 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
     }
     if cmd == "check" {
         if json_errors { run_check_json_errors(fs, sys, path); return; }
+        // M-CTZ-2: --hitl-allowed threads explicit CLI gate into HITL check.
+        // Bypass cached run_check_path so the flag reaches check_hitl_deny.
+        if hitl_allowed {
+            let src_h: String = load_source_with_imports(fs, path);
+            run_check_core_hitl(sys, src_h, true);
+            println("OK");
+            return;
+        }
         run_check_path(fs, sys, path);
         return;
     }

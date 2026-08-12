@@ -1,39 +1,41 @@
-# Polymorphic metamorphic binaries
+# METAMORPHIC — immune / layout diversity residual pack
 
-**Status:** residual honesty (not enforced). PM **3.11**.  
 **Marker:** `METAMORPHIC_RESIDUAL_ALPHA`
 
-## Named surface only (not product green)
+## Path A (alpha product floor — limited)
 
-- Named only: metamorphic / polymorphic codegen (DESIGN)
+1. **Emit-time layout decoys (opt-in)**  
+   Source directive (line-start only):
+   ```
+   // METAMORPHIC: path-a
+   ```
+   When present, Backend-C emit inserts non-semantic `__oo_meta_decoy_N` functions after each top-level fn so the **exposed C/object layout** differs from a build without the marker.  
+   - Default **OFF** (no directive) → stable layout for deterministic product builds.  
+   - Does **not** re-mutate code after load.  
+   - Fail-closed residual wording: this is **not** full DESIGN runtime assembly mutation.
 
-## What is true today
+2. **Process-local epoch**  
+   Free name `meta_epoch()` → `oo_meta_epoch()`: fixed random 64-bit value for the process (first call). For future immune hooks / diversification seeds.  
+   Residual: does not rewrite .text at runtime.
 
-Product alpha does **not** ship this DESIGN surface as enforced. Process-local caps / pure self-host / Backend-C floor remain the claimed path. This residual names the gap so agents do not treat aspiration as shipped.
+## Residual (not product — free-name refuse)
 
-## Fail-closed residual
+| Free name | Tag |
+|-----------|-----|
+| `metamorphic_emit` | METAMORPHIC |
+| `metamorphic_build` | METAMORPHIC |
+| `metamorphic_vs_det` | META_VS_DET |
 
-Do **not** treat the named surface as a security or product boundary. Absence of implementation is residual, not silent green.
+Full DESIGN “polymorphic metamorphic binaries / immune systems” (continuous RAM re-mutation, ROP graph reshape) is **not shipped**.  
+Fail-closed residual at check: residual free-name default-deny.
 
-## What we do **not** claim
+## Tension with deterministic builds
 
-- No metamorphic binary product path shipped
+- Source `input_fp` remains the reproducibility anchor.  
+- Path-A decoys are **explicit opt-in** so default CI/product builds stay layout-stable.  
+- True bit-identical binary + continuous polymorphism remains residual (DESIGN §6.1).
 
+## Honesty
 
-## Path A product floor (alpha) — M153
-
-**Path A marker:** `METAMORPHIC_PATH_A_ALPHA`  
-**Status:** path A **In** — check default-deny of named residual free calls (`check_residual.oo`).  
-**In:** metamorphic_emit/metamorphic_build free calls refused at check  
-**Rails:** `scripts/residual_path_a_floor_smoke.sh`  
-**Still residual:** full DESIGN implementation of this moonshot (not claimed).
-
-## Rails
-
-- Doc marker: `METAMORPHIC_RESIDUAL_ALPHA`
-- Smoke: `scripts/metamorphic_residual_smoke.sh`
-- Fixture: `fixtures/metamorphic_marker.oo` (marker comment only)
-
-## Next (path A, not this pack)
-
-Bounded product refuse or thin enforce path — still not full DESIGN depth.
+Honesty ban list (never product-green without residual tag): runtime code re-mutation is residual only.  
+Claim only: path-A layout decoys + `meta_epoch`; full immune system remains residual.

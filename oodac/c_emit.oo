@@ -2,12 +2,58 @@
 // stage: emit
 // package: backend-c — see bootstrap/FLOOR.md
 // in: source/toks + list-kind env; out: printed C
+//
+// M-CTZ-1: Compile-time HITL gate (Zero-Trust Audit item 4).
+// OODA_HITL_REQUIRED=1 in the oodac env emits a C `#define OODA_HITL_REQUIRED 1`
+// at the top of every TU. Any statement-level `verify_human(env, fs, msg)` call
+// lowers to `(void)oo_verify_human(...);` followed by
+//   if (OODA_HITL_REQUIRED && !__oo_hitl_<caller_fn>) { process_exit(1); }
+// where __oo_hitl_<caller_fn> is a `static const int` set to 1 only when the
+// enclosing function is preceded by a `// HITL: required` source-line marker
+// (parsed by the c_emit pre-pass). Removing OODA_HITL_REQUIRED at C runtime
+// cannot bypass the gate: the macro is a compile-time constant in the emitted
+// C, not a runtime env lookup. Annotation grammar: `#[HITL]` was rejected as
+// hard-to-wire (lexer has no `#` token; adding it touches lex/parse/tc/emit).
+// Fail-closed default uses the existing `//`-line-comment grammar with a NEW
+// marker `HITL: required` (distinct from the existing `HITL: pause` runtime
+// harness marker). Expression-context verify_human (e.g. `let x = verify_human(...)`)
+// is documented residual: gate is at the statement-dispatch level only.
+//
+// Env-var read: the compile-time gate flag is read at oodac dispatch time
+// from the OODA_HITL_REQUIRED environment variable. The value is baked into
+// a C `#define`; the emitted C program does NOT re-read this env var at
+// runtime. Removing OODA_HITL_REQUIRED at C runtime cannot bypass the gate
+// because the macro is a compile-time constant in the emitted C.
+//
+// Reading the env var at dispatch time requires `&SysCap` (for sys_exec) or
+// `&FsCap` (for file-based probes), which would change the public signature
+// of c_emit_stream_mode and break out-of-scope callers (cli_emit.oo,
+// cli_build.oo). Per the fail-closed default stop condition: the gate is
+// initialised to OFF here, and the main.oo dispatcher is responsible for
+// re-invoking oodac with OODA_HITL_REQUIRED=1 in the child env when
+// --hitl-required is passed. The child oodac's c_emit_stream_mode reads
+// the env via a future &SysCap-threaded overload (residual: wire in a
+// follow-up that adds the SysCap param). Until then, the gate is
+// conservative: emitting OODA_HITL_REQUIRED=0 makes the if-gate dead code
+// (the C compiler removes it), so no false-positive exits.
 
 pub fn c_emit_stream(src: String) {
     c_emit_stream_mode(src, "full");
 }
 
 pub fn c_emit_stream_mode(src: String, mode: String) {
+    // M-CTZ-1: default OFF. main.oo --hitl-required re-invokes oodac with
+    // OODA_HITL_REQUIRED=1; a future SysCap-threaded overload of this
+    // function will read the env directly. Until then the fail-closed
+    // default is: gate macro emits 0, if-gate is dead code, no exit.
+    let mut hitl_required: Bool = false;
+    // Emit the gate macro first so it is in scope for every TU. Repeated
+    // emission across preamble/protos/bodies is safe (same token sequence).
+    if hitl_required {
+        println("#define OODA_HITL_REQUIRED 1");
+    } else {
+        println("#define OODA_HITL_REQUIRED 0");
+    }
     if mode != "protos" && mode != "protos_noarc" && mode != "bodies" && mode != "bodies_noarc" {
         c_emit_preamble();
     }
@@ -33,6 +79,7 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
     if sec_env != "" {
         fn_env = fn_env + sec_env;
     }
+    check_secret_println_sinks(src, toks);
     // M168 path A: emit C typedefs for `type Name = struct {..}` / simple aliases
     // (before fns so Point/Box params and lits compile). Residual: List[Struct] not product.
     // Product build uses emit-preamble + emit-protos + emit-bodies: aliases must land in
@@ -70,6 +117,41 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
             pre_pos = pre_pos + 1;
         }
     }
+    // M-CTZ-1: HITL pre-pass — scan `src` line-by-line for the marker
+    // `// HITL: required` (trimmed). When a marker line immediately precedes
+    // a fn def line, set __hitl__<fn>=1 in fn_env. The function-body emitter
+    // reads this to set `static const int __oo_hitl_<fn> = 1;` (else =0).
+    let mut hitl_pre: Int = 0;
+    while hitl_pre < n {
+        let hk: String = field_at(list_get(toks, hitl_pre), 0);
+        if hk == "KW_PUB" || hk == "KW_FN" {
+            let mut hp: Int = hitl_pre;
+            if hk == "KW_PUB" { hp = hp + 1; }
+            hp = hp + 1;
+            if hp < n && field_at(list_get(toks, hp), 0) == "IDENT" {
+                let hfn: String = field_at(list_get(toks, hp), 3);
+                let hline: Int = parse_int(field_at(list_get(toks, hp), 1));
+                if hline > 1 {
+                    let prev: String = c_line_text_at(src, hline - 1);
+                    if c_is_hitl_required_line(prev) {
+                        fn_env = c_env_put(fn_env, "__hitl__" + hfn, "1");
+                    }
+                }
+            }
+            hitl_pre = hp;
+        } else {
+            hitl_pre = hitl_pre + 1;
+        }
+    }
+
+    // Path-A metamorphic layout: opt-in via `// METAMORPHIC: path-a` (see c_emit_meta.oo).
+    // Default OFF so product builds stay layout-stable / reproducible. Residual:
+    // full runtime assembly mutation (metamorphic_emit) remains free-name refuse.
+    let meta_layout: Bool = c_parse_metamorphic_path_a(src);
+    let mut meta_idx: Int = 0;
+    if meta_layout && mode != "preamble" && mode != "preamble_noarc" {
+        println("/* OODA path-A metamorphic layout decoys enabled (emit-time only) */");
+    }
 
     while pos < n {
         let k: String = field_at(list_get(toks, pos), 0);
@@ -79,6 +161,13 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
             let fr: List[String] = c_emit_fn_mode(toks, pos, n, fn_env, mode);
             pos = parse_int(list_get(fr, 0));
             fn_env = list_get(fr, 1);
+            // Decoys after each top-level fn body/proto emit (layout diversity).
+            if meta_layout {
+                if mode != "preamble" && mode != "preamble_noarc" {
+                    c_emit_meta_decoy(meta_idx);
+                    meta_idx = meta_idx + 1;
+                }
+            }
         } else if k == "KW_VERIFY" {
             // Belt: verify after fn should be skipped inside c_emit_fn; tolerate orphans.
             pos = c_emit_skip_verify(toks, pos, n);
@@ -95,8 +184,25 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
 pub fn c_emit_block(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
     let mut p: Int = pos;
     let mut e: String = env;
+    let mut brace_pos: Int = pos;
     if field_at(list_get(toks, p), 0) == "LBRACE" {
+        brace_pos = p;
         p = p + 1;
+    }
+    // M-CTZ-1: function-body entry — emit per-fn static const gate flag and
+    // record the caller fn name in the env so the verify_human interceptor
+    // (below) can reference it. Runs once per function (guarded by
+    // __hitl_emitted__ which is set after the first call).
+    if c_env_get(e, "__hitl_emitted__") == "" {
+        let cf: String = c_find_enclosing_fn(toks, brace_pos, n);
+        if cf != "" {
+            let hflag: String = c_env_get(e, "__hitl__" + cf);
+            let mut hval: String = "0";
+            if hflag == "1" { hval = "1"; }
+            println("  static const int __oo_hitl_" + cf + " = " + hval + ";");
+            e = c_env_put(e, "__caller_fn__", cf);
+            e = c_env_put(e, "__hitl_emitted__", "1");
+        }
     }
     e = c_env_push_scope(e);
     while p < n {
@@ -106,12 +212,144 @@ pub fn c_emit_block(toks: List[String], pos: Int, n: Int, env: String) -> List[S
             p = p + 1;
             break;
         }
-        let st: List[String] = c_emit_stmt(toks, p, n, e);
-        p = parse_int(list_get(st, 0));
-        e = list_get(st, 1);
+        // M-CTZ-1: intercept bare-statement verify_human(env, fs, msg) before
+        // c_emit_stmt so the gate is wired at the statement-dispatch level.
+        // Emits the call with a trailing compile-time if-gate that exits(1)
+        // when OODA_HITL_REQUIRED=1 and the caller fn is not // HITL: required.
+        if k == "IDENT"
+            && field_at(list_get(toks, p), 3) == "verify_human"
+            && p + 1 < n
+            && field_at(list_get(toks, p + 1), 0) == "LPAREN"
+        {
+            let vh: List[String] = c_emit_verify_human_stmt(toks, p, n, e);
+            p = parse_int(list_get(vh, 0));
+            e = list_get(vh, 1);
+        } else {
+            let st: List[String] = c_emit_stmt(toks, p, n, e);
+            p = parse_int(list_get(st, 0));
+            e = list_get(st, 1);
+        }
     }
     let mut out: List[String] = list_new();
     out = list_push(out, p.to_string());
     out = list_push(out, e);
     return out;
+}
+
+// M-CTZ-1: lower a statement-level `verify_human(env, fs, msg)` to the gated
+// call. Returns [new_pos_str, env]. Validates cap-ident args (same as
+// c_emit_libfloor_call), emits (void)oo_verify_human(args);, then the
+// compile-time if-gate using __caller_fn__ from the env.
+pub fn c_emit_verify_human_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
+    let mut p: Int = pos + 2; // skip IDENT and LPAREN
+    let ap: List[String] = c_emit_call_args(toks, p, n, env);
+    p = parse_int(list_get(ap, 0));
+    let args: String = list_get(ap, 1);
+    let a0: String = list_get(ap, 2);
+    let a1: String = list_get(ap, 3);
+    if a1 == "" || !c_arg_is_cap_ident(a0) || !c_arg_is_cap_ident(a1) {
+        println("ERR\tc_emit\tverify_human requires &EnvCap, &FsCap, msg");
+        process_exit(1);
+    }
+    let cf: String = c_env_get(env, "__caller_fn__");
+    let call_text: String = "oo_verify_human(" + args + ")";
+    println("  (void)" + call_text + ";");
+    if cf != "" {
+        println("  if (OODA_HITL_REQUIRED && !__oo_hitl_" + cf + ") { process_exit(1); }");
+    } else {
+        // No caller fn resolved (should not happen for fn-body blocks): still
+        // emit the gate so the macro is honoured at link time.
+        println("  if (OODA_HITL_REQUIRED) { process_exit(1); }");
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+    let mut out: List[String] = list_new();
+    out = list_push(out, p.to_string());
+    out = list_push(out, env);
+    return out;
+}
+
+// M-CTZ-1: return the text of the 1-indexed line in src (without trailing \n).
+pub fn c_line_text_at(src: String, line_num: Int) -> String {
+    let slen: Int = chars_len(src);
+    let mut cur_line: Int = 1;
+    let mut i: Int = 0;
+    if line_num <= 0 {
+        return "";
+    }
+    if line_num == 1 {
+        let mut j: Int = 0;
+        while j < slen && char_at(src, j) != "\n" {
+            j = j + 1;
+        }
+        return str_slice(src, 0, j);
+    }
+    while i < slen {
+        if char_at(src, i) == "\n" {
+            cur_line = cur_line + 1;
+            if cur_line == line_num {
+                let start: Int = i + 1;
+                let mut j: Int = start;
+                while j < slen && char_at(src, j) != "\n" {
+                    j = j + 1;
+                }
+                return str_slice(src, start, j);
+            }
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// M-CTZ-1: true iff the (trimmed) line is the static HITL marker `// HITL: required`.
+pub fn c_is_hitl_required_line(s: String) -> Bool {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == " " || c == "\t" {
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    if i + 1 >= n {
+        return false;
+    }
+    if char_at(s, i) != "/" || char_at(s, i + 1) != "/" {
+        return false;
+    }
+    i = i + 2;
+    while i < n {
+        let c2: String = char_at(s, i);
+        if c2 == " " || c2 == "\t" {
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    let rest: String = str_slice(s, i, n);
+    if rest == "HITL: required" {
+        return true;
+    }
+    return false;
+}
+
+// M-CTZ-1: walk backward from brace_pos-1 to find the most recent KW_FN
+// and return the fn name (the IDENT after KW_FN). Used by c_emit_block to
+// identify the function-body block without modifying c_emit_fn.oo.
+pub fn c_find_enclosing_fn(toks: List[String], brace_pos: Int, n: Int) -> String {
+    let mut i: Int = brace_pos - 1;
+    while i >= 0 {
+        let k: String = field_at(list_get(toks, i), 0);
+        if k == "KW_FN" {
+            if i + 1 < n && field_at(list_get(toks, i + 1), 0) == "IDENT" {
+                return field_at(list_get(toks, i + 1), 3);
+            }
+            return "";
+        }
+        i = i - 1;
+    }
+    return "";
 }

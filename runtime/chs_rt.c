@@ -17,4 +17,5 @@
 #include "chs_rt_print.c"
 #include "chs_rt_math.c"
 #include "chs_rt_crypto.c"
+#include "chs_rt_meta.c"
 #include "chs_rt_host.c"

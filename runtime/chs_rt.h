@@ -53,7 +53,9 @@ typedef struct {
 
 /* Internal payload allocation helpers.
  * Ambient List quota: default 64MiB; override OO_LIST_AMBIENT_QUOTA (bytes).
- * Not OS rlimit; raise ceiling via alloc_bytes(&AllocCap, n). */
+ * Not OS rlimit; raise ceiling via alloc_bytes(&AllocCap, n).
+ * Per-raise n capped at 1<<30 in chs_rt_alloc.c (oversize → no-op); residual:
+ * still not setrlimit / cgroup / ASAN heap isolation. */
 extern long long oo_list_ambient_quota;
 extern long long oo_list_ambient_bytes;
 void oo_list_quota_init_public(void);
@@ -136,6 +138,25 @@ long long oo_cap_grant_time(void);
 long long oo_cap_grant_rand(void);
 long long oo_cap_grant_alloc(void);
 long long oo_cap_grant_ffi(void);
+long long oo_cap_grant_audit(void);
+long long oo_cap_grant_sign(void);
+long long oo_cap_grant_hitl(void);
+long long oo_cap_grant_process(void);
+long long oo_cap_grant_sync(void);
+long long oo_cap_grant_mem(void);
+long long oo_cap_grant_http(void);
+long long oo_cap_grant_tcp(void);
+long long oo_cap_grant_udp(void);
+long long oo_cap_grant_bind(void);
+long long oo_cap_grant_audio(void);
+long long oo_cap_grant_camera(void);
+long long oo_cap_grant_usb(void);
+long long oo_cap_grant_hid(void);
+long long oo_cap_grant_window(void);
+long long oo_cap_grant_frame(void);
+long long oo_cap_grant_fsread(void);
+long long oo_cap_grant_fswrite(void);
+
 void oo_cap_require(long long got, long long want, const char *op);
 void oo_cap_require_fs(long long got, const char *op);
 void oo_cap_require_sys(long long got, const char *op);
@@ -145,6 +166,25 @@ void oo_cap_require_time(long long got, const char *op);
 void oo_cap_require_rand(long long got, const char *op);
 void oo_cap_require_alloc(long long got, const char *op);
 void oo_cap_require_ffi(long long got, const char *op);
+void oo_cap_require_audit(long long got, const char *op);
+void oo_cap_require_sign(long long got, const char *op);
+void oo_cap_require_hitl(long long got, const char *op);
+void oo_cap_require_process(long long got, const char *op);
+void oo_cap_require_sync(long long got, const char *op);
+void oo_cap_require_mem(long long got, const char *op);
+void oo_cap_require_http(long long got, const char *op);
+void oo_cap_require_tcp(long long got, const char *op);
+void oo_cap_require_udp(long long got, const char *op);
+void oo_cap_require_bind(long long got, const char *op);
+void oo_cap_require_audio(long long got, const char *op);
+void oo_cap_require_camera(long long got, const char *op);
+void oo_cap_require_usb(long long got, const char *op);
+void oo_cap_require_hid(long long got, const char *op);
+void oo_cap_require_window(long long got, const char *op);
+void oo_cap_require_frame(long long got, const char *op);
+void oo_cap_require_fsread(long long got, const char *op);
+void oo_cap_require_fswrite(long long got, const char *op);
+
 OoResS oo_dlopen(long long cap, OoStr path);
 OoResS oo_dlsym(long long cap, OoStr handle, OoStr name);
 OoResS oo_dlclose(long long cap, OoStr handle);
@@ -155,6 +195,7 @@ void oo_cap_require_gpu(long long got, const char *op);
 OoStr crypto_md5_internal(OoStr data);
 OoStr crypto_sha1_internal(OoStr data);
 OoStr crypto_aes_encrypt_internal(OoStr key, OoStr plain);
+OoStr crypto_hmac_sha256_internal(OoStr key, OoStr msg);
 long long oo_byte_at(OoStr s, long long idx);
 long long oo_bytes_len(OoStr s);
 OoStr oo_byte_slice(OoStr s, long long start, long long end);
@@ -196,6 +237,8 @@ OoResS oo_actor_send(long long cap, long long id, OoStr msg);
 OoResS oo_actor_recv(long long cap, long long id);
 /* Process-policy env: only OODA_* / OO_* keys (not product env_get). */
 const char *oo_process_policy_getenv(const char *key);
+/* Path-A metamorphic floor: process-local epoch (not runtime code mutation). */
+long long oo_meta_epoch(void);
 /* HITL requires process EnvCap + FsCap (TTY / policy env). */
 OoResS oo_verify_human(long long env, long long fs, OoStr msg);
 OoResS oo_gpu_launch(long long cap, OoStr shader);
