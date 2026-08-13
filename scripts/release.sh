@@ -11,7 +11,7 @@ PIN_FILE="$ROOT/install/BOOTSTRAP_PIN"
 if [[ -f "$PIN_FILE" ]]; then
   CARGO_VER="$(tr -d 'v\r\n' <"$PIN_FILE" | head -1)"
 else
-  CARGO_VER="0.184.1-alpha"
+  CARGO_VER="0.184.4-alpha"
 fi
 VERSION="${1:-v${CARGO_VER}}"
 case "$VERSION" in
