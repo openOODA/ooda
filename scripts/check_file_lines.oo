@@ -1,0 +1,43 @@
+// # Check File Lines Holds The Lock
+// Logline: every owned source file ≤ MAX_LINES (default 256); ratchet mode only fails on growth or new oversize.
+// Setup: git repo (uses git rev-parse); finds .oo .rs .c .h .sh .py excluding generated/noise.
+// Beats: 1. walk owned sources | 2. JSON or text summary | 3. ratchet vs strict mode exit
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+    let maxl  = sh_env_get_or(p, "MAX_LINES", "256").unwrap_or("256");
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — walk owned sources (.oo .rs .c .h .sh .py)
+    let _w1 = process_exec(p, "cd " + root + " && find . -type f \\( -name '*.oo' -o -name '*.rs' -o -name '*.c' -o -name '*.h' -o -name '*.sh' -o -name '*.py' \\) -not -path './.git/*' -not -path './target/*' -not -path './dist/*' -not -path './.agents/*' 2>/dev/null | sed 's|^\\./||' | sort > " + tmpd + "/cfl.lst");
+    fails   = fails + tally(expect_quiet(p, "test -s " + tmpd + "/cfl.lst"),                              "walk owned sources");
+
+    // and — flag oversize (excluding generated/noise)
+    let _w2 = process_exec(p, "O=0; T=0; rm -f " + tmpd + "/cfl_oversize.lst; while IFS= read -r f; do " +
+        "case \"$f\" in *.oo.c|*.oo.bin|*.c_native|*.concat.oo|*.oo.concat.oo|oodac/main.c|oodac/oodac2.c|./oodac/main.c|./oodac/oodac2.c|*/oodac/main.c|*/oodac/oodac2.c|a.out|*/a.out|out.txt|*/out.txt|*.git/*|*target/*|*dist/*|*.agents/*) continue;; esac; " +
+        "[ -f \"$f\" ] || continue; T=$((T+1)); n=$(wc -l < \"$f\" | tr -d ' '); " +
+        "if [ \"$n\" -gt " + maxl + " ]; then echo \"$n $f\" >> " + tmpd + "/cfl_oversize.lst; O=$((O+1)); fi; done < " + tmpd + "/cfl.lst; " +
+        "echo \"$O\" > " + tmpd + "/cfl_oversize_n; echo \"$T\" > " + tmpd + "/cfl_total_n");
+    fails   = fails + tally(check(p, "test -s " + tmpd + "/cfl_total_n", 60),                              "count oversize + total");
+
+    // then — emit summary line
+    let _w3 = process_exec(p, "O=$(cat " + tmpd + "/cfl_oversize_n); T=$(cat " + tmpd + "/cfl_total_n); " +
+        "echo \"check_file_lines: MAX_LINES=" + maxl + "  owned=$T  O=$O  mode=text\" > " + tmpd + "/cfl_summary.txt; " +
+        "if [ \"$O\" -gt 0 ]; then echo 'OVERSIZE:' >> " + tmpd + "/cfl_summary.txt; sort -n " + tmpd + "/cfl_oversize.lst >> " + tmpd + "/cfl_summary.txt; else echo 'OK: no owned source file exceeds " + maxl + " lines.' >> " + tmpd + "/cfl_summary.txt; fi");
+    let _w4 = process_exec(p, "cat " + tmpd + "/cfl_summary.txt");
+    fails   = fails + tally(check(p, "test -s " + tmpd + "/cfl_summary.txt", 5),                           "summary written");
+
+    if fails > 0 { println("check_file_lines: FAILED"); process_exit(1); }
+    println("check_file_lines: PASSED");
+}

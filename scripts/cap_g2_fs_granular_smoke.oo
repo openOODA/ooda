@@ -1,0 +1,57 @@
+// # Cap G2 Fs Granular Stays Preferred
+// Logline: FsReadCap/FsWriteCap preferred over FsCap legacy; sealed_fs_kind_of map; corpus deny/allow round.
+// Setup: oodac/oodac built; bootstrap/corpus/check/{pass,fail}/ granular fs fixtures on disk.
+// Beats: 1. static sealed_fs_kind_of map | 2. corpus deny wrong-granular | 3. corpus allow right-granular + legacy
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+    let passd = root + "/bootstrap/corpus/check/pass";
+    let faild = root + "/bootstrap/corpus/check/fail";
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — static sealed_fs_kind_of map
+    fails = fails + tally(check(p, "grep -q 'sealed_fs_kind_of' " + root + "/oodac/check_cap_util.oo && grep -q 'return \"FsReadCap\"' " + root + "/oodac/check_cap_util.oo && grep -q 'return \"FsWriteCap\"' " + root + "/oodac/check_cap_util.oo", 5), "sealed_fs_kind_of (read/write)");
+    fails = fails + tally(expect_quiet(p, "grep -qE 'oo_cap_require_fsread|require_fsread' " + root + "/runtime/chs_rt_fs.c " + root + "/runtime/chs_rt_sys.c " + root + "/runtime/chs_rt.h 2>/dev/null; true"), "runtime require_fsread (soft)");
+
+    // and — corpus deny wrong-granular
+    let mut i: Int = 0;
+    let deny_arr = ["wrong_granular_fsread_for_write.oo", "wrong_granular_fswrite_for_read.oo"];
+    let deny_lab = ["FsReadCap+write_file", "FsWriteCap+read_file"];
+    while i < 2 {
+        let f = faild + "/" + deny_arr[i];
+        let base = deny_arr[i];
+        let _w = process_exec(p, oodac + " check " + f + " > " + tmpd + "/cap_g2_" + base + ".out 2> " + tmpd + "/cap_g2_" + base + ".err");
+        fails  = fails + tally(check(p, "test \"$(grep -c '^OK' " + tmpd + "/cap_g2_" + base + ".out 2>/dev/null || echo 0)\" -eq 0 && grep -qiE 'capability|ERR|default-deny|cap' " + tmpd + "/cap_g2_" + base + ".out " + tmpd + "/cap_g2_" + base + ".err 2>/dev/null", 10), "check deny " + deny_lab[i]);
+        i = i + 1;
+    }
+
+    // and — corpus allow right-granular + legacy
+    let j: Int = 0;
+    let allow_arr = ["ok_fs_cap_read_write.oo", "ok_fs_read_cap_read.oo", "ok_fs_write_cap_write.oo", "ok_fs_read.oo", "ok_fs_write.oo"];
+    let allow_lab = ["FsCap+read+write", "FsReadCap+read_file", "FsWriteCap+write_file", "FsCap+read_file (legacy)", "FsCap+write_file (legacy)"];
+    while j < 5 {
+        let f = passd + "/" + allow_arr[j];
+        let base = allow_arr[j];
+        let _w = process_exec(p, oodac + " check " + f + " > " + tmpd + "/cap_g2_p_" + base + ".out 2> " + tmpd + "/cap_g2_p_" + base + ".err");
+        fails  = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/cap_g2_p_" + base + ".out"),       "check allow " + allow_lab[j]);
+        j = j + 1;
+    }
+
+    // then — soft ci_product wire
+    fails = fails + tally(expect_quiet(p, "grep -q 'cap_g2_fs_granular_smoke' " + root + "/scripts/ci_product.sh 2>/dev/null; true"), "ci_product wire (soft)");
+
+    if fails > 0 { println("cap_g2_fs_granular_smoke: FAILED"); process_exit(1); }
+    println("cap_g2_fs_granular_smoke: PASSED");
+}

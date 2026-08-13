@@ -1,0 +1,67 @@
+// # Libfloor Process Smoke
+//
+// Logline: libfloor Path A — bare sys_spawn without SysCap fails check; granted sys_spawn/wait/kill dual-run residual Err; sys_exec stays real blocking spawn+wait; forged zero SysCap denied.
+// Setup: oodac/oodac prebuilt; gcc; corpus/{check/pass/ok_sys_spawn,check/fail/no_cap_sys_spawn}/.oo; fixtures/libfloor_sys_spawn.oo; std/os/process.oo.
+//
+// Beats: deny bare sys_spawn | allow ok_sys_spawn | std/os/process.oo check OK | emit lowers oo_sys_* + grant_sys | runtime residual Err sys_spawn/wait/kill | zero Sys forge deny | sys_exec contrast remains real.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _ = sh_mkdir_p(p, tmpd);
+    let _ = scenario(p, fs, "libfloor path A sys_spawn / sys_exec");
+
+    expect_quiet(p, "test -x " + oodac);
+    expect_present(fs, root + "/bootstrap/corpus/check/fail/no_cap_sys_spawn.oo");
+    expect_present(fs, root + "/bootstrap/corpus/check/pass/ok_sys_spawn.oo");
+    expect_present(fs, root + "/fixtures/libfloor_sys_spawn.oo");
+    expect_present(fs, root + "/std/os/process.oo");
+
+    when "bare sys_spawn denied | granted ok_sys_spawn allowed | std/os/process.oo OK" {
+    and  "emit lowers oo_sys_spawn/wait/kill + grant_sys" {
+    and  "sys_spawn without SysCap IDENT fail-closed" {
+    and  "runtime residual Err sys_spawn/wait/kill | zero Sys forge deny" {
+    and  "sys_exec contrast remains real blocking spawn+wait" {
+    then "libfloor process green" {
+    } } } } }
+
+    expect_clean(p, "!" + oodac + " check " + root + "/bootstrap/corpus/check/fail/no_cap_sys_spawn.oo > " + tmpd + "/lp_fail.out 2> " + tmpd + "/lp_fail.err");
+    expect_clean(p, "grep -qE 'capability|ERR' " + tmpd + "/lp_fail.out " + tmpd + "/lp_fail.err");
+
+    check(p, oodac + " check " + root + "/bootstrap/corpus/check/pass/ok_sys_spawn.oo > " + tmpd + "/lp_pass.out 2> " + tmpd + "/lp_pass.err", within: 30);
+    expect_clean(p, "grep -qE '^OK' " + tmpd + "/lp_pass.out");
+    check(p, oodac + " check " + root + "/std/os/process.oo > " + tmpd + "/lp_std.out 2> " + tmpd + "/lp_std.err", within: 30);
+    expect_clean(p, "grep -qE '^OK' " + tmpd + "/lp_std.out");
+
+    check(p, oodac + " emit-c " + root + "/fixtures/libfloor_sys_spawn.oo > " + tmpd + "/lp_spawn.c 2> " + tmpd + "/lp_spawn.err", within: 30);
+    expect_substring(fs, tmpd + "/lp_spawn.c", "oo_sys_spawn(");
+    expect_substring(fs, tmpd + "/lp_spawn.c", "oo_sys_wait(");
+    expect_substring(fs, tmpd + "/lp_spawn.c", "oo_sys_kill(");
+    expect_substring(fs, tmpd + "/lp_spawn.c", "oo_cap_grant_sys");
+
+    check(p, "printf 'pub fn main(sys: &SysCap) { let r = sys_spawn(\"true\"); }\\n' > " + tmpd + "/lp_bad_spawn.oo", within: 5);
+    check(p, oodac + " emit-c " + tmpd + "/lp_bad_spawn.oo > " + tmpd + "/lp_bad_spawn.c 2> " + tmpd + "/lp_bad_spawn.err", within: 30);
+    expect_clean(p, "grep -qE 'ERR\\tc_emit\\tsys_spawn requires' " + tmpd + "/lp_bad_spawn.c " + tmpd + "/lp_bad_spawn.err 2>/dev/null");
+
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/lp_spawn.c -o " + tmpd + "/lp_spawn.bin -lm -ldl -lpthread 2> " + tmpd + "/lp_gcc.err", within: 60);
+    expect_quiet(p, "test -x " + tmpd + "/lp_spawn.bin");
+    let out: String = match process_exec(p, tmpd + "/lp_spawn.bin 2>&1") { Ok(s) => s, Err(_) => "" };
+    expect_clean(p, "echo \"" + out + "\" | grep -q 'spawn-residual-ok'");
+    expect_clean(p, "echo \"" + out + "\" | grep -q 'wait-residual-ok'");
+    expect_clean(p, "echo \"" + out + "\" | grep -q 'kill-residual-ok'");
+
+    check(p, "sed -E 's/long long sys = oo_cap_grant_sys\\(\\)/long long sys = 0LL/' " + tmpd + "/lp_spawn.c > " + tmpd + "/lp_zero.c", within: 5);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/lp_zero.c -o " + tmpd + "/lp_zero.bin -lm -ldl -lpthread 2>/dev/null", within: 60);
+    expect_clean(p, "!" + tmpd + "/lp_zero.bin 2>&1 | grep -qE 'spawn-residual-ok|wait-residual-ok|kill-residual-ok'");
+
+    check(p, "printf 'pub fn main(sys: &SysCap) {\\n    let r = sys_exec(sys, \"sh\", \"-c\", \"true\");\\n    if r.is_ok() { println(\"exec-real-ok\"); } else { println(\"exec-fail\"); }\\n}\\n' > " + tmpd + "/lp_exec.oo", within: 5);
+    check(p, oodac + " emit-c " + tmpd + "/lp_exec.oo > " + tmpd + "/lp_exec.c 2> " + tmpd + "/lp_exec.err", within: 30);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/lp_exec.c -o " + tmpd + "/lp_exec.bin -lm -ldl -lpthread 2>/dev/null", within: 60);
+    expect_clean(p, tmpd + "/lp_exec.bin 2>&1 | grep -q 'exec-real-ok'");
+
+    println("libfloor_process_smoke: PASSED");
+}

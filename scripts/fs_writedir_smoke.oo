@@ -1,0 +1,73 @@
+// # FS Writedir Smoke
+//
+// Logline: HIGH 6.4 — OODA_FS_WRITEDIR write boundary: deny unset/empty/root, allow create+overwrite under dir, deny outside / .. escape / leaf symlink to outside / parent symlink to outside.
+// Setup: gcc; runtime/chs_rt_fs.c with policy getenv + realpath + openat O_NOFOLLOW.
+//
+// Beats: runtime honesty gate | unset deny | empty deny | root deny | create under allow | overwrite existing | outside deny | .. escape deny | leaf symlink deny | parent symlink deny.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let _ = sh_mkdir_p(p, tmpd);
+    let _ = scenario(p, fs, "HIGH 6.4 OODA_FS_WRITEDIR write boundary");
+
+    expect_present(fs, root + "/runtime/chs_rt_fs.c");
+    expect_substring(fs, root + "/runtime/chs_rt_fs.c", "OODA_FS_WRITEDIR");
+    expect_substring(fs, root + "/runtime/chs_rt_fs.c", "oo_process_policy_getenv(\"OODA_FS_WRITEDIR\")");
+    expect_substring(fs, root + "/runtime/chs_rt_fs.c", "path_under_writedir");
+    expect_substring(fs, root + "/runtime/chs_rt_fs.c", "O_NOFOLLOW");
+    expect_substring(fs, root + "/runtime/chs_rt_fs.c", "openat");
+
+    when "policy gate present (getenv + realpath + openat O_NOFOLLOW)" {
+    and  "deny: unset | empty | root" {
+    and  "allow: create new + overwrite existing under dir" {
+    and  "deny: outside | .. escape | leaf symlink outside | parent symlink outside" {
+    then "fs_writedir path green" {
+    } } } }
+
+    let probe: String = tmpd + "/fs_wd_probe.c";
+    let bin: String = tmpd + "/fs_wd_probe.bin";
+    check(p, "printf '#include \"chs_rt.h\"\\n#include <stdio.h>\\nint main(int argc, char **argv) { long long fs = oo_cap_grant_fs(); const char *p = (argc > 1 && argv[1][0]) ? argv[1] : \"/tmp/ooda_wd_missing\"; OoStr path = oo_str_lit(p); OoStr body = oo_str_lit(\"wd-ok\"); OoResV r = oo_write_file(fs, path, body); if (r.ok) { printf(\"write-ok\\\\n\"); return 0; } printf(\"write-err:%s\\\\n\", r.err.data ? r.err.data : \"\"); return 1; }\\n' > " + probe, within: 5);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + probe + " -o " + bin + " -lm -lpthread -ldl 2> " + tmpd + "/fs_wd_probe.gcc", within: 60);
+    expect_quiet(p, "test -x " + bin);
+
+    let wd: String = match sh_tempfile(p, "-d " + tmpd + " -t wd_XXXXXX") { Ok(s) => s, Err(_) => tmpd + "/wd" };
+    let outd: String = match sh_tempfile(p, "-d " + tmpd + " -t wd_out_XXXXXX") { Ok(s) => s, Err(_) => tmpd + "/wd_out" };
+    let new_file: String = wd + "/created.txt";
+    let exist: String = wd + "/exist.txt";
+    let outside: String = match sh_tempfile(p, "-t " + tmpd + "/fs_wd_outside_XXXXXX.txt") { Ok(s) => s, Err(_) => tmpd + "/outside.txt" };
+    check(p, "printf pre > " + exist, within: 5);
+
+    expect_clean(p, "!" + bin + " " + new_file + " 2>&1 | grep -qE '^write-ok'");
+    expect_clean(p, "!" + bin + " " + outside + " 2>&1 | grep -qE '^write-ok'");
+
+    let out: String = match process_exec(p, "env -u OODA_FS_WRITEDIR " + bin + " " + new_file) { Ok(s) => s, Err(_) => "" };
+    expect_clean(p, "echo \"" + out + "\" | grep -q 'write-err:.*OODA_FS_WRITEDIR'");
+
+    let out: String = match process_exec(p, "OODA_FS_WRITEDIR=" + wd + " " + bin + " " + new_file) { Ok(s) => s, Err(_) => "" };
+    expect_clean(p, "echo \"" + out + "\" | grep -q 'write-ok'");
+    expect_substring(fs, new_file, "wd-ok");
+
+    let out: String = match process_exec(p, "OODA_FS_WRITEDIR=" + wd + " " + bin + " " + exist) { Ok(s) => s, Err(_) => "" };
+    expect_clean(p, "echo \"" + out + "\" | grep -q 'write-ok'");
+
+    let esc: String = wd + "/../fs_wd_escape.txt";
+    let out: String = match process_exec(p, "OODA_FS_WRITEDIR=" + wd + " " + bin + " " + esc) { Ok(s) => s, Err(_) => "" };
+    expect_clean(p, "echo \"" + out + "\" | grep -q 'write-err:.*OODA_FS_WRITEDIR'");
+
+    check(p, "printf secret > " + outd + "/target.txt && ln -sfn " + outd + "/target.txt " + wd + "/leaf_link.txt", within: 5);
+    let out: String = match process_exec(p, "OODA_FS_WRITEDIR=" + wd + " " + bin + " " + wd + "/leaf_link.txt") { Ok(s) => s, Err(_) => "" };
+    expect_clean(p, "echo \"" + out + "\" | grep -qE 'write-err'");
+    expect_substring(fs, outd + "/target.txt", "secret");
+
+    check(p, "ln -sfn " + outd + " " + wd + "/outdir_link", within: 5);
+    let out: String = match process_exec(p, "OODA_FS_WRITEDIR=" + wd + " " + bin + " " + wd + "/outdir_link/via_parent.txt") { Ok(s) => s, Err(_) => "" };
+    expect_clean(p, "echo \"" + out + "\" | grep -q 'write-err:.*OODA_FS_WRITEDIR'");
+
+    let _ = sh_clean(p, wd);
+    let _ = sh_clean(p, outd);
+    println("fs_writedir_smoke: PASSED");
+}

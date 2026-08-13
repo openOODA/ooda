@@ -1,0 +1,56 @@
+// # Cap Process Facade Stays Path-A Sealed
+// Logline: std/os/process.oo exec takes &ProcessCap, prctl takes &SysCap; python load_model stays SysCap.
+// Setup: oodac/oodac built; std/os/{process,python,async}.oo on disk; corpus fixtures reachable.
+// Beats: 1. static exec / prctl seals | 2. deny ProcessCap+sys_prctl / allow ProcessCap+sys_exec | 3. python/async honesty
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+    let proc  = root + "/std/os/process.oo";
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — static process_exec uses &ProcessCap
+    let _w1 = process_exec(p, "exec_sig=$(grep -E '^\\s*pub\\s+fn\\s+process_exec\\s*\\(' " + proc + " 2>/dev/null | head -1); echo \"$exec_sig\" > " + tmpd + "/exec_sig.txt");
+    let _w2 = process_exec(p, "prctl_sig=$(grep -E '^\\s*pub\\s+fn\\s+process_prctl\\s*\\(' " + proc + " 2>/dev/null | head -1); echo \"$prctl_sig\" > " + tmpd + "/prctl_sig.txt");
+    fails   = fails + tally(check(p, "grep -qE '&ProcessCap' " + tmpd + "/exec_sig.txt && ! grep -qE '&SysCap' " + tmpd + "/exec_sig.txt", 5), "static process_exec &ProcessCap");
+    fails   = fails + tally(check(p, "grep -qE '&SysCap' " + tmpd + "/prctl_sig.txt && ! grep -qE '&ProcessCap' " + tmpd + "/prctl_sig.txt", 5), "static process_prctl &SysCap");
+
+    // and — deny ProcessCap+sys_prctl; allow ProcessCap+sys_exec
+    let mut i: Int = 0;
+    let denies = ["fn main(p: &ProcessCap) { let _ = sys_prctl(p, 0); }", "fn main(p: &ProcessCap) { let _ = python_embed_internal(p, \"x\"); }"];
+    let dn_lab = ["process_prctl_shape", "process_python_embed"];
+    while i < 2 {
+        let _w = process_exec(p, "printf '%s\\n' '" + denies[i] + "' > " + tmpd + "/" + dn_lab[i] + ".oo && " + oodac + " check " + tmpd + "/" + dn_lab[i] + ".oo > " + tmpd + "/" + dn_lab[i] + ".out 2> " + tmpd + "/" + dn_lab[i] + ".err");
+        fails  = fails + tally(check(p, "grep -qiE 'ERR|Capability|cap' " + tmpd + "/" + dn_lab[i] + ".out " + tmpd + "/" + dn_lab[i] + ".err 2>/dev/null", 10), "deny " + dn_lab[i]);
+        i = i + 1;
+    }
+    let _w3 = process_exec(p, "printf 'fn main(p: &ProcessCap) { let _ = sys_exec(p, \"true\"); }\\n' > " + tmpd + "/process_exec_sealed.oo");
+    let _w4 = process_exec(p, oodac + " check " + tmpd + "/process_exec_sealed.oo > " + tmpd + "/process_exec_sealed.out 2> " + tmpd + "/process_exec_sealed.err");
+    fails   = fails + tally(check(p, "! grep -qiE 'Capability Violation|requires a &' " + tmpd + "/process_exec_sealed.out " + tmpd + "/process_exec_sealed.err 2>/dev/null && grep -qE '^OK' " + tmpd + "/process_exec_sealed.out", 10), "allow process_exec_sealed");
+
+    // then — std/os/process.oo typechecks; python load_model stays SysCap
+    let _w5 = process_exec(p, oodac + " check " + proc + " > " + tmpd + "/proc_chk.out 2> " + tmpd + "/proc_chk.err");
+    fails   = fails + tally(check(p, "grep -qE '^OK' " + tmpd + "/proc_chk.out", 10), "check std/os/process.oo");
+    let _w6 = process_exec(p, "for f in " + root + "/std/os/python.oo " + root + "/../std/python.oo; do test -f \"$f\" || continue; sig=$(grep -E '^\\s*pub\\s+fn\\s+load_model\\s*\\(' \"$f\" 2>/dev/null | head -1); if [ -z \"$sig\" ]; then echo NO_SIG \"$f\"; continue; fi; echo \"$sig\" | grep -qE '&SysCap' && ! echo \"$sig\" | grep -qE '&ProcessCap' && echo OK \"$f\" || echo FAIL \"$f\"; done > " + tmpd + "/cap_py.log");
+    let _w7 = process_exec(p, "cat " + tmpd + "/cap_py.log");
+    fails   = fails + tally(check(p, "grep -q '^OK' " + tmpd + "/cap_py.log", 5), "python load_model stays &SysCap");
+
+    // async honesty
+    let _w8 = process_exec(p, "for f in " + root + "/std/os/async.oo " + root + "/../std/async.oo; do test -f \"$f\" || continue; sp=$(grep -E '^\\s*pub\\s+fn\\s+spawn_task\\s*\\(' \"$f\" 2>/dev/null | head -1); jn=$(grep -E '^\\s*pub\\s+fn\\s+join_task\\s*\\(' \"$f\" 2>/dev/null | head -1); echo \"$sp|$jn|$f\"; done > " + tmpd + "/cap_async.log");
+    let _w9 = process_exec(p, "cat " + tmpd + "/cap_async.log");
+    fails   = fails + tally(check(p, "test -s " + tmpd + "/cap_async.log && grep -q 'spawn_task' " + tmpd + "/cap_async.log; true"), "async spawn_task / join_task scan (soft)");
+
+    if fails > 0 { println("cap_process_facade_smoke: FAILED"); process_exit(1); }
+    println("cap_process_facade_smoke: PASSED");
+}

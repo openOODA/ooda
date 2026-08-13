@@ -1,0 +1,69 @@
+// # Cap FFI Product Floor Refuses Bare dlopen
+// Logline: check denies bare dlopen; allows &UnsafeFFICap first arg; emit lowers oo_dlopen; runtime seal + residual honesty.
+// Setup: oodac/oodac + bin/ooda built; corpus fixtures + cap_ffi_{runtime,residual}_smoke.sh on disk.
+// Beats: 1. check deny bare dlopen | 2. emit lowers oo_dlopen | 3. runtime seal + residual honesty pack
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let ooda  = sh_env_get_or(p, "OODA",      root + "/bin/ooda").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — check deny bare dlopen + allow with &UnsafeFFICap
+    let _w1 = process_exec(p, oodac + " check " + root + "/fixtures/ffi_dlopen_fail.oo > " + tmpd + "/cff_fail.out 2> " + tmpd + "/cff_fail.err");
+    fails   = fails + tally(check(p, "grep -qE 'capability|UnsafeFFICap|dlopen' " + tmpd + "/cff_fail.out " + tmpd + "/cff_fail.err 2>/dev/null", 10), "check deny bare dlopen");
+    let _w2 = process_exec(p, oodac + " check " + root + "/fixtures/ffi_dlopen_pass.oo > " + tmpd + "/cff_pass.out 2> " + tmpd + "/cff_pass.err");
+    fails   = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/cff_pass.out"),                  "check allow with &UnsafeFFICap");
+
+    // and — corpus deny/allow round
+    let mut i: Int = 0;
+    let fails_arr = ["no_cap_dlopen", "no_cap_host_ast_dump", "no_cap_chs_build"];
+    while i < 3 {
+        let base = fails_arr[i];
+        let f = root + "/bootstrap/corpus/check/fail/" + base + ".oo";
+        let _w = process_exec(p, oodac + " check " + f + " > " + tmpd + "/cff_" + base + ".out 2> " + tmpd + "/cff_" + base + ".err");
+        fails  = fails + tally(check(p, "test \"$(grep -c '^OK' " + tmpd + "/cff_" + base + ".out 2>/dev/null || echo 0)\" -eq 0", 10), "corpus deny " + base);
+        i = i + 1;
+    }
+    let j: Int = 0;
+    let pass_arr = ["ok_unsafe_ffi_dlopen", "ok_unsafe_ffi_host"];
+    while j < 2 {
+        let base = pass_arr[j];
+        let f = root + "/bootstrap/corpus/check/pass/" + base + ".oo";
+        let _w = process_exec(p, oodac + " check " + f + " > " + tmpd + "/cff_p_" + base + ".out 2> " + tmpd + "/cff_p_" + base + ".err");
+        fails  = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/cff_p_" + base + ".out"),       "corpus allow " + base);
+        j = j + 1;
+    }
+
+    // and — product CLI deny (when present)
+    if expect_quiet(p, "test -x " + ooda).is_ok() {
+        let _w = process_exec(p, ooda + " check " + root + "/fixtures/ffi_dlopen_fail.oo > " + tmpd + "/cff_prod.out 2> " + tmpd + "/cff_prod.err");
+        fails  = fails + tally(check(p, "test \"$(grep -c '^OK' " + tmpd + "/cff_prod.out 2>/dev/null || echo 0)\" -eq 0", 10), "product check deny bare dlopen");
+    }
+
+    // and — emit lowers dlopen → oo_dlopen + host-FFI stays residual
+    let _w3 = process_exec(p, oodac + " emit-c " + root + "/fixtures/ffi_dlopen_pass.oo > " + tmpd + "/cff_emit.c 2> " + tmpd + "/cff_emit.err");
+    fails   = fails + tally(expect_quiet(p, "grep -q 'oo_dlopen' " + tmpd + "/cff_emit.c"),               "emit lowers oo_dlopen");
+    let _w4 = process_exec(p, oodac + " emit-c " + root + "/bootstrap/corpus/check/pass/ok_unsafe_ffi_host.oo > " + tmpd + "/cff_host.c 2> " + tmpd + "/cff_host.err");
+    fails   = fails + tally(check(p, "grep -qE 'ffi residual' " + tmpd + "/cff_host.c " + tmpd + "/cff_host.err 2>/dev/null || test \"$?\" -ne 0", 10), "host_ast_dump emit residual");
+
+    // then — runtime seal floor + residual honesty pack
+    let _w5 = process_exec(p, "bash " + root + "/scripts/cap_ffi_runtime_smoke.sh > " + tmpd + "/cfr.log 2>&1");
+    fails   = fails + tally(check(p, "grep -q 'cap_ffi_runtime_smoke: PASSED' " + tmpd + "/cfr.log", 30), "cap_ffi_runtime_smoke");
+    let _w6 = process_exec(p, "bash " + root + "/scripts/cap_ffi_residual_smoke.sh > " + tmpd + "/cfrr.log 2>&1");
+    fails   = fails + tally(check(p, "grep -q 'cap_ffi_residual_smoke: PASSED' " + tmpd + "/cfrr.log", 30), "cap_ffi_residual_smoke");
+
+    if fails > 0 { println("cap_ffi_product_floor_smoke: FAILED"); process_exit(1); }
+    println("cap_ffi_product_floor_smoke: PASSED");
+}

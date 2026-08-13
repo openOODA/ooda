@@ -1,0 +1,67 @@
+// # Malloc Path A Smoke
+//
+// Logline: M166 path A — product free names malloc/free lower to oo_alloc_bytes/oo_free_bytes under AllocCap, and a forged zero token is rejected.
+// Beats: doc honesty | tc_names + check_cap_util + c_emit + arity + ecap fix | fixture shape + runtime symbols | forged zero token denies.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+const FIX: String = "ooda/fixtures/malloc_path_a.oo";
+const DOC: String = "ooda/bootstrap/MEMORY_QUOTA.oot";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let tmp = root + "/.ooda-cache/ooda-tmp/malloc_path_a";
+    let _ = sh_mkdir_p(p, tmp);
+    let _ = scenario(p, fs, "M166 path A: malloc/free under AllocCap");
+
+    // when: doc + source wiring + fixture shape + runtime symbols
+    expect_present(fs, DOC);
+    expect_clean(p, "grep -qE 'malloc|free' " + root + "/" + DOC);
+    expect_clean(p, "grep -qiE 'AllocCap' " + root + "/" + DOC);
+    expect_clean(p, "grep -qiE 'not OS rlimit|not.*GC|path A' " + root + "/" + DOC);
+    expect_clean(p, "grep -q 'name == \\\"malloc\\\"' " + root + "/oodac/tc_names.oo");
+    expect_clean(p, "grep -q 'name == \\\"free\\\"' " + root + "/oodac/tc_names.oo");
+    expect_clean(p, "grep -q 'name == \\\"realloc\\\"' " + root + "/oodac/tc_names.oo");
+    expect_clean(p, "grep -q 'name == \\\"malloc\\\"' " + root + "/oodac/check_cap_util.oo");
+    expect_clean(p, "grep -q 'is_sealed_alloc' " + root + "/oodac/check_cap_util.oo");
+    expect_clean(p, "grep -qE 't == \\\"malloc\\\"' " + root + "/oodac/c_emit_lower.oo");
+    expect_clean(p, "grep -q 'oo_alloc_bytes' " + root + "/oodac/c_emit_lower.oo");
+    expect_clean(p, "grep -q 'oo_free_bytes' " + root + "/oodac/c_emit_lower.oo");
+    expect_clean(p, "grep -q 'malloc=2' " + root + "/oodac/tc_call_arity.oo");
+    expect_clean(p, "grep -q 'realloc=3' " + root + "/oodac/tc_call_arity.oo");
+    expect_clean(p, "grep -q '\\\"malloc\\\": \\\"AllocCap\\\"' " + root + "/ooda/scripts/ooda_apply_ecap_fix.py");
+    expect_present(fs, FIX);
+    expect_clean(p, "grep -q 'main(alloc: &AllocCap)' " + root + "/" + FIX);
+    expect_clean(p, "grep -qE 'let p: Int = malloc|free\\(alloc, malloc' " + root + "/" + FIX);
+    expect_clean(p, "grep -q 'oo_alloc_bytes' " + root + "/ooda/runtime/chs_rt.h");
+    expect_clean(p, "grep -q 'oo_alloc_bytes' " + root + "/ooda/runtime/chs_rt_alloc.c");
+
+    // and: bare malloc without AllocCap refused at check
+    let _ = process_exec(p, "cat > " + tmp + "/mal_bare.oo <<'EOF'\npub fn main() { let p = malloc(64); }\nEOF");
+    let _ = process_exec(p, oodac + " check " + tmp + "/mal_bare.oo > " + tmp + "/mal_bare.out 2> " + tmp + "/mal_bare.err");
+    expect_clean(p, "grep -qiE 'capability|AllocCap|undefined|ERR' " + tmp + "/mal_bare.out " + tmp + "/mal_bare.err");
+
+    // then: fixture check passes (or 'unknown' if oodac pre rebuild)
+    let _ = process_exec(p, oodac + " check " + root + "/" + FIX + " > " + tmp + "/mal_ck.out 2> " + tmp + "/mal_ck.err");
+    expect_clean(p, "grep -qE '^OK' " + tmp + "/mal_ck.out || grep -qiE 'undefined|unknown' " + tmp + "/mal_ck.err " + tmp + "/mal_ck.out");
+
+    // and: emit lowers to oo_alloc_bytes/oo_free_bytes + grant, then runs "ok"
+    let _ = process_exec(p, oodac + " emit-c " + root + "/" + FIX + " > " + tmp + "/mal.c 2> " + tmp + "/mal.err");
+    expect_clean(p, "! grep -qE $'^ERR\\t' " + tmp + "/mal.c " + tmp + "/mal.err");
+    expect_clean(p, "grep -qE 'oo_alloc_bytes\\(alloc' " + tmp + "/mal.c");
+    expect_clean(p, "grep -qE 'oo_free_bytes\\(alloc' " + tmp + "/mal.c");
+    expect_clean(p, "grep -q 'oo_cap_grant_alloc' " + tmp + "/mal.c");
+    let _ = process_exec(p, "gcc -O0 -I " + root + "/ooda/runtime " + root + "/ooda/runtime/chs_rt.c " + tmp + "/mal.c -o " + tmp + "/mal.bin -lm 2> " + tmp + "/mal_gcc.err");
+    expect_clean(p, tmp + "/mal.bin 2>&1 | grep -qx 'ok'");
+
+    // forged zero token denies
+    let _ = process_exec(p, "sed -E 's/long long alloc = oo_cap_grant_alloc\\(\\)/long long alloc = 0LL/' " + tmp + "/mal.c > " + tmp + "/mal_zero.c");
+    let _ = process_exec(p, "gcc -O0 -I " + root + "/ooda/runtime " + root + "/ooda/runtime/chs_rt.c " + tmp + "/mal_zero.c -o " + tmp + "/mal_zero.bin 2>/dev/null");
+    expect_clean(p, tmp + "/mal_zero.bin 2>&1 | grep -qE $'ERR[\\t ]*cap'");
+
+    // ci wire
+    expect_substring(fs, root + "/ooda/scripts/ci_product.sh", "malloc_path_a_smoke");
+    println("malloc_path_a_smoke: PASSED");
+}

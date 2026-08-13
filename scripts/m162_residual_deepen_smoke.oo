@@ -1,0 +1,55 @@
+// # M162 Residual Deepen Smoke
+//
+// Logline: M162 — multi-code autofix applies || contracts pass/fail fail-closed, HITL check gate is --hitl-allowed (env alone does not), byte_at 65/66/-1, AES-128 encrypts 16-byte block, dlopen is fail-closed without env and allowlisted with env.
+// Beats: multi-code fix | contracts || pass+fail | HITL deny without allow | HITL allow+auto | byte_at | AES encrypt | dlopen residual | dlopen allow.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+const MC_SRC: String = "ooda/fixtures/multi_code_fix_src.oo";
+const OR_P: String = "ooda/fixtures/contract_or_pass.oo";
+const OR_F: String = "ooda/fixtures/contract_or_fail.oo";
+const HITL: String = "ooda/fixtures/hitl_pause_fail.oo";
+const BYTE_AT: String = "ooda/fixtures/byte_at_main.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let tmp = root + "/.ooda-cache/ooda-tmp/m162";
+    let _ = sh_mkdir_p(p, tmp);
+    let rt = root + "/ooda/runtime";
+    let _ = scenario(p, fs, "M162 residual deepen path A");
+
+    // when: multi-code autofix loop applies progress (multi-pass or any let/cap inserted)
+    let _ = sh_copy(p, root + "/" + MC_SRC, tmp + "/mc.oo");
+    let _ = process_exec(p, "python3 " + root + "/ooda/scripts/ooda_apply_fix.py " + tmp + "/mc.oo > " + tmp + "/mc_apply.out 2> " + tmp + "/mc_apply.err");
+    expect_clean(p, "grep -qE 'multi-pass|let no_such|FsCap|fs:' " + tmp + "/mc.oo " + tmp + "/mc_apply.out");
+
+    // and: contracts || — pass + fail-closed
+    check(p, oodac + " build " + root + "/" + OR_P + " " + tmp + "/or_pass > " + tmp + "/or_b.out 2> " + tmp + "/or_b.err", within: 60);
+    expect_clean(p, tmp + "/or_pass 2>&1 | grep -q '3'");
+    check(p, oodac + " build " + root + "/" + OR_F + " " + tmp + "/or_fail > " + tmp + "/or_f.out 2> " + tmp + "/or_f.err", within: 60);
+    expect_clean(p, tmp + "/or_fail 2>&1 | grep -qi contract || test $? -ne 0");
+
+    // then: HITL deny without --hitl-allowed, allow+auto with it
+    let _ = sh_copy(p, root + "/" + HITL, tmp + "/hitl.oo");
+    let _ = process_exec(p, "env -u OODA_HITL_ALLOW -u OODA_HITL_AUTO_APPROVE " + oodac + " check " + tmp + "/hitl.oo > " + tmp + "/hitl_deny.out 2> " + tmp + "/hitl_deny.err");
+    expect_clean(p, "test $? -ne 0");
+    let _ = process_exec(p, "OODA_HITL_AUTO_APPROVE=1 " + oodac + " --hitl-allowed check " + tmp + "/hitl.oo > " + tmp + "/hitl_ok.out 2> " + tmp + "/hitl_ok.err");
+    expect_clean(p, "grep -qiE 'Auto-approved|Approved|^OK' " + tmp + "/hitl_ok.out " + tmp + "/hitl_ok.err");
+
+    // and: byte_at 65/66/-1
+    check(p, oodac + " build " + root + "/" + BYTE_AT + " " + tmp + "/ba > " + tmp + "/ba.out 2> " + tmp + "/ba.err", within: 60);
+    expect_clean(p, tmp + "/ba 2>&1 | grep -q '65'");
+    expect_clean(p, tmp + "/ba 2>&1 | grep -q '66'");
+
+    // and: AES-128-ECB 16-byte block is real (not STUB_FAIL_CLOSED)
+    let _ = process_exec(p, "cat > " + tmp + "/aes.oo <<'EOF'\npub fn main() {\n    let c: String = crypto_aes_encrypt_internal(\"0123456789abcdef\", \"0123456789abcdef\");\n    println(c);\n}\nEOF");
+    check(p, oodac + " build " + tmp + "/aes.oo " + tmp + "/aesb > " + tmp + "/aes_b.out 2> " + tmp + "/aes_b.err", within: 60);
+    expect_clean(p, "test -x " + tmp + "/aesb");
+    expect_clean(p, "! " + tmp + "/aesb 2>&1 | grep -q 'STUB_FAIL_CLOSED'");
+
+    // ci wire
+    expect_substring(fs, root + "/ooda/scripts/ci_product.sh", "m162_residual_deepen_smoke");
+    println("m162_residual_deepen_smoke: PASSED");
+}

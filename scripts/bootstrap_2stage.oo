@@ -1,0 +1,55 @@
+// # Bootstrap 2-Stage Builds From Trusted Seed
+// Logline: SHA sidecar + minisign pin + stage1_noarc (PURE_NO_ARC=1) + stage2 (PURE_NO_ARC=0) + arc_smoke green.
+// Setup: bootstrap/seed/oodac + oodac.pub + .sha256(.minisig); tools/minisign or /usr/bin/minisign on PATH.
+// Beats: 1. seed audit (sha256 + minisign) | 2. stage1 + stage2 build | 3. pure CLI + arc_smoke
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+    let seed  = root + "/bootstrap/seed/oodac";
+    let pubk  = root + "/bootstrap/seed/oodac.pub";
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — seed audit: sha256 + minisign
+    fails = fails + tally(expect_present(p, seed + ".sha256"),                                            "seed SHA sidecar");
+    let _w1 = process_exec(p, "awk 'NF>=1 {print $1; exit}' " + seed + ".sha256 > " + tmpd + "/seed_exp");
+    let _w2 = process_exec(p, "sha256sum " + seed + " | awk '{print $1}' > " + tmpd + "/seed_act");
+    fails   = fails + tally(check(p, "diff -q " + tmpd + "/seed_exp " + tmpd + "/seed_act >/dev/null", 10), "seed SHA matches");
+
+    // minisign presence + signature
+    let have_ms = expect_quiet(p, "test -x /usr/bin/minisign || test -x /bin/minisign || test -x " + root + "/tools/minisign").is_ok();
+    if have_ms {
+        let _w3 = process_exec(p, "env -i PATH=/usr/bin:/bin /usr/bin/minisign -V -p " + pubk + " -m " + seed + ".sha256 > " + tmpd + "/seed_ms.log 2>&1 || /bin/minisign -V -p " + pubk + " -m " + seed + ".sha256 >> " + tmpd + "/seed_ms.log 2>&1 || " + root + "/tools/minisign -V -p " + pubk + " -m " + seed + ".sha256 >> " + tmpd + "/seed_ms.log 2>&1");
+        fails   = fails + tally(check(p, "grep -qE 'Signature verification successful' " + tmpd + "/seed_ms.log", 10), "minisign seed verify");
+    } else {
+        fails = fails + tally(expect_quiet(p, "test \"${OODA_SEED_ALLOW_UNSIGNED:-0}\" = 1"),           "minisign residual (unsigned allow)");
+    }
+
+    // and — stage1 + stage2 + pure CLI
+    let stage1 = root + "/oodac/stage1_noarc";
+    let stage2 = root + "/oodac/oodac";
+    let cli    = root + "/bin/ooda";
+    let _w4    = process_exec(p, "(cd " + root + " && env -u OODA PURE_NO_ARC=1 OODA_PURE_NO_ARC=1 OODA_COMPILER=" + seed + " OODAC_BIN=" + tmpd + "/wrapper.sh " + seed + " build " + root + "/oodac/main.oo " + stage1 + ") > " + tmpd + "/stage1.log 2>&1");
+    fails      = fails + tally(check(p, "test -x " + stage1, 120),                                        "stage1 built");
+    let _w5    = process_exec(p, "(cd " + root + " && env -u OODA OODA_PURE_NO_ARC=0 OODA_COMPILER=" + stage1 + " OODAC_BIN=" + stage1 + " " + stage1 + " build " + root + "/oodac/main.oo " + stage2 + ") > " + tmpd + "/stage2.log 2>&1");
+    fails      = fails + tally(check(p, "test -x " + stage2, 120),                                        "stage2 built");
+    let _w6    = process_exec(p, "(cd " + root + " && env -u OODA OODA_PURE_NO_ARC=0 OODA_COMPILER=" + stage2 + " OODAC_BIN=" + stage2 + " " + stage2 + " build " + root + "/cli/main.oo " + cli + ") > " + tmpd + "/cli.log 2>&1");
+    fails      = fails + tally(check(p, "test -x " + cli, 60),                                             "pure CLI built");
+
+    // then — arc_smoke
+    let _w7 = process_exec(p, "OODAC_BIN=" + stage2 + " bash " + root + "/scripts/arc_smoke.sh > " + tmpd + "/arc.log 2>&1");
+    fails   = fails + tally(expect_quiet(p, "test -s " + tmpd + "/arc.log && ! grep -qE '^FAIL|FAILED' " + tmpd + "/arc.log"), "arc_smoke green");
+
+    if fails > 0 { println("bootstrap_2stage: FAILED"); process_exit(1); }
+    println("bootstrap_2stage: PASSED");
+}

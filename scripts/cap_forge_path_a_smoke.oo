@@ -1,0 +1,47 @@
+// # Cap Forge Path A Refuses Bare Sealed Free Name
+// Logline: bare sealed free name (dlopen) refused at check; &UnsafeFFICap first arg allowed; `as` cast does not soft-pass.
+// Setup: oodac/oodac built; bootstrap/STATIC_CAPS.oot + fixtures/cap_forge_cast_residual.oo on disk.
+// Beats: 1. STATIC_CAPS M169 cast posture | 2. bare dlopen refused | 3. with cap + as-cast refuse
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — STATIC_CAPS M169 cast forgery posture
+    fails = fails + tally(check(p, "grep -q 'M169 path A — cast forgery' " + root + "/bootstrap/STATIC_CAPS.oot && grep -qiE 'Not a product surface|as fn' " + root + "/bootstrap/STATIC_CAPS.oot", 5), "STATIC_CAPS M169 cast forgery posture");
+
+    // when — bare dlopen refused (sealed)
+    let _w1 = process_exec(p, "printf 'pub fn main() { let r = dlopen(\"libc.so.6\"); println(1); }\\n' > " + tmpd + "/forge_bare.oo");
+    let _w2 = process_exec(p, oodac + " check " + tmpd + "/forge_bare.oo > " + tmpd + "/fb.out 2> " + tmpd + "/fb.err");
+    fails   = fails + tally(check(p, "grep -qiE 'capability|UnsafeFFICap|default-deny|sealed' " + tmpd + "/fb.out " + tmpd + "/fb.err 2>/dev/null", 10), "check refuse bare dlopen (E_CAP)");
+
+    // and — with cap: dlopen with &UnsafeFFICap check OK
+    let fix = root + "/fixtures/cap_forge_cast_residual.oo";
+    if expect_present(p, fix).is_ok() {
+        let _w3 = process_exec(p, oodac + " check " + fix + " > " + tmpd + "/fc.out 2> " + tmpd + "/fc.err");
+        fails   = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/fc.out"),                    "check dlopen with &UnsafeFFICap");
+    } else {
+        println("FAIL missing fixture cap_forge_cast_residual.oo");
+        fails = fails + 1;
+    }
+
+    // then — `as` cast does not soft-pass
+    let _w4 = process_exec(p, "printf 'pub fn main() { let x = dlopen as fn(&UnsafeFFICap, String) -> Int; println(x); }\\n' > " + tmpd + "/as_cast.oo");
+    let _w5 = process_exec(p, oodac + " check " + tmpd + "/as_cast.oo > " + tmpd + "/as.out 2> " + tmpd + "/as.err");
+    fails   = fails + tally(check(p, "test \"$(grep -cE '^OK' " + tmpd + "/as.out 2>/dev/null || echo 0)\" -eq 0", 10), "as-fn cast does not soft-pass check");
+
+    if fails > 0 { println("cap_forge_path_a_smoke: FAILED"); process_exit(1); }
+    println("cap_forge_path_a_smoke: PASSED");
+}

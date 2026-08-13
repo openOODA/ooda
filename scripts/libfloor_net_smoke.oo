@@ -1,0 +1,79 @@
+// # Libfloor Net Smoke
+//
+// Logline: M161 Path A — bare tcp_connect without NetCap is refused; NetCap-gated tcp_connect / tls_connect / tcp_bind / bind_udp dual-run residual Err; forged zero/magic NetCap denied; TLS stays in chs_rt_tls.c.
+// Setup: oodac/oodac prebuilt; gcc; runtime real TCP/UDP + TLS residual strings.
+//
+// Beats: bare tcp_connect refused | check tcp + tls + std/os/net.oo pass | tcp_connect residual Err | tls_connect residual Err | tcp_bind + bind_udp residual Err | zero + magic forge deny | runtime real TCP/UDP + TLS residual; no socket symbols in emit.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _ = sh_mkdir_p(p, tmpd);
+    let _ = scenario(p, fs, "M161 libfloor path A net / tls");
+
+    expect_quiet(p, "test -x " + oodac);
+    expect_present(fs, root + "/fixtures/libfloor_tcp.oo");
+    expect_present(fs, root + "/fixtures/libfloor_tls.oo");
+
+    when "bare tcp_connect without NetCap refused" {
+    and  "granted tcp / tls / std/os/net.oo check pass" {
+    and  "emit lowers oo_tcp_connect / oo_tls_connect + grant_net; no socket/SSL symbols" {
+    and  "dual-run residual Err; forged zero + magic NetCap denied" {
+    and  "tcp_bind + bind_udp lower to oo_* and run residual Err" {
+    and  "runtime real TCP/UDP + TLS residual; TLS split to chs_rt_tls.c" {
+    then "libfloor net green" {
+    } } } } } }
+
+    check(p, "printf 'pub fn main() { let r = tcp_connect(\"127.0.0.1\", 1); }\\n' > " + tmpd + "/lfn_bare.oo", within: 5);
+    expect_clean(p, "!" + oodac + " check " + tmpd + "/lfn_bare.oo > " + tmpd + "/lfn_bare.out 2> " + tmpd + "/lfn_bare.err");
+    expect_clean(p, "grep -qiE 'capability|NetCap|ERR' " + tmpd + "/lfn_bare.out " + tmpd + "/lfn_bare.err");
+
+    check(p, oodac + " check " + root + "/fixtures/libfloor_tcp.oo > " + tmpd + "/lfn_ck_tcp.out 2> " + tmpd + "/lfn_ck_tcp.err", within: 30);
+    expect_clean(p, "grep -qE '^OK' " + tmpd + "/lfn_ck_tcp.out");
+    check(p, oodac + " check " + root + "/fixtures/libfloor_tls.oo > " + tmpd + "/lfn_ck_tls.out 2> " + tmpd + "/lfn_ck_tls.err", within: 30);
+    expect_clean(p, "grep -qE '^OK' " + tmpd + "/lfn_ck_tls.out");
+    check(p, oodac + " check " + root + "/std/os/net.oo > " + tmpd + "/lfn_std.out 2> " + tmpd + "/lfn_std.err", within: 30);
+    expect_clean(p, "grep -qE '^OK' " + tmpd + "/lfn_std.out");
+
+    dual_run(p, fs, root, tmpd, oodac, "lfn_tcp", "fixtures/libfloor_tcp.oo", "tcp-err-ok", "oo_tcp_connect");
+    dual_run(p, fs, root, tmpd, oodac, "lfn_tls", "fixtures/libfloor_tls.oo", "tls-residual-ok", "oo_tls_connect");
+
+    check(p, "printf 'pub fn main(net: &NetCap) {\\n    let a = tcp_bind(net, 0);\\n    let b = bind_udp(net, 0);\\n    if a.is_err() {\\n        if b.is_err() { println(\"udp-bind-residual-ok\"); } else { println(\"udp-unexpected\"); }\\n    } else { println(\"bind-unexpected\"); }\\n}\\n' > " + tmpd + "/lfn_udp.oo", within: 5);
+    check(p, oodac + " emit-c " + tmpd + "/lfn_udp.oo > " + tmpd + "/lfn_udp.c 2> " + tmpd + "/lfn_udp.err", within: 30);
+    expect_substring(fs, tmpd + "/lfn_udp.c", "oo_tcp_bind");
+    expect_substring(fs, tmpd + "/lfn_udp.c", "oo_bind_udp");
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/lfn_udp.c -o " + tmpd + "/lfn_udp.bin -lm -ldl -lpthread 2> " + tmpd + "/lfn_udp.gcc", within: 60);
+    expect_clean(p, tmpd + "/lfn_udp.bin 2>&1 | grep -q 'udp-bind-residual-ok'");
+
+    expect_substring(fs, root + "/runtime/chs_rt_netfloor.c", "getaddrinfo");
+    expect_substring(fs, root + "/runtime/chs_rt_netfloor.c", "socket(");
+    expect_substring(fs, root + "/runtime/chs_rt_tls.c", "tls residual: OpenSSL not linked");
+    expect_substring(fs, root + "/runtime/chs_rt.c", "chs_rt_tls.c");
+    expect_clean(p, "! grep -nE 'openssl|SSL_|oo_tls_connect' " + root + "/runtime/chs_rt_netfloor.c");
+
+    println("libfloor_net_smoke: PASSED");
+}
+
+fn dual_run(p: &ProcessCap, fs: &FsReadCap, root: String, tmpd: String, oodac: String, base: String, rel: String, needle: String, sym: String) {
+    let fix: String = root + "/" + rel;
+    check(p, oodac + " emit-c " + fix + " > " + tmpd + "/" + base + ".c 2> " + tmpd + "/" + base + ".err", within: 30);
+    expect_substring(fs, tmpd + "/" + base + ".c", sym + "(");
+    expect_substring(fs, tmpd + "/" + base + ".c", "oo_cap_grant_net");
+    expect_clean(p, "! grep -qE '\\bsocket\\(|\\bconnect\\(|\\bbind\\(|\\blisten\\(|\\bSSL_|\\bgetaddrinfo\\(' " + tmpd + "/" + base + ".c");
+
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/" + base + ".c -o " + tmpd + "/" + base + ".bin -lm -ldl -lpthread 2> " + tmpd + "/" + base + "_gcc.err", within: 60);
+    let out: String = match process_exec(p, tmpd + "/" + base + ".bin 2>&1") { Ok(s) => s, Err(_) => "" };
+    expect_clean(p, "echo \"" + out + "\" | grep -q '" + needle + "'");
+
+    check(p, "sed -E 's/long long net = oo_cap_grant_net\\(\\)/long long net = 0LL/' " + tmpd + "/" + base + ".c > " + tmpd + "/" + base + "_zero.c", within: 5);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/" + base + "_zero.c -o " + tmpd + "/" + base + "_zero.bin -lm -ldl -lpthread 2>/dev/null", within: 60);
+    expect_clean(p, "!" + tmpd + "/" + base + "_zero.bin 2>&1 | grep -q '" + needle + "'");
+
+    check(p, "sed -E 's/long long net = oo_cap_grant_net\\(\\)/long long net = 0x4F4F4E54LL/' " + tmpd + "/" + base + ".c > " + tmpd + "/" + base + "_mag.c", within: 5);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/" + base + "_mag.c -o " + tmpd + "/" + base + "_mag.bin -lm -ldl -lpthread 2>/dev/null", within: 60);
+    expect_clean(p, "!" + tmpd + "/" + base + "_mag.bin 2>&1 | grep -q '" + needle + "'");
+}

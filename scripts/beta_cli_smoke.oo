@@ -1,0 +1,61 @@
+// # Beta CLI Surface Stays Pure Native
+// Logline: tokens|ast|check|build|emit-c on pure native oodac; out-of-surface fail-closed; product ≡ pure.
+// Setup: oodac/oodac + bin/ooda built; corpus fixtures + scripts/chs_parity.sh on disk.
+// Beats: 1. out-of-surface fail-closed | 2. tokens/ast/check rails | 3. pure build + chs_parity
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let ooda  = sh_env_get_or(p, "OODA",      root + "/bin/ooda").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — out-of-surface fail-closed
+    let mut i: Int = 0;
+    let bads = ["lsp", "run", "pkg", "migrate", "wasm", "llvm"];
+    while i < 6 {
+        let bad = bads[i];
+        let _w  = process_exec(p, oodac + " " + bad + " " + root + "/fixtures/int_main.oo > " + tmpd + "/beta_" + bad + ".out 2> " + tmpd + "/beta_" + bad + ".err");
+        fails   = fails + tally(check(p, "test ! -s " + tmpd + "/beta_" + bad + ".out; test \"$?\" -ne 0", 10), "fail-closed " + bad);
+        i = i + 1;
+    }
+
+    // and — tokens pass/fail
+    let _w1 = process_exec(p, oodac + " tokens " + root + "/fixtures/int_main.oo > " + tmpd + "/beta_tok.out 2> " + tmpd + "/beta_tok.err");
+    fails   = fails + tally(expect_quiet(p, "grep -q $'\\t' " + tmpd + "/beta_tok.out"),                  "tokens pass int_main");
+    let _w2 = process_exec(p, oodac + " tokens " + root + "/bootstrap/corpus/lex/fail/bad_char.oo > " + tmpd + "/beta_tokf.out 2> " + tmpd + "/beta_tokf.err");
+    fails   = fails + tally(check(p, "test \"$(grep -cE '^OK' " + tmpd + "/beta_tokf.out 2>/dev/null || echo 0)\" -eq 0", 10), "tokens fail-closed bad_char");
+
+    // and — ast pass
+    let _w3 = process_exec(p, oodac + " ast " + root + "/bootstrap/corpus/parse/pass/let_mut.oo > " + tmpd + "/beta_ast.out 2> " + tmpd + "/beta_ast.err");
+    fails   = fails + tally(expect_quiet(p, "grep -q PROGRAM " + tmpd + "/beta_ast.out"),                 "ast pass let_mut");
+
+    // and — check pass/fail + cap deny
+    let _w4 = process_exec(p, oodac + " check " + root + "/bootstrap/corpus/check/pass/ok_main.oo > " + tmpd + "/beta_ck.out 2> " + tmpd + "/beta_ck.err");
+    fails   = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/beta_ck.out"),                    "check pass ok_main");
+    let _w5 = process_exec(p, oodac + " check " + root + "/bootstrap/corpus/typecheck/fail/undefined_var.oo > " + tmpd + "/beta_ckf.out 2> " + tmpd + "/beta_ckf.err");
+    fails   = fails + tally(check(p, "grep -qE '^ERR.type' " + tmpd + "/beta_ckf.out " + tmpd + "/beta_ckf.err 2>/dev/null", 10), "check fail-closed undefined_var");
+    let _w6 = process_exec(p, oodac + " check " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo > " + tmpd + "/beta_cap.out 2> " + tmpd + "/beta_cap.err");
+    fails   = fails + tally(check(p, "grep -qE '^ERR|capability' " + tmpd + "/beta_cap.out " + tmpd + "/beta_cap.err 2>/dev/null", 10), "check fail-closed no_cap_fetch");
+
+    // then — pure build three fixtures
+    let _w7 = process_exec(p, "for rel in fixtures/chs_list_string.oo fixtures/while_count.oo bootstrap/corpus/emit-c/pass/println_int.oo; do base=$(basename \"$rel\" .oo); bin=" + tmpd + "/beta_${base}.bin; rm -f \"$bin\"; (cd " + root + " && " + oodac + " build \"$rel\" \"$bin\") > " + tmpd + "/beta_build_${base}.log 2>&1; done");
+    fails   = fails + tally(check(p, "for b in chs_list_string while_count println_int; do test -x " + tmpd + "/beta_${b}.bin; done", 60), "pure build 3 fixtures");
+
+    // then — chs_parity (product ≡ pure)
+    let _w8 = process_exec(p, "(cd " + root + " && OODAC_BIN=" + oodac + " OODA=" + ooda + " bash scripts/chs_parity.sh) > " + tmpd + "/beta_parity.log 2>&1");
+    fails   = fails + tally(check(p, "grep -q 'chs_parity product≡oodac' " + tmpd + "/beta_parity.log", 60), "chs_parity product≡oodac");
+
+    if fails > 0 { println("beta_cli_smoke: FAILED"); process_exit(1); }
+    println("beta_cli_smoke: PASSED");
+}

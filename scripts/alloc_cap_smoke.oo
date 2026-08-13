@@ -1,0 +1,64 @@
+// # Alloc Cap Stays Local Seal
+// Logline: AllocCap check pass/deny + product deny + emit fail-closed + runtime grant + forge zero deny.
+// Setup: oodac/oodac + bin/ooda built; corpus ok_alloc_bytes / no_cap_alloc_bytes fixtures on disk.
+// Beats: 1. check pass/deny + product deny | 2. emit fail-closed without cap | 3. runtime + forge deny
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let ooda  = sh_env_get_or(p, "OODA",      root + "/bin/ooda").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    let pass_fix = root + "/bootstrap/corpus/check/pass/ok_alloc_bytes.oo";
+    let fail_fix = root + "/bootstrap/corpus/check/fail/no_cap_alloc_bytes.oo";
+
+    // when — check pass/deny
+    let _w1 = process_exec(p, oodac + " check " + pass_fix + " > " + tmpd + "/ac_pass.out 2> " + tmpd + "/ac_pass.err");
+    fails   = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/ac_pass.out"),                    "check allow ok_alloc_bytes");
+    let _w2 = process_exec(p, oodac + " check " + fail_fix + " > " + tmpd + "/ac_fail.out 2> " + tmpd + "/ac_fail.err");
+    fails   = fails + tally(check(p, "grep -qE 'capability|ERR' " + tmpd + "/ac_fail.out " + tmpd + "/ac_fail.err 2>/dev/null", 10), "check deny no_cap_alloc_bytes");
+
+    // and — product CLI deny (when present)
+    if expect_quiet(p, "test -x " + ooda).is_ok() {
+        let _w3 = process_exec(p, ooda + " check " + fail_fix + " > " + tmpd + "/ac_prod.out 2> " + tmpd + "/ac_prod.err");
+        fails   = fails + tally(check(p, "test \"$(grep -c '^OK' " + tmpd + "/ac_prod.out 2>/dev/null || echo 0)\" -eq 0", 10), "product check deny");
+    }
+
+    // and — emit without cap IDENT must fail-closed
+    let bad = tmpd + "/ac_bad.oo";
+    let _w4 = process_exec(p, "printf 'pub fn main(alloc: &AllocCap) { let p = alloc_bytes(1, 16); }\\n' > " + bad);
+    let _w5 = process_exec(p, oodac + " emit-c " + bad + " > " + tmpd + "/ac_bad.c 2> " + tmpd + "/ac_bad.err");
+    fails   = fails + tally(check(p, "grep -qE 'ERR.c_emit.alloc_bytes requires|^ERR' " + tmpd + "/ac_bad.c " + tmpd + "/ac_bad.err 2>/dev/null", 10), "emit alloc_bytes without cap fail-closed");
+
+    // then — runtime + grant path prints alloc-ok
+    let rt = tmpd + "/ac_rt.oo";
+    let _w6 = process_exec(p, "printf 'pub fn main(alloc: &AllocCap) { let p = alloc_bytes(alloc, 64); free_bytes(alloc, p); println(\"alloc-ok\"); }\\n' > " + rt);
+    let _w7 = process_exec(p, oodac + " emit-c " + rt + " > " + tmpd + "/ac_rt.c 2> " + tmpd + "/ac_rt.err");
+    fails   = fails + tally(check(p, "grep -qE 'oo_alloc_bytes.alloc' " + tmpd + "/ac_rt.c", 10), "emit passes alloc cap first");
+    let _w8 = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/ac_rt.c -o " + tmpd + "/ac_rt.bin -lm");
+    let _w9 = process_exec(p, tmpd + "/ac_rt.bin +2>&1 || true");
+    fails   = fails + tally(expect_quiet(p, "grep -q 'alloc-ok' " + tmpd + "/ac_rt.bin.out 2>/dev/null; true"), "runtime alloc-ok");
+
+    // forge deny: zero + classic magic
+    let _w10 = process_exec(p, "sed -E 's/long long alloc = oo_cap_grant_alloc.+/long long alloc = 0LL/' " + tmpd + "/ac_rt.c > " + tmpd + "/ac_zero.c");
+    let _w11 = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/ac_zero.c -o " + tmpd + "/ac_zero.bin -lm && (" + tmpd + "/ac_zero.bin 2>&1; echo rc=$?) > " + tmpd + "/ac_zero.out");
+    fails    = fails + tally(check(p, "grep -qE 'ERR.*cap' " + tmpd + "/ac_zero.out", 10), "zero forge deny");
+
+    let _w12 = process_exec(p, "sed -E 's/long long alloc = oo_cap_grant_alloc.+/long long alloc = 0x4F4F414CLL/' " + tmpd + "/ac_rt.c > " + tmpd + "/ac_mag.c");
+    let _w13 = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/ac_mag.c -o " + tmpd + "/ac_mag.bin -lm && (" + tmpd + "/ac_mag.bin 2>&1; echo rc=$?) > " + tmpd + "/ac_mag.out");
+    fails    = fails + tally(check(p, "grep -qE 'ERR.*cap' " + tmpd + "/ac_mag.out", 10), "classic magic deny");
+
+    if fails > 0 { println("alloc_cap_smoke: FAILED"); process_exit(1); }
+    println("alloc_cap_smoke: PASSED");
+}

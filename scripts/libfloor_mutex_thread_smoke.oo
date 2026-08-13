@@ -1,0 +1,73 @@
+// # Libfloor Mutex/Thread Smoke
+//
+// Logline: M161 Path A — bare mutex_lock without ThreadCap is refused; ThreadCap-gated mutex / thread_spawn / gpu_launch dual-run residual Err; forged zero/magic caps denied.
+// Setup: oodac/oodac prebuilt; gcc; runtime pthread + GPU residual strings.
+//
+// Beats: bare mutex refused | check mutex + thread_spawn + std/os/sync.oo pass | mutex residual Ok | thread_spawn residual Ok | gpu_launch residual Err | zero + magic forge deny | runtime honesty + no GPU dispatch.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _ = sh_mkdir_p(p, tmpd);
+    let _ = scenario(p, fs, "M161 libfloor path A mutex/thread_spawn/gpu_launch");
+
+    expect_quiet(p, "test -x " + oodac);
+    expect_present(fs, root + "/fixtures/libfloor_mutex.oo");
+    expect_present(fs, root + "/fixtures/libfloor_thread_spawn.oo");
+    expect_present(fs, root + "/fixtures/libfloor_gpu_launch.oo");
+
+    when "bare mutex_lock without ThreadCap refused" {
+    and  "granted mutex / thread_spawn / std/os/sync.oo check pass" {
+    and  "emit lowers oo_cap_grant_{thread,gpu}" {
+    and  "dual-run residual Ok for mutex / thread_spawn | Err for gpu_launch" {
+    and  "forged zero and magic caps denied at runtime" {
+    and  "runtime pthread + GPU residual present; no GPU dispatch" {
+    then "libfloor mutex/thread green" {
+    } } } } } }
+
+    check(p, "printf 'pub fn main() { let r = mutex_lock(1, 1); }\\n' > " + tmpd + "/lf_bare_mutex.oo", within: 5);
+    expect_clean(p, "!" + oodac + " check " + tmpd + "/lf_bare_mutex.oo > " + tmpd + "/lf_bare.out 2> " + tmpd + "/lf_bare.err");
+    expect_clean(p, "grep -qiE 'capability|ThreadCap|ERR' " + tmpd + "/lf_bare.out " + tmpd + "/lf_bare.err");
+
+    check(p, oodac + " check " + root + "/fixtures/libfloor_mutex.oo > " + tmpd + "/lf_ck_m.out 2> " + tmpd + "/lf_ck_m.err", within: 30);
+    expect_clean(p, "grep -qE '^OK' " + tmpd + "/lf_ck_m.out");
+    check(p, oodac + " check " + root + "/fixtures/libfloor_thread_spawn.oo > " + tmpd + "/lf_ck_t.out 2> " + tmpd + "/lf_ck_t.err", within: 30);
+    expect_clean(p, "grep -qE '^OK' " + tmpd + "/lf_ck_t.out");
+    check(p, oodac + " check " + root + "/std/os/sync.oo > " + tmpd + "/lf_ck_s.out 2> " + tmpd + "/lf_ck_s.err", within: 30);
+    expect_clean(p, "grep -qE '^OK' " + tmpd + "/lf_ck_s.out");
+
+    dual_run(p, fs, root, tmpd, oodac, "lf_mutex", "fixtures/libfloor_mutex.oo", "mutex-lock-ok", "thread");
+    dual_run(p, fs, root, tmpd, oodac, "lf_tspawn", "fixtures/libfloor_thread_spawn.oo", "thread-spawn-ok", "thread");
+    dual_run(p, fs, root, tmpd, oodac, "lf_gpu", "fixtures/libfloor_gpu_launch.oo", "gpu-residual-ok", "gpu");
+
+    expect_substring(fs, root + "/runtime/chs_rt_libfloor.c", "pthread_mutex_lock");
+    expect_substring(fs, root + "/runtime/chs_rt_thread.c", "pthread_create");
+    expect_substring(fs, root + "/runtime/chs_rt_thread.c", "pthread_join");
+    expect_substring(fs, root + "/runtime/chs_rt_libfloor.c", "gpu residual: no device shaders");
+    expect_clean(p, "! grep -nE 'cudaLaunch|clEnqueue|vkCmdDispatch' " + root + "/runtime/chs_rt_libfloor.c " + root + "/runtime/chs_rt_thread.c");
+
+    println("libfloor_mutex_thread_smoke: PASSED");
+}
+
+fn dual_run(p: &ProcessCap, fs: &FsReadCap, root: String, tmpd: String, oodac: String, base: String, rel: String, needle: String, gident: String) {
+    let fix: String = root + "/" + rel;
+    check(p, oodac + " emit-c " + fix + " > " + tmpd + "/" + base + ".c 2> " + tmpd + "/" + base + ".err", within: 30);
+    expect_substring(fs, tmpd + "/" + base + ".c", "oo_cap_grant_" + gident);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/" + base + ".c -o " + tmpd + "/" + base + ".bin -lm -ldl -lpthread 2> " + tmpd + "/" + base + "_gcc.err", within: 60);
+    let out: String = match process_exec(p, tmpd + "/" + base + ".bin 2>&1") { Ok(s) => s, Err(_) => "" };
+    expect_clean(p, "echo \"" + out + "\" | grep -q '" + needle + "'");
+
+    check(p, "sed -E 's/long long " + gident + " = oo_cap_grant_" + gident + "\\(\\)/long long " + gident + " = 0LL/' " + tmpd + "/" + base + ".c > " + tmpd + "/" + base + "_zero.c", within: 5);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/" + base + "_zero.c -o " + tmpd + "/" + base + "_zero.bin -lm -ldl -lpthread 2>/dev/null", within: 60);
+    expect_clean(p, "!" + tmpd + "/" + base + "_zero.bin 2>&1 | grep -qE 'residual-ok|lock-ok|spawn-ok'");
+
+    let magic: String = "0x4F4F5448LL";
+    if gident == "gpu" { magic = "0x4F4F4750LL"; }
+    check(p, "sed -E 's/long long " + gident + " = oo_cap_grant_" + gident + "\\(\\)/long long " + gident + " = " + magic + "/' " + tmpd + "/" + base + ".c > " + tmpd + "/" + base + "_mag.c", within: 5);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/" + base + "_mag.c -o " + tmpd + "/" + base + "_mag.bin -lm -ldl -lpthread 2>/dev/null", within: 60);
+    expect_clean(p, "!" + tmpd + "/" + base + "_mag.bin 2>&1 | grep -qE 'residual-ok|lock-ok|spawn-ok'");
+}

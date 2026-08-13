@@ -1,0 +1,49 @@
+// # Cap FFI Runtime Seal Holds The Grant
+// Logline: check refuses bare dlopen; emit lowers oo_dlopen + oo_cap_grant_ffi; runtime stub ok; forge zero + magic deny.
+// Setup: oodac/oodac built; chs_rt.c linkable; fixtures/ffi_dlopen_runtime_pass.oo on disk.
+// Beats: 1. check deny bare | 2. emit lowers oo_dlopen + grant | 3. forge zero + classic magic deny
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — check refuses bare dlopen
+    let _w1 = process_exec(p, oodac + " check " + root + "/fixtures/ffi_dlopen_fail.oo > " + tmpd + "/cfr_bare.out 2> " + tmpd + "/cfr_bare.err");
+    fails   = fails + tally(check(p, "test \"$(grep -c '^OK' " + tmpd + "/cfr_bare.out 2>/dev/null || echo 0)\" -eq 0", 10), "check refuse bare dlopen");
+
+    // and — emit lowers oo_dlopen + oo_cap_grant_ffi
+    let fix = root + "/fixtures/ffi_dlopen_runtime_pass.oo";
+    let _w2 = process_exec(p, oodac + " emit-c " + fix + " > " + tmpd + "/cfr_pass.c 2> " + tmpd + "/cfr_pass.err");
+    fails   = fails + tally(check(p, "! grep -qE '^ERR' " + tmpd + "/cfr_pass.c " + tmpd + "/cfr_pass.err 2>/dev/null", 30), "emit-c runtime pass");
+    fails   = fails + tally(expect_quiet(p, "grep -q 'oo_dlopen' " + tmpd + "/cfr_pass.c && grep -q 'oo_cap_grant_ffi' " + tmpd + "/cfr_pass.c"), "emit lowers oo_dlopen + grant_ffi");
+
+    // then — gcc link + runtime stub ok
+    let _w3 = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/cfr_pass.c -lm -ldl -lpthread -o " + tmpd + "/cfr_pass.bin 2>" + tmpd + "/cfr_gcc.err");
+    let _w4 = process_exec(p, tmpd + "/cfr_pass.bin +2>&1 || true");
+    fails   = fails + tally(check(p, "test -x " + tmpd + "/cfr_pass.bin && grep -q 'ffi-stub-ok' " + tmpd + "/cfr_pass.bin.out 2>/dev/null", 30), "runtime stub dlopen with real grant");
+
+    // and — forge deny: zero token
+    let _w5 = process_exec(p, "sed -E 's/long long ffi = oo_cap_grant_ffi.+/long long ffi = 0LL/' " + tmpd + "/cfr_pass.c > " + tmpd + "/cfr_zero.c && gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/cfr_zero.c -lm -ldl -lpthread -o " + tmpd + "/cfr_zero.bin 2>" + tmpd + "/cfr_zero.err");
+    let _w6 = process_exec(p, tmpd + "/cfr_zero.bin +2>&1 || true");
+    fails   = fails + tally(check(p, "test -x " + tmpd + "/cfr_zero.bin && grep -qE 'ERR.*cap' " + tmpd + "/cfr_zero.bin.out 2>/dev/null", 10), "zero forge deny");
+
+    // and — forge deny: classic magic 0x4F4F4649
+    let _w7 = process_exec(p, "sed -E 's/long long ffi = oo_cap_grant_ffi.+/long long ffi = 0x4F4F4649LL/' " + tmpd + "/cfr_pass.c > " + tmpd + "/cfr_mag.c && gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/cfr_mag.c -lm -ldl -lpthread -o " + tmpd + "/cfr_mag.bin 2>" + tmpd + "/cfr_mag.err");
+    let _w8 = process_exec(p, tmpd + "/cfr_mag.bin +2>&1 || true");
+    fails   = fails + tally(check(p, "test -x " + tmpd + "/cfr_mag.bin && grep -qE 'ERR.*cap' " + tmpd + "/cfr_mag.bin.out 2>/dev/null", 10), "magic forge deny");
+
+    if fails > 0 { println("cap_ffi_runtime_smoke: FAILED"); process_exit(1); }
+    println("cap_ffi_runtime_smoke: PASSED");
+}

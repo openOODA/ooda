@@ -1,0 +1,39 @@
+// # LLVM Fail Closed Smoke
+//
+// Logline: M119 — missing LLVM tools, unsupported for-loop, and emit-llvm on secret_sink_fail all refuse with ERR rather than soft-pass.
+// Beats: sandbox no clang/llc ERR | bad for residual ERR | secret_sink emit-llvm ERR.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+const LINK: String = "ooda/scripts/llvm_link.sh";
+const SECRET: String = "ooda/fixtures/secret_sink_fail.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let tmp = root + "/.ooda-cache/ooda-tmp/llvm_fail_closed";
+    let _ = sh_mkdir_p(p, tmp);
+    let _ = scenario(p, fs, "M119 fail-closed: no LLVM + bad for + secret sink");
+
+    // when: a sandbox path with no clang/llc causes llvm_link.sh to ERR_NO_LLVM
+    let bin = tmp + "/bin";
+    let _ = sh_mkdir_p(p, bin);
+    let _ = process_exec(p, "for c in bash dirname mkdir cat rm timeout true false ls; do src=$(command -v \"$c\" 2>/dev/null) || continue; ln -sf \"$src\" " + bin + "/$c; done");
+    let _ = process_exec(p, "echo 'define i32 @main() { ret i32 0 }' > " + tmp + "/t.ll");
+    let _ = process_exec(p, "env -i PATH=" + bin + " HOME=$HOME TMPDIR=" + tmp + " /bin/bash " + root + "/" + LINK + " -O0 " + tmp + "/t.ll " + tmp + "/out > " + tmp + "/no_llvm.out 2> " + tmp + "/no_llvm.err");
+    expect_clean(p, "! grep -q 'ERR_NO_LLVM' " + tmp + "/no_llvm.out");
+    expect_clean(p, "grep -q 'ERR_NO_LLVM' " + tmp + "/no_llvm.err");
+
+    // and: unsupported for-loop on emit-llvm refuses with ERR/residual
+    let _ = process_exec(p, "cat > " + tmp + "/bad_for.oo <<'EOF'\npub fn main() {\n    for x in items {\n        println(1);\n    }\n}\nEOF");
+    let _ = process_exec(p, oodac + " emit-llvm " + tmp + "/bad_for.oo > " + tmp + "/bad.ll 2> " + tmp + "/bad.err");
+    expect_clean(p, "grep -qiE 'ERR|residual' " + tmp + "/bad.ll " + tmp + "/bad.err");
+
+    // then: secret_sink_fail.oo emit-llvm refuses with ERR secret
+    expect_present(fs, SECRET);
+    let _ = process_exec(p, oodac + " emit-llvm " + root + "/" + SECRET + " > " + tmp + "/sec.ll 2> " + tmp + "/sec.err");
+    expect_clean(p, "grep -qE $'ERR\\tsecret|secret' " + tmp + "/sec.ll " + tmp + "/sec.err");
+
+    println("llvm_fail_closed_smoke: PASSED");
+}

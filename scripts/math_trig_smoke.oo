@@ -1,7 +1,7 @@
 // # Math Trig Smoke
 //
-// Logline: M166 path A — sin/cos/ln/exp/sqrt/pow are wired through the runtime C and lowered from .oo source.
-// Beats: doc+marker | runtime symbols | tc/c_emit wiring | runtime C sin/cos/sqrt guard.
+// Logline: M166 path A — sin/cos/ln/exp/sqrt/pow are wired through the runtime C and lowered from .oo source as IEEE double.
+// Beats: doc + marker | runtime symbols | tc/c_emit wiring | runtime C sin/cos/sqrt guard.
 
 import "std/scenario.oo";
 import "std/sh.oo";
@@ -10,30 +10,50 @@ const DOC: String = "ooda/bootstrap/MATH_TRIG.oot";
 const MARKER: String = "MATH_TRIG_PATH_A_ALPHA";
 const RT_HDR: String = "ooda/runtime/chs_rt.h";
 const RT_MATH: String = "ooda/runtime/chs_rt_math.c";
+const FIX: String = "ooda/fixtures/math_trig.oo";
 
 pub fn main(p: &ProcessCap, fs: &FsReadCap) {
     let root = sh_realpath(p, ".").unwrap_or(".");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let tmp = root + "/.ooda-cache/ooda-tmp/math_trig";
+    let _ = sh_mkdir_p(p, tmp);
     let _ = scenario(p, fs, "math trig path A sin/cos/ln/exp/sqrt/pow");
 
-    // when doc carries marker + path A free names + IEEE double
+    // when doc carries marker + path A free names + IEEE double + no-decimal residual
     expect_present(fs, DOC);
     expect_substring(fs, DOC, MARKER);
-    expect_clean(p, "grep -qE 'sin\\(|cos\\(|ln\\(|exp\\(|sqrt\\(|pow\\(' " + DOC);
-    expect_clean(p, "grep -qiE 'IEEE|double' " + DOC);
+    expect_clean(p, "grep -qE 'sin\\(|cos\\(|ln\\(|exp\\(|sqrt\\(|pow\\(' " + root + "/" + DOC);
+    expect_clean(p, "grep -qiE 'IEEE|double' " + root + "/" + DOC);
+    expect_clean(p, "grep -qiE 'no decimal|not decimal|NOT decimal|residual' " + root + "/" + DOC);
 
     // and runtime exports the per-op symbol table
-    expect_clean(p, "grep -q 'oo_sin' " + RT_HDR);
-    expect_clean(p, "grep -q 'oo_pow' " + RT_HDR);
-    expect_clean(p, "grep -q 'oo_print_double' " + RT_HDR);
-    expect_clean(p, "grep -q 'chs_rt_math.c' ooda/runtime/chs_rt.c");
-    expect_clean(p, "grep -q 'oo_print_double' " + RT_MATH);
+    expect_clean(p, "grep -q 'oo_sin' " + root + "/" + RT_HDR);
+    expect_clean(p, "grep -q 'oo_cos' " + root + "/" + RT_HDR);
+    expect_clean(p, "grep -q 'oo_ln' " + root + "/" + RT_HDR);
+    expect_clean(p, "grep -q 'oo_exp' " + root + "/" + RT_HDR);
+    expect_clean(p, "grep -q 'oo_sqrt' " + root + "/" + RT_HDR);
+    expect_clean(p, "grep -q 'oo_pow' " + root + "/" + RT_HDR);
+    expect_clean(p, "grep -q 'oo_print_double' " + root + "/" + RT_HDR);
+    expect_clean(p, "grep -q 'chs_rt_math.c' " + root + "/ooda/runtime/chs_rt.c");
+    expect_clean(p, "grep -q 'oo_print_double' " + root + "/" + RT_MATH);
+
+    // and emit/check wiring (source floor)
+    expect_clean(p, "grep -qE 'name == \\\"sin\\\"|name == \\\"cos\\\"' " + root + "/oodac/tc_names.oo");
+    expect_clean(p, "grep -q 'sin=1' " + root + "/oodac/tc_call_arity.oo");
+    expect_clean(p, "grep -q 'pow=2' " + root + "/oodac/tc_call_arity.oo");
+    expect_clean(p, "grep -q 'oo_sin' " + root + "/oodac/c_emit_libfloor.oo");
+    expect_clean(p, "grep -q 'oo_pow' " + root + "/oodac/c_emit_libfloor.oo");
+    expect_clean(p, "grep -q 'oo_print_double' " + root + "/oodac/c_emit_print.oo");
+    expect_clean(p, "grep -q 'Float' " + root + "/oodac/c_emit_skip.oo");
 
     // then runtime C harness proves sin/cos/sqrt/ln/exp/pow to 1e-12
-    let tmp = root + "/.ooda-cache/ooda-tmp/math_trig_rt";
-    let _ = sh_mkdir_p(p, root + "/.ooda-cache/ooda-tmp");
-    let _ = process_exec(p, "cat > " + tmp + ".c <<'CEOF'\n#include \"chs_rt.h\"\n#include <math.h>\n#include <stdio.h>\nstatic int near(double a, double b, double eps) { double d = a - b; if (d < 0) d = -d; return d <= eps; }\nint main(void) { if (!near(oo_sin(0.0), 0.0, 1e-12)) return 1; if (!near(oo_cos(0.0), 1.0, 1e-12)) return 2; if (!near(oo_sqrt(4.0), 2.0, 1e-12)) return 3; if (!near(oo_ln(1.0), 0.0, 1e-12)) return 4; if (!near(oo_exp(0.0), 1.0, 1e-12)) return 5; if (!near(oo_pow(2.0, 3.0), 8.0, 1e-12)) return 6; oo_print_double(oo_cos(0.0)); oo_println(); printf(\"rt-ok\\n\"); return 0; }\nCEOF");
-    check(p, "gcc -O0 -I " + root + "/ooda/runtime " + tmp + ".c " + root + "/ooda/runtime/chs_rt.c -lm -ldl -lpthread -o " + tmp, within: 30);
-    expect_clean(p, tmp + " 2>&1 | grep -q 'rt-ok'");
+    let _ = process_exec(p, "cat > " + tmp + "/rt.c <<'CEOF'\n#include \"chs_rt.h\"\n#include <math.h>\n#include <stdio.h>\nstatic int near(double a, double b, double eps) { double d = a - b; if (d < 0) d = -d; return d <= eps; }\nint main(void) { if (!near(oo_sin(0.0), 0.0, 1e-12)) return 1; if (!near(oo_cos(0.0), 1.0, 1e-12)) return 2; if (!near(oo_sqrt(4.0), 2.0, 1e-12)) return 3; if (!near(oo_ln(1.0), 0.0, 1e-12)) return 4; if (!near(oo_exp(0.0), 1.0, 1e-12)) return 5; if (!near(oo_pow(2.0, 3.0), 8.0, 1e-12)) return 6; printf(\"rt-ok\\n\"); return 0; }\nCEOF");
+    check(p, "gcc -O0 -I " + root + "/ooda/runtime " + tmp + "/rt.c " + root + "/ooda/runtime/chs_rt.c -lm -ldl -lpthread -o " + tmp + "/rt", within: 30);
+    expect_clean(p, tmp + "/rt 2>&1 | grep -qx 'rt-ok'");
+
+    // and: math_trig fixture builds + runs (or honored skip if oodac pre rebuild)
+    let _ = process_exec(p, oodac + " build " + root + "/" + FIX + " " + tmp + "/mathtrig > " + tmp + "/mathtrig.out 2> " + tmp + "/mathtrig.err");
+    expect_clean(p, "test -x " + tmp + "/mathtrig || grep -qiE 'undefined|unknown|ERR' " + tmp + "/mathtrig.err");
 
     println("math_trig_smoke: PASSED");
 }

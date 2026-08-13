@@ -1,0 +1,49 @@
+// # LLVM Link
+//
+// Logline: M119 — shared LLVM IR → native binary via clang (prefer) or llc+linker + chs_rt, fail-closed on missing tools.
+// Beats: parse -O0/-O1/-O2/-O3 flags | probe clang/llc/linker | compile+link | runnable binary.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+const TIMEOUT_CC: Int = 60;
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let ll = root + "/.ooda-cache/ooda-tmp/llvm_link_in.ll";
+    let bin = root + "/.ooda-cache/ooda-tmp/llvm_link_out.bin";
+    let _ = sh_mkdir_p(p, root + "/.ooda-cache/ooda-tmp");
+    let _ = scenario(p, fs, "M119 llvm_link: clang or llc+linker + chs_rt");
+
+    // when: a tiny IR is dropped and clang (prefer) or llc+linker is on PATH
+    let _ = process_exec(p, "cat > " + ll + " <<'EOF'\ndeclare i32 @printf(i8*, ...)\n@msg = constant [4 x i8] c\"hi\\0A\\00\"\ndefine i32 @main() {\n  call i32 (i8*, ...) @printf(i8* getelementptr ([4 x i8], [4 x i8]* @msg, i32 0, i32 0))\n  ret i32 0\n}\nEOF");
+    let clang = sh_which(p, "clang").unwrap_or("");
+    let llc = sh_which(p, "llc").unwrap_or("");
+    let linker = "";
+    if chars_len(clang) > 0 { linker = clang; }
+    else if chars_len(sh_which(p, "gcc").unwrap_or("")) > 0 { linker = sh_which(p, "gcc").unwrap_or(""); }
+    else { linker = sh_which(p, "cc").unwrap_or(""); }
+    if chars_len(clang) == 0 && chars_len(llc) == 0 {
+        println("ERR_NO_LLVM: need clang (prefer) or llc on PATH");
+        return;
+    }
+    if chars_len(clang) == 0 && chars_len(llc) > 0 && chars_len(linker) == 0 {
+        println("ERR_NO_LLVM: llc present but no clang/gcc/cc to link");
+        return;
+    }
+
+    // and: compile + link with chs_rt (clang takes IR; llc produces obj then linker links)
+    let rt = root + "/ooda/runtime";
+    if chars_len(clang) > 0 {
+        check(p, clang + " -O0 -Wno-override-module -Wno-unused-command-line-argument -I " + rt + " " + ll + " " + rt + "/chs_rt.c -o " + bin + " -lm", within: TIMEOUT_CC);
+    } else {
+        let obj = root + "/.ooda-cache/ooda-tmp/llvm_link_out.o";
+        check(p, llc + " -filetype=obj -o " + obj + " " + ll, within: TIMEOUT_CC);
+        check(p, linker + " -O0 -I " + rt + " " + obj + " " + rt + "/chs_rt.c -o " + bin + " -lm", within: TIMEOUT_CC);
+    }
+    expect_present(fs, bin);
+
+    // then: binary is executable and outputs "hi"
+    expect_clean(p, bin + " 2>&1 | grep -qx 'hi'");
+    println("llvm_link: PASSED");
+}

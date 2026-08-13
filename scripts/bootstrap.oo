@@ -1,0 +1,68 @@
+// # Bootstrap Pure Multi Links C Without Cargo
+// Logline: oodac emits C; python stitches protos+bodies; gcc links chs_rt — emits native main.
+// Setup: oodac/oodac built; OODAC_BIN overridable; main.oo reachable; chs_rt.c linkable.
+// Beats: 1. import-graph collection | 2. emit + python stitch | 3. gcc links executable
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — collect import graph transitively
+    let _w0 = process_exec(p, "MAIN=" + root + "/fixtures/int_main.oo; " +
+        "cd $(dirname \"$MAIN\") && abs=\"$(pwd)/$(basename \"$MAIN\")\"; " +
+        "declare -A SEEN STACK; MODS=(); " +
+        "collect(){ local p=\"$1\" a; if [[ \"$p\" = /* ]]; then a=\"$p\"; else a=\"$(cd \"$(dirname \"$p\")\" && pwd)/$(basename \"$p\")\"; fi; " +
+        "[[ -n \"${STACK[$a]:-}\" ]] && { echo ERR_IMPORT_CYCLE; exit 1; }; " +
+        "[[ -n \"${SEEN[$a]:-}\" ]] && return; STACK[$a]=1; " +
+        "d=\"$(cd \"$(dirname \"$a\")\" && pwd)\"; " +
+        "while IFS= read -r imp; do [[ -z \"$imp\" ]] && continue; if [[ \"$imp\" = /* ]]; then collect \"$imp\"; else collect \"$d/$imp\"; fi; done < <(grep -E '^import \"' \"$a\" 2>/dev/null | sed -n 's/^import \"\\(.*\\)\";.*/\\1/p'); " +
+        "unset 'STACK[$a]'; SEEN[$a]=1; MODS+=(\"$a\"); }; " +
+        "collect \"$abs\"; " +
+        "printf '%s\\n' \"${MODS[@]}\" > " + tmpd + "/pure_mods.lst");
+
+    // and — emit-c each module under timeout 60
+    let _w1 = process_exec(p, "FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\\) \\{'; " +
+        "rm -rf " + tmpd + "/mc " + tmpd + "/pure_build && mkdir -p " + tmpd + "/mc " + tmpd + "/pure_build; " +
+        "i=0; " +
+        "while IFS= read -r src; do mc=" + tmpd + "/mc/$(echo \"$src\" | tr '/.' '__').c; OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 timeout 60 " + oodac + " emit-c \"$src\" > \"$mc\" 2>" + tmpd + "/pure_build/emit.err; rc=$?; " +
+        "if [ \"$rc\" -eq 124 ]; then echo ERR_EMIT_TIMEOUT; exit 1; fi; " +
+        "if [ ! -s \"$mc\" ] || ! grep -qE \"$FN_DEF\" \"$mc\" || grep -qE '^ERR' \"$mc\"; then echo ERR_EMIT; head -8 " + tmpd + "/pure_build/emit.err; exit 1; fi; " +
+        "i=$((i+1)); done < " + tmpd + "/pure_mods.lst; " +
+        "echo EMIT_OK > " + tmpd + "/pure_build/emit.ok");
+
+    fails = fails + tally(check(p, "test -f " + tmpd + "/pure_build/emit.ok", 60),                       "emit-c all modules");
+
+    // and — python stitches protos + bodies (drop duplicate decls)
+    let _w2 = process_exec(p, "cd " + tmpd + "/pure_build && " +
+        "FIRST=$(head -1 " + tmpd + "/pure_mods.lst | tr '/.' '__'); " +
+        "awk '/^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\\) \\{/ { exit } { print }' " + tmpd + "/mc/${FIRST}.c > preamble.c; " +
+        "python3 - " + tmpd + "/pure_build $(cat " + tmpd + "/pure_mods.lst" + " | tr '\\n' ' ') <<'PY'\n" +
+        "import re, sys\nfrom pathlib import Path\ntmp = Path(sys.argv[1])\n" +
+        "import os\nfiles = [p for p in sys.argv[2:] if p]\nmcs = [Path(tmp) / 'mc' / (f.replace('/', '_').replace('.', '_') + '.c') for f in files]\n" +
+        "fn_start = re.compile(r'^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) ([A-Za-z_][A-Za-z0-9_]*)\\s*\\(.*\\)\\s*\\{\\s*$')\n" +
+        "protos, bodies, seen = [], [], set()\n" +
+        "for mc in mcs:\n    for chunk in mc.read_text(errors='replace').splitlines(keepends=True):\n        pass\n" +
+        "for mc in mcs:\n    text = mc.read_text(errors='replace').splitlines(keepends=True)\n    i, n = 0, len(text)\n    while i < n:\n        m = fn_start.match(text[i].rstrip('\\n'))\n        if not m: i += 1; continue\n        name = m.group(2); j = i + 1\n        while j < n and not fn_start.match(text[j].rstrip('\\n')): j += 1\n        if name not in seen:\n            seen.add(name); line = text[i].rstrip()\n            if line.endswith('{'): line = line[:-1].rstrip() + ';'\n            protos.append(line + '\\n'); bodies.extend(text[i:j])\n        i = j\n(tmp / 'protos.c').write_text(''.join(protos))\n(tmp / 'bodies.c').write_text(''.join(bodies))\nPY");
+    let _w3 = process_exec(p, "cat " + tmpd + "/pure_build/preamble.c " + tmpd + "/pure_build/protos.c " + tmpd + "/pure_build/bodies.c > " + tmpd + "/pure_build/all.c; " +
+        "if ! grep -q 'int main\\|long long main' " + tmpd + "/pure_build/all.c; then echo 'int main(void) { return 0; }' >> " + tmpd + "/pure_build/all.c; fi");
+
+    // then — gcc link
+    let out = tmpd + "/pure_multi.bin";
+    let _w4 = process_exec(p, "gcc -O2 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/pure_build/all.c -lm -ldl -lpthread -o " + out + " 2> " + tmpd + "/gcc.err");
+    fails   = fails + tally(check(p, "test -x " + out, 60),                                              "gcc links executable");
+
+    if fails > 0 { println("bootstrap: FAILED"); process_exit(1); }
+    println("bootstrap: PASSED");
+}

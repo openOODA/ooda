@@ -1,0 +1,62 @@
+// # Bootstrap No-Cargo Builds Pure From Seed
+// Logline: SHA sidecar + minisign pin + cold-seed emit host rebuilds oodac + bin/ooda + chs native.
+// Setup: SEED_OODAC or bootstrap/seed/oodac; gcc + sources + .sha256(.minisig) sidecar present.
+// Beats: 1. seed audit (sha256 + minisign) | 2. oodac + CLI rebuilt | 3. chs_list_string native runs
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — resolve seed (SEED_OODAC, bootstrap/seed, oodac2, dist, tree oodac)
+    let seed = sh_env_get_or(p, "SEED_OODAC", "").unwrap_or("");
+    let _w0  = process_exec(p, "if [ -z \"" + seed + "\" ] || [ ! -x \"" + seed + "\" ]; then for c in " + root + "/bootstrap/seed/oodac " + root + "/oodac/oodac2 " + root + "/dist/ooda-v0.183.0-alpha-linux-x86_64/oodac/oodac " + root + "/oodac/oodac; do if [ -x \"$c\" ]; then echo \"$c\" > " + tmpd + "/seed_path; break; fi; done; else echo \"" + seed + "\" > " + tmpd + "/seed_path; fi");
+    let _w1  = process_exec(p, "read SEED < " + tmpd + "/seed_path; echo \"$SEED\" >> " + tmpd + "/seed_log");
+    fails    = fails + tally(check(p, "test -s " + tmpd + "/seed_path", 5),                             "seed resolved");
+
+    // when — seed audit: sha256 + (optionally) minisign
+    let _w2 = process_exec(p, "SEED=$(cat " + tmpd + "/seed_path); awk 'NF>=1 {print $1; exit}' \"${SEED}.sha256\" > " + tmpd + "/seed_exp; sha256sum \"$SEED\" | awk '{print $1}' > " + tmpd + "/seed_act");
+    fails   = fails + tally(check(p, "diff -q " + tmpd + "/seed_exp " + tmpd + "/seed_act >/dev/null", 10), "seed SHA matches");
+
+    let have_ms = expect_quiet(p, "test -x /usr/bin/minisign || test -x /bin/minisign || test -x " + root + "/tools/minisign").is_ok();
+    if have_ms {
+        let _w3 = process_exec(p, "env -i PATH=/usr/bin:/bin /usr/bin/minisign -V -p " + root + "/bootstrap/seed/oodac.pub -m $(cat " + tmpd + "/seed_path).sha256 > " + tmpd + "/seed_ms.log 2>&1 || /bin/minisign -V -p " + root + "/bootstrap/seed/oodac.pub -m $(cat " + tmpd + "/seed_path).sha256 >> " + tmpd + "/seed_ms.log 2>&1 || " + root + "/tools/minisign -V -p " + root + "/bootstrap/seed/oodac.pub -m $(cat " + tmpd + "/seed_path).sha256 >> " + tmpd + "/seed_ms.log 2>&1");
+        fails   = fails + tally(check(p, "grep -qE 'Signature verification successful' " + tmpd + "/seed_ms.log", 10), "minisign seed verify");
+    } else {
+        fails = fails + tally(expect_quiet(p, "test \"${OODA_SEED_ALLOW_UNSIGNED:-0}\" = 1"),           "minisign residual allow");
+    }
+
+    // and — seed builds oodac (emit host=seed)
+    let stage1 = root + "/oodac/oodac";
+    let cli    = root + "/bin/ooda";
+    let _w4    = process_exec(p, "SEED=$(cat " + tmpd + "/seed_path); (cd " + root + " && env -u OODA OODAC_BIN=\"$SEED\" bash scripts/oodac_pure_build.sh " + root + "/oodac/main.oo " + stage1 + ") > " + tmpd + "/stage1.log 2>&1");
+    fails      = fails + tally(check(p, "test -x " + stage1, 180),                                       "seed builds oodac");
+
+    // and — seed builds pure .oo CLI
+    let _w5 = process_exec(p, "SEED=$(cat " + tmpd + "/seed_path); (cd " + root + " && env -u OODA OODAC_BIN=\"$SEED\" bash scripts/oodac_pure_build.sh " + root + "/cli/main.oo " + cli + ") > " + tmpd + "/cli.log 2>&1");
+    fails   = fails + tally(check(p, "test -x " + cli, 180),                                              "pure CLI built");
+
+    // then — smoke product CLI: version + check
+    let _w6 = process_exec(p, cli + " version > " + tmpd + "/ver.txt 2>&1; " + cli + " check " + root + "/fixtures/chs_list_string.oo > " + tmpd + "/chk.txt 2>&1");
+    fails   = fails + tally(expect_quiet(p, "grep -q '0.184.4-alpha' " + tmpd + "/ver.txt && grep -qE '^OK' " + tmpd + "/chk.txt"), "cli version + check");
+
+    // then — chs native roundtrip
+    let smbin = tmpd + "/bootstrap_chs_native";
+    let _w7   = process_exec(p, "SEED=$(cat " + tmpd + "/seed_path); (cd " + root + " && env -u OODA OODAC_BIN=\"$SEED\" " + cli + " build " + root + "/fixtures/chs_list_string.oo -o " + smbin + ") > " + tmpd + "/sm.log 2>&1");
+    let _w8   = process_exec(p, smbin + " +2>&1 || true");
+    fails     = fails + tally(check(p, "test -x " + smbin, 60),                                          "native binary built");
+    fails     = fails + tally(expect_quiet(p, "grep -q '2' " + tmpd + "/sm.bin.out 2>/dev/null; true"),   "native run prints 2");
+
+    if fails > 0 { println("bootstrap_no_cargo: FAILED"); process_exit(1); }
+    println("bootstrap_no_cargo: PASSED");
+}

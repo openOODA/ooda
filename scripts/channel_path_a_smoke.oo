@@ -1,0 +1,55 @@
+// # Channel Path A Seals Under ThreadCap
+// Logline: bare channel_new / actor_spawn refused; grant path runtime prints "hi"; forge zero + magic deny.
+// Setup: oodac/oodac built; chs_rt.c linkable; fixtures/channel_roundtrip.oo on disk.
+// Beats: 1. bare + actor refuse | 2. emit lowers oo_channel_ + grant | 3. forge deny + runtime honesty
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+    let fix   = root + "/fixtures/channel_roundtrip.oo";
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — bare channel_new + actor_spawn refused (capability)
+    let _w1 = process_exec(p, "printf 'pub fn main() { let r = channel_new(); }\\n' > " + tmpd + "/ch_bare.oo && " + oodac + " check " + tmpd + "/ch_bare.oo > " + tmpd + "/ch_bare.out 2> " + tmpd + "/ch_bare.err");
+    fails   = fails + tally(check(p, "grep -qiE 'capability|ThreadCap|ERR' " + tmpd + "/ch_bare.out " + tmpd + "/ch_bare.err 2>/dev/null", 10), "check refuse bare channel_new");
+    let _w2 = process_exec(p, "printf 'pub fn main() { let r = actor_spawn(\"x\"); }\\n' > " + tmpd + "/ch_actor.oo && " + oodac + " check " + tmpd + "/ch_actor.oo > " + tmpd + "/ch_actor.out 2> " + tmpd + "/ch_actor.err");
+    fails   = fails + tally(check(p, "grep -qiE 'capability|ThreadCap|ERR' " + tmpd + "/ch_actor.out " + tmpd + "/ch_actor.err 2>/dev/null", 10), "check refuse bare actor_spawn (ThreadCap)");
+
+    // and — check + emit-c the granted ThreadCap fixture
+    let _w3 = process_exec(p, oodac + " check " + fix + " > " + tmpd + "/ch_ck.out 2> " + tmpd + "/ch_ck.err");
+    fails   = fails + tally(check(p, "grep -qE '^OK' " + tmpd + "/ch_ck.out", 10), "check channel_roundtrip with ThreadCap");
+    let _w4 = process_exec(p, oodac + " emit-c " + fix + " > " + tmpd + "/ch.c 2> " + tmpd + "/ch.err");
+    fails   = fails + tally(check(p, "! grep -qE '^ERR' " + tmpd + "/ch.c " + tmpd + "/ch.err 2>/dev/null && grep -qE 'oo_channel_new.thread' " + tmpd + "/ch.c && grep -qE 'oo_channel_send.thread' " + tmpd + "/ch.c && grep -qE 'oo_channel_recv.thread' " + tmpd + "/ch.c && grep -q 'oo_cap_grant_thread' " + tmpd + "/ch.c", 30), "emit lowers oo_channel_* + grant");
+
+    // then — runtime grant path prints "hi"
+    let _w5 = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/ch.c -lm -ldl -lpthread -o " + tmpd + "/ch.bin 2>" + tmpd + "/ch_gcc.err");
+    let _w6 = process_exec(p, tmpd + "/ch.bin +2>&1 || true");
+    fails   = fails + tally(check(p, "test -x " + tmpd + "/ch.bin && grep -qx hi " + tmpd + "/ch.bin.out 2>/dev/null", 30), "runtime grant path hi");
+
+    // and — forge deny: zero + classic magic OOTH
+    let _w7 = process_exec(p, "sed -E 's/long long thread = oo_cap_grant_thread.+/long long thread = 0LL/' " + tmpd + "/ch.c > " + tmpd + "/ch_zero.c && gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/ch_zero.c -lm -ldl -lpthread -o " + tmpd + "/ch_zero.bin 2>" + tmpd + "/ch_zero.err");
+    let _w8 = process_exec(p, tmpd + "/ch_zero.bin +2>&1 || true");
+    fails   = fails + tally(check(p, "test -x " + tmpd + "/ch_zero.bin && grep -qE 'ERR.*cap' " + tmpd + "/ch_zero.bin.out 2>/dev/null", 10), "zero forge deny");
+    let _w9 = process_exec(p, "sed -E 's/long long thread = oo_cap_grant_thread.+/long long thread = 0x4F4F5448LL/' " + tmpd + "/ch.c > " + tmpd + "/ch_mag.c && gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/ch_mag.c -lm -ldl -lpthread -o " + tmpd + "/ch_mag.bin 2>" + tmpd + "/ch_mag.err");
+    let _w10 = process_exec(p, tmpd + "/ch_mag.bin +2>&1 || true");
+    fails    = fails + tally(check(p, "test -x " + tmpd + "/ch_mag.bin && grep -qE 'ERR.*cap' " + tmpd + "/ch_mag.bin.out 2>/dev/null", 10), "magic forge deny");
+
+    // and — runtime honesty: bounded queue + mutex present; residual honesty
+    fails = fails + tally(check(p, "grep -q 'OO_CH_SLOTS' " + root + "/runtime/chs_rt_channel.c && grep -q 'pthread_mutex_lock' " + root + "/runtime/chs_rt_channel.c && grep -q 'pthread_cond_' " + root + "/runtime/chs_rt_channel.c && grep -q 'ch:%d' " + root + "/runtime/chs_rt_channel.c", 5), "runtime channel path A present");
+    fails = fails + tally(expect_quiet(p, "grep -q 'chs_rt_channel.c' " + root + "/runtime/chs_rt.c"), "chs_rt.c includes channel");
+    fails = fails + tally(check(p, "! grep -qE 'name == \"channel_' " + root + "/oodac/check_residual.oo && ! grep -qE 'name == \"actor_spawn\"' " + root + "/oodac/check_residual.oo", 5), "residual honesty: channels + actors not residual");
+
+    if fails > 0 { println("channel_path_a_smoke: FAILED"); process_exit(1); }
+    println("channel_path_a_smoke: PASSED");
+}
