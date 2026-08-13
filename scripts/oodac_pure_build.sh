@@ -195,6 +195,8 @@ PY
 echo "long long oo_cap_grant_fs(void); long long oo_cap_grant_sys(void); long long oo_cap_grant_env(void); long long oo_cap_grant_net(void);" >> "$TMP/preamble.c"
 echo "int oo_path_exists(long long,OoStr); long long oo_file_size(long long,OoStr); OoResS oo_env_get(long long,OoStr);" >> "$TMP/preamble.c"
 echo "OoResS oo_read_file(long long,OoStr); OoResV oo_write_file(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoResV oo_fs_remove_file(long long,OoStr); OoResV oo_fs_mkdir(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResV oo_fs_hardlink(long long,OoStr,OoStr); OoResV oo_fs_symlink(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
 echo "OoResS oo_sys_exec(long long,int,OoStr*); OoResS oo_sys_exec1(long long,OoStr);" >> "$TMP/preamble.c"
 echo "OoSList str_split(OoStr,OoStr);" >> "$TMP/preamble.c"
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
