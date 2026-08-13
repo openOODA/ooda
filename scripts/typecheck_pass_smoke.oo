@@ -1,155 +1,33 @@
-// ===================================================================
-// Typecheck Pass Smoke
-// ===================================================================
-// job: pure oodac check OK on bootstrap/corpus/typecheck/pass/*
-// in:  OODAC_BIN (default ./oodac/oodac) + typecheck/pass corpus
-// out: exit 0 if every pass fixture check succeeds (OK + exit 0)
+// # Typecheck Pass Corpus Stays Green
+// Logline: every fixture under bootstrap/corpus/typecheck/pass/* passes oodac check.
+// Setup: oodac/oodac built; bootstrap/corpus/typecheck/pass/* on disk.
+// Beats: 1. pass corpus non-empty | 2. each fixture OK + no ERR | 3. wrap-up
 
-import "std/test.oo";
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+import "std/scenario.oo";
+import "std/sh.oo";
 
 pub fn main(p: &ProcessCap) {
-    let mut tr: TestRunner = test_runner_new();
-    
-    let root = get_root(p);
-    let oodac = get_env(p, "OODAC_BIN", root + "/oodac/oodac");
-    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
-    let pass_dir = root + "/bootstrap/corpus/typecheck/pass";
-    
-    // Check oodac exists
-    let oodac_exists = cmd_exec(p, "test -x " + oodac);
-    if !oodac_exists.is_ok() {
-        println("ERR_NO_OODAC: need " + oodac);
-        process_exit(1);
-    }
-    
-    // Setup temp dir
-    let mkdir_res = cmd_exec(p, "mkdir -p " + tmpdir);
-    if !mkdir_res.is_ok() {
-        println("FAIL: cannot create temp dir " + tmpdir);
-        process_exit(1);
-    }
-    
-    // Check pass dir exists
-    let pass_dir_exists = cmd_exec(p, "test -d " + pass_dir);
-    if !pass_dir_exists.is_ok() {
-        println("ERR: no pass fixtures under " + pass_dir);
-        process_exit(1);
-    }
-    
-    let n = 0;
-    
-    // List files in pass directory
-    let list_res = cmd_exec(p, "ls " + pass_dir + "/*.oo 2>/dev/null");
-    if list_res.is_ok() {
-        let files = list_res.unwrap();
-        let file_list = str_split(files, "\n");
-        
-        for file in file_list {
-            let file = trim(file);
-            if str_len(file) == 0 {
-                continue;
-            }
-            n = n + 1;
-            
-            let base = str_replace(file, pass_dir + "/", "");
-            let out = tmpdir + "/tc_pass_" + base + ".out";
-            let err = tmpdir + "/tc_pass_" + base + ".err";
-            
-            let check_res = cmd_exec(p, oodac + " check \"" + file + "\" >" + out + " 2>" + err);
-            if !check_res.is_ok() {
-                println("FAIL typecheck pass exit=non-zero: " + base);
-                tr = test_assert(tr, base, false);
-                continue;
-            }
-            
-            let check_ok = cmd_exec(p, "grep -q '^OK' " + out);
-            if !check_ok.is_ok() {
-                println("FAIL typecheck pass missing OK: " + base);
-                tr = test_assert(tr, base, false);
-                continue;
-            }
-            
-            let check_no_err = cmd_exec(p, "grep -qE $'^ERR\\t' " + out + " " + err + " 2>/dev/null");
-            if check_no_err.is_ok() {
-                println("FAIL typecheck pass has ERR: " + base);
-                tr = test_assert(tr, base, false);
-                continue;
-            }
-            
-            tr = test_assert(tr, "OK typecheck pass: " + base, true);
-        }
-    }
-    
-    if n == 0 {
-        println("ERR: no pass fixtures under " + pass_dir);
-        process_exit(1);
-    }
-    
-    test_summary(tr);
-    
-    if tr.failed > 0 {
-        println("typecheck_pass_smoke: FAILED (" + str_from_int(n) + " fixtures)");
-        process_exit(1);
-    }
-    
-    println("typecheck_pass_smoke: ALL OK (" + str_from_int(n) + " pass fixtures)");
-}
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let pd    = root + "/bootstrap/corpus/typecheck/pass";
+    let _v0   = sh_mkdir_p(p, tmpd);
 
-fn get_root(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
-    if res.is_ok() {
-        return trim(res.unwrap());
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
     }
-    return ".";
-}
 
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        let val = res.unwrap();
-        let trimmed = trim(val);
-        if str_len(trimmed) > 0 {
-            return trimmed;
-        }
-    }
-    return default;
-}
+    // when — pass corpus non-empty
+    let _w1 = process_exec(p, "ls -1 " + pd + "/*.oo > " + tmpd + "/tc_pass.lst 2>/dev/null");
+    fails   = fails + tally(expect_quiet(p, "test -s " + tmpd + "/tc_pass.lst"),                  "pass corpus non-empty");
 
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
-}
+    // and — every fixture: exit 0 + ^OK + no ^ERR
+    fails = fails + tally(check(p, "for f in $(cat " + tmpd + "/tc_pass.lst); do out=" + oodac + " check \"$f\" 2>&1; rc=$?; [ \"$rc\" -eq 0 ] || exit 1; echo \"$out\" | grep -qE '^OK' || exit 1; echo \"$out\" | grep -qE '^ERR' && exit 1; done", 240), "pass corpus all OK");
 
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    if start < 0 {
-        return "";
-    }
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        return str_replace(result, "\r", "");
-    }
-    return "";
+    // then — wrap-up
+    if fails > 0 { println("typecheck_pass_smoke: FAILED"); process_exit(1); }
+    println("typecheck_pass_smoke: PASSED");
 }

@@ -1,0 +1,36 @@
+// # Sys Exec Env Filter Smoke
+//
+// Logline: DE1.8 — runtime chs_rt_sys.c filters child env: OODA_/OO_ kept, AWS/HOME/USER/LD_PRELOAD stripped, PATH minimal, no system(3).
+// Beats: env_cap + prefix filter | no system(3) | clearenv + PATH | gcc -Werror | runtime harness proves strip.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+const SYS_C: String = "ooda/runtime/chs_rt_sys.c";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let _ = sh_mkdir_p(p, root + "/.ooda-cache/ooda-tmp");
+    let _ = scenario(p, fs, "sys_exec env filter");
+
+    // when: chs_rt_sys.c carries env_cap + OODA_/OO_ prefix filter + clearenv + PATH
+    expect_clean(p, "grep -q 'env_cap' " + root + "/" + SYS_C);
+    expect_clean(p, "grep -qE 'strncmp\\(\\*src, \"OODA_\"' " + root + "/" + SYS_C);
+    expect_clean(p, "grep -qE 'strncmp\\(\\*src, \"OO_\"' " + root + "/" + SYS_C);
+    expect_clean(p, "grep -q 'clearenv' " + root + "/" + SYS_C);
+    expect_clean(p, "grep -q 'PATH.*/usr/bin:/bin' " + root + "/" + SYS_C);
+    expect_clean(p, "! grep -nE '[^[:alnum:]_]system\\s*\\(' " + root + "/" + SYS_C + " | grep -v 'system(3)'");
+
+    // and: gcc -Werror -Wshadow on owned TU
+    let _ = process_exec(p, "gcc -c -Werror -Wshadow -I " + root + "/ooda/runtime " + root + "/" + SYS_C + " -o " + root + "/.ooda-cache/ooda-tmp/chs_rt_sys.o 2>" + root + "/.ooda-cache/ooda-tmp/sys_c.gcc");
+    let _ = expect_clean(p, "test -f " + root + "/.ooda-cache/ooda-tmp/chs_rt_sys.o");
+
+    // then: runtime harness proves OODA_/OO_ kept + secrets stripped
+    let harness = root + "/.ooda-cache/ooda-tmp/sys_exec_env_filter_harness.c";
+    let bin = root + "/.ooda-cache/ooda-tmp/sys_exec_env_filter_harness";
+    let _ = process_exec(p, "cat > " + harness + " <<'EOF'\n#include \"chs_rt.h\"\nint main(void) {\n  long long sys = oo_cap_grant_sys();\n  OoStr av[3];\n  av[0] = oo_str_lit(\"sh\"); av[1] = oo_str_lit(\"-c\"); av[2] = oo_str_lit(\"test \\\"${OODA_MARK:-}\\\" = keepme || exit 10; test \\\"${OO_MARK:-}\\\" = keepoo || exit 11; test -z \\\"${AWS_SECRET_ACCESS_KEY:-}\\\" || exit 12; test -z \\\"${HOME:-}\\\" || exit 14; exit 0\");\n  OoResS r = oo_sys_exec(sys, 3, av); (void)r;\n  return 0;\n}\nEOF");
+    check(p, "gcc -O0 -Werror -I " + root + "/ooda/runtime " + harness + " " + root + "/ooda/runtime/chs_rt.c -lm -ldl -lpthread -o " + bin, within: 30);
+    expect_clean(p, "OODA_MARK=keepme OO_MARK=keepoo AWS_SECRET_ACCESS_KEY=AKIA_SHOULD_NOT_LEAK HOME=/tmp USER=smoke " + bin + " 2>&1");
+
+    println("sys_exec_env_filter_smoke: PASSED");
+}

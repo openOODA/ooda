@@ -1,0 +1,42 @@
+// # Typecheck Line Stays Local
+// Logline: single-file type errors report line < 50 (small), near the offending line.
+// Setup: oodac/oodac built; typecheck/fail fixtures on disk.
+// Beats: 1. corpus fail has small line | 2. probe keeps let-ann mismatch line local | 3. multi-import residual
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — single-file fail fixtures: line must be local (<50)
+    let cf = root + "/bootstrap/corpus/typecheck/fail";
+    fails = fails + tally(expect_present(p, cf),                                                  "corpus dir exists");
+    let _w1 = process_exec(p, "ls -1 " + cf + "/*.oo > " + tmpd + "/tc_line.lst 2>/dev/null || true");
+    fails   = fails + tally(check(p, "for f in $(cat " + tmpd + "/tc_line.lst); do n=$(" + oodac + " check \"$f\" 2>&1 | sed -n 's/.*Type error at \\([0-9]\\+\\):.*/\\1/p' | head -1); [ -n \"$n\" ] && [ \"$n\" -lt 50 ] || exit 1; done", 60), "corpus single-file line < 50");
+
+    // and — ad-hoc probe: let ann mismatch on line 3 keeps line local
+    let probe = tmpd + "/tc_line_probe.oo";
+    let pout  = tmpd + "/tc_probe.out";
+    let perr  = tmpd + "/tc_probe.err";
+    let _w2   = process_exec(p, "printf '// line 1\\nfn main() {\\n    let x: Int = \"hi\";\\n}\\n' > " + probe);
+    let _w3   = process_exec(p, oodac + " check " + probe + " > " + pout + " 2> " + perr);
+    fails     = fails + tally(expect_quiet(p, "cat " + pout + " " + perr + " | grep -E 'Type error at [0-9]+:'"),   "probe Type error at LINE:");
+    fails     = fails + tally(check(p, "cat " + pout + " " + perr + " | sed -n 's/.*Type error at \\([0-9]\\+\\):.*/\\1/p' | head -1 | xargs -I{} test {} -lt 50", 30), "probe line < 50");
+
+    // then — residual documented
+    println("RESIDUAL: multi-import expanded LINE offsets — see oodac/tc_diag.oo");
+
+    if fails > 0 { println("typecheck_line_smoke: FAILED"); process_exit(1); }
+    println("typecheck_line_smoke: PASSED");
+}

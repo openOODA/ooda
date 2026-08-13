@@ -1,0 +1,53 @@
+// # R2 Multi-Import Type Check Smoke
+//
+// Logline: R2 path A — cross-file function calls, struct types, and chain imports type-check; arg/arity/missing/return-type mismatches fail-closed.
+// Beats: call across import | struct type across import | arg mismatch | arity mismatch | missing import | return-type wrong | chain.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+const FIX: String = ".ooda-cache/ooda-tmp/r2_multi_import_tc";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _ = sh_mkdir_p(p, root + "/" + FIX);
+    let _ = scenario(p, fs, "R2 multi-import type check");
+
+    // when: helpers + call + struct pass; arg/arity/missing/return-type fail-closed
+    let _ = write_fix(p, root + "/" + FIX);
+    expect_clean(p, "test -f " + root + "/" + FIX + "/call_main.oo");
+    expect_clean(p, "test -f " + root + "/" + FIX + "/struct_main.oo");
+    expect_clean(p, "test -f " + root + "/" + FIX + "/chain_main.oo");
+    expect_clean(p, "test -f " + root + "/" + FIX + "/arg_bad_main.oo");
+
+    // then: pass rails type-check
+    check(p, oodac + " check " + root + "/" + FIX + "/call_main.oo", within: 30);
+    check(p, oodac + " check " + root + "/" + FIX + "/struct_main.oo", within: 30);
+    check(p, oodac + " check " + root + "/" + FIX + "/chain_main.oo", within: 30);
+
+    // and: fail-closed rails ERR type / import / missing
+    expect_clean(p, "!" + oodac + " check " + root + "/" + FIX + "/arg_bad_main.oo +\" 2>&1 | grep -qE 'ERR[[:space:]]+(type|import)|expects Int|got String'");
+    expect_clean(p, "!" + oodac + " check " + root + "/" + FIX + "/missing_main.oo +\" 2>&1 | grep -qE 'ERR[[:space:]]+import|not found|missing'");
+    expect_clean(p, "!" + oodac + " check " + root + "/" + FIX + "/arity_bad_main.oo +\" 2>&1 | grep -qE 'ERR[[:space:]]+type|expects 2|got 1|argument'");
+    expect_clean(p, "!" + oodac + " check " + root + "/" + FIX + "/ret_bad_main.oo +\" 2>&1 | grep -qE 'ERR[[:space:]]+type|annotated as String|Type error'");
+
+    println("r2_multi_import_tc_smoke: PASSED");
+}
+
+fn write_fix(p: &ProcessCap, fix: String) {
+    let _ = process_exec(p, "cat > " + fix + "/call_lib.oo <<'EOF'\npub fn helper() -> Int { return 42; }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/call_main.oo <<'EOF'\nimport \"call_lib.oo\";\npub fn main() { let x: Int = helper(); println(x); }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/struct_lib.oo <<'EOF'\ntype Point = struct { x: Int, y: Int, };\npub fn make_point(a: Int, b: Int) -> Point { return Point { x: a, y: b }; }\npub fn point_sum(p: Point) -> Int { return p.x + p.y; }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/struct_main.oo <<'EOF'\nimport \"struct_lib.oo\";\npub fn main() { let p: Point = make_point(1, 2); let s: Int = point_sum(p); println(s); }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/arg_lib.oo <<'EOF'\npub fn need_int(n: Int) -> Int { return n + 1; }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/arg_bad_main.oo <<'EOF'\nimport \"arg_lib.oo\";\npub fn main() { let x: Int = need_int(\"nope\"); println(x); }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/missing_main.oo <<'EOF'\nimport \"no_such_module.oo\";\npub fn main() { println(\"unreachable\"); }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/arity_lib.oo <<'EOF'\npub fn add(a: Int, b: Int) -> Int { return a + b; }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/arity_bad_main.oo <<'EOF'\nimport \"arity_lib.oo\";\npub fn main() { let x: Int = add(1); println(x); }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/ret_lib.oo <<'EOF'\npub fn add(a: Int, b: Int) -> Int { return a + b; }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/ret_bad_main.oo <<'EOF'\nimport \"ret_lib.oo\";\npub fn main() { let s: String = add(1, 2); println(s); }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/chain_lib.oo <<'EOF'\npub fn leaf(x: Int) -> Int { return x + 1; }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/chain_mid.oo <<'EOF'\nimport \"chain_lib.oo\";\npub fn mid(x: Int) -> Int { return leaf(x); }\nEOF");
+    let _ = process_exec(p, "cat > " + fix + "/chain_main.oo <<'EOF'\nimport \"chain_mid.oo\";\npub fn main() { let a: Int = mid(1); let b: Int = leaf(2); println(a); println(b); }\nEOF");
+}

@@ -1,149 +1,42 @@
-// ===================================================================
-// WASM Emit Smoke Test
-// ===================================================================
-// job: smoke test for openOODA direct WebAssembly (.wat) backend
-// in:  ooda/bin/ooda or oodac/oodac
-// out: exit 0 if .wat file created with expected content
+// # Wasm Emit Hands Back A Module
+// Logline: emit-wasm produces a complete .wat with module / wasi / fd_write / memory / _start.
+// Setup: oodac/oodac or bin/ooda built.
+// Beats: 1. emit-wasm produces .wat | 2. module + wasi + fd_write + memory + _start | 3. wrap-up
 
-import "std/test.oo";
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+import "std/scenario.oo";
+import "std/sh.oo";
 
 pub fn main(p: &ProcessCap) {
-    let mut tr: TestRunner = test_runner_new();
-    
-    let root = get_root(p);
-    let ooda = get_env(p, "OODA_BIN", root + "/bin/ooda");
-    let oodac = get_env(p, "OODAC_BIN", root + "/oodac/oodac");
-    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
-    
-    // Check at least one compiler exists
-    let ooda_exists = cmd_exec(p, "test -x " + ooda);
-    let oodac_exists = cmd_exec(p, "test -x " + oodac);
-    
-    if !ooda_exists.is_ok() && !oodac_exists.is_ok() {
-        println("ERR_NO_COMPILER: need " + ooda + " or " + oodac);
-        process_exit(1);
-    }
-    
-    // Setup temp dir
-    let mkdir_res = cmd_exec(p, "mkdir -p " + tmpdir);
-    if !mkdir_res.is_ok() {
-        println("FAIL: cannot create temp dir " + tmpdir);
-        process_exit(1);
-    }
-    
-    let test_src = tmpdir + "/wasm_smoke_test.oo";
-    let out_wat = tmpdir + "/wasm_smoke_test.wat";
-    
-    // Write test source
-    let write_res = cmd_exec(p, "cat > \"" + test_src + "\" << 'EOF'
-pub fn main() {
-    let msg: String = \"hello wasm smoke\"
-    println(msg)
-}
-EOF");
-    tr = test_assert(tr, "write test source", write_res.is_ok());
-    
-    // Emit WASM
-    if ooda_exists.is_ok() {
-        let emit_res = cmd_exec(p, ooda + " build --target wasm \"" + test_src + "\" -o \"" + out_wat + "\"");
-        tr = test_assert(tr, "ooda build --target wasm", emit_res.is_ok());
-    } else {
-        let emit_res = cmd_exec(p, oodac + " emit-wasm \"" + test_src + "\" > \"" + out_wat + "\"");
-        tr = test_assert(tr, "oodac emit-wasm", emit_res.is_ok());
-    }
-    
-    // Check output file exists
-    let wat_exists = cmd_exec(p, "test -f " + out_wat);
-    tr = test_assert(tr, "output wat file created", wat_exists.is_ok());
-    
-    if !wat_exists.is_ok() {
-        test_summary(tr);
-        process_exit(1);
-    }
-    
-    // Check for expected WASM content
-    let check_module = cmd_exec(p, "grep -q module " + out_wat);
-    tr = test_assert(tr, "wat contains module", check_module.is_ok());
-    
-    let check_wasi = cmd_exec(p, "grep -q wasi_snapshot_preview1 " + out_wat);
-    tr = test_assert(tr, "wat contains wasi_snapshot_preview1", check_wasi.is_ok());
-    
-    let check_fd_write = cmd_exec(p, "grep -q fd_write " + out_wat);
-    tr = test_assert(tr, "wat contains fd_write", check_fd_write.is_ok());
-    
-    let check_memory = cmd_exec(p, "grep -q memory " + out_wat);
-    tr = test_assert(tr, "wat contains memory declaration", check_memory.is_ok());
-    
-    let check_start = cmd_exec(p, "grep -q '_start' " + out_wat);
-    tr = test_assert(tr, "wat contains _start export", check_start.is_ok());
-    
-    // Cleanup
-    let _ = cmd_exec(p, "rm -f " + test_src + " " + out_wat);
-    
-    test_summary(tr);
-    
-    if tr.failed > 0 {
-        process_exit(1);
-    }
-    
-    println("wasm_emit_smoke: WebAssembly backend smoke test OK");
-}
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let ooda  = sh_env_get_or(p, "OODA_BIN",   root + "/bin/ooda").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
 
-fn get_root(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
-    if res.is_ok() {
-        return trim(res.unwrap());
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
     }
-    return ".";
-}
 
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        let val = res.unwrap();
-        let trimmed = trim(val);
-        if str_len(trimmed) > 0 {
-            return trimmed;
-        }
-    }
-    return default;
-}
+    // when — emitter available + fixture present
+    fails = fails + tally(expect_quiet(p, "test -x " + oodac + " || test -x " + ooda), "emitter binary");
 
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
-}
+    // and — emit-wasm produces .wat
+    let src = tmpd + "/wasm_smoke_test.oo";
+    let wat = tmpd + "/wasm_smoke_test.wat";
+    let _w1 = process_exec(p, "printf 'pub fn main() {\\n    let msg: String = \"hello wasm smoke\"\\n    println(msg)\\n}\\n' > " + src);
+    let _w2 = process_exec(p, "test -x " + ooda + " && " + ooda + " build --target wasm " + src + " -o " + wat + " || " + oodac + " emit-wasm " + src + " > " + wat);
+    fails   = fails + tally(expect_present(p, wat), "emit-wasm produced .wat");
 
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    if start < 0 {
-        return "";
-    }
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        return str_replace(result, "\r", "");
-    }
-    return "";
+    // then — .wat is a complete module
+    fails = fails + tally(expect_quiet(p, "grep -q 'module' "                + wat), "module keyword");
+    fails = fails + tally(expect_quiet(p, "grep -q 'wasi_snapshot_preview1' " + wat), "wasi import");
+    fails = fails + tally(expect_quiet(p, "grep -q 'fd_write' "               + wat), "fd_write import");
+    fails = fails + tally(expect_quiet(p, "grep -q 'memory' "                 + wat), "memory declaration");
+    fails = fails + tally(expect_quiet(p, "grep -q '_start' "                 + wat), "_start export");
+
+    if fails > 0 { println("wasm_emit_smoke: FAILED"); process_exit(1); }
+    println("wasm_emit_smoke: PASSED");
 }

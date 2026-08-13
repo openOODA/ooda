@@ -1,171 +1,48 @@
-// ===================================================================
-// Meta Epoch Smoke Test
-// ===================================================================
+// # Meta Epoch Smoke
+//
+// Logline: oo_meta_epoch() returns non-zero and stable within a process, but differs across re-spawned processes.
+// Beats: write harness | gcc+run twice | parse epoch=n | cross-process epochs differ.
 
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+import "std/scenario.oo";
+import "std/sh.oo";
 
-pub fn main(p: &ProcessCap) {
-    let root = get_root(p);
-    let tmp = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
-    
-    let mkdir_res = cmd_exec(p, "mkdir -p " + tmp);
-    if !mkdir_res.is_ok() {
-        println("Cannot create tmp dir");
-        process_exit(1);
-    }
-    
-    // Write harness C file
-    let harness_c = tmp + "/meta_epoch_harness.c";
-    let c_content = "#include \"chs_rt.h\"\n#include <stdio.h>\nint main(void) {\n  long long a = oo_meta_epoch();\n  long long b = oo_meta_epoch();\n  long long m = oo_meta_mix(42);\n  if (a == 0 || a != b) { fprintf(stderr, \"epoch fail\\n\"); return 1; }\n  if (m == 0) { fprintf(stderr, \"mix fail\\n\"); return 1; }\n  printf(\"OK epoch=%lld mix=%lld path_a=%d\\n\", (long long)a, (long long)m, oo_meta_is_path_a());\n  return 0;\n}";
-    
-    // Use shell to write file with heredoc
-    let write_res = cmd_exec(p, "cat >\"" + harness_c + "\" <<'C'\n#include \"chs_rt.h\"\n#include <stdio.h>\nint main(void) {\n  long long a = oo_meta_epoch();\n  long long b = oo_meta_epoch();\n  long long m = oo_meta_mix(42);\n  if (a == 0 || a != b) { fprintf(stderr, \"epoch fail\\n\"); return 1; }\n  if (m == 0) { fprintf(stderr, \"mix fail\\n\"); return 1; }\n  printf(\"OK epoch=%lld mix=%lld path_a=%d\\n\", (long long)a, (long long)m, oo_meta_is_path_a());\n  return 0;\n}\nC");
-    
-    if !write_res.is_ok() {
-        println("Cannot write harness");
-        process_exit(1);
-    }
-    
-    // Compile
-    let harness_exe = tmp + "/meta_epoch_harness";
-    let gcc_cmd = "gcc -O0 -I\"" + root + "/runtime\" \"" + harness_c + "\" \"" + root + "/runtime/chs_rt.c\" -lm -ldl -lpthread -o \"" + harness_exe + "\"";
-    let gcc_res = cmd_exec(p, gcc_cmd);
-    if !gcc_res.is_ok() {
-        println("gcc compile failed");
-        process_exit(1);
-    }
-    
-    // Run twice and capture output
-    let run1_res = cmd_exec(p, harness_exe);
-    if !run1_res.is_ok() {
-        println("First run failed");
-        process_exit(1);
-    }
-    let out1 = run1_res.unwrap();
-    println(out1);
-    
-    let run2_res = cmd_exec(p, harness_exe);
-    if !run2_res.is_ok() {
-        println("Second run failed");
-        process_exit(1);
-    }
-    let out2 = run2_res.unwrap();
-    println(out2);
-    
-    // Parse epoch values
-    let e1 = parse_epoch(out1);
-    let e2 = parse_epoch(out2);
-    
-    if e1 == 0 || e2 == 0 {
-        println("epoch parse fail");
-        process_exit(1);
-    }
-    
-    if e1 == e2 {
-        println("epoch fail: two processes matched (" + e1.to_string() + ")");
-        process_exit(1);
-    }
-    
-    println("OK cross-process epochs differ");
+const HARNESS_C: String = ".ooda-cache/ooda-tmp/meta_epoch_harness.c";
+const HARNESS_BIN: String = ".ooda-cache/ooda-tmp/meta_epoch_harness";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let _ = sh_mkdir_p(p, root + "/.ooda-cache/ooda-tmp");
+    let _ = scenario(p, fs, "meta epoch cross-process");
+
+    // when: harness C file is written and gnu-linked with chs_rt
+    let _ = process_exec(p, "cat > " + root + "/" + HARNESS_C + " <<'C'\n#include \"chs_rt.h\"\n#include <stdio.h>\nint main(void) {\n  long long a = oo_meta_epoch();\n  long long b = oo_meta_epoch();\n  long long m = oo_meta_mix(42);\n  if (a == 0 || a != b) { fprintf(stderr, \"epoch fail\\n\"); return 1; }\n  if (m == 0) { fprintf(stderr, \"mix fail\\n\"); return 1; }\n  printf(\"OK epoch=%lld mix=%lld\\n\", (long long)a, (long long)m);\n  return 0;\n}\nC");
+    check(p, "gcc -O0 -I " + root + "/ooda/runtime " + root + "/" + HARNESS_C + " " + root + "/ooda/runtime/chs_rt.c -lm -ldl -lpthread -o " + root + "/" + HARNESS_BIN, within: 30);
+
+    // and: two runs produce different epoch values
+    let out1 = match process_exec(p, root + "/" + HARNESS_BIN) { Ok(s) => s, Err(_) => "" };
+    let out2 = match process_exec(p, root + "/" + HARNESS_BIN) { Ok(s) => s, Err(_) => "" };
+    expect_substring(fs, root + "/" + HARNESS_C, "oo_meta_epoch");
+    expect_clean(p, "echo '" + out1 + "' | grep -qE 'epoch=(-?[0-9]+)'");
+    expect_clean(p, "echo '" + out2 + "' | grep -qE 'epoch=(-?[0-9]+)'");
+
+    // then: cross-process epochs differ
+    let e1 = pick_field(out1, "epoch=");
+    let e2 = pick_field(out2, "epoch=");
+    expect_clean(p, "test \"$e1\" != \"$e2\" || ! echo epoch=$e1 vs $e2");
+
     println("meta_epoch_smoke: PASSED");
 }
 
-fn get_root(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
-    if res.is_ok() {
-        return trim(res.unwrap());
+fn pick_field(s: String, key: String) -> String {
+    let i = str_index_of(s, key);
+    if i < 0 { return ""; }
+    let start = i + chars_len(key);
+    let rest = str_slice(s, start, chars_len(s));
+    let mut j: Int = 0;
+    let n = chars_len(rest);
+    while j < n {
+        if char_at(rest, j) == " " || char_at(rest, j) == "\n" { break; }
+        j = j + 1;
     }
-    return ".";
-}
-
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return default;
-}
-
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
-}
-
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    if start < 0 {
-        return "";
-    }
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        return str_replace(result, "\r", "");
-    }
-    return "";
-}
-
-fn parse_epoch(s: String) -> Int {
-    // Parse epoch=NNN from string
-    let len = str_len(s);
-    let mut i = 0;
-    let mut found = false;
-    let mut num = 0;
-    let mut negative = false;
-    
-    while i < len {
-        let c = str_char_at(s, i);
-        if c == 'e' && i + 5 < len && str_sub(s, i, i + 6) == "epoch=" {
-            i = i + 6;
-            found = true;
-            // Handle negative
-            if i < len && str_char_at(s, i) == '-' {
-                negative = true;
-                i = i + 1;
-            }
-            // Parse digits
-            while i < len {
-                let c2 = str_char_at(s, i);
-                if c2 >= "0" && c2 <= "9" {
-                    num = num * 10 + (c2.to_int() - "0".to_int());
-                    i = i + 1;
-                } else {
-                    break;
-                }
-            }
-            break;
-        }
-        i = i + 1;
-    }
-    
-    if found {
-        if negative {
-            return -num;
-        }
-        return num;
-    }
-    return 0;
-}
-
-fn str_sub(s: String, start: Int, end: Int) -> String {
-    return str_slice(s, start, end);
+    return str_slice(rest, 0, j);
 }

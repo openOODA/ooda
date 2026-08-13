@@ -1,61 +1,66 @@
-import std.fs;
-import std.os;
-import std.testing;
+import "fs.oo";
+import "process.oo";
+import "test.oo";
+import "str.oo";
 
-// Helper to create a mock registry environment
-fn setup_mock_registry(registry_path: String) {
-    // Scaffold dummy packages for testing
-    fs.write_file(registry_path + "/pkg-a/1.0.0/manifest.oo", "{ name: 'pkg-a', version: '1.0.0', deps: { 'pkg-b': '1.0.0' } }");
-    fs.write_file(registry_path + "/pkg-b/1.0.0/manifest.oo", "{ name: 'pkg-b', version: '1.0.0', deps: {} }");
+fn setup_mock_registry(fsW: &FsWriteCap, registry_path: String) {
+    let _ = fs_mkdir(fsW, registry_path);
+    let _ = fs_mkdir(fsW, registry_path + "/pkg-a");
+    let _ = fs_mkdir(fsW, registry_path + "/pkg-a/1.0.0");
+    let _ = fs_write_file(fsW, registry_path + "/pkg-a/1.0.0/manifest.oo", "name = \"pkg-a\"\nversion = \"1.0.0\"\n[dependencies]\npkg-b = \"1.0.0\"\n");
+
+    let _ = fs_mkdir(fsW, registry_path + "/pkg-b");
+    let _ = fs_mkdir(fsW, registry_path + "/pkg-b/1.0.0");
+    let _ = fs_write_file(fsW, registry_path + "/pkg-b/1.0.0/manifest.oo", "name = \"pkg-b\"\nversion = \"1.0.0\"\n[dependencies]\n");
 }
 
-fn test_end_to_end_resolution_and_install() {
-    let test_env = testing.create_temp_env();
-    let registry_dir = test_env.create_dir("mock_registry");
-    let workspace_dir = test_env.create_dir("workspace");
-
-    // 1. Setup Mock Registry
-    setup_mock_registry(registry_dir);
-
-    // 2. Setup Workspace Manifest
-    let manifest_content = """
-    name = "test-workspace"
-    version = "1.0.0"
-
-    [dependencies]
-    pkg-a = "1.0.0"
-    """;
-    fs.write_file(workspace_dir + "/package.oo", manifest_content);
-
-    // 3. Execute PM Install command
-    // We pass an environment variable or flag to override the default registry URL
-    let result = os.exec("ooda", ["pm", "install", "--registry", registry_dir], {
-        cwd: workspace_dir,
-        env: { "OODA_CACHE_DIR": test_env.create_dir("cache") }
-    });
-
-    // 4. Validate Exit Code
-    testing.assert_eq(result.exit_code, 0, "Package manager install failed: " + result.stderr);
-
-    // 5. Validate Lockfile Generation
-    let lockfile_path = workspace_dir + "/ooda.lock";
-    testing.assert(fs.exists(lockfile_path), "Lockfile was not generated.");
+pub fn main(p: &ProcessCap, fsR: &FsReadCap, fsW: &FsWriteCap) {
+    let mut tr = test_runner_new();
     
-    let lockfile_content = fs.read_file(lockfile_path);
-    testing.assert(lockfile_content.contains("pkg-a"), "Lockfile missing pkg-a");
-    testing.assert(lockfile_content.contains("pkg-b"), "Lockfile missing transitive dependency pkg-b");
+    // --- Test 1: Install ---
+    let registry_dir = "test_pm_mock_reg_inst";
+    let workspace_dir = "test_pm_ws_inst";
+    let cache_dir = "test_pm_cache_inst";
 
-    // 6. Validate Downloaded Modules
-    let modules_dir = workspace_dir + "/ooda_modules";
-    testing.assert(fs.exists(modules_dir + "/pkg-a"), "pkg-a was not installed to workspace.");
-    testing.assert(fs.exists(modules_dir + "/pkg-b"), "pkg-b was not installed to workspace.");
+    let _ = fs_mkdir(fsW, workspace_dir);
+    let _ = fs_mkdir(fsW, cache_dir);
+    setup_mock_registry(fsW, registry_dir);
 
-    test_env.cleanup();
-}
+    let manifest_content = "name = \"test-workspace\"\nversion = \"1.0.0\"\n\n[dependencies]\npkg-a = \"1.0.0\"\n";
+    let _ = fs_write_file(fsW, workspace_dir + "/package.oo", manifest_content);
 
-// Run the smoke test
-pub fn main() {
-    testing.run([
-        test_end_to_end_resolution_and_install,
-    ]);
+    // Call standalone binary oodac/ooda-pm
+    let cmd = "cd " + workspace_dir + " && OODA_CACHE_DIR=../" + cache_dir + " ../oodac/ooda-pm install --registry ../" + registry_dir;
+    let install_res = process_exec(p, cmd);
+    tr = test_assert(tr, "ooda install command execution", install_res.is_ok());
+
+    tr = test_assert(tr, "install lockfile generated", fs_path_exists(fsR, workspace_dir + "/ooda.lock"));
+    tr = test_assert(tr, "install pkg-a downloaded", fs_path_exists(fsR, workspace_dir + "/ooda_modules/pkg-a"));
+    tr = test_assert(tr, "install pkg-b downloaded", fs_path_exists(fsR, workspace_dir + "/ooda_modules/pkg-b"));
+
+
+    // --- Test 2: Add ---
+    let registry_dir2 = "test_pm_mock_reg_add";
+    let workspace_dir2 = "test_pm_ws_add";
+    let cache_dir2 = "test_pm_cache_add";
+
+    let _ = fs_mkdir(fsW, workspace_dir2);
+    let _ = fs_mkdir(fsW, cache_dir2);
+    setup_mock_registry(fsW, registry_dir2);
+
+    let manifest_content2 = "name = \"test-workspace\"\nversion = \"1.0.0\"\n\n[dependencies]\n";
+    let _ = fs_write_file(fsW, workspace_dir2 + "/package.oo", manifest_content2);
+
+    let cmd2 = "cd " + workspace_dir2 + " && OODA_CACHE_DIR=../" + cache_dir2 + " ../oodac/ooda-pm add pkg-a --registry ../" + registry_dir2;
+    let add_res = process_exec(p, cmd2);
+    tr = test_assert(tr, "ooda add command execution", add_res.is_ok());
+
+    tr = test_assert(tr, "add lockfile generated", fs_path_exists(fsR, workspace_dir2 + "/ooda.lock"));
+    tr = test_assert(tr, "add pkg-a downloaded", fs_path_exists(fsR, workspace_dir2 + "/ooda_modules/pkg-a"));
+
+    let r_manifest = fs_read_file(fsR, workspace_dir2 + "/package.oo");
+    let manifest_str = match r_manifest { Ok(s) => s, Err(_) => "" };
+    tr = test_assert(tr, "manifest updated with pkg-a", str_contains(manifest_str, "pkg-a"));
+
+    test_summary(tr);
 }

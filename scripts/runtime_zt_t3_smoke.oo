@@ -1,0 +1,40 @@
+// # Runtime ZT T3 Smoke
+//
+// Logline: T3 path A — 1.8 sys_exec env filter, 1.10/4.5 FFI mutex + nested dlopen refuse, 6.4 OODA_FS_WRITEDIR fail-closed.
+// Beats: 1.8 static + runtime | 1.10 mutex | 4.5 nested refuse | 6.4 WRITEDIR before/after.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+const SYS_C: String = "ooda/runtime/chs_rt_sys.c";
+const FFI_C: String = "ooda/runtime/chs_rt_ffi.c";
+const FS_C: String = "ooda/runtime/chs_rt_fs.c";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let _ = sh_mkdir_p(p, root + "/.ooda-cache/ooda-tmp");
+    let _ = scenario(p, fs, "T3 runtime ZT");
+
+    // when: 1.8 static — env_cap + OODA_/OO_ prefix filter in chs_rt_sys.c
+    expect_clean(p, "grep -qE 'DE1\\.8' " + root + "/" + SYS_C);
+    expect_clean(p, "grep -qE 'OODA_|OO_' " + root + "/" + SYS_C);
+
+    // and runtime harness: SYS env leaks produce ENV_LEAK; clean runs ENV_CLEAN
+    let bin = root + "/.ooda-cache/ooda-tmp/zt_t3_exec_rt.bin";
+    let _ = process_exec(p, "cat > " + root + "/.ooda-cache/ooda-tmp/zt_t3_exec_rt.c <<'C'\n#include \"chs_rt.h\"\nint main(void) {\n  long long sys = oo_cap_grant_sys();\n  OoStr av[3];\n  av[0] = oo_str_lit(\"sh\"); av[1] = oo_str_lit(\"-c\"); av[2] = oo_str_lit(\"if [ -n \\\"$SECRET_LEAK\\\" ]; then echo ENV_LEAK; else echo ENV_CLEAN; fi\");\n  OoResS r = oo_sys_exec(sys, 3, av); (void)r;\n  return 0;\n}\nC");
+    check(p, "gcc -O0 -I " + root + "/ooda/runtime " + root + "/.ooda-cache/ooda-tmp/zt_t3_exec_rt.c " + root + "/ooda/runtime/chs_rt.c -lm -ldl -lpthread -o " + bin, within: 30);
+    expect_clean(p, "SECRET_LEAK=leak " + bin + " 2>&1 | grep -q ENV_CLEAN");
+
+    // then: 1.10 FFI handle mutex + 4.5 nested dlopen refuse
+    expect_clean(p, "grep -qE 'g_ffi_handles_mu' " + root + "/" + FFI_C);
+    expect_clean(p, "grep -qE 'pthread_mutex_lock\\(&g_ffi_handles_mu\\)' " + root + "/" + FFI_C);
+    expect_clean(p, "grep -qE 'nested dlopen refused' " + root + "/" + FFI_C);
+
+    // and: 6.4 OODA_FS_WRITEDIR fail-closed
+    expect_clean(p, "grep -qE 'OODA_FS_WRITEDIR' " + root + "/" + FS_C);
+    expect_clean(p, "grep -qE 'path_under_writedir|write_file denied' " + root + "/" + FS_C);
+
+    // ci wire
+    expect_substring(fs, root + "/ooda/scripts/ci_product.sh", "runtime_zt_t3_smoke");
+    println("runtime_zt_t3_smoke: PASSED");
+}

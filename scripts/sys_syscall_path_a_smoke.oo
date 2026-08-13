@@ -1,0 +1,54 @@
+// # Syscall Path A Seals The Capability
+// Logline: sys_epoll/inotify/prctl lower through SysCap with residual Err under forge.
+// Setup: oodac/oodac built; chs_rt.c linkable.
+// Beats: 1. seal + lower present | 2. runtime residual Err path | 3. forge zero deny
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], label: String) -> Int {
+        if r.is_ok() { println("OK " + label); return 0; }
+        println("FAIL " + label);
+        return 1;
+    }
+
+    // when — source honesty: seals, lowers, runtime residual
+    fails = fails + tally(expect_quiet(p, "grep -q 'sys_epoll_create' "   + root + "/oodac/check_cap_util.oo"),    "seal sys_epoll_create");
+    fails = fails + tally(expect_quiet(p, "grep -q 'sys_inotify_init' "  + root + "/oodac/check_cap_util.oo"),    "seal sys_inotify_init");
+    fails = fails + tally(expect_quiet(p, "grep -q 'sys_prctl' "          + root + "/oodac/check_cap_util.oo"),    "seal sys_prctl");
+    fails = fails + tally(expect_quiet(p, "grep -q 'oo_sys_epoll_create' "+ root + "/oodac/c_emit_sys.oo"),       "lower oo_sys_epoll_create");
+    fails = fails + tally(expect_quiet(p, "grep -q 'oo_sys_inotify_init' "+ root + "/oodac/c_emit_sys.oo"),       "lower oo_sys_inotify_init");
+    fails = fails + tally(expect_quiet(p, "grep -q 'oo_sys_prctl' "       + root + "/oodac/c_emit_sys.oo"),       "lower oo_sys_prctl");
+    fails = fails + tally(expect_quiet(p, "grep -q 'oo_sys_epoll_create' "+ root + "/runtime/chs_rt_libfloor.c"), "rt residual stub");
+
+    // and — bare refuse + fixture check
+    let bare = tmpd + "/sys_bare.oo";
+    let _w1  = process_exec(p, "printf 'pub fn main() { let r = sys_epoll_create(0); }\\n' > " + bare);
+    fails    = fails + tally(check(p, "!" + oodac + " check " + bare + " >/dev/null 2>&1", 30), "bare sys_epoll_create refused");
+    let fix  = root + "/fixtures/sys_syscall_path_a.oo";
+    fails    = fails + tally(check(p, oodac + " check " + fix + " 2>&1 | grep -qE '^OK'", 30), "fixture with SysCap OK");
+
+    // then — emit-c lowers, runtime residual Err path
+    let cfile = tmpd + "/sys.c";
+    let cbout = tmpd + "/sys.out";
+    let _w2   = process_exec(p, oodac + " emit-c " + fix + " > " + cfile + " 2>" + tmpd + "/sys.err");
+    fails     = fails + tally(expect_quiet(p, "grep -qE 'oo_sys_epoll_create\\(sys' " + cfile), "emit lowers sys_epoll_create");
+    fails     = fails + tally(expect_quiet(p, "grep -qE 'oo_sys_inotify_init\\(sys' " + cfile), "emit lowers sys_inotify_init");
+    fails     = fails + tally(expect_quiet(p, "grep -qE 'oo_sys_prctl\\(sys' "         + cfile), "emit lowers sys_prctl");
+    fails     = fails + tally(expect_quiet(p, "grep -q 'oo_cap_grant_sys' "            + cfile), "emit has SysCap grant");
+
+    let bin = tmpd + "/sys.bin";
+    let _w3 = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + cfile + " -o " + bin + " -lm -ldl -lpthread 2>" + tmpd + "/sys.gcc");
+    let _w4 = process_exec(p, bin + " > " + cbout + " 2>&1 || true");
+    fails   = fails + tally(expect_clean(p, "grep -qE 'epoll-residual-ok|inotify-residual-ok|prctl-residual-ok' " + cbout), "runtime residual Err");
+
+    if fails > 0 { println("sys_syscall_path_a_smoke: FAILED"); process_exit(1); }
+    println("sys_syscall_path_a_smoke: PASSED");
+}

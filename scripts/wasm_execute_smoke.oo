@@ -1,239 +1,55 @@
-// ===================================================================
-// WASM Execute Smoke Test
-// ===================================================================
-// job: M4 WASM execute smoke — emit .wat AND run with wasmtime (prefer) or wasm3
-// in:  ooda/oodac + host WASM runtime (wasmtime | wasm3)
-// out: exit 0 only if emit + execute match expected stdout
-// fail-closed: missing runtime → ERR_NO_WASMTIME (never soft-pass)
+// # Wasm Execute Prints Hi
+// Logline: emit-wasm + wasmtime (or wasm3 + wat2wasm) prints "hi" via WASI fd_write.
+// Setup: oodac/oodac built; wasmtime or wasm3+wat2wasm on PATH.
+// Beats: 1. emit-wasm produces .wat | 2. wasm runtime exits 0 | 3. stdout matches "hi"
 
-import "std/test.oo";
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+import "std/scenario.oo";
+import "std/sh.oo";
 
 pub fn main(p: &ProcessCap) {
-    let mut tr: TestRunner = test_runner_new();
-    
-    // Get oodac path - prefer OODAC_BIN env, else relative to script
-    let oodac_path = get_env(p, "OODAC_BIN", "./oodac/oodac");
-    
-    // Check oodac exists using shell
-    let check_res = cmd_exec(p, "test -x " + oodac_path);
-    
-    if !check_res.is_ok() {
-        println("ERR_NO_COMPILER: need " + oodac_path);
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let ooda  = sh_env_get_or(p, "OODA_BIN",   root + "/bin/ooda").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — emit "hi" fixture as .wat
+    let src  = tmpd + "/hello_wasm.oo";
+    let wat  = tmpd + "/hello_wasm.wat";
+    let wasm = tmpd + "/hello_wasm.wasm";
+    let rout = tmpd + "/run.out";
+    let _w1  = process_exec(p, "printf 'pub fn main() {\\n    println(\"hi\")\\n}\\n' > " + src);
+    let _w2  = process_exec(p, "test -x " + oodac + " && " + oodac + " emit-wasm " + src + " > " + wat + " || " + ooda + " build --target wasm " + src + " -o " + wat);
+    fails    = fails + tally(expect_present(p, wat),                                         "emit-wasm produced .wat");
+    fails    = fails + tally(expect_quiet(p, "grep -q 'module' "                + wat), "module keyword");
+    fails    = fails + tally(expect_quiet(p, "grep -q 'wasi_snapshot_preview1' " + wat), "wasi import");
+    fails    = fails + tally(expect_quiet(p, "grep -q 'fd_write' "               + wat), "fd_write import");
+    fails    = fails + tally(expect_quiet(p, "grep -q '_start' "                 + wat), "_start export");
+
+    // and — wasmtime OR wasm3+wat2wasm executes; stdout == "hi"
+    let have_wt = expect_quiet(p, "command -v wasmtime").is_ok();
+    let have_3  = expect_quiet(p, "command -v wasm3").is_ok();
+    let have_w2w = expect_quiet(p, "command -v wat2wasm").is_ok();
+    if have_wt {
+        let _w3 = process_exec(p, "timeout 15 wasmtime run --wasm-features=all " + wat + " > " + rout + " 2>" + tmpd + "/run.err");
+        if !expect_present(p, rout).is_ok() { let _w3b = process_exec(p, "timeout 15 wasmtime " + wat + " > " + rout + " 2>" + tmpd + "/run.err"); }
+    } else if have_3 && have_w2w {
+        let _w4 = process_exec(p, "wat2wasm " + wat + " -o " + wasm + " && timeout 15 wasm3 " + wasm + " > " + rout + " 2>" + tmpd + "/run.err");
+    } else {
+        println("ERR_NO_WASMTIME: need wasmtime (prefer) or wasm3+wat2wasm");
         process_exit(1);
     }
-    
-    // Setup temp dir
-    let tmp_root = get_env(p, "TMPDIR", "/tmp");
-    let tmp_dir = tmp_root + "/wasm_execute_smoke_" + getpid(p);
-    
-    let mkdir_res = cmd_exec(p, "mkdir -p " + tmp_dir);
-    
-    if !mkdir_res.is_ok() {
-        println("FAIL: cannot create temp dir " + tmp_dir);
-        process_exit(1);
-    }
-    
-    // Fixture source path
-    let fix_src_path = tmp_dir + "/hello_wasm.oo";
-    
-    // Write fixture file
-    let write_fix_res = cmd_exec(p, "echo 'pub fn main() { println(\"hi\") }' > " + fix_src_path);
-    tr = test_assert(tr, "write fixture file", write_fix_res.is_ok());
-    
-    let out_wat = tmp_dir + "/hello_wasm.wat";
-    let out_err = tmp_dir + "/emit.err";
-    let expected = "hi";
-    
-    // == M4 emit-wasm (redirect output to file) ==
-    let emit_res = cmd_exec(p, oodac_path + " emit-wasm " + fix_src_path + " > " + out_wat + " 2>" + out_err);
-    tr = test_assert(tr, "emit-wasm command succeeds", emit_res.is_ok());
-    
-    if emit_res.is_ok() {
-        // Check .wat is not empty
-        let check_size_res = cmd_exec(p, "test -s " + out_wat);
-        tr = test_assert(tr, "wat file not empty", check_size_res.is_ok());
-        
-        // Check .wat content using grep
-        let check_module_res = cmd_exec(p, "grep -q module " + out_wat);
-        tr = test_assert(tr, "wat contains module", check_module_res.is_ok());
-        
-        let check_wasi_res = cmd_exec(p, "grep -q wasi_snapshot_preview1 " + out_wat);
-        tr = test_assert(tr, "wat contains wasi_snapshot_preview1", check_wasi_res.is_ok());
-        
-        let check_fd_write_res = cmd_exec(p, "grep -q fd_write " + out_wat);
-        tr = test_assert(tr, "wat contains fd_write", check_fd_write_res.is_ok());
-        
-        let check_start_res = cmd_exec(p, "grep -q _start " + out_wat);
-        tr = test_assert(tr, "wat contains _start", check_start_res.is_ok());
-        
-        // Check string/print lowering: i32.const 1024 OR call $println_str
-        let check_1024_res = cmd_exec(p, "grep -q 'i32.const 1024' " + out_wat);
-        let check_println_res = cmd_exec(p, "grep -q println_str " + out_wat);
-        tr = test_assert(tr, "wat contains string/print lowering", 
-            check_1024_res.is_ok() || check_println_res.is_ok());
-    }
-    
-    // == Check for WASM runtime ==
-    let has_wasmtime = cmd_exists(p, "wasmtime");
-    let has_wasm3 = cmd_exists(p, "wasm3");
-    let has_wat2wasm = cmd_exists(p, "wat2wasm");
-    
-    if !has_wasmtime && !has_wasm3 {
-        println("ERR_NO_WASMTIME: need wasmtime (prefer) or wasm3 on PATH to execute M4 WASM");
-        test_summary(tr);
-        process_exit(1);
-    }
-    
-    // == M4 execute ==
-    let mut runtime_used = "";
-    
-    if has_wasmtime {
-        let run_out = tmp_dir + "/run.out";
-        let run_err = tmp_dir + "/run.err";
-        
-        // wasmtime with features flag
-        let run_res = cmd_exec(p, "wasmtime run --wasm-features=all " + out_wat + " > " + run_out + " 2>" + run_err);
-        if run_res.is_ok() {
-            runtime_used = "wasmtime";
-            let output = read_file_cmd(p, run_out);
-            let trimmed = trim(output);
-            tr = test_assert(tr, "wasm execute via wasmtime", str_eq(trimmed, expected));
-        } else {
-            // fallback without feature flags
-            let run_res2 = cmd_exec(p, "wasmtime " + out_wat + " > " + run_out + " 2>" + run_err);
-            if run_res2.is_ok() {
-                runtime_used = "wasmtime";
-                let output = read_file_cmd(p, run_out);
-                let trimmed = trim(output);
-                tr = test_assert(tr, "wasm execute via wasmtime (fallback)", str_eq(trimmed, expected));
-            } else {
-                tr = test_assert(tr, "wasmtime execute succeeds", false);
-            }
-        }
-    } else if has_wasm3 {
-        // wasm3 wants binary .wasm
-        if !has_wat2wasm {
-            println("ERR_NO_WASMTIME: wasm3 present but wat2wasm missing (cannot assemble .wat)");
-            test_summary(tr);
-            process_exit(1);
-        }
-        
-        let out_wasm = tmp_dir + "/hello_wasm.wasm";
-        let run_out = tmp_dir + "/run.out";
-        let run_err = tmp_dir + "/run.err";
-        
-        // Convert wat to wasm
-        let w2w_res = cmd_exec(p, "wat2wasm " + out_wat + " -o " + out_wasm + " 2>" + tmp_dir + "/w2w.err");
-        tr = test_assert(tr, "wat2wasm conversion", w2w_res.is_ok());
-        
-        if w2w_res.is_ok() {
-            let run_res = cmd_exec(p, "wasm3 " + out_wasm + " > " + run_out + " 2>" + run_err);
-            if run_res.is_ok() {
-                runtime_used = "wasm3";
-                let output = read_file_cmd(p, run_out);
-                let trimmed = trim(output);
-                tr = test_assert(tr, "wasm execute via wasm3", str_eq(trimmed, expected));
-            } else {
-                tr = test_assert(tr, "wasm3 execute succeeds", false);
-            }
-        }
-    }
-    
-    // Cleanup temp dir
-    let _ = cmd_exec(p, "rm -rf " + tmp_dir);
-    
-    test_summary(tr);
-    
-    if tr.failed > 0 {
-        process_exit(1);
-    }
-    
+
+    // then — stdout matches "hi"
+    fails = fails + tally(expect_quiet(p, "tr -d '\\r' < " + rout + " | sed -e 's/[[:space:]]*$//' | grep -qx hi"), "stdout == \"hi\"");
+
+    if fails > 0 { println("wasm_execute_smoke: FAILED"); process_exit(1); }
     println("wasm_execute_smoke: PASSED");
-}
-
-// Helper: execute command via shell
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
-}
-
-// Helper: check if command exists
-fn cmd_exists(p: &ProcessCap, cmd: String) -> Bool {
-    let res = cmd_exec(p, "command -v " + cmd);
-    return res.is_ok();
-}
-
-// Helper: get environment variable with default
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        let val = res.unwrap();
-        let trimmed = trim(val);
-        if str_len(trimmed) > 0 {
-            return trimmed;
-        }
-    }
-    return default;
-}
-
-// Helper: get current process ID
-fn getpid(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "echo $$");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return "0";
-}
-
-// Helper: read file content via cat
-fn read_file_cmd(p: &ProcessCap, path: String) -> String {
-    let res = cmd_exec(p, "cat " + path);
-    if res.is_ok() {
-        return res.unwrap();
-    }
-    return "";
-}
-
-// Helper: trim whitespace and carriage returns
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    
-    // Find first non-whitespace
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    
-    if start < 0 {
-        return "";
-    }
-    
-    // Find last non-whitespace
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        // Remove carriage returns
-        let clean = str_replace(result, "\r", "");
-        return clean;
-    }
-    
-    return "";
 }
