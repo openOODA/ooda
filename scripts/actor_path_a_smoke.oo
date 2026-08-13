@@ -1,0 +1,55 @@
+// # Actor Path A Walks The ThreadCap Seal
+// Logline: actor_spawn/send/recv under ThreadCap — bare refuse; grant ping; zero forge deny; runtime honest.
+// Setup: oodac/oodac built; fixtures/actor_path_a.oo + runtime/chs_rt_actor.c on disk.
+// Beats: 1. not-residual refuse | 2. bare refuse + grant check OK | 3. emit-c + ping | 4. zero forge deny | 5. runtime honesty
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+    let _v1   = scenario(p, "actor path A");
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — actor_spawn not residual refuse
+    fails = fails + tally(check(p, "grep -qE 'name == \"actor_spawn\"' " + root + "/oodac/check_residual.oo; [ $? -ne 0 ]", 5), "actor_spawn not residual refuse");
+
+    // and — bare actor_spawn refused
+    let bare = tmpd + "/act_bare.oo";
+    let _w1 = process_exec(p, "printf 'pub fn main() { let r = actor_spawn(\"x\"); }\\n' > " + bare);
+    let _w2 = process_exec(p, oodac + " check " + bare + " > " + tmpd + "/act_bare.out 2> " + tmpd + "/act_bare.err");
+    fails   = fails + tally(check(p, "grep -qiE 'capability|ThreadCap|ERR' " + tmpd + "/act_bare.out " + tmpd + "/act_bare.err 2>/dev/null", 5), "bare actor_spawn refused");
+
+    // and — granted fixture: check + emit-c + runtime ping
+    let fix = root + "/fixtures/actor_path_a.oo";
+    let _w3 = process_exec(p, oodac + " check " + fix + " > " + tmpd + "/act_ck.out 2> " + tmpd + "/act_ck.err");
+    fails   = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/act_ck.out"), "check fixture with ThreadCap");
+    let _w4 = process_exec(p, oodac + " emit-c " + fix + " > " + tmpd + "/act.c 2> " + tmpd + "/act.err");
+    fails   = fails + tally(check(p, "grep -qE 'oo_actor_spawn\\(thread|oo_actor_send\\(thread|oo_actor_recv\\(thread|oo_cap_grant_thread' " + tmpd + "/act.c", 5), "emit lowers actor + grant");
+    let _w5 = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/act.c -o " + tmpd + "/act.bin -lm -ldl -lpthread");
+    let _w6 = process_exec(p, tmpd + "/act.bin > " + tmpd + "/act_run.out 2>&1");
+    fails   = fails + tally(check(p, "grep -qx 'ping' " + tmpd + "/act_run.out", 5), "runtime grant path ping");
+
+    // forge deny: zero token
+    let _w7  = process_exec(p, "sed -E 's/long long thread = oo_cap_grant_thread\\(\\)/long long thread = 0LL/' " + tmpd + "/act.c > " + tmpd + "/act_zero.c");
+    let _w8  = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/act_zero.c -o " + tmpd + "/act_zero.bin -lm -ldl -lpthread 2>/dev/null");
+    let _w9  = process_exec(p, "(" + tmpd + "/act_zero.bin; echo rc=$?) > " + tmpd + "/act_zero.out 2>&1");
+    fails    = fails + tally(check(p, "grep -qE 'ERR[\\t ]*cap' " + tmpd + "/act_zero.out", 5), "zero forge deny");
+
+    // then — runtime honesty
+    fails = fails + tally(check(p, "grep -q 'OO_ACTOR_SLOTS' " + root + "/runtime/chs_rt_actor.c && grep -q 'actor:%d' " + root + "/runtime/chs_rt_actor.c && grep -q 'pthread_create' " + root + "/runtime/chs_rt_actor.c && grep -q 'oo_actor_send' " + root + "/runtime/chs_rt_actor.c", 5), "runtime actor path A present");
+    fails = fails + tally(check(p, "grep -q 'chs_rt_actor.c' " + root + "/runtime/chs_rt.c", 5), "chs_rt.c includes actor");
+    fails = fails + tally(check(p, "grep -q 'actor_spawn' " + root + "/oodac/check_cap_util.oo && grep -q 'is_sealed_thread' " + root + "/oodac/check_cap_util.oo", 5), "actor sealed under ThreadCap");
+
+    if fails > 0 { println("actor_path_a_smoke: FAILED"); process_exit(1); }
+    println("actor_path_a_smoke: PASSED");
+}

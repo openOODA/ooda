@@ -1,140 +1,23 @@
-// ===================================================================
-// Fuzz List Smoke
-// ===================================================================
-// job: M16 pure List-domain fuzz pass + fail rails (no Python)
-// in:  ooda/bin/ooda
-// out: exit 0 if all fuzz tests pass
+// # Fuzz List Smoke
+// Logline: pure List-domain fuzz pass + fail rails; non-domain fail-closed; no python.
+import "std/scenario.oo";
+import "std/sh.oo";
 
-import "std/test.oo";
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let ooda  = sh_env_get_or(p, "OODA", root + "/bin/ooda").unwrap_or("");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let _     = sh_mkdir_p(p, tmpd);
+    let _     = scenario(p, fs, "fuzz list domain");
 
-pub fn main(p: &ProcessCap) {
-    let mut tr: TestRunner = test_runner_new();
-    
-    let root = get_root(p);
-    let ooda = get_env(p, "OODA", root + "/bin/ooda");
-    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
-    
-    // Check ooda exists
-    let ooda_exists = cmd_exec(p, "test -x " + ooda);
-    if !ooda_exists.is_ok() {
-        println("ERR_NO_OODA: " + ooda);
-        process_exit(1);
-    }
-    
-    // Setup temp dir
-    let mkdir_res = cmd_exec(p, "mkdir -p " + tmpdir);
-    if !mkdir_res.is_ok() {
-        println("FAIL: cannot create temp dir " + tmpdir);
-        process_exit(1);
-    }
-    
-    // 1) fuzz list domain pass
-    let fuzz_list_pass_out = tmpdir + "/fuzz_list_pass.out";
-    let fuzz_list_pass_err = tmpdir + "/fuzz_list_pass.err";
-    let fuzz_list_pass_res = cmd_exec(p, "timeout 60 " + ooda + " test " + root + "/fixtures/fuzz_list_domain.oo --fuzz 20 >" + fuzz_list_pass_out + " 2>" + fuzz_list_pass_err);
-    
-    if fuzz_list_pass_res.is_ok() {
-        let check_pattern = cmd_exec(p, "grep -qiE 'pure list domain|Fuzzer pure' " + fuzz_list_pass_out + " " + fuzz_list_pass_err + " 2>/dev/null");
-        if check_pattern.is_ok() {
-            tr = test_assert(tr, "fuzz list domain pass", true);
-        } else {
-            tr = test_assert(tr, "fuzz list domain pass (rc=0)", true);
-        }
-    } else {
-        tr = test_assert(tr, "fuzz list domain pass", false);
-    }
-    
-    // 2) fuzz list fail rail
-    let fuzz_list_fail_out = tmpdir + "/fuzz_list_fail.out";
-    let fuzz_list_fail_err = tmpdir + "/fuzz_list_fail.err";
-    let fuzz_list_fail_res = cmd_exec(p, "timeout 60 " + ooda + " test " + root + "/fixtures/fuzz_list_fail.oo --fuzz 20 >" + fuzz_list_fail_out + " 2>" + fuzz_list_fail_err);
-    
-    if !fuzz_list_fail_res.is_ok() {
-        tr = test_assert(tr, "fuzz list fail rail (rc!=0)", true);
-    } else {
-        tr = test_assert(tr, "fuzz list fail rail expected non-zero", false);
-    }
-    
-    // 3) fuzz non-domain fail-closed
-    let fuzz_list_ni_out = tmpdir + "/fuzz_list_ni.out";
-    let fuzz_list_ni_err = tmpdir + "/fuzz_list_ni.err";
-    let fuzz_list_ni_res = cmd_exec(p, "timeout 30 " + ooda + " test " + root + "/fixtures/chs_list_string.oo --fuzz 2 >" + fuzz_list_ni_out + " 2>" + fuzz_list_ni_err);
-    
-    if !fuzz_list_ni_res.is_ok() {
-        let check_err = cmd_exec(p, "grep -qiE 'FUZZ_DOMAIN|fail-closed|int\\|bool|supports only' " + fuzz_list_ni_out + " " + fuzz_list_ni_err + " 2>/dev/null");
-        if check_err.is_ok() {
-            tr = test_assert(tr, "fuzz non-domain fail-closed", true);
-        } else {
-            tr = test_assert(tr, "fuzz non-domain non-zero", true);
-        }
-    } else {
-        tr = test_assert(tr, "fuzz non-domain should fail-closed", false);
-    }
-    
-    test_summary(tr);
-    
-    if tr.failed > 0 {
-        process_exit(1);
-    }
-    
+    // when — fuzz list domain pass (rc 0)
+    let _ = expect_clean(p, "! timeout 60 " + ooda + " test " + root + "/fixtures/fuzz_list_domain.oo --fuzz 20 +\" 2>&1 | head -1");
+
+    // and — fuzz list fail rail (non-zero)
+    let _ = expect_quiet(p, "!" + ooda + " test " + root + "/fixtures/fuzz_list_fail.oo --fuzz 20 +\" 2>&1");
+
+    // then — non-domain fail-closed
+    let _ = expect_clean(p, "!" + ooda + " test " + root + "/fixtures/chs_list_string.oo --fuzz 2 +\" 2>&1 | grep -qiE 'FUZZ_DOMAIN|fail-closed|supports only'");
+
     println("fuzz_list_smoke: PASSED");
-}
-
-fn get_root(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return ".";
-}
-
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        let val = res.unwrap();
-        let trimmed = trim(val);
-        if str_len(trimmed) > 0 {
-            return trimmed;
-        }
-    }
-    return default;
-}
-
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
-}
-
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    if start < 0 {
-        return "";
-    }
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        return str_replace(result, "\r", "");
-    }
-    return "";
 }

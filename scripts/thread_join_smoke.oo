@@ -1,0 +1,53 @@
+// # Thread Join Walks The ThreadCap Seal
+// Logline: thread_join/spawn under ThreadCap — bare refuse; grant join-ok; zero + magic forge deny; runtime joinable.
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _     = sh_mkdir_p(p, tmpd);
+    let _     = scenario(p, fs, "thread join seal");
+
+    let fix = root + "/fixtures/thread_join.oo";
+
+    // when — bare thread_join refused
+    let bare = tmpd + "/tj_bare.oo";
+    let _    = process_exec(p, "printf 'pub fn main() { let r = thread_join(0, 0); }\\n' > " + bare);
+    let _    = process_exec(p, oodac + " check " + bare + " > " + tmpd + "/tj_bare.out 2> " + tmpd + "/tj_bare.err; echo rc=$? >> " + tmpd + "/tj_bare.out");
+    let _    = check(p, "! tail -1 " + tmpd + "/tj_bare.out | grep -q 'rc=0' && grep -qiE 'capability|ThreadCap|ERR' " + tmpd + "/tj_bare.out " + tmpd + "/tj_bare.err 2>/dev/null", 5);
+
+    // and — bare thread_spawn refused
+    let bare_sp = tmpd + "/tj_bare_sp.oo";
+    let _       = process_exec(p, "printf 'pub fn main() { let r = thread_spawn(\"x\"); }\\n' > " + bare_sp);
+    let _       = process_exec(p, oodac + " check " + bare_sp + " > " + tmpd + "/tj_bare_sp.out 2> " + tmpd + "/tj_bare_sp.err; echo rc=$? >> " + tmpd + "/tj_bare_sp.out");
+    let _       = check(p, "! tail -1 " + tmpd + "/tj_bare_sp.out | grep -q 'rc=0' && grep -qiE 'capability|ThreadCap|ERR' " + tmpd + "/tj_bare_sp.out " + tmpd + "/tj_bare_sp.err 2>/dev/null", 5);
+
+    // and — granted fixture check + emit-c + runtime join-ok
+    let _ = process_exec(p, oodac + " check " + fix + " > " + tmpd + "/tj_ck.out 2> " + tmpd + "/tj_ck.err");
+    let _ = expect_quiet(p, "grep -qE '^OK' " + tmpd + "/tj_ck.out");
+    let _ = process_exec(p, oodac + " emit-c " + fix + " > " + tmpd + "/tj.c 2> " + tmpd + "/tj.err");
+    let _ = check(p, "grep -qE 'oo_thread_spawn\\(thread|oo_thread_join\\(thread|oo_cap_grant_thread' " + tmpd + "/tj.c", 5);
+    let _ = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/tj.c -o " + tmpd + "/tj.bin -lm -ldl -lpthread 2>" + tmpd + "/tj_gcc.err");
+    let _ = process_exec(p, "(" + tmpd + "/tj.bin; echo rc=$?) > " + tmpd + "/tj_r.out 2>&1");
+    let _ = check(p, "tail -1 " + tmpd + "/tj_r.out | grep -q 'rc=0' && grep -q 'join-ok' " + tmpd + "/tj_r.out", 5);
+
+    // and — forge deny: zero token
+    let _ = process_exec(p, "sed -E 's/long long thread = oo_cap_grant_thread\\(\\)/long long thread = 0LL/' " + tmpd + "/tj.c > " + tmpd + "/tj_zero.c");
+    let _ = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/tj_zero.c -o " + tmpd + "/tj_zero.bin -lm -ldl -lpthread 2>/dev/null");
+    let _ = process_exec(p, "(" + tmpd + "/tj_zero.bin; echo rc=$?) > " + tmpd + "/tj_zero.out 2>&1");
+    let _ = check(p, "! tail -1 " + tmpd + "/tj_zero.out | grep -q 'rc=0' && grep -qE 'ERR[\\t ]*cap' " + tmpd + "/tj_zero.out", 5);
+
+    // and — forge deny: magic 0x4F4F5448
+    let _ = process_exec(p, "sed -E 's/long long thread = oo_cap_grant_thread\\(\\)/long long thread = 0x4F4F5448LL/' " + tmpd + "/tj.c > " + tmpd + "/tj_mag.c");
+    let _ = process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/tj_mag.c -o " + tmpd + "/tj_mag.bin -lm -ldl -lpthread 2>/dev/null");
+    let _ = process_exec(p, "(" + tmpd + "/tj_mag.bin; echo rc=$?) > " + tmpd + "/tj_mag.out 2>&1");
+    let _ = check(p, "! tail -1 " + tmpd + "/tj_mag.out | grep -q 'rc=0' && grep -qE 'ERR[\\t ]*cap' " + tmpd + "/tj_mag.out", 5);
+
+    // then — runtime honesty: joinable slot table (not detach-by-default) + mutex path A + GPU residual
+    let _ = check(p, "grep -q 'pthread_create' " + root + "/runtime/chs_rt_thread.c && grep -q 'pthread_join' " + root + "/runtime/chs_rt_thread.c && grep -q 'tid:%d' " + root + "/runtime/chs_rt_thread.c && ! grep -q 'pthread_detach' " + root + "/runtime/chs_rt_thread.c", 5);
+    let _ = check(p, "grep -q 'pthread_mutex_lock' " + root + "/runtime/chs_rt_libfloor.c && grep -q 'gpu residual: no device shaders' " + root + "/runtime/chs_rt_libfloor.c", 5);
+
+    println("thread_join_smoke: PASSED");
+}

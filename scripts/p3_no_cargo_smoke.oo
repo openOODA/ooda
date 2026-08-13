@@ -1,0 +1,62 @@
+// # P3 Walks The Pure Product Path
+// Logline: bootstrap pure + version pure + check fail-closed + native run + json-errors empty + B0 RS=0.
+// Setup: SEED_OODAC + bin/ooda + gcc on host; SEED_PURE_MULTI residual optional.
+// Beats: 1. bootstrap pure + version pure | 2. check + cap fail-closed + tokens + native run | 3. json-errors [] + B0 RS=0
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let ooda  = sh_env_get_or(p, "OODA",      root + "/bin/ooda").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+    let _v1   = scenario(p, "p3 pure path");
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — bootstrap must not shell out to cargo/rustc
+    fails = fails + tally(check(p, "! grep -nE '(^|[^[:alnum:]_])(cargo|rustc)( |$)' " + root + "/scripts/bootstrap_no_cargo.sh | grep -vE 'Never invoke|must not|comment|#'", 5), "bootstrap pure (no cargo/rustc)");
+
+    // and — bootstrap green
+    let _w1 = process_exec(p, "SEED_OODAC='" + root + "/bootstrap/seed/oodac' bash " + root + "/scripts/bootstrap_no_cargo.sh > " + tmpd + "/p3_boot.out 2> " + tmpd + "/p3_boot.err");
+    fails   = fails + tally(expect_quiet(p, "test -x " + ooda), "bin/ooda exists");
+
+    // and — version pure
+    let _w2 = process_exec(p, ooda + " version > " + tmpd + "/p3_ver.txt 2> " + tmpd + "/p3_ver.err");
+    fails   = fails + tally(check(p, "grep -q 'pure' " + tmpd + "/p3_ver.txt", 5), "version pure");
+
+    // and — check pass + fail-closed cap + dump tokens
+    let _w3 = process_exec(p, ooda + " check " + root + "/fixtures/chs_list_string.oo > " + tmpd + "/p3_chk.txt 2> " + tmpd + "/p3_chk.err");
+    fails   = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/p3_chk.txt"), "check pass");
+    let _w4 = process_exec(p, ooda + " check " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo > " + tmpd + "/p3_cap.txt 2> " + tmpd + "/p3_cap.err; echo rc=$? >> " + tmpd + "/p3_cap.txt");
+    fails   = fails + tally(check(p, "grep -q 'rc=' " + tmpd + "/p3_cap.txt && ! tail -1 " + tmpd + "/p3_cap.txt | grep -q 'rc=0'", 5), "check fail-closed cap");
+    let _w5 = process_exec(p, ooda + " dump tokens " + root + "/fixtures/int_main.oo > " + tmpd + "/p3_tok.txt 2> " + tmpd + "/p3_tok.err");
+    fails   = fails + tally(check(p, "grep -q $'\\t' " + tmpd + "/p3_tok.txt", 5), "dump tokens tab-format");
+
+    // then — native run (build+exec)
+    let pbin = tmpd + "/p3_chs_native";
+    let _w6  = process_exec(p, "cd " + root + " && env -u OODA OODAC_BIN=" + root + "/bootstrap/seed/oodac " + ooda + " build " + root + "/fixtures/chs_list_string.oo -o " + pbin + " > " + tmpd + "/p3_run.txt 2> " + tmpd + "/p3_run.err");
+    let _w7  = process_exec(p, pbin + " > " + tmpd + "/p3_out.txt 2>/dev/null");
+    fails    = fails + tally(check(p, "grep -q '2' " + tmpd + "/p3_out.txt", 5), "run native (build+exec)");
+
+    // and — json-errors pass →
+    let _w8 = process_exec(p, ooda + " check " + root + "/fixtures/chs_list_string.oo --json-errors > " + tmpd + "/p3_je.txt 2> " + tmpd + "/p3_je.err");
+    fails   = fails + tally(check(p, "python3 -c 'import json,sys; v=json.loads(open(sys.argv[1]).read()); assert v==[]' " + tmpd + "/p3_je.txt", 10), "json-errors pass → []");
+
+    // and — no OK_HOST in pure sources
+    fails = fails + tally(check(p, "! grep -rI --include='*.oo' 'OK_HOST' " + root + "/oodac " + root + "/cli 2>/dev/null | grep -v '//' | grep -q OK_HOST", 5), "no OK_HOST in pure sources");
+
+    // and — B0 RS=0 (no soft-pass)
+    let _w9 = process_exec(p, "find " + root + " -name '*.rs' -not -path '*/.git/*' -not -path '*/target/*' | wc -l > " + tmpd + "/p3_rs.txt");
+    fails   = fails + tally(check(p, "test $(cat " + tmpd + "/p3_rs.txt | tr -d ' ') -eq 0", 5), "B0 RS=0");
+
+    if fails > 0 { println("p3_no_cargo_smoke: FAILED"); process_exit(1); }
+    println("p3_no_cargo_smoke: PASSED");
+}

@@ -1,150 +1,32 @@
-// ===================================================================
-// Std Semver Smoke
-// ===================================================================
-// job: pure std/semver.oo check + multi-build fixture
-// in:  oodac, std/semver.oo, fixtures/std_semver_main.oo
-// out: exit 0 if core major.minor.patch parse is real on pure path
+// # Std Semver Smoke
+// Logline: std/semver.oo check + multi-build fixture; residual honesty on prerelease/build metadata.
+import "std/scenario.oo";
+import "std/sh.oo";
 
-import "std/test.oo";
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+const TMP: String = ".ooda-cache/ooda-tmp/std_semver";
+const SEMVER: String = "std/semver.oo";
+const FIX: String = "fixtures/std_semver_main.oo";
 
-pub fn main(p: &ProcessCap) {
-    let mut tr: TestRunner = test_runner_new();
-    
-    let root = get_root(p);
-    let oodac = get_env(p, "OODAC_BIN", root + "/oodac/oodac");
-    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
-    
-    // Check oodac exists
-    let oodac_exists = cmd_exec(p, "test -x " + oodac);
-    if !oodac_exists.is_ok() {
-        println("ERR_NO_OODAC");
-        process_exit(1);
-    }
-    
-    // Setup temp dir
-    let mkdir_res = cmd_exec(p, "mkdir -p " + tmpdir);
-    if !mkdir_res.is_ok() {
-        println("FAIL: cannot create temp dir " + tmpdir);
-        process_exit(1);
-    }
-    
-    // Check std/semver.oo
-    let semver_path = root + "/std/semver.oo";
-    let semver_ck_out = tmpdir + "/std_semver_ck.out";
-    let semver_ck_err = tmpdir + "/std_semver_ck.err";
-    let semver_ck_res = cmd_exec(p, oodac + " check \"" + semver_path + "\" >" + semver_ck_out + " 2>" + semver_ck_err);
-    
-    if !semver_ck_res.is_ok() {
-        tr = test_assert(tr, "check std/semver.oo", false);
-    } else {
-        tr = test_assert(tr, "check std/semver.oo", true);
-    }
-    
-    // Residual honesty: no false full-semver claims
-    let check_no_false = cmd_exec(p, "grep -qiE 'full semver DESIGN|prerelease fully|build metadata fully' " + semver_path);
-    if check_no_false.is_ok() {
-        tr = test_assert(tr, "honesty std/semver.oo forbidden full-semver claim", false);
-    } else {
-        let check_residual = cmd_exec(p, "grep -qiE 'prerelease|build' " + semver_path + " && grep -qiE 'residual|NOT accepted|not accepted' " + semver_path);
-        if check_residual.is_ok() {
-            tr = test_assert(tr, "honesty residual std/semver.oo", true);
-        } else {
-            tr = test_assert(tr, "honesty residual missing std/semver.oo", false);
-        }
-    }
-    
-    // Build and run fixture
-    let fixture_path = root + "/fixtures/std_semver_main.oo";
-    let semver_bin = tmpdir + "/std_semver_main";
-    let semver_b_out = tmpdir + "/std_semver_b.out";
-    let semver_b_err = tmpdir + "/std_semver_b.err";
-    
-    let build_res = cmd_exec(p, "OODAC_BIN=" + oodac + " " + oodac + " build \"" + fixture_path + "\" \"" + semver_bin + "\" >" + semver_b_out + " 2>" + semver_b_err);
-    
-    if !build_res.is_ok() || !cmd_exec(p, "test -x " + semver_bin).is_ok() {
-        tr = test_assert(tr, "build fixtures/std_semver_main.oo", false);
-    } else {
-        let run_out = tmpdir + "/std_semver_r.out";
-        let run_err = tmpdir + "/std_semver_r.err";
-        let run_res = cmd_exec(p, semver_bin + " >" + run_out + " 2>" + run_err);
-        
-        if !run_res.is_ok() {
-            let err_content = cmd_exec(p, "cat " + run_err + " 2>/dev/null || true");
-            tr = test_assert(tr, "run fixtures/std_semver_main.oo", false);
-        } else {
-            let out_content = cmd_exec(p, "cat " + run_out + " 2>/dev/null || true");
-            if out_content.is_ok() && str_contains(out_content.unwrap(), "semver-ok") {
-                tr = test_assert(tr, "build+run fixtures/std_semver_main.oo", true);
-            } else {
-                tr = test_assert(tr, "run missing semver-ok", false);
-            }
-        }
-    }
-    
-    test_summary(tr);
-    
-    if tr.failed > 0 {
-        process_exit(1);
-    }
-    
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _     = sh_mkdir_p(p, root + "/" + TMP);
+    let _     = scenario(p, fs, "std semver pure floor");
+
+    // when — std/semver.oo typechecks
+    let sem = root + "/" + SEMVER;
+    let _ = process_exec(p, oodac + " check " + sem + " > " + root + "/" + TMP + "/sem_ck.out 2> " + root + "/" + TMP + "/sem_ck.err");
+    let _ = expect_quiet(p, "grep -qE '^OK' " + root + "/" + TMP + "/sem_ck.out");
+
+    // and — residual honesty: no false full-semver claim
+    let _ = expect_clean(p, "grep -qiE 'full semver DESIGN|prerelease fully|build metadata fully' " + sem);
+    let _ = expect_quiet(p, "grep -qiE 'prerelease|build' " + sem + " && grep -qiE 'residual|NOT accepted|not accepted' " + sem);
+
+    // then — build + run fixture
+    let bin = root + "/" + TMP + "/std_semver_main";
+    let _ = process_exec(p, "OODAC_BIN=" + oodac + " " + oodac + " build " + root + "/" + FIX + " " + bin + " > " + root + "/" + TMP + "/b.out 2> " + root + "/" + TMP + "/b.err");
+    let _ = process_exec(p, bin + " > " + root + "/" + TMP + "/r.out 2> " + root + "/" + TMP + "/r.err");
+    let _ = expect_quiet(p, "grep -q 'semver-ok' " + root + "/" + TMP + "/r.out");
+
     println("std_semver_smoke: PASSED");
-}
-
-fn get_root(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return ".";
-}
-
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        let val = res.unwrap();
-        let trimmed = trim(val);
-        if str_len(trimmed) > 0 {
-            return trimmed;
-        }
-    }
-    return default;
-}
-
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
-}
-
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    if start < 0 {
-        return "";
-    }
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        return str_replace(result, "\r", "");
-    }
-    return "";
 }

@@ -1,0 +1,71 @@
+// # Product Pure Dispatch Stays Off The Host Path
+// Logline: dump ≡ oodac + check pure + cap fail-closed + wasm path + native run + test verify + B0 RS=0.
+// Setup: release bin/ooda + native oodac + bootstrap/seed/oodac; fixtures/* + corpus/fail on disk.
+// Beats: 1. dump ≡ oodac + check pure | 2. cap + lex fail-closed + build-c | 3. wasm + native run | 4. test verify + B0
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let ooda  = sh_env_get_or(p, "OODA",      root + "/bin/ooda").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+    let _v1   = scenario(p, "product pure dispatch");
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    let fix = root + "/fixtures/int_main.oo";
+    let cap_fail = root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo";
+    let lex_fail = root + "/bootstrap/corpus/lex/fail/bad_char.oo";
+    let build_src = root + "/fixtures/chs_list_string.oo";
+
+    // when — dump tokens ≡ oodac
+    let _w1 = process_exec(p, ooda + " dump tokens " + fix + " > " + tmpd + "/prod_tok.txt; " + oodac + " tokens " + fix + " > " + tmpd + "/oodac_tok.txt");
+    fails   = fails + tally(check(p, "diff -q " + tmpd + "/prod_tok.txt " + tmpd + "/oodac_tok.txt", 5), "product dump tokens ≡ oodac");
+
+    // and — check pure + not host banner
+    let _w2 = process_exec(p, ooda + " check " + fix + " > " + tmpd + "/prod_chk.txt 2> " + tmpd + "/prod_chk.err; echo rc=$? >> " + tmpd + "/prod_chk.txt");
+    fails   = fails + tally(check(p, "tail -1 " + tmpd + "/prod_chk.txt | grep -q 'rc=0' && ! grep -q 'openOODA check' " + tmpd + "/prod_chk.txt", 5), "product check pure + not host banner");
+
+    // and — cap + lex fail-closed
+    let _w3 = process_exec(p, ooda + " check " + cap_fail + " > " + tmpd + "/cap.out 2> " + tmpd + "/cap.err; echo rc=$? >> " + tmpd + "/cap.out");
+    fails   = fails + tally(check(p, "! tail -1 " + tmpd + "/cap.out | grep -q 'rc=0'", 5), "product check fail-closed cap");
+    let _w4 = process_exec(p, ooda + " dump tokens " + lex_fail + " > " + tmpd + "/lex.out 2> " + tmpd + "/lex.err; echo rc=$? >> " + tmpd + "/lex.out");
+    fails   = fails + tally(check(p, "! tail -1 " + tmpd + "/lex.out | grep -q 'rc=0'", 5), "product dump fail-closed lex");
+
+    // and — pure build-c + exec
+    let _w5 = process_exec(p, "cp " + build_src + " " + tmpd + "/smoke.oo; " + ooda + " build --target c " + tmpd + "/smoke.oo > " + tmpd + "/build.out 2> " + tmpd + "/build.err");
+    let _w6 = process_exec(p, "(" + tmpd + "/smoke; echo rc=$?) > " + tmpd + "/sm.out 2>&1");
+    fails    = fails + tally(check(p, "tail -1 " + tmpd + "/sm.out | grep -q 'rc=0' && grep -q '2' " + tmpd + "/sm.out", 5), "product pure build-c smoke");
+
+    // then — wasm path + native run
+    let _w7 = process_exec(p, ooda + " build --target wasm " + build_src + " > " + tmpd + "/wasm.out 2> " + tmpd + "/wasm.err; echo rc=$? >> " + tmpd + "/wasm.out");
+    fails   = fails + tally(check(p, "tail -1 " + tmpd + "/wasm.out | grep -q 'rc=0' || grep -qiE 'WebAssembly|\\.wat' " + tmpd + "/wasm.out " + tmpd + "/wasm.err 2>/dev/null", 5), "product wasm path");
+    let rbin = tmpd + "/prod_chs_native";
+    let _w8  = process_exec(p, "cd " + root + " && env -u OODA OODAC_BIN=" + root + "/bootstrap/seed/oodac " + ooda + " build " + build_src + " -o " + rbin + " > " + tmpd + "/run.out 2> " + tmpd + "/run.err");
+    let _w9  = process_exec(p, rbin + " > " + tmpd + "/ro.out 2>/dev/null");
+    fails    = fails + tally(check(p, "grep -q '2' " + tmpd + "/ro.out", 5), "product pure run native");
+
+    // and — test verify + verify_fail
+    let _wA = process_exec(p, ooda + " test " + root + "/fixtures/verify_pass.oo > " + tmpd + "/tp.out 2> " + tmpd + "/tp.err");
+    fails    = fails + tally(check(p, "grep -q 'OK verify' " + tmpd + "/tp.out", 5), "product test verify_pass");
+    let _wB = process_exec(p, ooda + " test " + root + "/fixtures/verify_fail.oo > " + tmpd + "/tf.out 2> " + tmpd + "/tf.err; echo rc=$? >> " + tmpd + "/tf.out");
+    fails    = fails + tally(check(p, "! tail -1 " + tmpd + "/tf.out | grep -q 'rc=0'", 5), "product test fail-closed verify_fail");
+
+    // and — host shell modules gone + B0 RS=0 + no OK_HOST
+    fails = fails + tally(check(p, "! test -d " + root + "/src", 5), "src/ deleted");
+    fails = fails + tally(check(p, "! test -f " + root + "/Cargo.toml", 5), "Cargo.toml deleted");
+    fails = fails + tally(check(p, "! grep -rI --include='*.oo' 'OK_HOST' " + root + "/oodac " + root + "/cli 2>/dev/null | grep -v '//' | grep -q OK_HOST", 5), "no OK_HOST in pure sources");
+    let _wC = process_exec(p, "find " + root + " -name '*.rs' -not -path '*/.git/*' -not -path '*/target/*' | wc -l > " + tmpd + "/rs.txt");
+    fails   = fails + tally(check(p, "test $(cat " + tmpd + "/rs.txt | tr -d ' ') -eq 0", 5), "B0 RS_COUNT=0");
+
+    if fails > 0 { println("product_pure_dispatch_smoke: FAILED"); process_exit(1); }
+    println("product_pure_dispatch_smoke: PASSED");
+}

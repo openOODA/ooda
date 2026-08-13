@@ -1,0 +1,66 @@
+// # Problem Hunt Catches The Known Lies
+// Logline: differential + mutation + honesty traps — known lies stay fixed; non-zero on regression.
+// Setup: oodac + product ooda + bootstrap/corpus/check/fail/* + fixtures on disk.
+// Beats: 1. emit-c multi expands helper | 2. requires runtime trap + assert_ne verify | 3. cap fail-closed + json-errors E_CAP | 4. shell injection blocked
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("") + "/ph";
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let ooda  = sh_env_get_or(p, "OODA",      root + "/bin/ooda").unwrap_or("");
+    let _v0   = sh_mkdir_p(p, tmpd);
+    let _v1   = scenario(p, "problem hunt rails");
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when — emit-c multi-file expands helper (not incomplete)
+    let _w1 = process_exec(p, oodac + " emit-c " + root + "/bootstrap/corpus/import/pass/multi_ok.oo > " + tmpd + "/multi.c 2> " + tmpd + "/multi.err");
+    fails   = fails + tally(check(p, "! grep -q 'helper()' " + tmpd + "/multi.c && (grep -qE 'long long helper|helper\\(void\\)' " + tmpd + "/multi.c || grep -q 'helper(' " + tmpd + "/multi.c)", 5), "emit-c multi-file expands helper");
+
+    // and — simple requires runtime enforced
+    let req = tmpd + "/req.oo";
+    let _w2 = process_exec(p, "printf 'pub fn scale(x: Int) -> Int\\n    requires x >= 0\\n{ return x + 1; }\\npub fn main() { println(scale(0 - 1)); }\\n' > " + req);
+    let _w3 = process_exec(p, oodac + " build " + req + " " + tmpd + "/req > " + tmpd + "/req_b.out 2> " + tmpd + "/req_b.err");
+    let _w4 = process_exec(p, "(" + tmpd + "/req; echo rc=$?) > " + tmpd + "/req_r.out 2>&1");
+    fails    = fails + tally(check(p, "! grep -q 'rc=0' " + tmpd + "/req_r.out && grep -qi 'contract' " + tmpd + "/req_r.out", 5), "requires runtime traps violation");
+
+    // and — assert_ne! + assert! verify
+    let vne = tmpd + "/vne.oo";
+    let _w5 = process_exec(p, "printf 'pub fn add(a: Int, b: Int) -> Int { return a + b; }\\nverify add {\\n    assert_ne!(add(1, 1), 3);\\n    assert!(add(2, 2) == 4);\\n}\\npub fn main() { println(1); }\\n' > " + vne);
+    let _w6 = process_exec(p, ooda + " test " + vne + " > " + tmpd + "/vne.out 2> " + tmpd + "/vne.err");
+    fails   = fails + tally(check(p, "grep -q 'OK verify' " + tmpd + "/vne.out", 5), "assert_ne + assert! verify");
+
+    // and — free-call cap sealed + json-errors E_CAP
+    let _w7 = process_exec(p, oodac + " check " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo > " + tmpd + "/fc.out 2> " + tmpd + "/fc.err; echo rc=$? >> " + tmpd + "/fc.out");
+    fails   = fails + tally(check(p, "! tail -1 " + tmpd + "/fc.out | grep -q 'rc=0'", 5), "cap free-call fail-closed");
+    let _w8 = process_exec(p, ooda + " check --json-errors " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo > " + tmpd + "/j.out 2> " + tmpd + "/j.err; echo rc=$? >> " + tmpd + "/j.out");
+    fails   = fails + tally(check(p, "! tail -1 " + tmpd + "/j.out | grep -q 'rc=0' && grep -q 'E_CAP' " + tmpd + "/j.out", 5), "json-errors E_CAP");
+
+    // and — no OK_HOST in pure sources
+    fails = fails + tally(check(p, "! grep -rI --include='*.oo' 'OK_HOST' " + root + "/oodac " + root + "/cli 2>/dev/null | grep -v '//' | grep -q OK_HOST", 5), "no OK_HOST");
+
+    // and — div-by-zero + cap name + List[FsCap] fail-closed
+    let div = tmpd + "/div.oo";
+    let _w9 = process_exec(p, "printf 'pub fn main() { let x = 1 / 0; println(x); }\\n' > " + div);
+    let _wA = process_exec(p, oodac + " check " + div + " > " + tmpd + "/dc.out 2> " + tmpd + "/dc.err; echo rc=$? >> " + tmpd + "/dc.out");
+    fails    = fails + tally(check(p, "! tail -1 " + tmpd + "/dc.out | grep -q 'rc=0'", 5), "div-by-zero fail-closed");
+    let _wB = process_exec(p, oodac + " check " + root + "/bootstrap/corpus/check/fail/cap_name_not_type.oo > " + tmpd + "/cn.out 2> " + tmpd + "/cn.err; echo rc=$? >> " + tmpd + "/cn.out");
+    fails    = fails + tally(check(p, "! tail -1 " + tmpd + "/cn.out | grep -q 'rc=0'", 5), "cap name not type fail-closed");
+    let _wC = process_exec(p, oodac + " check " + root + "/bootstrap/corpus/check/fail/list_fscap_not_grant.oo > " + tmpd + "/cl.out 2> " + tmpd + "/cl.err; echo rc=$? >> " + tmpd + "/cl.out");
+    fails    = fails + tally(check(p, "! tail -1 " + tmpd + "/cl.out | grep -q 'rc=0'", 5), "List[FsCap] not grant");
+
+    // then — shell injection via product CLI blocked
+    let _wD = process_exec(p, "rm -f /tmp/ooda_inject_marker_ph; " + ooda + " check 'fixtures/int_main.oo\"; touch /tmp/ooda_inject_marker_ph; echo \"' > " + tmpd + "/inj.out 2> " + tmpd + "/inj.err");
+    fails    = fails + tally(check(p, "! test -e /tmp/ooda_inject_marker_ph", 5), "shell injection blocked");
+
+    if fails > 0 { println("problem_hunt_smoke: FAILED"); process_exit(1); }
+    println("problem_hunt_smoke: PASSED");
+}
