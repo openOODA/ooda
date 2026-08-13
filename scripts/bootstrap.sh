@@ -44,7 +44,9 @@ FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) 
 MCS=()
 for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
-  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>/dev/null || true
+  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>"$TMP/emit.err"; ec=$?
+  if [ $ec -eq 124 ]; then echo "ERR_EMIT_TIMEOUT $src" >&2; exit 1; fi
+  if [ ! -s "$mc" ] || ! grep -qE "$FN_DEF" "$mc" || grep -qE "^ERR" "$mc"; then echo "ERR_EMIT $src" >&2; cat "$TMP/emit.err" >&2 || true; exit 1; fi
   MCS+=("$mc")
 done
 

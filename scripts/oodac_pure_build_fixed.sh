@@ -92,7 +92,8 @@ for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
   MCS+=("$mc")
   (
-    EMIT_NO_CONCAT=1 timeout 600 "$OODAC_BIN" emit-c "$src" >"$mc" || true
+    EMIT_NO_CONCAT=1 timeout 600 "$OODAC_BIN" emit-c "$src" >"$mc" 2>"$TMP/emit.$$.err"; ec=$?
+    if [[ $ec -eq 124 ]]; then echo "ERR_EMIT_TIMEOUT $src" >&2; exit 1; fi
     if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
       echo "ERR_EMIT $src" >&2
       exit 1

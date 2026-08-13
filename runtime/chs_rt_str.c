@@ -179,8 +179,8 @@ static long long utf8_byte_index(OoStr s, long long char_idx) {
 OoStr oo_char_at(OoStr s, long long idx) {
   long long b = utf8_byte_index(s, idx);
   if (b < 0) {
-    fprintf(stderr, "char_at OOB\n");
-    abort();
+    fprintf(stderr, "ERR\tchar_at OOB\n");
+    exit(1);
   }
   unsigned char c = (unsigned char)s.data[b];
   int nbytes = 1;

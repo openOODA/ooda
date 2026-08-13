@@ -141,8 +141,8 @@ long long oo_ilist_get(OoIList l, long long i) {
   long long v;
   if (i < 0 || i >= l.len) {
     oo_ilist_release(l);
-    fprintf(stderr, "ilist_get OOB\n");
-    abort();
+    fprintf(stderr, "ERR\tilist_get OOB\n");
+    exit(1);
   }
   v = l.data[i];
   oo_ilist_release(l);
@@ -227,8 +227,8 @@ OoStr oo_slist_get(OoSList l, long long i) {
   OoStr r;
   if (i < 0 || i >= l.len) {
     oo_slist_release(l);
-    fprintf(stderr, "slist_get OOB\n");
-    abort();
+    fprintf(stderr, "ERR\tslist_get OOB\n");
+    exit(1);
   }
   /* Return an owned ref so let s = list_get(...) is free-safe. */
   oo_str_retain(l.data[i]);
