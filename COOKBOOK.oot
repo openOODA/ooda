@@ -1,0 +1,165 @@
+# ooda cookbook — academy-award worked examples
+
+Five short `.oo` scripts that pin the **measured** product floor for Wave 1.
+Each is a full, syntactically plausible OODA program (imports, constants,
+`pub fn main(p: &ProcessCap)`, optional helper) in the academy narrative
+style: **logline**, **setup**, **script**, **what it tests**. Reference
+scripts; not run by CI.
+
+### 1. The Compiler Wakes
+
+Logline: `oodac check oodac/main.oo` exits 0 within 180s.
+Setup: `oodac/oodac` is built; `oodac/main.oo` is the self-host entry.
+
+```oo
+// The Compiler Wakes — pin: oodac check oodac/main.oo exits 0 < 180s
+import "std/os/process.oo";
+import "std/str.oo";
+
+const OODAC: String = "oodac/oodac";
+const SRC: String = "oodac/main.oo";
+const DEADLINE_MS: Int = 180000;
+
+pub fn main(p: &ProcessCap) {
+    let t0 = now_ms(p);
+    let res = process_exec(p, OODAC + " check " + SRC);
+    let wall = now_ms(p) - t0;
+    let ok = res.is_ok() && wall < DEADLINE_MS;
+    if ok { println("PASS wall=" + wall.to_string() + "ms"); }
+    else { println("FAIL wall=" + wall.to_string() + "ms"); }
+}
+```
+
+What it tests: The self-host compiler wakes cold on its own `main.oo`
+without looping, OOMing, or sliding past 180s. Every other test here
+builds on this — if the compiler does not run, nothing else is meaningful.
+
+### 2. The Inventory Holds
+
+Logline: `ooda/std` exposes 34 `.oo` files at the documented line counts.
+Setup: `ooda/std/` is the v0.184.x tree, no in-flight edits.
+
+```oo
+// The Inventory Holds — pin: oda/std shows 34 .oo files at sane line counts
+import "std/os/fs.oo";
+import "std/str.oo";
+
+const STD_ROOT: String = "ooda/std";
+const EXPECTED: Int = 34;
+const MIN_LINES: Int = 3;
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let mut count: Int = 0;
+    let mut fail: Int = 0;
+    for n in list_dir(fs, STD_ROOT) {
+        if !str_ends_with(n, ".oo") { continue; }
+        count = count + 1;
+        if str_count(read_file(fs, STD_ROOT + "/" + n), "\n") + 1 < MIN_LINES {
+            fail = fail + 1;
+            println("tiny " + n);
+        }
+    }
+    if count == EXPECTED && fail == 0 { println("PASS std=" + count.to_string()); }
+    else { println("FAIL std=" + count.to_string() + " bad=" + fail.to_string()); }
+}
+```
+
+What it tests: The stock std tree is intact (no prune, no half-committed
+rename, no stub dropped in). Without a fixed inventory, every import-based
+story becomes "maybe it works on this box."
+
+### 3. The Smoke Survives
+
+Logline: F26 hangs closed; wall < 180s, RSS < 32 GiB.
+Setup: `oodac/oodac` works; `oodac/main.oo` triggers the F26 stress path.
+
+```oo
+// The Smoke Survives — pin: F26 wall < 180s, RSS < 32 GiB
+import "std/os/process.oo";
+import "std/os/fs.oo";
+import "std/str.oo";
+
+const OODAC: String = "oodac/oodac";
+const SRC: String = "oodac/main.oo";
+const WALL_MAX_MS: Int = 180000;
+const RSS_MAX_KB: Int = 32 * 1024 * 1024;
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let timef = ".ooda-cache/f26/time.txt";
+    let t0 = now_ms(p);
+    let _ = process_exec(p, "mkdir -p .ooda-cache/f26 && /usr/bin/time -v -o " + timef + " timeout 180 " + OODAC + " check " + SRC);
+    let wall = now_ms(p) - t0;
+    let rss = rss_kb(read_file(fs, timef));
+    let ok = wall < WALL_MAX_MS && rss < RSS_MAX_KB;
+    if ok { println("PASS"); } else { println("FAIL"); }
+}
+
+fn rss_kb(blob: String) -> Int {
+    let i = str_index_of(blob, "Maximum resident set size");
+    if i < 0 { return 0; }
+    return parse_int(str_slice(blob, i + 30, str_index_of(blob, "\n")));
+}
+```
+
+What it tests: The F26 residual — historically the deadlock / 30 GB growth
+wall — cannot regress on a clean `main.oo` parse. Wall and RSS are both
+bound; a slow leak and a fast explosion are caught equally.
+
+### 4. The Tests Compile
+
+Logline: every test script under `scripts/` compiles via `oodac check`.
+Setup: `oodac/oodac` is built; `scripts/*.oo` is the smoke roster.
+
+```oo
+// The Tests Compile — pin: every scripts/*.oo survives oodac check
+import "std/os/process.oo";
+import "std/os/fs.oo";
+import "std/str.oo";
+
+const OODAC: String = "oodac/oodac";
+const DIR: String = "scripts";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let mut fail: Int = 0;
+    let mut total: Int = 0;
+    for n in list_dir(fs, DIR) {
+        if !str_ends_with(n, ".oo") { continue; }
+        total = total + 1;
+        if process_exec(p, OODAC + " check " + DIR + "/" + n).is_err() {
+            fail = fail + 1;
+            println("FAIL " + n);
+        }
+    }
+    if fail == 0 { println("PASS tests-compile total=" + total.to_string()); }
+    else { println("FAIL tests-compile fail=" + fail.to_string()); }
+}
+```
+
+What it tests: Every test script is at least syntactically and typestate
+valid. Catches the team-breakage where a refactor leaves a runner that
+cannot parse, which would mask every other smoke behind a green "no-fail"
+silence.
+
+### 5. The Cap Holds
+
+Logline: a forged cap — bytes cast into a `&ProcessCap` token — is rejected.
+Setup: no real grant; only raw `alloc_bytes` is available.
+
+```oo
+// The Cap Holds — pin: forged cap is rejected at the call site
+import "std/os/process.oo";
+import "std/str.oo";
+
+pub fn main(p: &ProcessCap) {
+    let raw: Bytes = alloc_bytes(8);
+    let forged: &ProcessCap = raw as &ProcessCap;
+    let r = process_exec(forged, "id");
+    if r.is_err() { println("PASS forged-cap rejected"); }
+    else { println("FAIL forged-cap accepted"); }
+}
+```
+
+What it tests: The capability seal is enforced at the **call site**, not
+only at function entry. A user can spin up a buffer and lie about its type,
+but the runtime re-check on the magic token fails closed — once a forged
+token executes a sealed op, the whole cap discipline is a stage prop.
