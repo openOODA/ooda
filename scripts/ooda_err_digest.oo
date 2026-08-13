@@ -1,0 +1,184 @@
+// ===================================================================
+// Error Digest Tool
+// ===================================================================
+// job: compress gcc/oodac error logs into token-dense counts (no full dumps)
+// in:  path to .err / log file, or stdin
+// out: top error kinds + first 8 sample lines + file:line hits for top kind
+// fail-closed: always processes input, never soft-pass
+
+import "std/test.oo";
+import "std/os/cmd.oo";
+import "std/os/process.oo";
+import "std/core/str.oo";
+
+pub fn main(p: &ProcessCap) {
+    let mut tr: TestRunner = test_runner_new();
+    
+    let tmp_root = get_env(p, "TMPDIR", "/tmp");
+    let pid = getpid(p);
+    let input_file = tmp_root + "/ooda_err_digest_" + pid + ".txt";
+    let py_script = tmp_root + "/ooda_err_digest_" + pid + ".py";
+    
+    // Handle input: file arg or stdin
+    if p.args.len > 1 {
+        let arg = p.args[1];
+        let check_file = cmd_exec(p, "test -f " + arg);
+        if check_file.is_ok() {
+            let res = cmd_exec(p, "cat " + arg + " > " + input_file);
+            if !res.is_ok() {
+                println("ERR: cannot read " + arg);
+                process_exit(1);
+            }
+        } else {
+            // Try reading as path
+            let res = cmd_exec(p, "cat < " + arg + " > " + input_file + " 2>/dev/null");
+            if !res.is_ok() {
+                println("ERR: cannot read " + arg);
+                process_exit(1);
+            }
+        }
+    } else {
+        // Read from stdin
+        let res = cmd_exec(p, "cat > " + input_file);
+        if !res.is_ok() {
+            println("ERR: cannot read stdin");
+            process_exit(1);
+        }
+    }
+    
+    // Check if empty
+    let check_empty = cmd_exec(p, "grep -qs '[^[:space:]]' " + input_file);
+    if !check_empty.is_ok() {
+        let _ = cmd_exec(p, "rm -f " + input_file);
+        println("err_digest: empty");
+        process_exit(0);
+    }
+    
+    // Write python script via cat heredoc
+    let py_res = cmd_exec(p, 
+        "cat > " + py_script + " << 'PYEOF'\n"
+        + "import sys\n"
+        + "import re\n"
+        + "from collections import Counter\n"
+        + "\n"
+        + "with open('" + input_file + "', 'r') as f:\n"
+        + "    data = f.read()\n"
+        + "\n"
+        + "lines = data.splitlines()\n"
+        + "kinds = Counter()\n"
+        + "samples = []\n"
+        + "file_hits = Counter()\n"
+        + "\n"
+        + "def replace_token(m):\n"
+        + "    t = m.group(0)\n"
+        + "    keepers = {'OoStr','OoSList','OoIList','OoResS','OoResV','long','int','void','struct','type'}\n"
+        + "    if t in keepers:\n"
+        + "        return t\n"
+        + "    if t[0].islower() or t[0] == '_':\n"
+        + "        return 'ID'\n"
+        + "    return 'Name'\n"
+        + "\n"
+        + "for ln in lines:\n"
+        + "    if 'error:' in ln:\n"
+        + "        m = re.search(r'error:\\s*(.+)$', ln)\n"
+        + "        kind = m.group(1).strip() if m else ln.strip()\n"
+        + "        kind = re.sub(r\"'[^']*'\", \"'...\", kind)\n"
+        + "        kind = re.sub(r'\\b[A-Za-z_][A-Za-z0-9_]*\\b', replace_token, kind, count=3)\n"
+        + "        kinds[kind[:120]] += 1\n"
+        + "        if len(samples) < 8:\n"
+        + "            samples.append(ln[:160])\n"
+        + "        fm = re.search(r'([^/\\s]+\\.[ch]):(\\d+)', ln)\n"
+        + "        if fm:\n"
+        + "            file_hits[f'{fm.group(1)}:{fm.group(2)}'] += 1\n"
+        + "    elif '\\tERR' in ln or ln.startswith('ERR'):\n"
+        + "        kinds[ln.strip()[:80]] += 1\n"
+        + "        if len(samples) < 8:\n"
+        + "            samples.append(ln[:160])\n"
+        + "\n"
+        + "nerr = sum(kinds.values())\n"
+        + "print(f'err_digest errors={nerr} unique_kinds={len(kinds)}')\n"
+        + "print('top_kinds:')\n"
+        + "for k, v in kinds.most_common(12):\n"
+        + "    print(f'  {v:4d}  {k}')\n"
+        + "if file_hits:\n"
+        + "    print('hot_sites:')\n"
+        + "    for k, v in file_hits.most_common(8):\n"
+        + "        print(f'  {v:4d}  {k}')\n"
+        + "if samples:\n"
+        + "    print('samples:')\n"
+        + "    for s in samples:\n"
+        + "        print(f'  | {s}')\n"
+        + "PYEOF"
+    );
+    
+    if !py_res.is_ok() {
+        let _ = cmd_exec(p, "rm -f " + input_file);
+        println("ERR: cannot write python script");
+        process_exit(1);
+    }
+    
+    // Execute python
+    let py_exec = cmd_exec(p, "python3 " + py_script);
+    if py_exec.is_ok() {
+        println(py_exec.unwrap());
+    } else {
+        let _ = cmd_exec(p, "rm -f " + input_file + " " + py_script);
+        println("ERR: python3 execution failed");
+        process_exit(1);
+    }
+    
+    // Cleanup
+    let _ = cmd_exec(p, "rm -f " + input_file + " " + py_script);
+}
+
+fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
+    return process_exec(p, cmd);
+}
+
+fn get_env(p: &ProcessCap, key: String, default: String) -> String {
+    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return default;
+}
+
+fn getpid(p: &ProcessCap) -> String {
+    let res = cmd_exec(p, "echo $$");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return "0";
+}
+
+fn trim(s: String) -> String {
+    let len = str_len(s);
+    let mut start = -1;
+    let mut end = -1;
+    let mut i = 0;
+    while i < len {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            start = i;
+            break;
+        }
+        i = i + 1;
+    }
+    if start < 0 {
+        return "";
+    }
+    i = len - 1;
+    while i >= start {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            end = i;
+            break;
+        }
+        i = i - 1;
+    }
+    if end >= start {
+        let result = str_sub(s, start, end + 1);
+        return str_replace(result, "\r", "");
+    }
+    return "";
+}

@@ -1,145 +1,28 @@
-// ===================================================================
-// P7 Check Main Smoke
-// ===================================================================
-// job: P7: compiler check must finish (not hang). Tiny main always OK.
-// Large oodac/main.oo: after modular check land + rebuild, finish within 45s.
-// in:  oodac/oodac
-// out: exit 0 if both tiny and large check finish
+// # P7 Check Main Smoke
+//
+// Logline: oodac check completes (no deadlock) on tiny fixture and oodac/main.oo.
+//
+// Beats: write tiny → expect present → check <8s → check oodac/main.oo <180s.
 
-import "std/test.oo";
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+import "std/scenario.oo";
+import "std/sh.oo";
 
-pub fn main(p: &ProcessCap) {
-    let mut tr: TestRunner = test_runner_new();
-    
-    let root = get_root(p);
-    let oodac = get_env(p, "OODAC_BIN", root + "/oodac/oodac");
-    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
-    
-    // Check oodac exists
-    let oodac_exists = cmd_exec(p, "test -x " + oodac);
-    if !oodac_exists.is_ok() {
-        println("ERR_NO_OODAC " + oodac);
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let fix = ".ooda-cache/ooda-tmp/p7_check_main";
+    let tiny = fix + "/main.oo";
+    let _ = sh_clean(p, fix);
+    let _ = sh_mkdir_p(p, fix);
+    let _ = match process_exec(p, "printf '%s\\n' 'pub fn main() {' '    let x = 1;' '}' > " + tiny) { Ok(s) => s, Err(_) => "" };
+
+    let _ = scenario(p, fs, "p7 check main");
+    let _ = expect_present(fs, tiny);
+    let r1 = check(p, "oodac check " + tiny, within: 8);
+    let r2 = check(p, "oodac check oodac/main.oo", within: 180);
+
+    let _ = sh_clean(p, fix);
+
+    if r1.is_err() || r2.is_err() {
         process_exit(1);
     }
-    
-    // Setup temp dir
-    let fix_dir = tmpdir + "/p7_check_main_" + getpid(p);
-    let mkdir_res = cmd_exec(p, "mkdir -p " + fix_dir);
-    if !mkdir_res.is_ok() {
-        println("FAIL: cannot create temp dir " + fix_dir);
-        process_exit(1);
-    }
-    
-    // Write tiny main.oo
-    let tiny_path = fix_dir + "/main.oo";
-    let write_res = cmd_exec(p, "printf '%s\\n' 'pub fn main() {' '    let x = 1;' '}' > " + tiny_path);
-    tr = test_assert(tr, "write tiny main.oo", write_res.is_ok());
-    
-    // Tiny main check <8s
-    let tiny_out = fix_dir + "/tiny.out";
-    let tiny_err = fix_dir + "/tiny.err";
-    let tiny_res = cmd_exec(p, "timeout 8 " + oodac + " check " + tiny_path + " >" + tiny_out + " 2>" + tiny_err);
-    if tiny_res.is_ok() {
-        tr = test_assert(tr, "tiny main.oo check <8s", true);
-    } else {
-        tr = test_assert(tr, "tiny main.oo check rc!=0 (not a deadlock)", false);
-    }
-    
-    // Large oodac/main.oo check <180s
-    let big_out = fix_dir + "/big.out";
-    let big_err = fix_dir + "/big.err";
-    let big_res = cmd_exec(p, "timeout 180 " + oodac + " check " + root + "/oodac/main.oo >" + big_out + " 2>" + big_err);
-    if big_res.is_ok() {
-        // Check exit code from timeout
-        let check_timeout = cmd_exec(p, "test $? -eq 124");
-        if check_timeout.is_ok() {
-            tr = test_assert(tr, "oodac/main.oo check timeout 180s (slow tree)", false);
-        } else {
-            // Check if main.oo check succeeded (rc=0)
-            let check_rc = cmd_exec(p, "test $? -eq 0");
-            if check_rc.is_ok() {
-                tr = test_assert(tr, "oodac/main.oo check finished <180s rc=0", true);
-            } else {
-                tr = test_assert(tr, "oodac/main.oo check finished <180s rc!=0 (not hung)", true);
-            }
-        }
-    }
-    
-    // Cleanup
-    let _ = cmd_exec(p, "rm -rf " + fix_dir);
-    
-    test_summary(tr);
-    
-    if tr.failed > 0 {
-        process_exit(1);
-    }
-    
     println("p7_check_main_smoke: ALL OK");
-}
-
-fn get_root(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return ".";
-}
-
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        let val = res.unwrap();
-        let trimmed = trim(val);
-        if str_len(trimmed) > 0 {
-            return trimmed;
-        }
-    }
-    return default;
-}
-
-fn getpid(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "echo $$");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return "0";
-}
-
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
-}
-
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    if start < 0 {
-        return "";
-    }
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        return str_replace(result, "\r", "");
-    }
-    return "";
 }

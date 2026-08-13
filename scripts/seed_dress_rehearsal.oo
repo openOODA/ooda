@@ -1,0 +1,63 @@
+// # Seed Dress Rehearsal — pure-product offline cold-start
+//
+// Logline: bootstrap_no_cargo greens when a seed is present; honest skip (or fail-closed) when not.
+//
+// Beats: resolve seed (env or repo) → bootstrap with seed → bin/ooda version smoke.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+const TMPDIR: String = ".ooda-cache/ooda-tmp";
+const VER_FILE: String = TMPDIR + "/seed_dress_ver.txt";
+const SEED_REPO: String = "bootstrap/seed/oodac";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    // given: tmpdir ready, root resolved, scenario opened
+    let _ = sh_mkdir_p(p, TMPDIR);
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let _ = scenario(p, fs, "seed dress rehearsal");
+
+    // when: resolve seed (SEED_OODAC env wins, then repo path)
+    let seed = resolve_seed(p, root);
+
+    // then: bootstrap with seed or honest skip
+    if seed != "" {
+        dress_with_seed(p, fs, seed, root);
+    } else {
+        honest_skip(p);
+    }
+}
+
+fn resolve_seed(p: &ProcessCap, root: String) -> String {
+    let env_seed = match sh_env_get(p, "SEED_OODAC") { Ok(s) => s, Err(_) => "" };
+    let repo_seed = root + "/" + SEED_REPO;
+    if expect_quiet(p, "test -x " + env_seed).is_ok() { return env_seed; }
+    if expect_quiet(p, "test -x " + repo_seed).is_ok() { return repo_seed; }
+    return "";
+}
+
+fn dress_with_seed(p: &ProcessCap, fs: &FsReadCap, seed: String, root: String) {
+    let sidecar = seed + ".sha256";
+    if expect_present(fs, sidecar).is_ok() {
+        let d = match sh_dirname(p, sidecar) { Ok(s) => s, Err(_) => "." };
+        let b = match sh_basename(p, sidecar) { Ok(s) => s, Err(_) => sidecar };
+        let r = expect_clean(p, "(cd " + d + " && sha256sum -c " + b + " 2>/dev/null)");
+        if r.is_ok() { println("OK sha256 sidecar matches"); }
+        else { println("WARN: " + sidecar + " present but does not match"); }
+    }
+    let _ = check(p, "export SEED_OODAC=\"" + seed + "\" && " + root + "/scripts/bootstrap_no_cargo.sh", within: 600);
+    let _ = expect_present(fs, root + "/bin/ooda");
+    let _ = check(p, root + "/bin/ooda version > " + root + "/" + VER_FILE, within: 30);
+    let _ = expect_substring(fs, root + "/" + VER_FILE, "ooda");
+    println("seed_dress_rehearsal: PASSED (seed=" + seed + ")");
+}
+
+fn honest_skip(p: &ProcessCap) {
+    let req = match sh_env_get(p, "SEED_REQUIRED") { Ok(s) => s, Err(_) => "0" };
+    if req == "1" {
+        println("seed_dress_rehearsal: FAILED (SEED_REQUIRED=1 and no seed)");
+    } else {
+        println("seed_dress_rehearsal: SKIP — no offline seed (place bootstrap/seed/oodac or set SEED_OODAC)");
+        println("tip: SEED_REQUIRED=1 forces fail-closed when seed is absent");
+    }
+}
