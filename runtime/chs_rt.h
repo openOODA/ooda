@@ -1,7 +1,7 @@
 #ifndef CHS_RT_H
 #define CHS_RT_H
 /* Runtime ABI v0 — C realization (Backend-C).
- * See bootstrap/FLOOR.md and bootstrap/RUNTIME_ABI_v0.md.
+ * See bootstrap/FLOOR.oot and bootstrap/RUNTIME_ABI_v0.oot.
  * Not a Rust host; thin OS floor under pure .oo emit-c + gcc. */
 #include <stdio.h>
 #include <stdlib.h>

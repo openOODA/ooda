@@ -17,5 +17,19 @@ int main(void) {
 }
 C
 gcc -O0 -I"$ROOT/runtime" "$TMP/meta_epoch_harness.c" "$ROOT/runtime/chs_rt.c" -lm -ldl -lpthread -o "$TMP/meta_epoch_harness"
-"$TMP/meta_epoch_harness"
+out1=$("$TMP/meta_epoch_harness")
+out2=$("$TMP/meta_epoch_harness")
+echo "$out1"
+echo "$out2"
+e1=$(echo "$out1" | sed -n 's/.*epoch=\([-0-9]*\).*/\1/p')
+e2=$(echo "$out2" | sed -n 's/.*epoch=\([-0-9]*\).*/\1/p')
+if [[ -z "$e1" || -z "$e2" ]]; then
+  echo "epoch parse fail" >&2
+  exit 1
+fi
+if [[ "$e1" == "$e2" ]]; then
+  echo "epoch fail: two processes matched ($e1)" >&2
+  exit 1
+fi
+echo "OK cross-process epochs differ"
 echo "meta_epoch_smoke: PASSED"

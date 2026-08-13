@@ -29,12 +29,20 @@ void oo_str_retain(OoStr s) {
   hdr->ref_count++;
 }
 
+static char *cached_str_data = NULL;
+static long long cached_str_len = 0;
+static long long cached_char_idx = -1;
+static long long cached_byte_idx = -1;
+
 void oo_str_release(OoStr s) {
   if (!oo_str_hdr_ok(s)) return;
   OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
     if (hdr->ref_count == 0) {
+      if (s.data == cached_str_data) {
+        cached_str_data = NULL;
+      }
       hdr->flags = 0xFFFFFFFFu;
       free(hdr);
     }
@@ -164,8 +172,19 @@ long long oo_chars_len(OoStr s) {
 
 static long long utf8_byte_index(OoStr s, long long char_idx) {
   long long n = 0;
-  for (long long i = 0; i < s.len;) {
-    if (n == char_idx) return i;
+  long long i = 0;
+  if (s.data == cached_str_data && s.len == cached_str_len && char_idx >= cached_char_idx && cached_char_idx >= 0) {
+    n = cached_char_idx;
+    i = cached_byte_idx;
+  }
+  for (; i < s.len;) {
+    if (n == char_idx) {
+      cached_str_data = s.data;
+      cached_str_len = s.len;
+      cached_char_idx = n;
+      cached_byte_idx = i;
+      return i;
+    }
     unsigned char c = (unsigned char)s.data[i];
     if (c < 0x80) i += 1;
     else if ((c & 0xE0) == 0xC0) i += 2;

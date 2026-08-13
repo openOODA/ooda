@@ -174,7 +174,7 @@ fi
 # 3) Smoke product CLI
 echo "=== smoke product bin/ooda ==="
 "$CLI_OUT" version | tee "$TMPDIR/bootstrap_ver.txt"
-grep -q '0.184.0-alpha' "$TMPDIR/bootstrap_ver.txt"
+grep -q '0.184.1-alpha' "$TMPDIR/bootstrap_ver.txt"
 "$CLI_OUT" check "$ROOT/fixtures/chs_list_string.oo" | tee "$TMPDIR/bootstrap_chk.txt"
 grep -qE '^OK' "$TMPDIR/bootstrap_chk.txt"
 SMOKE_BIN="$TMPDIR/bootstrap_chs_native"

@@ -1,0 +1,89 @@
+import "std/os/process.oo";
+import "std/os/fs.oo";
+
+pub fn main(p: &ProcessCap, sys: &SysCap, f_read: &FsReadCap, f_write: &FsWriteCap) {
+    let ooda = "bin/ooda";
+    let work = ".patch_smoke_work_oo";
+
+    let r_mkdir: Result[String, String] = process_exec(p, "mkdir -p " + work);
+    assert_eq!(r_mkdir.is_ok(), true);
+
+    let r_cp1: Result[String, String] = process_exec(p, "cp fixtures/patch_add.oo " + work + "/target.oo");
+    assert_eq!(r_cp1.is_ok(), true);
+
+    let r_cp2: Result[String, String] = process_exec(p, "cp fixtures/patch_add_body.txt " + work + "/body.txt");
+    assert_eq!(r_cp2.is_ok(), true);
+
+    let rel_t = work + "/target.oo";
+    let rel_b = work + "/body.txt";
+
+    // --- pass: replace_fn via CLI --with ---
+    let cmd1 = ooda + " patch " + rel_t + " --replace-fn add --with " + rel_b;
+    let r_cmd1: Result[String, String] = process_exec(p, cmd1);
+    assert_eq!(r_cmd1.is_ok(), true);
+
+    let t_body1: Result[String, String] = fs_read_file(f_read, rel_t);
+    assert_eq!(t_body1.is_ok(), true);
+    let t_str1: String = t_body1.unwrap();
+    assert_eq!(str_index_of(t_str1, "return a - b") >= 0, true);
+    println("OK patch replace_fn applied");
+
+    // --- pass: --check after patch ---
+    let r_cp3: Result[String, String] = process_exec(p, "cp fixtures/patch_add.oo " + work + "/target2.oo");
+    let cmd2 = ooda + " patch " + work + "/target2.oo --replace-fn add --with " + rel_b + " --check";
+    let r_cmd2: Result[String, String] = process_exec(p, cmd2);
+    assert_eq!(r_cmd2.is_ok(), true);
+    println("OK patch --check");
+
+    // --- fail: missing function ---
+    let r_cp4: Result[String, String] = process_exec(p, "cp fixtures/patch_add.oo " + work + "/miss.oo");
+    let cmd3 = ooda + " patch " + work + "/miss.oo --replace-fn nosuch --with " + rel_b;
+    let r_cmd3: Result[String, String] = process_exec(p, cmd3);
+    assert_eq!(r_cmd3.is_err(), true);
+    println("OK missing fn fail-closed");
+
+    // --- fail: path traversal ---
+    let cmd4 = ooda + " patch ../etc/passwd --replace-fn add --with " + rel_b;
+    let r_cmd4: Result[String, String] = process_exec(p, cmd4);
+    assert_eq!(r_cmd4.is_err(), true);
+    println("OK path traversal rejected");
+
+    // --- fail: absolute path outside cwd ---
+    let cmd5 = ooda + " patch /etc/passwd --replace-fn add --with " + rel_b;
+    let r_cmd5: Result[String, String] = process_exec(p, cmd5);
+    assert_eq!(r_cmd5.is_err(), true);
+    println("OK absolute outside cwd rejected");
+
+    // --- pass: JSON stdin ---
+    let r_cp5: Result[String, String] = process_exec(p, "cp fixtures/patch_add.oo " + work + "/json.oo");
+    let cmd6 = "printf '%s' '{\"op\":\"replace_fn\",\"name\":\"add\",\"body\":\"return a * b;\"}' | " + ooda + " patch " + work + "/json.oo";
+    let r_cmd6: Result[String, String] = process_exec(p, cmd6);
+    assert_eq!(r_cmd6.is_ok(), true);
+
+    let t_body2: Result[String, String] = fs_read_file(f_read, work + "/json.oo");
+    let t_str2: String = t_body2.unwrap();
+    assert_eq!(str_index_of(t_str2, "return a * b") >= 0, true);
+    println("OK JSON stdin replace_fn");
+
+    // --- fail: unknown JSON op ---
+    let r_cp6: Result[String, String] = process_exec(p, "cp fixtures/patch_add.oo " + work + "/badop.oo");
+    let cmd7 = "printf '%s' '{\"op\":\"eval\",\"name\":\"add\",\"body\":\"x\"}' | " + ooda + " patch " + work + "/badop.oo";
+    let r_cmd7: Result[String, String] = process_exec(p, cmd7);
+    assert_eq!(r_cmd7.is_err(), true);
+    println("OK unknown op fail-closed");
+
+    // --- fail: free-form shell payload not executed (body is text only) ---
+    let r_cp7: Result[String, String] = process_exec(p, "cp fixtures/patch_add.oo " + work + "/shell.oo");
+    let cmd8 = "printf '%s' '{\"op\":\"replace_fn\",\"name\":\"add\",\"body\":\"return 1; // $(touch /tmp/ooda_patch_pwned2)\"}' | " + ooda + " patch " + work + "/shell.oo";
+    let r_cmd8: Result[String, String] = process_exec(p, cmd8);
+    // It should exit non-zero or just not run the shell command
+    let pwned_exists = fs_path_exists(f_read, "/tmp/ooda_patch_pwned2");
+    assert_eq!(pwned_exists, false);
+    if r_cmd8.is_ok() {
+        process_exec(p, "rm -f /tmp/ooda_patch_pwned2");
+    }
+    println("OK body never shell-evaled");
+
+    let r_rm: Result[String, String] = process_exec(p, "rm -rf " + work);
+    println("patch_smoke.oo: PASSED");
+}

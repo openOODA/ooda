@@ -168,6 +168,7 @@ for rail in \
   meta_vs_det_residual_smoke.sh \
   metamorphic_residual_smoke.sh \
   metamorphic_path_a_smoke.sh \
+  meta_epoch_smoke.sh \
   lto_xlang_residual_smoke.sh \
   hot_reload_residual_smoke.sh \
   holographic_residual_smoke.sh \
