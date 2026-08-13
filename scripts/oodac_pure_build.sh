@@ -168,7 +168,27 @@ for mc in mcs:
         i = j
 # stable order already = first-seen module order
 (tmp / "protos.c").write_text("".join(protos))
-(tmp / "bodies.c").write_text("".join(bodies))
+
+# FAIRY Auto-Pagination: Shard bodies to strictly respect 256-line limit
+MAX_LINES = 200
+bodies_c_content = []
+part = 0
+lines = 0
+chunk = []
+for line in bodies:
+    chunk.append(line)
+    lines += 1
+    if lines >= MAX_LINES and line.rstrip() == "}":
+        (tmp / f"bodies_{part}.c").write_text("".join(chunk))
+        bodies_c_content.append(f'#include "bodies_{part}.c"\n')
+        part += 1
+        chunk = []
+        lines = 0
+if chunk:
+    (tmp / f"bodies_{part}.c").write_text("".join(chunk))
+    bodies_c_content.append(f'#include "bodies_{part}.c"\n')
+
+(tmp / "bodies.c").write_text("".join(bodies_c_content))
 print(f"pure_build: unique_fns={len(seen)} from_modules={len(mcs)}", flush=True)
 PY
 

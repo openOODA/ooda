@@ -7,7 +7,7 @@ OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
 TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/oodac_pure_$$"
 mkdir -p "$TMP"
 cleanup_pure_tmp() { rm -rf "$TMP"; }
-trap cleanup_pure_tmp EXIT
+#trap cleanup_pure_tmp EXIT
 
 DIR="$(cd "$(dirname "$MAIN")" && pwd)"
 BASE="$(basename "$MAIN")"
@@ -86,8 +86,29 @@ for mc in mcs:
             protos.append(line + "\n")
             bodies.extend(chunk)
         i = j
+
 (tmp / "protos.c").write_text("".join(protos))
-(tmp / "bodies.c").write_text("".join(bodies))
+
+# FAIRY Auto-Pagination: Shard bodies to strictly respect 256-line limit
+MAX_LINES = 200
+bodies_c_content = []
+part = 0
+lines = 0
+chunk = []
+for line in bodies:
+    chunk.append(line)
+    lines += 1
+    if lines >= MAX_LINES and line.rstrip() == "}":
+        (tmp / f"bodies_{part}.c").write_text("".join(chunk))
+        bodies_c_content.append(f'#include "bodies_{part}.c"\n')
+        part += 1
+        chunk = []
+        lines = 0
+if chunk:
+    (tmp / f"bodies_{part}.c").write_text("".join(chunk))
+    bodies_c_content.append(f'#include "bodies_{part}.c"\n')
+
+(tmp / "bodies.c").write_text("".join(bodies_c_content))
 PY
 
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
