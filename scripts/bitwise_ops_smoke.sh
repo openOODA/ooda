@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 fail=0
 pass() { echo "OK $*"; }
@@ -97,8 +97,8 @@ else
   bad "ord free name wiring incomplete"
 fi
 # Doc residual honesty
-if grep -qE 'ord|bitwise' "$ROOT/bootstrap/BYTE_STR.md" \
-  && grep -qiE 'no float bit|no rotate|residual' "$ROOT/bootstrap/BYTE_STR.md"; then
+if grep -qE 'ord|bitwise' "$ROOT/bootstrap/BYTE_STR.oot" \
+  && grep -qiE 'no float bit|no rotate|residual' "$ROOT/bootstrap/BYTE_STR.oot"; then
   pass "BYTE_STR.md ord + bitops residual"
 else
   bad "BYTE_STR.md missing M166 docs"

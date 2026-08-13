@@ -5,13 +5,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
 
-DOC="$ROOT/bootstrap/STR_OPS.md"
+DOC="$ROOT/bootstrap/STR_OPS.oot"
 [[ -f "$DOC" ]] || { echo "ERR_NO_DOC: $DOC" >&2; exit 1; }
 
 # Doc: path A In + residual honesty

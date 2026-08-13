@@ -33,7 +33,7 @@ for f in "${mods[@]}"; do
   base=$(basename "$f" .oo)
   out="/tmp/ooda_emit_health_$$_${base}.c"
   set +e
-  timeout "$TO" env EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 \
+  timeout "$TO" env OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 \
     "$OODAC_BIN" emit-c "$f" >"$out" 2>/tmp/ooda_emit_health_$$.err
   ec=$?
   set -e

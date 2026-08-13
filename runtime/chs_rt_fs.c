@@ -143,33 +143,34 @@ OoResS oo_read_file(long long cap, OoStr path) {
 OoResV oo_write_file(long long cap, OoStr path, OoStr content) {
   oo_cap_require_fswrite(cap, "write_file");
   OoResV r;
-  const char *p;
-  const char *dir;
-  int fd;
-  FILE *f;
-  /* HIGH 6.4: write allowlist — path must canonicalize under OODA_FS_WRITEDIR.
-   * Empty/unset dir → fail closed (no any-path writes). Policy key via
-   * oo_process_policy_getenv only (OODA_* prefix). */
-  p = path.data ? path.data : "";
-  dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
-  if (!dir || !dir[0] || !path_under_writedir(p, dir)) {
+  char cpath[PATH_MAX];
+  long long n = path.len;
+  if (n >= PATH_MAX) n = PATH_MAX - 1;
+  memcpy(cpath, path.data ? path.data : "", n);
+  cpath[n] = '\0';
+
+  const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
+  if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
     r.ok = 0;
     r.err = oo_str_lit("write_file denied: path not under OODA_FS_WRITEDIR");
     return r;
   }
-  fd = writedir_open_trunc(p);
+  
+  int fd = writedir_open_trunc(cpath);
   if (fd < 0) {
     r.ok = 0;
     r.err = oo_str_lit("write_file failed");
     return r;
   }
-  f = fdopen(fd, "wb");
+  
+  FILE *f = fdopen(fd, "wb");
   if (!f) {
     close(fd);
     r.ok = 0;
     r.err = oo_str_lit("write_file failed");
     return r;
   }
+  
   /* Torn-state seal: short write / ferror / fclose fail → Err, never ok=1. */
   size_t want = content.data ? (size_t)content.len : 0;
   size_t nw = want ? fwrite(content.data, 1, want, f) : 0;
@@ -228,7 +229,7 @@ long long oo_monotonic_us(void) {
   return us > 0LL ? us : 1LL;
 }
 
-OoSList fs_read_dir(long long cap, OoStr path) {
+OoSList oo_fs_read_dir(long long cap, OoStr path) {
   oo_cap_require_fsread(cap, "fs_read_dir");
   OoSList l = oo_slist_new();
   const char *p = path.data ? path.data : "";
@@ -247,7 +248,7 @@ OoSList fs_read_dir(long long cap, OoStr path) {
   return l;
 }
 
-int fs_is_dir(long long cap, OoStr path) {
+int oo_fs_is_dir(long long cap, OoStr path) {
   oo_cap_require_fsread(cap, "fs_is_dir");
   char cpath[1024];
   long long n = path.len;
@@ -259,4 +260,56 @@ int fs_is_dir(long long cap, OoStr path) {
     return S_ISDIR(st.st_mode) ? 1 : 0;
   }
   return 0;
+}
+
+OoResV oo_fs_remove_file(long long cap, OoStr path) {
+  oo_cap_require_fswrite(cap, "fs_remove_file");
+  char cpath[PATH_MAX];
+  long long n = path.len;
+  if (n >= PATH_MAX) n = PATH_MAX - 1;
+  memcpy(cpath, path.data ? path.data : "", n);
+  cpath[n] = '\0';
+
+  OoResV r;
+  const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
+  if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
+    r.ok = 0;
+    r.err = oo_str_lit("fs_remove_file denied: path not under OODA_FS_WRITEDIR");
+    return r;
+  }
+
+  if (unlink(cpath) == 0) {
+    r.ok = 1;
+    r.err = oo_str_lit("");
+  } else {
+    r.ok = 0;
+    r.err = oo_str_lit("fs_remove_file failed");
+  }
+  return r;
+}
+
+OoResV oo_fs_mkdir(long long cap, OoStr path) {
+  oo_cap_require_fswrite(cap, "fs_mkdir");
+  char cpath[PATH_MAX];
+  long long n = path.len;
+  if (n >= PATH_MAX) n = PATH_MAX - 1;
+  memcpy(cpath, path.data ? path.data : "", n);
+  cpath[n] = '\0';
+
+  OoResV r;
+  const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
+  if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
+    r.ok = 0;
+    r.err = oo_str_lit("fs_mkdir denied: path not under OODA_FS_WRITEDIR");
+    return r;
+  }
+
+  if (mkdir(cpath, 0777) == 0) {
+    r.ok = 1;
+    r.err = oo_str_lit("");
+  } else {
+    r.ok = 0;
+    r.err = oo_str_lit("fs_mkdir failed");
+  }
+  return r;
 }

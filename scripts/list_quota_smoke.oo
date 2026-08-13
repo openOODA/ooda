@@ -1,0 +1,144 @@
+// ===================================================================
+// List Quota Smoke
+// ===================================================================
+// job: M125 Ambient List memory quotas — fail-closed + AllocCap raise
+// in:  ooda/bin/ooda
+// out: exit 0 if quota tests pass
+
+import "std/test.oo";
+import "std/os/cmd.oo";
+import "std/os/process.oo";
+import "std/core/str.oo";
+
+pub fn main(p: &ProcessCap) {
+    let mut tr: TestRunner = test_runner_new();
+    
+    let root = get_root(p);
+    let ooda = get_env(p, "OODA_BIN", root + "/bin/ooda");
+    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
+    
+    // Check ooda exists
+    let ooda_exists = cmd_exec(p, "test -x " + ooda);
+    if !ooda_exists.is_ok() {
+        if cmd_exec(p, "test -x " + root + "/oodac/oodac").is_ok() {
+            // fall back
+        } else {
+            println("ERR_NO_OODA: need bin/ooda");
+            process_exit(1);
+        }
+    }
+    
+    // Setup temp dir
+    let mkdir_res = cmd_exec(p, "mkdir -p " + tmpdir);
+    if !mkdir_res.is_ok() {
+        println("FAIL: cannot create temp dir " + tmpdir);
+        process_exit(1);
+    }
+    
+    let fail_fix = root + "/fixtures/list_quota_fail.oo";
+    let pass_fix = root + "/fixtures/list_quota_pass.oo";
+    
+    // Fail: build under default quota; run with tiny budget
+    let t_bin = tmpdir + "/list_quota_fail.bin";
+    let build_fail_res = cmd_exec(p, "rm -f \"" + t_bin + "\" && env -u OO_LIST_AMBIENT_QUOTA " + ooda + " build \"" + fail_fix + "\" -o \"" + t_bin + "\" >/dev/null 2>" + tmpdir + "/lq_f_build.err");
+    
+    if !build_fail_res.is_ok() || !cmd_exec(p, "test -x " + t_bin).is_ok() {
+        tr = test_assert(tr, "list_quota_fail.oo failed to build", false);
+    } else {
+        let run_res = cmd_exec(p, "OO_LIST_AMBIENT_QUOTA=256 timeout 5 \"" + t_bin + "\" 2>&1");
+        if !run_res.is_ok() {
+            let output = run_res.unwrap();
+            if str_contains(output, "ambient List memory quota exceeded") {
+                tr = test_assert(tr, "list_quota_fail.oo aborted with quota exceeded", true);
+            } else {
+                tr = test_assert(tr, "list_quota_fail.oo did not hit quota", false);
+            }
+        } else {
+            tr = test_assert(tr, "list_quota_fail.oo should have failed", false);
+        }
+    }
+    
+    // Pass: run with tiny ambient + AllocCap raise inside program
+    let t_bin2 = tmpdir + "/list_quota_pass.bin";
+    let build_pass_res = cmd_exec(p, "rm -f \"" + t_bin2 + "\" && env -u OO_LIST_AMBIENT_QUOTA " + ooda + " build \"" + pass_fix + "\" -o \"" + t_bin2 + "\" >/dev/null 2>" + tmpdir + "/lq_p_build.err");
+    
+    if !build_pass_res.is_ok() || !cmd_exec(p, "test -x " + t_bin2).is_ok() {
+        tr = test_assert(tr, "list_quota_pass.oo failed to build", false);
+    } else {
+        let run_res2 = cmd_exec(p, "OO_LIST_AMBIENT_QUOTA=256 timeout 5 \"" + t_bin2 + "\" 2>&1");
+        if run_res2.is_ok() {
+            let output = run_res2.unwrap();
+            if str_contains(output, "50") {
+                tr = test_assert(tr, "list_quota_pass.oo under raised ceiling", true);
+            } else {
+                tr = test_assert(tr, "list_quota_pass.oo unexpected output", false);
+            }
+        } else {
+            tr = test_assert(tr, "list_quota_pass.oo failed to run", false);
+        }
+    }
+    
+    test_summary(tr);
+    
+    if tr.failed > 0 {
+        process_exit(1);
+    }
+    
+    println("list_quota_smoke: PASSED");
+}
+
+fn get_root(p: &ProcessCap) -> String {
+    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return ".";
+}
+
+fn get_env(p: &ProcessCap, key: String, default: String) -> String {
+    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
+    if res.is_ok() {
+        let val = res.unwrap();
+        let trimmed = trim(val);
+        if str_len(trimmed) > 0 {
+            return trimmed;
+        }
+    }
+    return default;
+}
+
+fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
+    return process_exec(p, cmd);
+}
+
+fn trim(s: String) -> String {
+    let len = str_len(s);
+    let mut start = -1;
+    let mut end = -1;
+    let mut i = 0;
+    while i < len {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            start = i;
+            break;
+        }
+        i = i + 1;
+    }
+    if start < 0 {
+        return "";
+    }
+    i = len - 1;
+    while i >= start {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            end = i;
+            break;
+        }
+        i = i - 1;
+    }
+    if end >= start {
+        let result = str_sub(s, start, end + 1);
+        return str_replace(result, "\r", "");
+    }
+    return "";
+}

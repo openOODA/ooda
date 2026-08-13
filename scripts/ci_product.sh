@@ -9,7 +9,7 @@
 #  - Does not uninstall system cargo if present — only refuses to *invoke* it.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
 fail=0
@@ -169,6 +169,7 @@ for rail in \
   metamorphic_residual_smoke.sh \
   metamorphic_path_a_smoke.sh \
   meta_epoch_smoke.sh \
+  oo_hide_smoke.sh \
   lto_xlang_residual_smoke.sh \
   hot_reload_residual_smoke.sh \
   holographic_residual_smoke.sh \

@@ -3,7 +3,7 @@
 # Proves c_emit_fn static markers + product emit-c lowers oo_cap_grant_{http,fsread,tcp}.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
 # Prefer product tree oodac; allow OODAC_BIN override; fall back to sibling oodac/

@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 fail=0
 pass(){ echo "OK $*"; }; bad(){ echo "FAIL $*" >&2; fail=1; }
-DOC="bootstrap/ARC_TEMPORAL_TENSION.md"; MARKER="ARC_TEMPORAL_TENSION_RESIDUAL_ALPHA"; FIX="fixtures/arc_temporal_marker.oo"; FIXLINE="ARC_TEMPORAL: residual"
+DOC="bootstrap/ARC_TEMPORAL_TENSION.oot"; MARKER="ARC_TEMPORAL_TENSION_RESIDUAL_ALPHA"; FIX="fixtures/arc_temporal_marker.oo"; FIXLINE="ARC_TEMPORAL: residual"
 [[ -f "$DOC" ]] || { echo missing $DOC; exit 1; }
 grep -q "$MARKER" "$DOC" && pass "marker" || bad "marker"
 grep -qiE 'fail-closed residual|Fail-closed residual' "$DOC" && pass "fail-closed" || bad "fail-closed"

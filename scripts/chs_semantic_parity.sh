@@ -6,7 +6,7 @@
 # ===================================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 OODA="${OODA_BIN:-$ROOT/bin/ooda}"
 if [[ ! -x "$OODA" ]]; then

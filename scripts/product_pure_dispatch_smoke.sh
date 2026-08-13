@@ -4,7 +4,7 @@
 # out: exit 0 if pure path + fail rails + anti FORCE_HOST host path
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 OODA="${OODA:-$ROOT/bin/ooda}"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"

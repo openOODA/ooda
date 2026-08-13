@@ -1,0 +1,153 @@
+// ===================================================================
+// CAP-G5 Seccomp Honesty Smoke Test
+// ===================================================================
+// CAP-G5: product emit must not claim live seccomp-bpf / must not emit broken oo_seccomp_init
+
+import "std/test.oo";
+import "std/os/cmd.oo";
+import "std/os/process.oo";
+import "std/core/str.oo";
+
+pub fn main(p: &ProcessCap) {
+    let mut tr: TestRunner = test_runner_new();
+    
+    let root = get_root(p);
+    let oodac = get_executable(p, root, "OODAC_BIN", "oodac/oodac");
+    
+    if str_len(oodac) == 0 {
+        println("oodac missing");
+        process_exit(1);
+    }
+    
+    let tmp = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp") + "/cap_g5_smoke_" + getpid(p);
+    let _ = cmd_exec(p, "mkdir -p " + tmp);
+    let cleanup = "rm -rf " + tmp;
+    
+    // Source honesty: no product oo_seccomp_init body
+    let check_body = cmd_exec(p, "grep -q 'static inline void oo_seccomp_init' " + root + "/oodac/c_emit_preamble.oo");
+    if check_body.is_ok() {
+        println("FAIL c_emit_preamble still emits oo_seccomp_init body");
+        process_exit(1);
+    }
+    tr = test_assert(tr, "preamble does not emit oo_seccomp_init body", !check_body.is_ok());
+    
+    let check_comment = cmd_exec(p, "grep -q 'CAP-G5 residual' " + root + "/oodac/c_emit_preamble.oo");
+    tr = test_assert(tr, "preamble has CAP-G5 residual comment", check_comment.is_ok());
+    
+    // Emit-c must not introduce sock_filter / BPF_STMT
+    let m_oo = tmp + "/m.oo";
+    let m_c = tmp + "/m.c";
+    
+    let write_res = cmd_exec(p, "printf '%s\\n' 'fn main() {}' >" + m_oo);
+    tr = test_assert(tr, "write test file", write_res.is_ok());
+    
+    let emit_res = cmd_exec(p, oodac + " emit-c " + m_oo + " >" + m_c + " 2>/dev/null");
+    tr = test_assert(tr, "emit-c succeeds", emit_res.is_ok());
+    
+    let check_seccomp = cmd_exec(p, "grep -qE 'sock_filter|BPF_STMT|oo_seccomp_init|SECCOMP_MODE_FILTER' " + m_c);
+    if check_seccomp.is_ok() {
+        println("FAIL emit-c still contains seccomp filter debris");
+        let _ = cmd_exec(p, cleanup);
+        process_exit(1);
+    }
+    tr = test_assert(tr, "emit-c free of seccomp-bpf filter", !check_seccomp.is_ok());
+    
+    let check_capg5 = cmd_exec(p, "grep -q 'CAP-G5 residual' " + m_c);
+    tr = test_assert(tr, "emit-c has CAP-G5 residual comment", check_capg5.is_ok());
+    
+    // Check ci_product wire
+    let check_ci = cmd_exec(p, "grep -q 'cap_g5_seccomp' " + root + "/scripts/ci_product.sh");
+    if check_ci.is_ok() {
+        println("OK ci_product soft-wire present");
+    } else {
+        println("OK ci_product optional: wire cap_g5_seccomp_honesty_smoke");
+    }
+    
+    // Cleanup
+    let _ = cmd_exec(p, cleanup);
+    
+    test_summary(tr);
+    
+    if tr.failed > 0 {
+        process_exit(1);
+    }
+    
+    println("cap_g5_seccomp_honesty_smoke: PASSED");
+}
+
+fn get_root(p: &ProcessCap) -> String {
+    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return ".";
+}
+
+fn get_executable(p: &ProcessCap, root: String, env_key: String, rel_path: String) -> String {
+    let env_val = get_env(p, env_key, "");
+    if str_len(env_val) > 0 && check_executable(p, env_val) {
+        return env_val;
+    }
+    let full_path = root + "/" + rel_path;
+    if check_executable(p, full_path) {
+        return full_path;
+    }
+    return "";
+}
+
+fn getpid(p: &ProcessCap) -> String {
+    let res = cmd_exec(p, "echo $$");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return "0";
+}
+
+fn get_env(p: &ProcessCap, key: String, default: String) -> String {
+    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return default;
+}
+
+fn check_executable(p: &ProcessCap, path: String) -> Bool {
+    let res = cmd_exec(p, "test -x " + path);
+    return res.is_ok();
+}
+
+fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
+    return process_exec(p, cmd);
+}
+
+fn trim(s: String) -> String {
+    let len = str_len(s);
+    let mut start = -1;
+    let mut end = -1;
+    let mut i = 0;
+    while i < len {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            start = i;
+            break;
+        }
+        i = i + 1;
+    }
+    if start < 0 {
+        return "";
+    }
+    i = len - 1;
+    while i >= start {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            end = i;
+            break;
+        }
+        i = i - 1;
+    }
+    if end >= start {
+        let result = str_sub(s, start, end + 1);
+        return str_replace(result, "\r", "");
+    }
+    return "";
+}

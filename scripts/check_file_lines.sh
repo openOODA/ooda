@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Lock: owned source files must be ≤ MAX_LINES (default 256).
-# See bootstrap/SPLIT_PLAN.md and monorepo RULES.md (entropy O / line pressure).
+# See bootstrap/SPLIT_PLAN.oot and monorepo RULES.oot (entropy O / line pressure).
 #
 # Usage:
 #   ./scripts/check_file_lines.sh           # list violators; exit 1 if any
@@ -131,7 +131,7 @@ fi
 
 # Strict
 if (( O > 0 )); then
-  echo "STRICT FAIL: O=$O owned source file(s) over $MAX_LINES lines. See bootstrap/SPLIT_PLAN.md" >&2
+  echo "STRICT FAIL: O=$O owned source file(s) over $MAX_LINES lines. See bootstrap/SPLIT_PLAN.oot" >&2
   exit 1
 fi
 exit 0

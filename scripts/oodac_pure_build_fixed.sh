@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MAIN="${1:?main.oo}"
 OUT="${2:?out_bin}"
 OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/oodac_pure_$$"
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/oodac_pure_$$"
 mkdir -p "$TMP"
 # Lifecycle: always reap temp tree (success or fail)
 # trap '' EXIT
@@ -92,7 +92,7 @@ for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
   MCS+=("$mc")
   (
-    EMIT_NO_CONCAT=1 timeout 600 "$OODAC_BIN" emit-c "$src" >"$mc" 2>"$TMP/emit.$$.err"; ec=$?
+    OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 timeout 600 "$OODAC_BIN" emit-c "$src" >"$mc" 2>"$TMP/emit.$$.err"; ec=$?
     if [[ $ec -eq 124 ]]; then echo "ERR_EMIT_TIMEOUT $src" >&2; exit 1; fi
     if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
       echo "ERR_EMIT $src" >&2
@@ -156,7 +156,7 @@ PY
 
 echo "long long oo_cap_grant_fs(void); long long oo_cap_grant_sys(void); long long oo_cap_grant_env(void); long long oo_cap_grant_net(void);" >> "$TMP/preamble.c"
 echo "int oo_path_exists(long long,OoStr); long long oo_file_size(long long,OoStr); OoResS oo_env_get(long long,OoStr);" >> "$TMP/preamble.c"
-echo "OoResS oo_read_file(long long,OoStr); OoResV oo_write_file(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_read_file(long long,OoStr); OoResS oo_write_file(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
 echo "OoResS oo_sys_exec(long long,int,OoStr*); OoResS oo_sys_exec1(long long,OoStr);" >> "$TMP/preamble.c"
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
 

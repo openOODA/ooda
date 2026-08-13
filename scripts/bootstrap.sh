@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MAIN="${1:?main.oo}"
 OUT="${2:?out_bin}"
 OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/oodac_pure_$$"
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/oodac_pure_$$"
 mkdir -p "$TMP"
 cleanup_pure_tmp() { rm -rf "$TMP"; }
 trap cleanup_pure_tmp EXIT
@@ -44,7 +44,7 @@ FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) 
 MCS=()
 for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
-  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>"$TMP/emit.err"; ec=$?
+  OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" 2>"$TMP/emit.err"; ec=$?
   if [ $ec -eq 124 ]; then echo "ERR_EMIT_TIMEOUT $src" >&2; exit 1; fi
   if [ ! -s "$mc" ] || ! grep -qE "$FN_DEF" "$mc" || grep -qE "^ERR" "$mc"; then echo "ERR_EMIT $src" >&2; cat "$TMP/emit.err" >&2 || true; exit 1; fi
   MCS+=("$mc")

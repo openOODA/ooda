@@ -1,0 +1,80 @@
+import "std/os/process.oo";
+import "std/os/fs.oo";
+import "std/str.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, sys: &SysCap) {
+    let oodac = "oodac/oodac";
+    let main_oo = "ooda/oodac/main.oo";
+    let tmpdir = ".ooda-cache/ooda-tmp";
+    let chk = process_exec(p, "test -x " + oodac);
+    if chk.is_err() {
+        println("ERR_NO_OODAC " + oodac);
+        process_exit(1);
+    }
+    process_exec(p, "mkdir -p " + tmpdir);
+    let warn_rss = 4 * 1024 * 1024;
+    let fail_rss = 24 * 1024 * 1024;
+    let fix = tmpdir + "/f26_residual";
+    process_exec(p, "mkdir -p " + fix);
+    let time_file = fix + "/time.txt";
+    let out_file = fix + "/out.txt";
+    let err_file = fix + "/err.txt";
+    let rc_file = fix + "/rc.txt";
+    let run_cmd = "/usr/bin/time -v -o " + time_file + " timeout 180 " + oodac + " check " + main_oo + " >" + out_file + " 2>" + err_file + "; echo $? > " + rc_file;
+    let mut fail = 0;
+    let t0_res = process_exec(p, "date +%s");
+    let t0_str = match t0_res { Ok(s) => s, Err(e) => "0" };
+    let t0 = parse_int(t0_str);
+    let _ = process_exec(p, run_cmd);
+    let t1_res = process_exec(p, "date +%s");
+    let t1_str = match t1_res { Ok(s) => s, Err(e) => "0" };
+    let t1 = parse_int(t1_str);
+    let wall = t1 - t0;
+    let wall_str = wall.to_string();
+    let rc_out = process_exec(p, "cat " + rc_file);
+    let rc_raw = match rc_out { Ok(s) => s, Err(e) => "0" };
+    let rc_nl = str_index_of(rc_raw, "\n");
+    let mut rc_str = rc_raw;
+    if rc_nl >= 0 {
+        rc_str = str_slice(rc_raw, 0, rc_nl);
+    }
+    let rss_cmd = "awk -F': ' '/Maximum resident set size/ {gsub(/[^0-9]/,\"\",\\$2); print \\$2; exit}' " + time_file + " || echo 0";
+    let rss_out = process_exec(p, rss_cmd);
+    let rss_raw = match rss_out { Ok(s) => s, Err(e) => "0" };
+    let rss_nl = str_index_of(rss_raw, "\n");
+    let mut rss_str = rss_raw;
+    if rss_nl >= 0 {
+        rss_str = str_slice(rss_raw, 0, rss_nl);
+    }
+    println("--- wall=" + wall_str + "s rss=" + rss_str + "KB rc=" + rc_str + " ---");
+    let rss = parse_int(rss_str);
+    if rss > fail_rss {
+        println("FAIL RSS " + rss_str + "KB > 24 GiB (OOM risk)");
+        fail = 1;
+    } else if rss > warn_rss {
+        println("WARN RSS " + rss_str + "KB > 4 GiB (watch for further growth)");
+    }
+    if rc_str == "124" {
+        println("FAIL deadlocked again (timeout 180s, wall=" + wall_str + ")");
+        fail = 1;
+    } else if rc_str == "132" {
+        println("FAIL SIGILL wall=" + wall_str + " rss=" + rss_str + "KB");
+        fail = 1;
+    } else if rc_str == "137" {
+        println("FAIL SIGKILL/OOM wall=" + wall_str + " rss=" + rss_str + "KB");
+        fail = 1;
+    } else if rc_str == "0" {
+        println("OK oodac check finished rc=0 wall=" + wall_str + " rss=" + rss_str + "KB");
+    } else {
+        println("OK slow-check residual accepted rc=" + rc_str + " wall=" + wall_str + " rss=" + rss_str + "KB");
+    }
+    println("--- stdout (last 5) ---");
+    process_exec(p, "tail -n 5 " + out_file);
+    println("--- stderr (last 5) ---");
+    process_exec(p, "tail -n 5 " + err_file);
+    if fail == 1 {
+        println("harness_f26_residual_smoke: FAILED");
+        process_exit(1);
+    }
+    println("harness_f26_residual_smoke: ALL OK");
+}

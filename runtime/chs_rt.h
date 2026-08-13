@@ -129,11 +129,13 @@ int oo_path_exists(long long cap, OoStr path);
 long long oo_file_size(long long cap, OoStr path);
 OoResS oo_env_get(long long cap, OoStr key);
 long long fs_file_size(long long cap, OoStr path);
-OoSList fs_read_dir(long long cap, OoStr path);
-int fs_is_dir(long long cap, OoStr path);
+OoSList oo_fs_read_dir(long long cap, OoStr path);
+int oo_fs_is_dir(long long cap, OoStr path);
+OoResV oo_fs_remove_file(long long cap, OoStr path);
+OoResV oo_fs_mkdir(long long cap, OoStr path);
 
 // sys capability functions
-OoSList sys_args(long long cap);
+OoSList oo_sys_args(long long cap);
 
 /* Process-local caps (chs_rt_sys.c) */
 long long oo_cap_grant_fs(void);
@@ -269,6 +271,6 @@ int oo_cg_verify(long long cap, long long sig);
 
 OoSList str_split(OoStr s, OoStr delim);
 OoStr str_trim(OoStr s);
-OoSList fs_read_dir(long long cap, OoStr path);
+OoSList oo_fs_read_dir(long long cap, OoStr path);
 
 #endif

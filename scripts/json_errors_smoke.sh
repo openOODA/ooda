@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # job: --json-errors shape rail (pass empty array + fail codes)
 # in:  bin/ooda + oodac/oodac pure path
-# out: exit 0 if JSON diags match bootstrap/DIAG_CODES.md
+# out: exit 0 if JSON diags match bootstrap/DIAG_CODES.oot
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 OODA="${OODA:-$ROOT/bin/ooda}"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"

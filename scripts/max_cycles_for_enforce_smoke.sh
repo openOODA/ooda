@@ -4,13 +4,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 [[ -x "$OODAC" ]] || { echo "ERR_NO_OODAC: need $OODAC" >&2; exit 1; }
 
 PASS="$ROOT/fixtures/max_cycles_for_pass.oo"
 FAIL="$ROOT/fixtures/max_cycles_for_fail.oo"
-DOC="$ROOT/bootstrap/MAX_CYCLES.md"
+DOC="$ROOT/bootstrap/MAX_CYCLES.oot"
 RT="$ROOT/runtime"
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; exit 1; }

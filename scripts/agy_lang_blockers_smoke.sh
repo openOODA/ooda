@@ -6,7 +6,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 fail=0
 pass() { echo "OK $*"; }
@@ -112,7 +112,7 @@ if [[ -x "$OODAC_BIN" ]]; then
 fi
 
 # residual honesty docs
-if grep -qiE 'List\[Struct\]|&mut|M168' bootstrap/*.md 2>/dev/null \
+if grep -qiE 'List\[Struct\]|&mut|M168' bootstrap/*.oot 2>/dev/null \
   || true; then
   pass "residual honesty (see SPRINT M168)"
 fi

@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 fail=0
 pass(){ echo "OK $*"; }; bad(){ echo "FAIL $*" >&2; fail=1; }
-DOC="bootstrap/OODA_SPEED.md"; MARKER="OODA_SPEED_RESIDUAL_ALPHA"; FIX="fixtures/ooda_speed_marker.oo"; FIXLINE="OODA_SPEED: residual"
+DOC="bootstrap/OODA_SPEED.oot"; MARKER="OODA_SPEED_RESIDUAL_ALPHA"; FIX="fixtures/ooda_speed_marker.oo"; FIXLINE="OODA_SPEED: residual"
 [[ -f "$DOC" ]] || { echo missing $DOC; exit 1; }
 grep -q "$MARKER" "$DOC" && pass "marker" || bad "marker"
 grep -qiE 'fail-closed residual|Fail-closed residual' "$DOC" && pass "fail-closed" || bad "fail-closed"

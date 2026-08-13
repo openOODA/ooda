@@ -1,0 +1,207 @@
+// job: callee entry/exit for TYPESTATE; stage: check
+// First param starts as From. If the body text calls another TYPESTATE fn
+// (any arm, including s.fn()), every live exit must leave that param as To.
+// A leaf body (no nested TYPESTATE call) trusts the directive.
+// Ctor -> To has no param. process_exit is abort and skips the To check.
+
+pub fn ts_fn_name(toks: List[String], fn_pos: Int) -> String {
+    let n = list_len(toks);
+    let mut i = fn_pos;
+    if i < n {
+        let k0: String = ts_tok_kind(toks, i);
+        if k0 == "KW_FN" { i = i + 1; }
+    }
+    if i < n {
+        let k1: String = ts_tok_kind(toks, i);
+        if k1 == "IDENT" { return ts_tok_text(toks, i); }
+    }
+    return "";
+}
+
+pub fn ts_fn_first_param(toks: List[String], fn_pos: Int) -> String {
+    let n = list_len(toks);
+    let mut i = fn_pos;
+    while i < n {
+        let k: String = ts_tok_kind(toks, i);
+        if k == "LBRACE" { return ""; }
+        if k == "LPAREN" {
+            let mut j = i + 1;
+            if j < n {
+                let km: String = ts_tok_kind(toks, j);
+                if km == "KW_MUT" { j = j + 1; }
+            }
+            if j < n {
+                let k2: String = ts_tok_kind(toks, j);
+                if k2 == "IDENT" { return ts_tok_text(toks, j); }
+            }
+            return "";
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+pub fn ts_spec_from(spec: String) -> String {
+    let n = chars_len(spec);
+    let mut j = 0;
+    while j < n {
+        if char_at(spec, j) == ">" { return str_slice(spec, 0, j); }
+        j = j + 1;
+    }
+    return "";
+}
+
+pub fn ts_spec_to(spec: String) -> String {
+    let n = chars_len(spec);
+    let mut j = 0;
+    while j < n {
+        if char_at(spec, j) == ">" { return str_slice(spec, j + 1, n); }
+        j = j + 1;
+    }
+    return "";
+}
+
+pub fn ts_fn_env(env0: String, fname: String, param: String, spec: String) -> String {
+    let mut e: String = env0;
+    e = c_env_put(e, "__tscfn__", fname);
+    e = c_env_put(e, "__tscparam__", param);
+    e = c_env_put(e, "__tscfrom__", ts_spec_from(spec));
+    e = c_env_put(e, "__tscto__", ts_spec_to(spec));
+    return e;
+}
+
+pub fn ts_enter_param(env: String, binds0: String) -> String {
+    let from_st: String = c_env_get(env, "__tscfrom__");
+    let param: String = c_env_get(env, "__tscparam__");
+    let fname: String = c_env_get(env, "__tscfn__");
+    if from_st == "" { return binds0; }
+    if param == "" {
+        println("ERR\ttypestate\t" + fname + " transition needs a first param");
+        process_exit(1);
+    }
+    return ts_set(binds0, param, from_st);
+}
+
+pub fn ts_root(binds: String, name: String) -> String {
+    let mut cur: String = name;
+    let mut d = 0;
+    while d < 16 {
+        let nxt: String = c_env_get(binds, "__tsa__" + cur);
+        if nxt == "" { return cur; }
+        cur = nxt;
+        d = d + 1;
+    }
+    return cur;
+}
+
+pub fn ts_get(binds: String, name: String) -> String {
+    let r: String = ts_root(binds, name);
+    return c_env_get(binds, "__tsv__" + r);
+}
+
+pub fn ts_set(binds: String, name: String, st: String) -> String {
+    let r: String = ts_root(binds, name);
+    return c_env_put(binds, "__tsv__" + r, st);
+}
+
+pub fn ts_alias_bind(binds0: String, dest: String, src: String) -> String {
+    let r: String = ts_root(binds0, src);
+    let st: String = c_env_get(binds0, "__tsv__" + r);
+    if st == "" {
+        return c_env_put(binds0, "__tsa__" + dest, "");
+    }
+    return c_env_put(binds0, "__tsa__" + dest, r);
+}
+
+pub fn ts_fresh(binds0: String, dest: String, st: String) -> String {
+    let b: String = c_env_put(binds0, "__tsa__" + dest, "");
+    return ts_set(b, dest, st);
+}
+
+pub fn ts_refuse_param_rebind(env: String, name: String, line: String) {
+    let param: String = c_env_get(env, "__tscparam__");
+    if param == "" { return; }
+    if name != param { return; }
+    println("ERR\ttypestate\tcannot rebind " + param + " at line " + line);
+    process_exit(1);
+}
+
+pub fn ts_body_composes(toks: List[String], lo: Int, hi: Int, env: String) -> Bool {
+    let mut i = lo;
+    while i + 1 < hi {
+        let k: String = ts_tok_kind(toks, i);
+        if k == "IDENT" {
+            let nk: String = ts_tok_kind(toks, i + 1);
+            if nk == "LPAREN" {
+                let fname: String = ts_tok_text(toks, i);
+                if c_env_get(env, "__tsf__" + fname) != "" { return true; }
+            }
+            if nk == "DOT" {
+                if i + 3 < hi {
+                    let k2: String = ts_tok_kind(toks, i + 2);
+                    let k3: String = ts_tok_kind(toks, i + 3);
+                    if k2 == "IDENT" {
+                        if k3 == "LPAREN" {
+                            let mname: String = ts_tok_text(toks, i + 2);
+                            if c_env_get(env, "__tsf__" + mname) != "" { return true; }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn ts_check_exit(env: String, binds: String, line: String) {
+    if c_env_get(env, "__tscompose__") != "1" { return; }
+    let param: String = c_env_get(env, "__tscparam__");
+    let to_st: String = c_env_get(env, "__tscto__");
+    let fname: String = c_env_get(env, "__tscfn__");
+    if param == "" { return; }
+    if to_st == "" { return; }
+    let have: String = ts_get(binds, param);
+    if have != to_st {
+        println("ERR\ttypestate\t" + fname + " must leave " + to_st + " have " + have + " at line " + line);
+        process_exit(1);
+    }
+}
+
+pub fn ts_check_main_end(env: String, binds: String, fname: String, line: String) {
+    if fname != "main" { return; }
+    let bag: String = ts_bag_from_binds(binds);
+    let n = chars_len(bag);
+    let mut i = 0;
+    if i < n {
+        if char_at(bag, i) == ";" { i = i + 1; }
+    }
+    while i < n {
+        let start = i;
+        while i < n {
+            if char_at(bag, i) == ";" { break; }
+            i = i + 1;
+        }
+        let name: String = str_slice(bag, start, i);
+        if name != "" {
+            let st: String = ts_get(binds, name);
+            let mut hash = -1;
+            let mut k = 0;
+            let sn = chars_len(st);
+            while k < sn {
+                if char_at(st, k) == "#" { hash = k; k = sn; } else { k = k + 1; }
+            }
+            if hash > 0 {
+                let ty: String = str_slice(st, 0, hash);
+                let want: String = c_env_get(env, "__tsend__" + ty);
+                if want != "" {
+                    if st != want {
+                        println("ERR\ttypestate\t" + name + " must end " + want + " have " + st + " at line " + line);
+                        process_exit(1);
+                    }
+                }
+            }
+        }
+        if i < n { i = i + 1; }
+    }
+}

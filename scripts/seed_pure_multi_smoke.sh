@@ -5,11 +5,11 @@
 #      exit 0 SKIP if no seed; exit 1 if seed present, lag, and residual not documented
 #
 # Prefer green. Residual mode is mechanical:
-#   - bootstrap/SEED_PURE_MULTI.md has start-of-line: ACTIVE: RESIDUAL_SEED_PURE_MULTI…
+#   - bootstrap/SEED_PURE_MULTI.oot has start-of-line: ACTIVE: RESIDUAL_SEED_PURE_MULTI…
 #   - this smoke prints RESIDUAL_SEED_PURE_MULTI and exits 0
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
 export PURE_NO_ARC="${PURE_NO_ARC:-0}"
@@ -24,7 +24,7 @@ if [[ -z "$SEED" || ! -x "$SEED" ]]; then
   fi
 fi
 
-RESIDUAL_DOC="$ROOT/bootstrap/SEED_PURE_MULTI.md"
+RESIDUAL_DOC="$ROOT/bootstrap/SEED_PURE_MULTI.oot"
 # Active residual is a start-of-line STATUS line in the doc (not prose/examples).
 # Smoke prints RESIDUAL_SEED_PURE_MULTI when that line is present and build lags.
 ACTIVE_RESIDUAL_RE='^ACTIVE: RESIDUAL_SEED_PURE_MULTI'
@@ -41,7 +41,7 @@ ERR="$TMPDIR/seed_pure_multi_build.err"
 
 if [[ -z "$SEED" ]]; then
   echo "seed_pure_multi_smoke: SKIP (no bootstrap/seed/oodac and no SEED_OODAC)"
-  echo "tip: place pure seed at bootstrap/seed/oodac; see bootstrap/SEED_PURE_MULTI.md"
+  echo "tip: place pure seed at bootstrap/seed/oodac; see bootstrap/SEED_PURE_MULTI.oot"
   exit 0
 fi
 
@@ -74,7 +74,7 @@ if [[ $rc -ne 0 || ! -x "$OUT" ]]; then
   first="$(grep -E 'ERR_|FAIL|error:|undefined' "$ERR" "$LOG" 2>/dev/null | head -3 || true)"
   if [[ -f "$RESIDUAL_DOC" ]] && grep -qE "$ACTIVE_RESIDUAL_RE" "$RESIDUAL_DOC"; then
     echo "$MARKER"
-    echo "seed_pure_multi_smoke: residual honesty (ACTIVE residual line in bootstrap/SEED_PURE_MULTI.md)"
+    echo "seed_pure_multi_smoke: residual honesty (ACTIVE residual line in bootstrap/SEED_PURE_MULTI.oot)"
     if [[ -n "$first" ]]; then
       echo "seed_pure_multi_smoke: first_error=$first"
     fi
@@ -82,7 +82,7 @@ if [[ $rc -ne 0 || ! -x "$OUT" ]]; then
     exit 0
   fi
   echo "FAIL seed_pure_multi: seed lag and residual not documented" >&2
-  echo "  add line to bootstrap/SEED_PURE_MULTI.md: ACTIVE: RESIDUAL_SEED_PURE_MULTI: <first error>" >&2
+  echo "  add line to bootstrap/SEED_PURE_MULTI.oot: ACTIVE: RESIDUAL_SEED_PURE_MULTI: <first error>" >&2
   echo "  or refresh seed: cp -a oodac/oodac bootstrap/seed/oodac  # trusted pure rebuild only" >&2
   exit 1
 fi

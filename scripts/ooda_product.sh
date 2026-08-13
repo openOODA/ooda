@@ -105,7 +105,7 @@ case "$MODE" in
       [[ -n "$file" ]] || { echo -e "ERR\tbuild\tmissing file" >&2; exit 2; }
       if [[ "$target" == "wasm" ]]; then
         [[ -z "$out" ]] && { out="${file%.oo}.wat"; [[ "$file" == *.oo ]] || out="${file}.wat"; }
-        tmp_out="${TMPDIR:-$HOME/.cache/ooda-tmp}/wasm_out_$$.wat"
+        tmp_out="${TMPDIR:-.ooda-cache/ooda-tmp}/wasm_out_$$.wat"
         mkdir -p "$(dirname "$tmp_out")"
         if ! "$EM" emit-wasm "$file" > "$tmp_out"; then rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
         if ! cp "$tmp_out" "$out" 2>/dev/null; then echo -e "ERR\tbuild\tfailed to write $out" >&2; rm -f "$tmp_out" 2>/dev/null || true; exit 2; fi
@@ -115,7 +115,7 @@ case "$MODE" in
         exit 0
       else
         [[ -z "$out" ]] && { out="${file%.oo}.bin"; [[ "$file" == *.oo ]] || out="${file}.bin"; }
-        tmp_out="${TMPDIR:-$HOME/.cache/ooda-tmp}/llvm_out_$$.ll"
+        tmp_out="${TMPDIR:-.ooda-cache/ooda-tmp}/llvm_out_$$.ll"
         mkdir -p "$(dirname "$tmp_out")"
         trap 'rm -f "$tmp_out" 2>/dev/null || true' EXIT
         if ! "$EM" emit-llvm "$file" > "$tmp_out"; then

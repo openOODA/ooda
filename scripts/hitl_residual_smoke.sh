@@ -3,7 +3,7 @@
 # job: grep residual doc marker; forbid false "HITL shipped/enforced" claims
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DOC="$ROOT/bootstrap/HITL.md"
+DOC="$ROOT/bootstrap/HITL.oot"
 FIX="$ROOT/fixtures/hitl_marker.oo"
 fail=0
 pass() { echo "OK $*"; }
@@ -53,7 +53,7 @@ fi
 
 # Residual honesty: residual docs must not claim HITL is product-green
 # Scope: bootstrap residual surface only (not DESIGN aspirational)
-_hits="$(grep -rn --include='*.md' --exclude='HITL.md' --exclude-dir=dist \
+_hits="$(grep -rn --include='*.oot' --exclude='HITL.md' --exclude-dir=dist \
   -E 'HITL (shipped|enforced)|human-in-the-loop (shipped|enforced|green)' \
   "$ROOT/bootstrap" 2>/dev/null || true)"
 if [[ -n "$_hits" ]] && echo "$_hits" | grep -vE 'not |residual|not-started|no false' | grep -q .; then

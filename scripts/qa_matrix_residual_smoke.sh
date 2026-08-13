@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"
 fail=0
 pass(){ echo "OK $*"; }; bad(){ echo "FAIL $*" >&2; fail=1; }
-DOC="bootstrap/QA_MATRIX.md"; MARKER="QA_MATRIX_RESIDUAL_ALPHA"; FIX="fixtures/qa_marker.oo"; FIXLINE="QA: residual"
+DOC="bootstrap/QA_MATRIX.oot"; MARKER="QA_MATRIX_RESIDUAL_ALPHA"; FIX="fixtures/qa_marker.oo"; FIXLINE="QA: residual"
 [[ -f "$DOC" ]] || { echo missing $DOC; exit 1; }
 grep -q "$MARKER" "$DOC" && pass "marker" || bad "marker"
 grep -qiE 'fail-closed residual|Fail-closed residual' "$DOC" && pass "fail-closed" || bad "fail-closed"

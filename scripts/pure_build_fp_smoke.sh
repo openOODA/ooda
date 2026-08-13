@@ -4,7 +4,7 @@
 # out: exit 0 if two pure multi builds of the same multi-module tree emit equal non-empty input_fp
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"

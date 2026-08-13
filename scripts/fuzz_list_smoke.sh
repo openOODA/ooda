@@ -2,7 +2,7 @@
 # job: M16 pure List-domain fuzz pass + fail rails (no Python)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 OODA="${OODA:-$ROOT/bin/ooda}"
 fail=0

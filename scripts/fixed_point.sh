@@ -11,7 +11,7 @@
 # oodac/oodac|oodac2).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}/fp_run_$$"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}/fp_run_$$"
 # Module-check thrash is residual-hostile during pure multi; skip unless forced.
 export PURE_SKIP_CHECK="${PURE_SKIP_CHECK:-1}"
 export PURE_NO_ARC="${PURE_NO_ARC:-0}"

@@ -1,0 +1,243 @@
+// job: if/else join and loop fixpoint for TYPESTATE; stage: check
+// in: toks + env + binds; out: binds after the control form
+// if/else: both sides must agree on every tracked name.
+// if without else: the missing side keeps the pre-if state.
+// while/for: the body must leave every tracked name in the same state.
+
+pub fn ts_bag_has(bag: String, name: String) -> Bool {
+    let key = ";" + name + ";";
+    let kn = chars_len(key);
+    let n = chars_len(bag);
+    let mut i = 0;
+    while i + kn <= n {
+        if str_slice(bag, i, i + kn) == key { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn ts_bag_add(bag: String, name: String) -> String {
+    if name == "" { return bag; }
+    if ts_bag_has(bag, name) { return bag; }
+    return bag + name + ";";
+}
+
+pub fn ts_bag_from_binds(binds: String) -> String {
+    let needle = "__tsv__";
+    let nn = chars_len(needle);
+    let n = chars_len(binds);
+    let mut bag = ";";
+    let mut i = 0;
+    while i + nn <= n {
+        if str_slice(binds, i, i + nn) == needle {
+            let start = i + nn;
+            let mut k = start;
+            while k < n {
+                if char_at(binds, k) == "=" { break; }
+                k = k + 1;
+            }
+            bag = ts_bag_add(bag, str_slice(binds, start, k));
+            i = k;
+        } else {
+            i = i + 1;
+        }
+    }
+    return bag;
+}
+
+pub fn ts_merge_branch(pre: String, then_b: String, else_b: String, line: String) -> String {
+    let td: String = c_env_get(then_b, "__tsdiv__");
+    let ed: String = c_env_get(else_b, "__tsdiv__");
+    if td == "1" {
+        if ed == "1" { return c_env_put(pre, "__tsdiv__", "1"); }
+        return else_b;
+    }
+    if ed == "1" { return then_b; }
+    let bag = ts_bag_from_binds(pre);
+    let n = chars_len(bag);
+    let mut i = 0;
+    if i < n {
+        if char_at(bag, i) == ";" { i = i + 1; }
+    }
+    let mut out = "";
+    while i < n {
+        let start = i;
+        while i < n {
+            if char_at(bag, i) == ";" { break; }
+            i = i + 1;
+        }
+        let name: String = str_slice(bag, start, i);
+        if name != "" {
+            let mut t: String = c_env_get(then_b, "__tsv__" + name);
+            if t == "" { t = c_env_get(pre, "__tsv__" + name); }
+            let mut e: String = c_env_get(else_b, "__tsv__" + name);
+            if e == "" { e = c_env_get(pre, "__tsv__" + name); }
+            if t != e {
+                println("ERR\ttypestate\t" + name + " then " + t + " else " + e + " at line " + line);
+                process_exit(1);
+            }
+            if t != "" {
+                out = c_env_put(out, "__tsv__" + name, t);
+            }
+        }
+        if i < n { i = i + 1; }
+    }
+    let tu: String = c_env_get(then_b, "__tsused__");
+    let eu: String = c_env_get(else_b, "__tsused__");
+    let pu: String = c_env_get(pre, "__tsused__");
+    if tu == "1" || eu == "1" || pu == "1" {
+        out = c_env_put(out, "__tsused__", "1");
+    }
+    return out;
+}
+
+pub fn ts_loop_join(pre: String, body_out: String, line: String) -> String {
+    if c_env_get(body_out, "__tsdiv__") != "1" {
+        let bag = ts_bag_from_binds(pre);
+        let n = chars_len(bag);
+        let mut i = 0;
+        if i < n {
+            if char_at(bag, i) == ";" { i = i + 1; }
+        }
+        while i < n {
+            let start = i;
+            while i < n {
+                if char_at(bag, i) == ";" { break; }
+                i = i + 1;
+            }
+            let name: String = str_slice(bag, start, i);
+            if name != "" {
+                let a: String = c_env_get(pre, "__tsv__" + name);
+                let b: String = c_env_get(body_out, "__tsv__" + name);
+                if a != b {
+                    println("ERR\ttypestate\t" + name + " loop " + a + " to " + b + " at line " + line);
+                    process_exit(1);
+                }
+            }
+            if i < n { i = i + 1; }
+        }
+    }
+    if c_env_get(body_out, "__tsused__") == "1" {
+        return c_env_put(pre, "__tsused__", "1");
+    }
+    return pre;
+}
+
+pub fn ts_find_lbrace(toks: List[String], i0: Int, hi: Int) -> Int {
+    let mut j = i0;
+    let mut depth = 0;
+    while j < hi {
+        let kj: String = ts_tok_kind(toks, j);
+        if kj == "LPAREN" { depth = depth + 1; }
+        if kj == "RPAREN" {
+            if depth > 0 { depth = depth - 1; }
+        }
+        if kj == "LBRACE" {
+            if depth == 0 { return j; }
+        }
+        j = j + 1;
+    }
+    return hi;
+}
+
+pub fn ts_if_end(toks: List[String], i: Int, hi: Int) -> Int {
+    let lb: Int = ts_find_lbrace(toks, i, hi);
+    let then_end: Int = ts_skip_braces(toks, lb);
+    if then_end < hi {
+        let e1: String = ts_tok_kind(toks, then_end);
+        if e1 == "KW_ELSE" {
+            if then_end + 1 < hi {
+                let e2: String = ts_tok_kind(toks, then_end + 1);
+                if e2 == "KW_IF" {
+                    return ts_if_end(toks, then_end + 1, hi);
+                }
+            }
+            let elb: Int = ts_find_lbrace(toks, then_end, hi);
+            return ts_skip_braces(toks, elb);
+        }
+    }
+    return then_end;
+}
+
+pub fn ts_eval_if(toks: List[String], i: Int, hi: Int, env: String, binds0: String) -> String {
+    let line: String = ts_tok_line(toks, i);
+    let lb: Int = ts_find_lbrace(toks, i, hi);
+    if ts_cond_has_ts_fn(toks, i + 1, lb, env) {
+        println("ERR\ttypestate\tif condition calls a transition at line " + line);
+        process_exit(1);
+    }
+    let binds: String = ts_walk_span(toks, i + 1, lb, env, binds0);
+    let then_end: Int = ts_skip_braces(toks, lb);
+    let then_b: String = ts_walk_span(toks, lb + 1, then_end - 1, env, binds);
+    let mut else_b: String = binds;
+    if then_end < hi {
+        let e1: String = ts_tok_kind(toks, then_end);
+        if e1 == "KW_ELSE" {
+            if then_end + 1 < hi {
+                let e2: String = ts_tok_kind(toks, then_end + 1);
+                if e2 == "KW_IF" {
+                    else_b = ts_eval_if(toks, then_end + 1, hi, env, binds);
+                } else {
+                    let elb: Int = ts_find_lbrace(toks, then_end, hi);
+                    let else_end: Int = ts_skip_braces(toks, elb);
+                    else_b = ts_walk_span(toks, elb + 1, else_end - 1, env, binds);
+                }
+            }
+        }
+    }
+    return ts_merge_branch(binds, then_b, else_b, line);
+}
+
+pub fn ts_walk_span(toks: List[String], lo: Int, hi: Int, env: String, binds0: String) -> String {
+    let mut binds: String = binds0;
+    let mut i = lo;
+    while i < hi {
+        let k: String = ts_tok_kind(toks, i);
+        if k == "KW_RETURN" {
+            let rs: Int = ts_skip_semi(toks, i + 1, hi);
+            binds = ts_walk_span(toks, i + 1, rs - 1, env, binds);
+            ts_check_exit(env, binds, ts_tok_line(toks, i));
+            return c_env_put(binds, "__tsdiv__", "1");
+        } else if k == "KW_MATCH" {
+            binds = ts_eval_match(toks, i, hi, env, binds);
+            if c_env_get(binds, "__tsdiv__") == "1" { return binds; }
+            i = ts_match_end(toks, i, hi);
+        } else if k == "KW_IF" {
+            binds = ts_eval_if(toks, i, hi, env, binds);
+            if c_env_get(binds, "__tsdiv__") == "1" { return binds; }
+            i = ts_if_end(toks, i, hi);
+        } else if k == "KW_WHILE" || k == "KW_FOR" {
+            let line: String = ts_tok_line(toks, i);
+            let lb: Int = ts_find_lbrace(toks, i, hi);
+            if ts_cond_has_ts_fn(toks, i + 1, lb, env) {
+                println("ERR\ttypestate\tloop condition calls a transition at line " + line);
+                process_exit(1);
+            }
+            binds = ts_walk_span(toks, i + 1, lb, env, binds);
+            let body_end: Int = ts_skip_braces(toks, lb);
+            let out: String = ts_walk_span(toks, lb + 1, body_end - 1, env, binds);
+            binds = ts_loop_join(binds, out, line);
+            i = body_end;
+        } else if k == "KW_LET" {
+            binds = ts_apply_let(toks, i, env, binds);
+            i = ts_skip_semi(toks, i, hi);
+        } else if k == "IDENT" {
+            let fname: String = ts_tok_text(toks, i);
+            if fname == "process_exit" {
+                if i + 1 < hi {
+                    let nk: String = ts_tok_kind(toks, i + 1);
+                    if nk == "LPAREN" {
+                        let pe: Int = ts_skip_semi(toks, i, hi);
+                        binds = ts_walk_span(toks, i + 1, pe - 1, env, binds);
+                        return c_env_put(binds, "__tsdiv__", "1");
+                    }
+                }
+            }
+            binds = ts_apply_ident(toks, i, env, binds);
+            i = ts_after_ident(toks, i);
+        } else {
+            i = i + 1;
+        }
+    }
+    return binds;
+}

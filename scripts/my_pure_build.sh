@@ -4,7 +4,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MAIN="${1:?main.oo}"
 OUT="${2:?out_bin}"
 OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/oodac_pure_$$"
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/oodac_pure_$$"
 mkdir -p "$TMP"
 cleanup_pure_tmp() { rm -rf "$TMP"; }
 trap cleanup_pure_tmp EXIT
@@ -74,17 +74,17 @@ collect "$MAIN_ABS"
 echo "pure_build: generating c files"
 
 # 1. Preamble (only once, from main)
-EMIT_NO_CONCAT=1 "$OODAC_BIN" emit-preamble "$MAIN" > "$TMP/all.c"
+OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 "$OODAC_BIN" emit-preamble "$MAIN" > "$TMP/all.c"
 
 # 2. Protos (all files)
 for src in "${MODS[@]}"; do
-  EMIT_NO_CONCAT=1 timeout 600 "$OODAC_BIN" emit-protos "$src" >> "$TMP/all.c" 2>>"$TMP/emit.err" || { echo "ERR_EMIT_PROTOS $src"; cat "$TMP/emit.err"; exit 1; }
+  OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 timeout 600 "$OODAC_BIN" emit-protos "$src" >> "$TMP/all.c" 2>>"$TMP/emit.err" || { echo "ERR_EMIT_PROTOS $src"; cat "$TMP/emit.err"; exit 1; }
 done
 
 # 3. Bodies (all files)
 for src in "${MODS[@]}"; do
   echo "emitting bodies for $src" >&2
-  EMIT_NO_CONCAT=1 "$OODAC_BIN" emit-bodies "$src" >> "$TMP/all.c"
+  OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 "$OODAC_BIN" emit-bodies "$src" >> "$TMP/all.c"
 done
 
 if ! grep -q 'int main\|long long main' "$TMP/all.c" && ! grep -q 'main(int argc' "$TMP/all.c"; then

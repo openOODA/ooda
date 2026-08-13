@@ -3,7 +3,7 @@
 # job: grep residual doc marker; forbid false "taint tracking shipped/enforced" claims
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DOC="$ROOT/bootstrap/SECRET_TAINT.md"
+DOC="$ROOT/bootstrap/SECRET_TAINT.oot"
 FIX="$ROOT/fixtures/secret_marker.oo"
 fail=0
 pass() { echo "OK $*"; }
@@ -54,7 +54,7 @@ else
   bad "fixture missing or without // SECRET: name"
 fi
 
-_hits="$(grep -rn --include='*.md' --exclude='SECRET_TAINT.md' --exclude-dir=dist \
+_hits="$(grep -rn --include='*.oot' --exclude='SECRET_TAINT.md' --exclude-dir=dist \
   -E 'taint tracking (shipped|enforced)|static taint (shipped|enforced|green)' \
   "$ROOT/bootstrap" 2>/dev/null || true)"
 if [[ -n "$_hits" ]] && echo "$_hits" | grep -vE 'not |residual|not-started|no false' | grep -q .; then

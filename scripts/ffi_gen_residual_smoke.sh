@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-DOC="bootstrap/FFI_GEN.md"
+DOC="bootstrap/FFI_GEN.oot"
 MARKER="FFI_GEN_RESIDUAL_ALPHA"
 FIX="fixtures/ffigen_marker.oo"
 FIXLINE="FFI_GEN: residual"
@@ -25,7 +25,7 @@ grep -qiE 'fail-closed residual|Fail-closed residual' "$DOC" && pass "fail-close
 [[ -f "$FIX" ]] || bad "missing fixture $FIX"
 grep -q "$FIXLINE" "$FIX" && pass "fixture marker" || bad "fixture marker $FIXLINE"
 # dual claim scan residual surface
-hits=$(grep -rn --include='*.md' -E 'shipped as enforced|fully sealed shipped' bootstrap 2>/dev/null | grep -v "$(basename "$DOC")" | grep -vi residual | head -5 || true)
+hits=$(grep -rn --include='*.oot' -E 'shipped as enforced|fully sealed shipped' bootstrap 2>/dev/null | grep -v "$(basename "$DOC")" | grep -vi residual | head -5 || true)
 if [[ -n "$hits" ]]; then
   echo "$hits" | head -3
   bad "bootstrap residual surface dual-claim"

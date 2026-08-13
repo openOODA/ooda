@@ -19,7 +19,7 @@
 # Does not rewrite Domain Expert product (check_residual.oo / c_emit_secret*).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
 [[ -x "$OODAC" ]] || { echo "ERR_NO_OODAC: need $OODAC" >&2; exit 1; }
@@ -128,7 +128,7 @@ document_na() {
 
 expect_residual_doc() {
   local doc="$ROOT/bootstrap/MACRO_SECRET_RESIDUAL.oot"
-  [[ -f "$doc" ]] || doc="$ROOT/bootstrap/MACRO_SECRET_RESIDUAL.md"
+  [[ -f "$doc" ]] || doc="$ROOT/bootstrap/MACRO_SECRET_RESIDUAL.oot"
   if [[ ! -f "$doc" ]]; then
     bad "N/A rail undocumented: missing MACRO_SECRET_RESIDUAL.oot"; return 1
   fi

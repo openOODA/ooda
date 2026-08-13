@@ -439,7 +439,7 @@ OoResS oo_fetch(long long cap, OoStr url) {
   return r;
 }
 
-OoSList sys_args(long long cap) {
+OoSList oo_sys_args(long long cap) {
   oo_cap_require_process(cap, "sys_args");
   OoSList l = oo_slist_new();
   FILE *f = fopen("/proc/self/cmdline", "rb");

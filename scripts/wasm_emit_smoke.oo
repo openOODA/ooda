@@ -1,0 +1,149 @@
+// ===================================================================
+// WASM Emit Smoke Test
+// ===================================================================
+// job: smoke test for openOODA direct WebAssembly (.wat) backend
+// in:  ooda/bin/ooda or oodac/oodac
+// out: exit 0 if .wat file created with expected content
+
+import "std/test.oo";
+import "std/os/cmd.oo";
+import "std/os/process.oo";
+import "std/core/str.oo";
+
+pub fn main(p: &ProcessCap) {
+    let mut tr: TestRunner = test_runner_new();
+    
+    let root = get_root(p);
+    let ooda = get_env(p, "OODA_BIN", root + "/bin/ooda");
+    let oodac = get_env(p, "OODAC_BIN", root + "/oodac/oodac");
+    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
+    
+    // Check at least one compiler exists
+    let ooda_exists = cmd_exec(p, "test -x " + ooda);
+    let oodac_exists = cmd_exec(p, "test -x " + oodac);
+    
+    if !ooda_exists.is_ok() && !oodac_exists.is_ok() {
+        println("ERR_NO_COMPILER: need " + ooda + " or " + oodac);
+        process_exit(1);
+    }
+    
+    // Setup temp dir
+    let mkdir_res = cmd_exec(p, "mkdir -p " + tmpdir);
+    if !mkdir_res.is_ok() {
+        println("FAIL: cannot create temp dir " + tmpdir);
+        process_exit(1);
+    }
+    
+    let test_src = tmpdir + "/wasm_smoke_test.oo";
+    let out_wat = tmpdir + "/wasm_smoke_test.wat";
+    
+    // Write test source
+    let write_res = cmd_exec(p, "cat > \"" + test_src + "\" << 'EOF'
+pub fn main() {
+    let msg: String = \"hello wasm smoke\"
+    println(msg)
+}
+EOF");
+    tr = test_assert(tr, "write test source", write_res.is_ok());
+    
+    // Emit WASM
+    if ooda_exists.is_ok() {
+        let emit_res = cmd_exec(p, ooda + " build --target wasm \"" + test_src + "\" -o \"" + out_wat + "\"");
+        tr = test_assert(tr, "ooda build --target wasm", emit_res.is_ok());
+    } else {
+        let emit_res = cmd_exec(p, oodac + " emit-wasm \"" + test_src + "\" > \"" + out_wat + "\"");
+        tr = test_assert(tr, "oodac emit-wasm", emit_res.is_ok());
+    }
+    
+    // Check output file exists
+    let wat_exists = cmd_exec(p, "test -f " + out_wat);
+    tr = test_assert(tr, "output wat file created", wat_exists.is_ok());
+    
+    if !wat_exists.is_ok() {
+        test_summary(tr);
+        process_exit(1);
+    }
+    
+    // Check for expected WASM content
+    let check_module = cmd_exec(p, "grep -q module " + out_wat);
+    tr = test_assert(tr, "wat contains module", check_module.is_ok());
+    
+    let check_wasi = cmd_exec(p, "grep -q wasi_snapshot_preview1 " + out_wat);
+    tr = test_assert(tr, "wat contains wasi_snapshot_preview1", check_wasi.is_ok());
+    
+    let check_fd_write = cmd_exec(p, "grep -q fd_write " + out_wat);
+    tr = test_assert(tr, "wat contains fd_write", check_fd_write.is_ok());
+    
+    let check_memory = cmd_exec(p, "grep -q memory " + out_wat);
+    tr = test_assert(tr, "wat contains memory declaration", check_memory.is_ok());
+    
+    let check_start = cmd_exec(p, "grep -q '_start' " + out_wat);
+    tr = test_assert(tr, "wat contains _start export", check_start.is_ok());
+    
+    // Cleanup
+    let _ = cmd_exec(p, "rm -f " + test_src + " " + out_wat);
+    
+    test_summary(tr);
+    
+    if tr.failed > 0 {
+        process_exit(1);
+    }
+    
+    println("wasm_emit_smoke: WebAssembly backend smoke test OK");
+}
+
+fn get_root(p: &ProcessCap) -> String {
+    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return ".";
+}
+
+fn get_env(p: &ProcessCap, key: String, default: String) -> String {
+    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
+    if res.is_ok() {
+        let val = res.unwrap();
+        let trimmed = trim(val);
+        if str_len(trimmed) > 0 {
+            return trimmed;
+        }
+    }
+    return default;
+}
+
+fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
+    return process_exec(p, cmd);
+}
+
+fn trim(s: String) -> String {
+    let len = str_len(s);
+    let mut start = -1;
+    let mut end = -1;
+    let mut i = 0;
+    while i < len {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            start = i;
+            break;
+        }
+        i = i + 1;
+    }
+    if start < 0 {
+        return "";
+    }
+    i = len - 1;
+    while i >= start {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            end = i;
+            break;
+        }
+        i = i - 1;
+    }
+    if end >= start {
+        let result = str_sub(s, start, end + 1);
+        return str_replace(result, "\r", "");
+    }
+    return "";
+}

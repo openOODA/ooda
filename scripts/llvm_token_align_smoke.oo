@@ -1,0 +1,168 @@
+// ===================================================================
+// LLVM Token Align Smoke
+// ===================================================================
+// job: emit-llvm on tiny int/string fixtures; grep for real constants
+// in:  oodac/oodac
+// out: exit 0 if emit-llvm produces expected LLVM IR
+
+import "std/test.oo";
+import "std/os/cmd.oo";
+import "std/os/process.oo";
+import "std/core/str.oo";
+
+pub fn main(p: &ProcessCap) {
+    let mut tr: TestRunner = test_runner_new();
+    
+    let root = get_root(p);
+    let oodac = root + "/oodac/oodac";
+    let tmpdir = get_env(p, "TMPDIR", "/tmp");
+    
+    // Setup temp dir
+    let tmp_base = tmpdir + "/llvm_token_align_" + getpid(p);
+    let mkdir_res = cmd_exec(p, "mkdir -p " + tmp_base);
+    if !mkdir_res.is_ok() {
+        println("FAIL: cannot create temp dir " + tmp_base);
+        process_exit(1);
+    }
+    
+    // Write fixtures
+    let int_lit_path = tmp_base + "/int_lit.oo";
+    let str_lit_path = tmp_base + "/str_lit.oo";
+    
+    let write_int = cmd_exec(p, "cat > \"" + int_lit_path + "\" << 'EOF'
+pub fn main() {
+    let x = 42;
+    println(x);
+}
+EOF");
+    
+    let write_str = cmd_exec(p, "cat > \"" + str_lit_path + "\" << 'EOF'
+pub fn main() {
+    let s = \"hi\";
+    println(s);
+}
+EOF");
+    
+    tr = test_assert(tr, "write fixtures", write_int.is_ok() && write_str.is_ok());
+    
+    // Tokens test
+    let tokens_res = cmd_exec(p, "timeout 20 " + oodac + " tokens " + int_lit_path + " | head -40 || true");
+    tr = test_assert(tr, "== tokens (int_lit) ===", tokens_res.is_ok());
+    
+    // emit-llvm int_lit
+    let int_ll = tmp_base + "/int.ll";
+    let int_err = tmp_base + "/int.err";
+    let emit_int_res = cmd_exec(p, "timeout 30 " + oodac + " emit-llvm " + int_lit_path + " >" + int_ll + " 2>" + int_err);
+    
+    if emit_int_res.is_ok() {
+        tr = test_assert(tr, "emit-llvm int_lit", true);
+        
+        let grep_define = cmd_exec(p, "grep -E 'define ' " + int_ll);
+        tr = test_assert(tr, "int.ll contains define", grep_define.is_ok());
+        
+        let grep_42 = cmd_exec(p, "grep -q 'i64 42' " + int_ll);
+        if grep_42.is_ok() {
+            tr = test_assert(tr, "PASS: int constant 42 present", true);
+        } else {
+            tr = test_assert(tr, "FAIL_OR_STALE: no i64 42", false);
+        }
+    } else {
+        tr = test_assert(tr, "emit-llvm failed (int)", false);
+    }
+    
+    // emit-llvm str_lit
+    let str_ll = tmp_base + "/str.ll";
+    let str_err = tmp_base + "/str.err";
+    let emit_str_res = cmd_exec(p, "timeout 30 " + oodac + " emit-llvm " + str_lit_path + " >" + str_ll + " 2>" + str_err);
+    
+    if emit_str_res.is_ok() {
+        tr = test_assert(tr, "emit-llvm str_lit", true);
+        
+        let grep_str = cmd_exec(p, "grep -E '@\\.str\\.|c\"hi|oo_str_lit' " + str_ll);
+        tr = test_assert(tr, "str.ll contains string patterns", grep_str.is_ok());
+        
+        let check_str_pool = cmd_exec(p, "grep -q '@\\.str\\.' " + str_ll + " && grep -q 'c\"hi' " + str_ll);
+        if check_str_pool.is_ok() {
+            tr = test_assert(tr, "PASS: string pool global present", true);
+        } else {
+            tr = test_assert(tr, "FAIL_OR_STALE: string pool missing", false);
+        }
+    } else {
+        tr = test_assert(tr, "emit-llvm str failed", false);
+    }
+    
+    // Cleanup
+    let _ = cmd_exec(p, "rm -rf " + tmp_base);
+    
+    test_summary(tr);
+    
+    if tr.failed > 0 {
+        process_exit(1);
+    }
+    
+    println("llvm_token_align_smoke: PASSED");
+}
+
+fn get_root(p: &ProcessCap) -> String {
+    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return ".";
+}
+
+fn get_env(p: &ProcessCap, key: String, default: String) -> String {
+    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
+    if res.is_ok() {
+        let val = res.unwrap();
+        let trimmed = trim(val);
+        if str_len(trimmed) > 0 {
+            return trimmed;
+        }
+    }
+    return default;
+}
+
+fn getpid(p: &ProcessCap) -> String {
+    let res = cmd_exec(p, "echo $$");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return "0";
+}
+
+fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
+    return process_exec(p, cmd);
+}
+
+fn trim(s: String) -> String {
+    let len = str_len(s);
+    let mut start = -1;
+    let mut end = -1;
+    let mut i = 0;
+    while i < len {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            start = i;
+            break;
+        }
+        i = i + 1;
+    }
+    if start < 0 {
+        return "";
+    }
+    i = len - 1;
+    while i >= start {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            end = i;
+            break;
+        }
+        i = i - 1;
+    }
+    if end >= start {
+        let result = str_sub(s, start, end + 1);
+        return str_replace(result, "\r", "");
+    }
+    return "";
+}

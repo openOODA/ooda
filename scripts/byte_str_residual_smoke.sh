@@ -4,7 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-DOC="$ROOT/bootstrap/BYTE_STR.md"
+DOC="$ROOT/bootstrap/BYTE_STR.oot"
 FIX="$ROOT/fixtures/byte_str_marker.oo"
 STD="$ROOT/std/byte.oo"
 MARKER="BYTE_STR_RESIDUAL_ALPHA"
@@ -102,7 +102,7 @@ else
 fi
 
 # Dual-claim scan: bootstrap residual surface must not claim Byte/&str shipped
-_hits="$(grep -rn --include='*.md' --exclude='BYTE_STR.md' --exclude-dir=dist \
+_hits="$(grep -rn --include='*.oot' --exclude='BYTE_STR.oot' --exclude-dir=dist \
   -E 'native &str (shipped|enforced)|Byte arrays (shipped|enforced)|Byte primitive (shipped|enforced)' \
   "$ROOT/bootstrap" 2>/dev/null || true)"
 if [[ -n "$_hits" ]] && echo "$_hits" | grep -vE 'not |residual|not-started|no false' | grep -q .; then
@@ -118,10 +118,10 @@ else
   bad "ci_product missing byte_str_residual_smoke.sh"
 fi
 
-if grep -q 'BYTE_STR.md' bootstrap/RESIDUAL_PACKS.md 2>/dev/null; then
+if grep -q 'BYTE_STR.oot' bootstrap/RESIDUAL_PACKS.oot 2>/dev/null; then
   pass "RESIDUAL_PACKS index"
 else
-  bad "RESIDUAL_PACKS missing BYTE_STR.md"
+  bad "RESIDUAL_PACKS missing BYTE_STR.oot"
 fi
 
 if [[ $fail -ne 0 ]]; then

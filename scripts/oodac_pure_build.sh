@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MAIN="${1:?main.oo}"
 OUT="${2:?out_bin}"
 OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/oodac_pure_$$"
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/oodac_pure_$$"
 mkdir -p "$TMP"
 # Lifecycle: always reap temp tree (success or fail)
 # trap 'rm -rf "$TMP"' EXIT
@@ -112,7 +112,7 @@ MCS=()
 for src in "${MODS[@]}"; do
   mc="$TMP/$(echo "$src" | tr '/.' '__').c"
   # Note: cli_emit probes EMIT_NO_CONCAT via sys_exec; non-OO_* keys are env-stripped → often expands anyway (residual).
-  EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" || true
+  OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" || true
   if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
     echo "ERR_EMIT $src" >&2
     exit 1
@@ -176,6 +176,7 @@ echo "long long oo_cap_grant_fs(void); long long oo_cap_grant_sys(void); long lo
 echo "int oo_path_exists(long long,OoStr); long long oo_file_size(long long,OoStr); OoResS oo_env_get(long long,OoStr);" >> "$TMP/preamble.c"
 echo "OoResS oo_read_file(long long,OoStr); OoResV oo_write_file(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
 echo "OoResS oo_sys_exec(long long,int,OoStr*); OoResS oo_sys_exec1(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoSList str_split(OoStr,OoStr);" >> "$TMP/preamble.c"
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
 
 # Capability grants + sealed signatures come from native c_emit_preamble/c_emit_fn

@@ -8,7 +8,7 @@ cd "$ROOT"
 export OODA_SRC_ROOT="$ROOT"
 export OODA="${OODA:-$ROOT/bin/ooda}"
 export OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 [[ -x "$OODA" ]] || { echo "ERR_NO_OODA" >&2; exit 1; }
 [[ -x "$OODAC_BIN" ]] || { echo "ERR_NO_OODAC" >&2; exit 1; }

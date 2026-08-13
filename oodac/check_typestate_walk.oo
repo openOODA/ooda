@@ -1,0 +1,224 @@
+// job: walk fn bodies and apply TYPESTATE transitions; stage: check
+// in: toks + directive env; out: ERR+exit on bad transition
+
+pub fn ts_apply_call(env: String, binds0: String, fname: String, arg: String, line: String) -> String {
+    let spec: String = c_env_get(env, "__tsf__" + fname);
+    if spec == "" { return binds0; }
+    let sn = chars_len(spec);
+    let mut gt = -1;
+    let mut j = 0;
+    while j < sn {
+        if char_at(spec, j) == ">" { gt = j; j = sn; } else { j = j + 1; }
+    }
+    if gt < 0 {
+        println("ERR\ttypestate\tbad spec for " + fname);
+        process_exit(1);
+    }
+    let from_st: String = str_slice(spec, 0, gt);
+    let to_st: String = str_slice(spec, gt + 1, sn);
+    if from_st == "" {
+        if arg == "" { return binds0; }
+        let mut ctor: String = binds0;
+        if arg != "" {
+            ctor = ts_set(binds0, arg, to_st);
+        }
+        return c_env_put(ctor, "__tsused__", "1");
+    }
+    if arg == "" {
+        println("ERR\ttypestate\t" + fname + " needs a named first arg at line " + line);
+        process_exit(1);
+    }
+    let have: String = ts_get(binds0, arg);
+    if have == "" {
+        println("ERR\ttypestate\t" + arg + " has no state for " + fname + " at line " + line);
+        process_exit(1);
+    }
+    if have != from_st {
+        println("ERR\ttypestate\t" + fname + " needs " + from_st + " have " + have + " on " + arg + " at line " + line);
+        process_exit(1);
+    }
+    let done: String = ts_set(binds0, arg, to_st);
+    return c_env_put(done, "__tsused__", "1");
+}
+
+pub fn ts_first_arg_ident(toks: List[String], lp: Int) -> String {
+    let n = list_len(toks);
+    if lp + 1 >= n { return ""; }
+    let a1: String = ts_tok_kind(toks, lp + 1);
+    if a1 != "IDENT" { return ""; }
+    if lp + 2 < n {
+        let a2: String = ts_tok_kind(toks, lp + 2);
+        if a2 == "DOT" { return ""; }
+        if a2 == "LBRACKET" { return ""; }
+        if a2 == "LPAREN" { return ""; }
+    }
+    return ts_tok_text(toks, lp + 1);
+}
+
+pub fn ts_apply_let(toks: List[String], i: Int, env: String, binds0: String) -> String {
+    let n = list_len(toks);
+    let mut p = i + 1;
+    if p < n {
+        if ts_tok_kind(toks, p) == "KW_MUT" { p = p + 1; }
+    }
+    if p >= n { return binds0; }
+    if ts_tok_kind(toks, p) != "IDENT" { return binds0; }
+    let vname: String = ts_tok_text(toks, p);
+    p = p + 1;
+    if p < n {
+        if ts_tok_kind(toks, p) == "COLON" {
+            p = p + 1;
+            if p < n { p = p + 1; }
+        }
+    }
+    if p < n {
+        if ts_tok_kind(toks, p) == "EQ" { p = p + 1; }
+    }
+    if p >= n { return binds0; }
+    if ts_tok_kind(toks, p) != "IDENT" { return binds0; }
+    if p + 1 >= n || ts_tok_kind(toks, p + 1) != "LPAREN" {
+        if p + 1 < n {
+            let nxt: String = ts_tok_kind(toks, p + 1);
+            if nxt != "SEMI" { return binds0; }
+        }
+        let src: String = ts_tok_text(toks, p);
+        ts_refuse_param_rebind(env, vname, ts_tok_line(toks, p));
+        return ts_alias_bind(binds0, vname, src);
+    }
+    let fname: String = ts_tok_text(toks, p);
+    let spec: String = c_env_get(env, "__tsf__" + fname);
+    if spec == "" { return binds0; }
+    if chars_len(spec) == 0 { return binds0; }
+    ts_refuse_param_rebind(env, vname, ts_tok_line(toks, p));
+    if char_at(spec, 0) == ">" {
+        return ts_fresh(binds0, vname, str_slice(spec, 1, chars_len(spec)));
+    }
+    let arg: String = ts_first_arg_ident(toks, p + 1);
+    let binds: String = ts_apply_call(env, binds0, fname, arg, ts_tok_line(toks, p));
+    let after: String = ts_get(binds, arg);
+    if after != "" {
+        return ts_fresh(binds, vname, after);
+    }
+    return binds;
+}
+
+pub fn ts_apply_ident(toks: List[String], i: Int, env: String, binds0: String) -> String {
+    let n = list_len(toks);
+    if i + 1 >= n { return binds0; }
+    if i + 3 < n {
+        let d1: String = ts_tok_kind(toks, i + 1);
+        let d2: String = ts_tok_kind(toks, i + 2);
+        let d3: String = ts_tok_kind(toks, i + 3);
+        if d1 == "DOT" {
+            if d2 == "IDENT" {
+                if d3 == "LPAREN" {
+                    let recv: String = ts_tok_text(toks, i);
+                    let mname: String = ts_tok_text(toks, i + 2);
+                    return ts_apply_call(env, binds0, mname, recv, ts_tok_line(toks, i));
+                }
+            }
+        }
+    }
+    if ts_tok_kind(toks, i + 1) == "LPAREN" {
+        let fname: String = ts_tok_text(toks, i);
+        let arg: String = ts_first_arg_ident(toks, i + 1);
+        return ts_apply_call(env, binds0, fname, arg, ts_tok_line(toks, i));
+    }
+    if ts_tok_kind(toks, i + 1) != "EQ" { return binds0; }
+    if i + 2 >= n { return binds0; }
+    if ts_tok_kind(toks, i + 2) != "IDENT" { return binds0; }
+    if i + 3 >= n || ts_tok_kind(toks, i + 3) != "LPAREN" {
+        if i + 3 < n {
+            let nxt: String = ts_tok_kind(toks, i + 3);
+            if nxt != "SEMI" { return binds0; }
+        }
+        let dest: String = ts_tok_text(toks, i);
+        let src: String = ts_tok_text(toks, i + 2);
+        ts_refuse_param_rebind(env, dest, ts_tok_line(toks, i));
+        return ts_alias_bind(binds0, dest, src);
+    }
+    let vname: String = ts_tok_text(toks, i);
+    let fname: String = ts_tok_text(toks, i + 2);
+    let spec: String = c_env_get(env, "__tsf__" + fname);
+    if spec == "" { return binds0; }
+    ts_refuse_param_rebind(env, vname, ts_tok_line(toks, i));
+    if char_at(spec, 0) == ">" {
+        return ts_fresh(binds0, vname, str_slice(spec, 1, chars_len(spec)));
+    }
+    let arg: String = ts_first_arg_ident(toks, i + 3);
+    let binds: String = ts_apply_call(env, binds0, fname, arg, ts_tok_line(toks, i + 2));
+    let after: String = ts_get(binds, arg);
+    if after != "" {
+        return ts_fresh(binds, vname, after);
+    }
+    return binds;
+}
+
+pub fn ts_cond_has_ts_fn(toks: List[String], lo: Int, hi: Int, env: String) -> Bool {
+    let mut i = lo;
+    while i + 1 < hi {
+        let k: String = ts_tok_kind(toks, i);
+        if k == "IDENT" {
+            let nk: String = ts_tok_kind(toks, i + 1);
+            if nk == "LPAREN" {
+                let fname: String = ts_tok_text(toks, i);
+                if c_env_get(env, "__tsf__" + fname) != "" { return true; }
+            }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn ts_span_hits_tracked(toks: List[String], lo: Int, hi: Int, binds: String) -> Bool {
+    let mut i = lo;
+    while i < hi {
+        let k: String = ts_tok_kind(toks, i);
+        if k == "IDENT" {
+            let name: String = ts_tok_text(toks, i);
+            if ts_get(binds, name) != "" { return true; }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn ts_walk_fn_body(toks: List[String], fn_pos: Int, body_lo: Int, body_hi: Int, env: String) {
+    let fname: String = ts_fn_name(toks, fn_pos);
+    let param: String = ts_fn_first_param(toks, fn_pos);
+    let spec: String = c_env_get(env, "__tsf__" + fname);
+    let mut fnenv: String = ts_fn_env(env, fname, param, spec);
+    if ts_body_composes(toks, body_lo, body_hi, env) {
+        fnenv = c_env_put(fnenv, "__tscompose__", "1");
+    }
+    let binds0: String = ts_enter_param(fnenv, "");
+    let binds: String = ts_walk_span(toks, body_lo, body_hi, fnenv, binds0);
+    if c_env_get(binds, "__tsdiv__") == "1" { return; }
+    ts_check_exit(fnenv, binds, ts_tok_line(toks, fn_pos));
+    ts_check_main_end(fnenv, binds, fname, ts_tok_line(toks, fn_pos));
+}
+
+pub fn ts_walk_program(toks: List[String], env: String) {
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        let k: String = ts_tok_kind(toks, i);
+        if k == "KW_FN" {
+            let mut j = i;
+            while j < n {
+                let jk: String = ts_tok_kind(toks, j);
+                if jk == "LBRACE" { break; }
+                j = j + 1;
+            }
+            if j < n {
+                let end: Int = ts_skip_braces(toks, j);
+                ts_walk_fn_body(toks, i, j + 1, end - 1, env);
+                i = end;
+            } else {
+                i = i + 1;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+}

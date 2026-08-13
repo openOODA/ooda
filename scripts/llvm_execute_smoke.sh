@@ -8,7 +8,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODA="${OODA_BIN:-${OODA:-$ROOT/bin/ooda}}"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
 export OODA_SRC_ROOT="${OODA_SRC_ROOT:-$ROOT}"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 TMP="$TMPDIR/llvm_execute_smoke_$$"
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT

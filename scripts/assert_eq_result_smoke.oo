@@ -1,0 +1,188 @@
+// ===================================================================
+// Assert Eq Result Smoke
+// ===================================================================
+// job: M161 Result[String,String] assert_eq / OoResS structural eq rails
+// in:  oodac/oodac (OODAC_BIN), fixtures/assert_eq_result.oo
+// out: exit 0 if build+run proves Ok/Err equality (path A alpha; not beta)
+
+import "std/test.oo";
+import "std/os/cmd.oo";
+import "std/os/process.oo";
+import "std/core/str.oo";
+
+pub fn main(p: &ProcessCap) {
+    let mut tr: TestRunner = test_runner_new();
+    
+    let root = get_root(p);
+    let oodac = get_env(p, "OODAC_BIN", root + "/oodac/oodac");
+    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
+    let ooda = get_env(p, "OODA", root + "/bin/ooda");
+    let src = root + "/fixtures/assert_eq_result.oo";
+    let bin = tmpdir + "/assert_eq_result";
+    let script_name = "assert_eq_result_smoke.sh";
+    
+    // Check oodac exists
+    let oodac_exists = cmd_exec(p, "test -x " + oodac);
+    if !oodac_exists.is_ok() {
+        println("ERR_NO_OODAC: " + oodac);
+        process_exit(1);
+    }
+    
+    // Check source file exists
+    let src_exists = cmd_exec(p, "test -f " + src);
+    tr = test_assert(tr, "source file exists", src_exists.is_ok());
+    
+    if !src_exists.is_ok() {
+        test_summary(tr);
+        process_exit(1);
+    }
+    
+    // Honesty: source emit must define oo_res_eq (M161)
+    let check_source = cmd_exec(p, "grep -q 'oo_res_eq' " + root + "/oodac/c_emit_preamble.oo 2>/dev/null");
+    tr = test_assert(tr, "source oo_res_eq in c_emit_preamble.oo", check_source.is_ok());
+    
+    // Probe: emit-c of fixture must carry oo_res_eq / oo_assert_eq_ress when binary is current
+    let emit_out = tmpdir + "/aer_emit.c";
+    let emit_err = tmpdir + "/aer_emit.err";
+    let emit_res = cmd_exec(p, oodac + " emit-c " + src + " >" + emit_out + " 2>" + emit_err);
+    if !emit_res.is_ok() {
+        tr = test_assert(tr, "emit-c assert_eq_result exit=0", false);
+    } else {
+        let check_oo_res_eq = cmd_exec(p, "grep -q 'oo_res_eq' " + emit_out);
+        tr = test_assert(tr, "emit-c includes oo_res_eq", check_oo_res_eq.is_ok());
+    }
+    
+    // Build (native)
+    let build_out = tmpdir + "/aer_build.out";
+    let build_err = tmpdir + "/aer_build.err";
+    let build_res = cmd_exec(p, "rm -f " + bin + " && " + oodac + " build " + src + " " + bin + " >" + build_out + " 2>" + build_err);
+    
+    if !build_res.is_ok() || !cmd_exec(p, "test -x " + bin).is_ok() {
+        // Fall back to pure multi-module script
+        let pure_out = tmpdir + "/aer_pure.out";
+        let pure_err = tmpdir + "/aer_pure.err";
+        let pure_res = cmd_exec(p, "OODAC_BIN=" + oodac + " bash " + root + "/scripts/oodac_pure_build.sh " + src + " " + bin + " >" + pure_out + " 2>" + pure_err);
+        if !pure_res.is_ok() || !cmd_exec(p, "test -x " + bin).is_ok() {
+            tr = test_assert(tr, "build fixtures/assert_eq_result.oo (direct+pure)", false);
+        } else {
+            tr = test_assert(tr, "pure build fixtures/assert_eq_result.oo", true);
+        }
+    } else {
+        tr = test_assert(tr, "build fixtures/assert_eq_result.oo", true);
+    }
+    
+    // Run: expect ok-eq / err-eq / ok-err-ne / pass (assert_eq aborts on mismatch)
+    if cmd_exec(p, "test -x " + bin).is_ok() {
+        let run_out = tmpdir + "/aer_run.out";
+        let run_err = tmpdir + "/aer_run.err";
+        let run_res = cmd_exec(p, bin + " >" + run_out + " 2>" + run_err);
+        if !run_res.is_ok() {
+            tr = test_assert(tr, "run assert_eq_result exit=0", false);
+        } else {
+            let output = cmd_exec(p, "cat " + run_out);
+            if output.is_ok() {
+                let out = output.unwrap();
+                if str_contains(out, "ok-eq") &&
+                   str_contains(out, "err-eq") &&
+                   str_contains(out, "ok-err-ne") &&
+                   str_contains(out, "pass") &&
+                   !str_contains(out, "should-not") {
+                    tr = test_assert(tr, "run assert_eq_result (Ok/Err structural eq)", true);
+                } else {
+                    tr = test_assert(tr, "run output unexpected", false);
+                }
+            }
+        }
+    } else {
+        tr = test_assert(tr, "no binary to run", false);
+    }
+    
+    // Line lock (path A)
+    let lines_check = cmd_exec(p, "wc -l <" + root + "/scripts/" + script_name);
+    if lines_check.is_ok() {
+        let n = lines_check.unwrap();
+        let n_trimmed = trim(n);
+        let n_int = str_to_int(n_trimmed);
+        if n_int > 256 {
+            tr = test_assert(tr, script_name + " over MAX_LINES 256", false);
+        } else {
+            tr = test_assert(tr, script_name + " lines=" + n_trimmed + " (<=256)", true);
+        }
+    }
+    
+    let fix_lines_check = cmd_exec(p, "wc -l <" + src);
+    if fix_lines_check.is_ok() {
+        let nfix = fix_lines_check.unwrap();
+        let nfix_trimmed = trim(nfix);
+        let nfix_int = str_to_int(nfix_trimmed);
+        if nfix_int > 256 {
+            tr = test_assert(tr, "fixtures/assert_eq_result.oo over MAX_LINES 256", false);
+        } else {
+            tr = test_assert(tr, "fixtures/assert_eq_result.oo lines=" + nfix_trimmed + " (<=256)", true);
+        }
+    }
+    
+    test_summary(tr);
+    
+    if tr.failed > 0 {
+        process_exit(1);
+    }
+    
+    println("assert_eq_result_smoke: PASSED");
+}
+
+fn get_root(p: &ProcessCap) -> String {
+    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
+    if res.is_ok() {
+        return trim(res.unwrap());
+    }
+    return ".";
+}
+
+fn get_env(p: &ProcessCap, key: String, default: String) -> String {
+    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
+    if res.is_ok() {
+        let val = res.unwrap();
+        let trimmed = trim(val);
+        if str_len(trimmed) > 0 {
+            return trimmed;
+        }
+    }
+    return default;
+}
+
+fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
+    return process_exec(p, cmd);
+}
+
+fn trim(s: String) -> String {
+    let len = str_len(s);
+    let mut start = -1;
+    let mut end = -1;
+    let mut i = 0;
+    while i < len {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            start = i;
+            break;
+        }
+        i = i + 1;
+    }
+    if start < 0 {
+        return "";
+    }
+    i = len - 1;
+    while i >= start {
+        let c = str_char_at(s, i);
+        if c != " " && c != "\t" && c != "\n" && c != "\r" {
+            end = i;
+            break;
+        }
+        i = i - 1;
+    }
+    if end >= start {
+        let result = str_sub(s, start, end + 1);
+        return str_replace(result, "\r", "");
+    }
+    return "";
+}

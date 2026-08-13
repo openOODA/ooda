@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMP"
 cat >"$TMP/meta_epoch_harness.c" <<'C'
 #include "chs_rt.h"

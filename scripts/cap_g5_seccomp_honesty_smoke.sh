@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
-TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/cap_g5_smoke_$$"
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/cap_g5_smoke_$$"
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT
 pass() { echo "OK $*"; }

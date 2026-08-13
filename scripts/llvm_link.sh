@@ -52,7 +52,7 @@ if [[ -z "$CLANG" && -n "$LLC" && -z "$LINKER" ]]; then
   exit 1
 fi
 
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 WORKDIR="$TMPDIR/llvm_link_$$"
 mkdir -p "$WORKDIR" "$(dirname "$OUT_BIN")"
 trap 'rm -rf "$WORKDIR"' EXIT

@@ -2,7 +2,7 @@
 # job: pure multi-module oodac build (emit each .oo, link once) — no stage-0 host
 # in:  <main.oo> <out_bin>
 # out: native binary via emit-c + gcc + chs_rt only
-# link recipe: Backend-C (see bootstrap/FLOOR.md) — swap here for other floors later
+# link recipe: Backend-C (see bootstrap/FLOOR.oot) — swap here for other floors later
 # Notes:
 #  - Forward prototypes for all fns so use-before-def across modules is OK
 #  - Nested imports + cycle/missing fail-closed (parity with load_import.oo)
@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MAIN="${1:?main.oo}"
 OUT="${2:?out_bin}"
 OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/oodac_llvm_$$"
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/oodac_llvm_$$"
 mkdir -p "$TMP"
 # Lifecycle: always reap temp tree (success or fail)
 cleanup_llvm_tmp() { echo "kept $TMP"; }
@@ -87,10 +87,10 @@ first=1
 for src in "${MODS[@]}"; do
   echo "emitting llvm for $src" >&2
   if [[ $first -eq 1 ]]; then
-      EMIT_NO_CONCAT=1 "$OODAC_BIN" emit-llvm "$src" >> "$TMP/all.ll"
+      OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 "$OODAC_BIN" emit-llvm "$src" >> "$TMP/all.ll"
       first=0
   else
-      EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 "$OODAC_BIN" emit-llvm "$src" >> "$TMP/all.ll"
+      OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 "$OODAC_BIN" emit-llvm "$src" >> "$TMP/all.ll"
   fi
 done
 

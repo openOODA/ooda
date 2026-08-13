@@ -5,14 +5,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }
 RT=(-O0 -I"$ROOT/runtime" "$ROOT/runtime/chs_rt.c" -lm -ldl -lpthread)
 FIX="$ROOT/fixtures/malloc_path_a.oo"
-DOC="$ROOT/bootstrap/MEMORY_QUOTA.md"
+DOC="$ROOT/bootstrap/MEMORY_QUOTA.oot"
 
 # Doc honesty
 if [[ -f "$DOC" ]] \

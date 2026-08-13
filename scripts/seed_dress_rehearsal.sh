@@ -6,7 +6,7 @@
 # Product path only (seed + gcc); offline; never beta tag
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
 # --- resolve seed (offline only; no release download) ---
@@ -20,7 +20,7 @@ elif [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then
 fi
 
 if [[ -z "$SEED" ]]; then
-  msg="residual: no offline seed (place bootstrap/seed/oodac or set SEED_OODAC); see bootstrap/seed/README.md"
+  msg="residual: no offline seed (place bootstrap/seed/oodac or set SEED_OODAC); see bootstrap/seed/README.oot"
   if [[ "${SEED_REQUIRED:-0}" == "1" ]]; then
     echo "seed_dress_rehearsal: FAILED ($msg)" >&2
     exit 1
@@ -59,5 +59,5 @@ echo "seed_dress_rehearsal: PASSED"
 echo "  seed: $SEED"
 echo "  oodac: $ROOT/oodac/oodac"
 echo "  ooda:  $ROOT/bin/ooda"
-echo "related: scripts/install_dress_rehearsal.sh (release layout); bootstrap/GHA_PRODUCT.md (remote CI)"
+echo "related: scripts/install_dress_rehearsal.sh (release layout); bootstrap/GHA_PRODUCT.oot (remote CI)"
 exit 0

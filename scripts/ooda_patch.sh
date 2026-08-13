@@ -5,7 +5,7 @@
 # SECURITY: never shell-evals patch body; path checks in python
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
 PY="$ROOT/scripts/ooda_patch.py"

@@ -1,0 +1,169 @@
+import "std/test.oo";
+import "std/os/cmd.oo";
+import "std/os/process.oo";
+import "std/os/fs.oo";
+import "std/str.oo";
+
+fn extract_result(r: Result[String, String]) -> String {
+    return match r {
+        Ok(x) => x,
+        Err(y) => y,
+    };
+}
+
+fn emit_ok(p: &ProcessCap, src: String, base: String) -> Result[String, String] {
+    let oodac = "oodac/oodac";
+    let tmpdir = ".ooda-tmp-test";
+    let c_out = tmpdir + "/mc_" + base + ".c";
+    let err_out = tmpdir + "/mc_" + base + ".err";
+    
+    let cmd = oodac + " emit-c " + src + " >" + c_out + " 2>" + err_out;
+    let r = process_exec(p, cmd);
+    
+    if r.is_err() {
+        process_exec(p, "cat " + err_out + " >&2");
+        return Err("FAIL multi-clause emit rc!=0: " + src);
+    }
+    
+    let grep_r = process_exec(p, "grep -E '^ERR\t' " + c_out);
+    if grep_r.is_ok() {
+        process_exec(p, "grep -E '^ERR\t' " + c_out + " >&2");
+        return Err("FAIL multi-clause emit found ERR in output: " + src);
+    }
+    
+    process_exec(p, "grep -v '🚀\\|Running main' " + c_out + " > " + c_out + ".clean || true");
+    process_exec(p, "mv " + c_out + ".clean " + c_out);
+    
+    return Ok(c_out);
+}
+
+pub fn main(p: &ProcessCap, sys: &SysCap, f_read: &FsReadCap, f_write: &FsWriteCap) {
+    let mut tr: TestRunner = test_runner_new();
+
+    let tmpdir = ".ooda-tmp-test";
+    process_exec(p, "mkdir -p " + tmpdir);
+
+    let rt = "runtime";
+    let mc_pass = "fixtures/multi_clause_pass.oo";
+    let mc_req_fail = "fixtures/multi_clause_req_fail.oo";
+    let mc_ens_fail = "fixtures/multi_clause_ens_fail.oo";
+    let three = "fixtures/multi_clause_three.oo";
+    let three_f = "fixtures/multi_clause_three_req_fail.oo";
+
+    // 1. pass: >=2 requires + >=2 ensures lowers; run -> 3
+    let c_mc_res = emit_ok(p, mc_pass, "pass");
+    tr = test_assert(tr, "emit_ok mc_pass", c_mc_res.is_ok());
+    if c_mc_res.is_ok() {
+        let c_mc = extract_result(c_mc_res);
+        
+        let req_check = process_exec(p, "awk '/if \\(!\\(/ {c++} END {if(c>=2) exit 0; else exit 1}' " + c_mc);
+        tr = test_assert(tr, "multi_clause_pass requires lowers >= 2", req_check.is_ok());
+        
+        let ens_check = process_exec(p, "grep -q 'OO_ENS_CHECK' " + c_mc);
+        tr = test_assert(tr, "multi_clause_pass missing multi-ensures lower", ens_check.is_ok());
+
+        let bin_mc = tmpdir + "/multi_clause_pass.bin";
+        let gcc_cmd1 = "gcc -O0 -I" + rt + " " + rt + "/chs_rt.c " + c_mc + " -o " + bin_mc + " -lm";
+        let build1 = process_exec(p, gcc_cmd1);
+        tr = test_assert(tr, "multi_clause_pass build", build1.is_ok());
+        
+        if build1.is_ok() {
+            let out_mc = process_exec(p, "timeout 3 " + bin_mc);
+            tr = test_assert(tr, "multi_clause_pass run success", out_mc.is_ok());
+            tr = test_assert(tr, "multi_clause_pass expected 3", str_contains(extract_result(out_mc), "3"));
+        }
+    }
+
+    // 2. second requires fails at runtime
+    let c_mrf_res = emit_ok(p, mc_req_fail, "req_fail");
+    tr = test_assert(tr, "emit_ok mc_req_fail", c_mrf_res.is_ok());
+    if c_mrf_res.is_ok() {
+        let c_mrf = extract_result(c_mrf_res);
+        let bin_mrf = tmpdir + "/multi_clause_req_fail.bin";
+        let gcc_cmd2 = "gcc -O0 -I" + rt + " " + rt + "/chs_rt.c " + c_mrf + " -o " + bin_mrf + " -lm";
+        let build2 = process_exec(p, gcc_cmd2);
+        tr = test_assert(tr, "multi_clause_req_fail build", build2.is_ok());
+        
+        if build2.is_ok() {
+            let out_mrf = process_exec(p, "timeout 3 " + bin_mrf + " 2>&1");
+            tr = test_assert(tr, "multi_clause_req_fail run should fail", out_mrf.is_err());
+            
+            let write_mrf = fs_write_file(f_write, tmpdir + "/mrf.out", extract_result(out_mrf));
+            let grep_mrf = process_exec(p, "grep -qiE 'contract|requires' " + tmpdir + "/mrf.out");
+            tr = test_assert(tr, "multi_clause_req_fail needle out", grep_mrf.is_ok());
+        }
+    }
+
+    // 3. second ensures fails at runtime
+    let c_mef_res = emit_ok(p, mc_ens_fail, "ens_fail");
+    tr = test_assert(tr, "emit_ok mc_ens_fail", c_mef_res.is_ok());
+    if c_mef_res.is_ok() {
+        let c_mef = extract_result(c_mef_res);
+        let ens_check2 = process_exec(p, "grep -q 'OO_ENS_CHECK' " + c_mef);
+        tr = test_assert(tr, "multi_clause_ens_fail ensures setup", ens_check2.is_ok());
+
+        let bin_mef = tmpdir + "/multi_clause_ens_fail.bin";
+        let gcc_cmd3 = "gcc -O0 -I" + rt + " " + rt + "/chs_rt.c " + c_mef + " -o " + bin_mef + " -lm";
+        let build3 = process_exec(p, gcc_cmd3);
+        tr = test_assert(tr, "multi_clause_ens_fail build", build3.is_ok());
+        
+        if build3.is_ok() {
+            let out_mef = process_exec(p, "timeout 3 " + bin_mef + " 2>&1");
+            tr = test_assert(tr, "multi_clause_ens_fail run should fail", out_mef.is_err());
+            
+            let write_mef = fs_write_file(f_write, tmpdir + "/mef.out", extract_result(out_mef));
+            let grep_mef = process_exec(p, "grep -qiE 'contract|ensures' " + tmpdir + "/mef.out");
+            tr = test_assert(tr, "multi_clause_ens_fail needle out", grep_mef.is_ok());
+        }
+    }
+
+    // 4. M67 three-clause depth
+    let has_three = fs_path_exists(f_read, three);
+    if has_three {
+        let c3_res = emit_ok(p, three, "three");
+        tr = test_assert(tr, "emit_ok multi_clause_three", c3_res.is_ok());
+        if c3_res.is_ok() {
+            let c3 = extract_result(c3_res);
+            let req_check3 = process_exec(p, "awk '/if \\(!\\(/ {c++} END {if(c>=3) exit 0; else exit 1}' " + c3);
+            tr = test_assert(tr, "multi_clause_three requires lowers >= 3", req_check3.is_ok());
+            
+            let ens_check3 = process_exec(p, "grep -q 'OO_ENS_CHECK' " + c3);
+            tr = test_assert(tr, "multi_clause_three ensures setup", ens_check3.is_ok());
+
+            let bin3 = tmpdir + "/multi_clause_three.bin";
+            let gcc_cmd4 = "gcc -O0 -I" + rt + " " + rt + "/chs_rt.c " + c3 + " -o " + bin3 + " -lm";
+            let build4 = process_exec(p, gcc_cmd4);
+            tr = test_assert(tr, "multi_clause_three build", build4.is_ok());
+            
+            if build4.is_ok() {
+                let out3 = process_exec(p, "timeout 3 " + bin3);
+                tr = test_assert(tr, "multi_clause_three run success", out3.is_ok());
+                tr = test_assert(tr, "multi_clause_three expected 6", str_contains(extract_result(out3), "6"));
+            }
+        }
+    }
+
+    let has_three_f = fs_path_exists(f_read, three_f);
+    if has_three_f {
+        let c3f_res = emit_ok(p, three_f, "three_f");
+        tr = test_assert(tr, "emit_ok multi_clause_three_req_fail", c3f_res.is_ok());
+        if c3f_res.is_ok() {
+            let c3f = extract_result(c3f_res);
+            let bin3f = tmpdir + "/multi_clause_three_req_fail.bin";
+            let gcc_cmd5 = "gcc -O0 -I" + rt + " " + rt + "/chs_rt.c " + c3f + " -o " + bin3f + " -lm";
+            let build5 = process_exec(p, gcc_cmd5);
+            tr = test_assert(tr, "multi_clause_three_req_fail build", build5.is_ok());
+            
+            if build5.is_ok() {
+                let out3f = process_exec(p, "timeout 3 " + bin3f + " 2>&1");
+                tr = test_assert(tr, "multi_clause_three_req_fail run should fail", out3f.is_err());
+                
+                let write_3f = fs_write_file(f_write, tmpdir + "/three_f.out", extract_result(out3f));
+                let grep_3f = process_exec(p, "grep -qiE 'contract|requires' " + tmpdir + "/three_f.out");
+                tr = test_assert(tr, "multi_clause_three_req_fail needle out", grep_3f.is_ok());
+            }
+        }
+    }
+
+    test_summary(tr);
+}

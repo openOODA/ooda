@@ -3,7 +3,7 @@
 # Proves corpus under bootstrap/corpus/check/{fail,pass}/ via product oodac check.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
 # Prefer product tree oodac; allow OODAC_BIN override; fall back to sibling oodac/

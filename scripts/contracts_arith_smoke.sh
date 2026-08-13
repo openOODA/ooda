@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 [[ -x "$OODAC_BIN" ]] || { echo "ERR_NO_OODAC" >&2; exit 1; }
 fail=0
@@ -65,9 +65,9 @@ else
 fi
 
 # honesty: residual markers still present (no full SMT claim)
-if grep -q "CONTRACTS_COMPLEX_RESIDUAL_ALPHA" "$ROOT/bootstrap/CONTRACTS_COMPLEX.md" \
-  && grep -qiE 'NO quantifier|no quantifier|not claim.*quantif|quantifiers' "$ROOT/bootstrap/CONTRACTS_COMPLEX.md" \
-  && grep -qiE 'old-state|old state' "$ROOT/bootstrap/CONTRACTS_COMPLEX.md"; then
+if grep -q "CONTRACTS_COMPLEX_RESIDUAL_ALPHA" "$ROOT/bootstrap/CONTRACTS_COMPLEX.oot" \
+  && grep -qiE 'NO quantifier|no quantifier|not claim.*quantif|quantifiers' "$ROOT/bootstrap/CONTRACTS_COMPLEX.oot" \
+  && grep -qiE 'old-state|old state' "$ROOT/bootstrap/CONTRACTS_COMPLEX.oot"; then
   pass "CONTRACTS_COMPLEX residual honesty (no quantifiers/old-state)"
 else
   bad "CONTRACTS_COMPLEX honesty gaps"

@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
 LINK="$ROOT/scripts/llvm_link.sh"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 TMP="$TMPDIR/llvm_fail_closed_$$"
 mkdir -p "$TMP/bin"
 trap 'rm -rf "$TMP"' EXIT

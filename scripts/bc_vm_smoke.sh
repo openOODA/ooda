@@ -23,7 +23,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
 OODA="${OODA:-$ROOT/bin/ooda}"
-TMP="${TMPDIR:-$HOME/.cache/ooda-tmp}/bc_vm_smoke_$$"
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/bc_vm_smoke_$$"
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT
 

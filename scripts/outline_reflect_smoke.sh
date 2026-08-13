@@ -4,7 +4,7 @@
 # out: exit 0 if pass+fail rails green
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 OODA="${OODA:-$ROOT/bin/ooda}"
 FIX="$ROOT/fixtures/outline_reflect_pass.oo"

@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
 [[ -x "$OODAC" ]] || { echo "ERR_NO_OODAC" >&2; exit 1; }
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; exit 1; }

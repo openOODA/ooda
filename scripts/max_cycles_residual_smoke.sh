@@ -3,7 +3,7 @@
 # Attack: residual must NOT still claim "names only" after path A product In
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-DOC="$ROOT/bootstrap/MAX_CYCLES.md"
+DOC="$ROOT/bootstrap/MAX_CYCLES.oot"
 FIX="$ROOT/fixtures/max_cycles_marker.oo"
 fail=0
 pass() { echo "OK $*"; }

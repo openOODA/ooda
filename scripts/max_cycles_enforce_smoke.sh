@@ -6,7 +6,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OODAC="${OODAC_BIN:-$ROOT/oodac/oodac}"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 INJ="$ROOT/scripts/max_cycles_fuel_inject.sh"
 
@@ -19,7 +19,7 @@ chmod +x "$INJ" 2>/dev/null || true
 PASS="$ROOT/fixtures/max_cycles_pass.oo"
 FAIL="$ROOT/fixtures/max_cycles_fail.oo"
 ZERO="$ROOT/fixtures/max_cycles_zero.oo"
-DOC="$ROOT/bootstrap/MAX_CYCLES.md"
+DOC="$ROOT/bootstrap/MAX_CYCLES.oot"
 fail=0
 pass() { echo "OK $*"; }
 bad() { echo "FAIL $*" >&2; fail=1; }

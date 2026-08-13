@@ -5,7 +5,7 @@
 # pure: bash harness gen + emit-c + gcc only (M50)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-export TMPDIR="${TMPDIR:-$HOME/.cache/ooda-tmp}"
+export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 
 SRC=""
@@ -138,7 +138,7 @@ fi
 pure_emit() {
   local em="$1"
   set +e
-  EMIT_NO_CONCAT=1 timeout 60 "$em" emit-c "$HARNESS" \
+  OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 timeout 60 "$em" emit-c "$HARNESS" \
     >"$HARNESS_C" 2>"$TMPDIR/ooda_test_build.err"
   local ec=$?
   set -e
