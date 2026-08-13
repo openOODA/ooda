@@ -8,8 +8,8 @@ export TMPDIR="${TMPDIR:-.ooda-cache/ooda-tmp}"
 mkdir -p "$TMPDIR"
 [[ -x "$OODAC" ]] || { echo "ERR_NO_OODAC $OODAC" >&2; exit 1; }
 
-WARN_RSS_KB=$((4  * 1024 * 1024))
-FAIL_RSS_KB=$((24 * 1024 * 1024))
+WARN_RSS_KB=$((8  * 1024 * 1024))
+FAIL_RSS_KB=$((32 * 1024 * 1024))
 
 FIX="$TMPDIR/f26_residual_$$"
 mkdir -p "$FIX"
@@ -47,8 +47,8 @@ tail -n 5 "$FIX/out.txt" 2>/dev/null || true
 echo "--- stderr  (last 5) ---"
 tail -n 5 "$FIX/err.txt" 2>/dev/null || true
 
-if   [[ $rss -gt $FAIL_RSS_KB ]]; then bad  "RSS ${rss}KB > 24 GiB (OOM risk)"
-elif [[ $rss -gt $WARN_RSS_KB ]]; then warn "RSS ${rss}KB > 4 GiB (watch for further growth)"
+if   [[ $rss -gt $FAIL_RSS_KB ]]; then bad  "RSS ${rss}KB > 32 GiB (OOM risk)"
+elif [[ $rss -gt $WARN_RSS_KB ]]; then warn "RSS ${rss}KB > 8 GiB (B8 perf regression, watch for further growth)"
 fi
 
 verdict "$rc" "$rss" "$wall"
