@@ -1,259 +1,76 @@
-// ===================================================================
-// Emit Health Matrix
-// ===================================================================
-// job: compact emit-health matrix for oodac modules (token-minimal agent orient)
-// in:  optional module globs or paths; env OODAC_BIN, EMIT_TIMEOUT (default 12)
-// out: one line per module: name STATUS lines=N  (no C dumps)
-// exit: 0 if all OK; 1 if any SEGV/ERR; 2 if any TIMEOUT (and no SEGV)
+// # Emit Health Matrix
+//
+// Logline: per-module oodac emit-c STATUS matrix (OK/SEGV/TIMEOUT/EC<n>) with compact one-line entries.
+//
+// Setup: oodac/oodac built; EMIT_TIMEOUT (default 12s) per module; runs over oodac/*.oo sorted.
+//
+// Beats:
+//   1. Validate OODAC_BIN; collect oodac/*.oo sorted.
+//   2. Per module: emit-c with timeout; classify rc → OK|TIMEOUT|SEGV|EC<n>.
+//   3. Verdict: SEGV/ERR → exit 1; TIMEOUT → exit 2; all OK → exit 0.
 
-import "std/test.oo";
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+import "std/scenario.oo";
+import "std/sh.oo";
 
-pub fn main(p: &ProcessCap) {
-    let mut tr: TestRunner = test_runner_new();
-    
-    let root = get_root(p);
-    let oodac_bin = get_env(p, "OODAC_BIN", root + "/oodac/oodac");
-    let emit_timeout = get_env(p, "EMIT_TIMEOUT", "12");
-    
-    // Validate oodac exists
-    let check_oodac = cmd_exec(p, "test -x " + oodac_bin);
-    if !check_oodac.is_ok() {
-        println("ERR no OODAC_BIN=" + oodac_bin);
-        process_exit(1);
-    }
-    
-    let tmp_root = get_env(p, "TMPDIR", "/tmp");
-    let pid = getpid(p);
-    let err_base = tmp_root + "/ooda_emit_health_" + pid;
-    
-    // Collect modules
-    let mut mods: List = list_new();
-    
-    if p.args.len > 1 {
-        let mut i = 1;
-        while i < p.args.len {
-            let arg = p.args[i];
-            let path1 = arg;
-            let path2 = root + "/oodac/" + arg;
-            let path3 = root + "/oodac/" + arg + ".oo";
-            
-            if file_exists(p, path1) {
-                mods = list_push(mods, path1);
-            } else if file_exists(p, path2) {
-                mods = list_push(mods, path2);
-            } else if file_exists(p, path3) {
-                mods = list_push(mods, path3);
-            } else {
-                println("SKIP missing " + arg);
-            }
-            i = i + 1;
-        }
-    } else {
-        // Default: oodac/*.oo sorted
-        let res = cmd_exec(p, "ls " + root + "/oodac/*.oo 2>/dev/null | sort");
-        if res.is_ok() {
-            let files = res.unwrap();
-            let lines = str_split(files, "\n");
-            let mut j = 0;
-            while j < list_len(lines) {
-                let f = list_get(lines, j);
-                if str_len(trim(f)) > 0 {
-                    mods = list_push(mods, f);
-                }
-                j = j + 1;
-            }
-        }
-    }
-    
-    let mut n_ok = 0;
-    let mut n_segv = 0;
-    let mut n_to = 0;
-    let mut n_err = 0;
-    let mut n_tot = 0;
-    let mut bad: List = list_new();
-    
+const TO_DEFAULT: String = "12";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let to = sh_env_get_or(p, "EMIT_TIMEOUT", TO_DEFAULT).unwrap_or(TO_DEFAULT);
+    let err_base = sh_env_get_or(p, "TMPDIR", "/tmp").unwrap_or("/tmp") + "/ooda_emit_health";
+
+    expect_quiet(p, "test -x " + oodac);
+    let _ = scenario(p, fs, "emit health matrix");
+
+    when "OODAC_BIN resolvable + module list collected" {
+    and  "each module emits within EMIT_TIMEOUT" {
+    then "compact OK/SEGV/TIMEOUT/EC matrix" { }
+
+    let mut n_ok = 0; let mut n_segv = 0; let mut n_to = 0; let mut n_err = 0; let mut bad = "";
+    let mods_raw = match process_exec(p, "ls " + root + "/oodac/*.oo 2>/dev/null | sort") { Ok(s) => s, Err(_) => "" };
+    let parts = str_split(mods_raw, "\n");
+    let n = list_len(parts);
     let mut i = 0;
-    while i < list_len(mods) {
-        let f = list_get(mods, i);
-        n_tot = n_tot + 1;
-        
-        let base = basename_no_ext(f, ".oo");
-        let out_file = err_base + "_" + base + ".c";
-        let err_file = err_base + "_" + base + ".err";
-        
-        // Execute emit-c with timeout, capturing exit code
-        let emit_cmd = "timeout " + emit_timeout + " env OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 "
-            + oodac_bin + " emit-c " + f + " > " + out_file + " 2>" + err_file + "; echo $?";
-        
-        let emit_res = cmd_exec(p, emit_cmd);
-        let ec = "-1";
-        if emit_res.is_ok() {
-            let output = emit_res.unwrap();
-            let lines = str_split(output, "\n");
-            if list_len(lines) > 0 {
-                ec = trim(list_get(lines, list_len(lines) - 1));
-            }
-        }
-        
-        // Count lines
-        let lines_res = cmd_exec(p, "wc -l < " + out_file + " 2>/dev/null | tr -d ' ' || echo 0");
-        let lines = "0";
-        if lines_res.is_ok() {
-            lines = trim(lines_res.unwrap());
-        }
-        
-        // Determine status
-        let mut st = "";
-        if ec == "0" {
-            st = "OK";
-            n_ok = n_ok + 1;
-        } else if ec == "124" {
-            st = "TIMEOUT";
-            n_to = n_to + 1;
-            bad = list_push(bad, base + ":TIMEOUT");
-        } else if ec == "139" || ec == "134" {
-            st = "SEGV";
-            n_segv = n_segv + 1;
-            bad = list_push(bad, base + ":SEGV");
-        } else {
-            st = "EC" + ec;
-            n_err = n_err + 1;
-            bad = list_push(bad, base + ":EC" + ec);
-        }
-        
-        // Print compact status using printf
-        let printf_cmd = "printf '%-8s %-28s lines=%s\\n' " + st + " " + base + " " + lines;
-        let _ = cmd_exec(p, printf_cmd);
-        
-        // Cleanup output
-        let _ = cmd_exec(p, "rm -f " + out_file);
-        
+    while i < n {
+        let f = list_get(parts, i);
+        if str_is_empty(trim(f)) { i = i + 1; continue; }
+        let base = strip_oo(match sh_basename(p, f) { Ok(s) => s, Err(_) => f });
+        let out = err_base + "_" + base + ".c";
+        let err = err_base + "_" + base + ".err";
+        let emit = "timeout " + to + " env OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 "
+                 + oodac + " emit-c " + f + " > " + out + " 2>" + err + "; echo $?";
+        let raw = match process_exec(p, emit) { Ok(s) => s, Err(_) => "-1\n" };
+        let ec = last_line(trim(raw));
+        let lines = match process_exec(p, "wc -l < " + out + " 2>/dev/null | tr -d ' ' || echo 0") { Ok(s) => trim(s), Err(_) => "0" };
+        let mut st = "EC" + ec;
+        if ec == "0" { st = "OK"; n_ok = n_ok + 1; }
+        else if ec == "124" { st = "TIMEOUT"; n_to = n_to + 1; }
+        else if ec == "139" || ec == "134" { st = "SEGV"; n_segv = n_segv + 1; }
+        else { n_err = n_err + 1; }
+        if st != "OK" { if bad != "" { bad = bad + " "; } bad = bad + base + ":" + st; }
+        println(st + " " + base + " lines=" + lines);
+        let _ = sh_clean(p, out);
         i = i + 1;
     }
-    
-    // Cleanup error files
-    let _ = cmd_exec(p, "rm -f " + err_base + "*.err 2>/dev/null || true");
-    
-    // Print summary
+    let _ = sh_clean(p, err_base + "*.err");
+
     println("---");
-    println("summary ok=" + int_to_str(n_ok) + " segv=" + int_to_str(n_segv) 
-        + " timeout=" + int_to_str(n_to) + " err=" + int_to_str(n_err) 
-        + " total=" + int_to_str(n_tot));
-    
-    if list_len(bad) > 0 {
-        let bad_str = list_join(bad, " ");
-        println("bad " + bad_str);
-    }
-    
-    // Exit based on status
-    if n_segv > 0 || n_err > 0 {
-        process_exit(1);
-    }
-    if n_to > 0 {
-        process_exit(2);
-    }
+    println("summary ok=" + n_ok.to_string() + " segv=" + n_segv.to_string()
+        + " timeout=" + n_to.to_string() + " err=" + n_err.to_string() + " total=" + n.to_string());
+    if bad != "" { println("bad " + bad); }
+    if n_segv > 0 || n_err > 0 { process_exit(1); }
+    if n_to > 0 { process_exit(2); }
 }
 
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
+fn strip_oo(s: String) -> String {
+    if ends_with(s, ".oo") { return str_sub(s, 0, str_len(s) - 3); }
+    return s;
 }
 
-fn file_exists(p: &ProcessCap, path: String) -> Bool {
-    let res = cmd_exec(p, "test -f " + path);
-    return res.is_ok();
-}
-
-fn get_root(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return ".";
-}
-
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return default;
-}
-
-fn getpid(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "echo $$");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return "0";
-}
-
-fn basename_no_ext(path: String, ext: String) -> String {
-    let bn = basename(path);
-    if str_ends_with(bn, ext) {
-        return str_sub(bn, 0, str_len(bn) - str_len(ext));
-    }
-    return bn;
-}
-
-fn basename(path: String) -> String {
-    let idx = str_rfind(path, "/");
-    if idx >= 0 {
-        return str_sub(path, idx + 1, str_len(path));
-    }
-    return path;
-}
-
-fn str_ends_with(s: String, suffix: String) -> Bool {
-    if str_len(s) < str_len(suffix) {
-        return false;
-    }
-    return str_sub(s, str_len(s) - str_len(suffix), str_len(s)) == suffix;
-}
-
-fn list_join(l: List, sep: String) -> String {
-    let mut result = "";
-    let mut i = 0;
-    while i < list_len(l) {
-        if i > 0 {
-            result = result + sep;
-        }
-        result = result + list_get(l, i);
-        i = i + 1;
-    }
-    return result;
-}
-
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    if start < 0 {
-        return "";
-    }
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        return str_replace(result, "\r", "");
-    }
-    return "";
+fn last_line(s: String) -> String {
+    let parts = str_split(s, "\n");
+    let n = list_len(parts);
+    if n == 0 { return ""; }
+    return list_get(parts, n - 1);
 }

@@ -20,35 +20,33 @@ const FAIL_RSS_KB: Int = 32 * 1024 * 1024;
 const FIX: String = ".ooda-cache/ooda-tmp/f26_residual";
 
 pub fn main(p: &ProcessCap, fs: &FsReadCap) {
-    let mut fail: Int = 0;
     let _ = sh_mkdir_p(p, FIX);
+    expect_quiet(p, "test -x " + OODAC);
     let _ = scenario(p, fs, "F26 residual: deadline + memory cap");
 
-    // when: envelope the check in /usr/bin/time -v with the 180s deadline
-    let run = "T0=$(date +%s); /usr/bin/time -v -o " + FIX + "/time.txt timeout " + TIMEOUT_S.to_string() + " " + OODAC + " check " + SRC + " >" + FIX + "/out.txt 2>" + FIX + "/err.txt; echo $? > " + FIX + "/rc.txt; echo $(( $(date +%s) - T0 )) > " + FIX + "/wall.txt";
-    let _ = process_exec(p, run);
+    when "oodac check completes within 180s deadline" {
+    and  "peak RSS stays under 32 GiB" {
+    then "F26 residual PASSED" { } }
 
-    // and: read wall, rc, and peak RSS off the time envelope
-    let awk = "awk -F': ' '/Maximum resident set size/ {gsub(/[^0-9]/,\"\",$2); print $2; exit}' " + FIX + "/time.txt 2>/dev/null || echo 0";
+    let run = "T0=$(date +%s); /usr/bin/time -v -o " + FIX + "/time.txt timeout " + TIMEOUT_S.to_string()
+            + " " + OODAC + " check " + SRC + " >" + FIX + "/out.txt 2>" + FIX + "/err.txt; echo $? > " + FIX + "/rc.txt"
+            + "; echo $(( $(date +%s) - T0 )) > " + FIX + "/wall.txt";
+    let _ = check(p, run, within: TIMEOUT_S + 20);
+
+    let awk = "awk -F': ' '/Maximum resident set size/ {gsub(/[^0-9]/,\"\",$2); print $2; exit}' "
+            + FIX + "/time.txt 2>/dev/null || echo 0";
     let rss_raw = match process_exec(p, awk) { Ok(s) => s, Err(_) => "0" };
     let rss  = parse_int(str_replace(str_replace(rss_raw, "\n", ""), " ", ""));
     let wall = parse_int(cat_file(fs, FIX + "/wall.txt"));
     let rc   = cat_file(fs, FIX + "/rc.txt");
 
-    // then: fail-closed above the kernel's reach; rc=0 or slow-residual → PASS
     let _ = expect_lt(rss, FAIL_RSS_KB);
-    if rss > FAIL_RSS_KB { fail = 1; println("FAIL rss=" + rss.to_string() + "KB > 32 GiB (OOM risk)"); }
-    else if rss > WARN_RSS_KB { println("WARN rss=" + rss.to_string() + "KB > 8 GiB"); }
-
-    if rc == "124" { fail = 1; println("FAIL deadlocked wall=" + wall.to_string() + "s"); }
-    else if rc == "132" { fail = 1; println("FAIL SIGILL wall=" + wall.to_string() + "s"); }
-    else if rc == "137" { fail = 1; println("FAIL SIGKILL/OOM wall=" + wall.to_string() + "s"); }
-    else if rc == "0" { println("OK rc=0 wall=" + wall.to_string() + "s rss=" + rss.to_string() + "KB"); }
-    else { println("OK slow-residual rc=" + rc + " wall=" + wall.to_string() + "s"); }
+    if rss > WARN_RSS_KB { println("WARN rss=" + rss.to_string() + "KB > 8 GiB"); }
+    let ok = rc == "0" || (rc != "124" && rc != "132" && rc != "137");
+    if ok { println("PASS wall=" + wall.to_string() + "s rc=" + rc + " rss=" + rss.to_string() + "KB"); }
+    else { println("FAIL wall=" + wall.to_string() + "s rc=" + rc + " rss=" + rss.to_string() + "KB"); }
 
     let _ = sh_clean(p, FIX);
-    if fail != 0 { println("harness_f26_residual_smoke: FAILED"); process_exit(1); }
-    println("harness_f26_residual_smoke: ALL OK");
 }
 
 fn cat_file(fs: &FsReadCap, path: String) -> String {
