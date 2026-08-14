@@ -1,0 +1,222 @@
+// # Lower memory and struct operations to LLVM
+//
+// Logline: Emit struct type declarations, GEP offset computations, field accessors, and struct literal allocations.
+//
+// Setup: llvm_ty_map, llvm_gen_reg, llvm_add_str_lit, and token format tools are in scope.
+//
+// Beats:
+//   1. Parse struct declarations into LLVM struct types and record field offsets.
+//   2. Lower GEP pointer calculations for struct field loads and stores.
+//   3. Provide struct field lookup and field get helpers.
+
+import "token_fmt.oo";
+import "llvm_emit_ty.oo";
+import "llvm_emit_env.oo";
+
+pub fn llvm_emit_type_decl(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    if field_at(list_get(toks, p), 0) == "KW_PUB" { p = p + 1; }
+    if p < n && field_at(list_get(toks, p), 0) == "KW_TYPE" { p = p + 1; }
+    if p >= n || field_at(list_get(toks, p), 0) != "IDENT" { return p + 1; }
+    let tname: String = field_at(list_get(toks, p), 3);
+    p = p + 1;
+    if p < n && field_at(list_get(toks, p), 0) == "EQ" { p = p + 1; }
+    if p < n && field_at(list_get(toks, p), 0) == "IDENT" && field_at(list_get(toks, p), 3) == "struct" {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "LBRACE" { p = p + 1; }
+        let mut field_tys: String = "";
+        let mut first = true;
+        while p < n && field_at(list_get(toks, p), 0) != "RBRACE" {
+            if field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
+            if p >= n || field_at(list_get(toks, p), 0) != "IDENT" { break; }
+            p = p + 1;
+            if p < n && field_at(list_get(toks, p), 0) == "COLON" { p = p + 1; }
+            let mut fty_name: String = "Int";
+            if p < n {
+                if field_at(list_get(toks, p), 0) == "AMP" { p = p + 1; }
+                fty_name = field_at(list_get(toks, p), 3);
+                p = p + 1;
+                if p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
+                    p = p + 1;
+                    let elem: String = field_at(list_get(toks, p), 3);
+                    fty_name = fty_name + "[" + elem + "]";
+                    p = p + 2;
+                }
+            }
+            let lty: String = llvm_ty_map(fty_name);
+            if first { field_tys = lty; first = false; }
+            else { field_tys = field_tys + ", " + lty; }
+        }
+        if p < n && field_at(list_get(toks, p), 0) == "RBRACE" { p = p + 1; }
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+        if field_tys == "" { field_tys = "i64"; }
+        println("%struct." + tname + " = type { " + field_tys + " }");
+        return p;
+    }
+    let mut simple_ty = "i64";
+    if p < n { simple_ty = llvm_ty_map(field_at(list_get(toks, p), 3)); p = p + 1; }
+    while p < n && field_at(list_get(toks, p), 0) != "SEMI" { p = p + 1; }
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+    println("%struct." + tname + " = type { " + simple_ty + " }");
+    return p;
+}
+
+pub fn llvm_scan_struct_fields(toks: List[String], n: Int) -> String {
+    let mut tab: String = "|";
+    let mut p = 0;
+    while p < n {
+        let k: String = field_at(list_get(toks, p), 0);
+        if k == "KW_TYPE" && p + 4 < n && field_at(list_get(toks, p + 1), 0) == "IDENT"
+            && field_at(list_get(toks, p + 2), 0) == "EQ"
+            && field_at(list_get(toks, p + 3), 0) == "IDENT"
+            && field_at(list_get(toks, p + 3), 3) == "struct"
+            && field_at(list_get(toks, p + 4), 0) == "LBRACE"
+        {
+            let sname: String = field_at(list_get(toks, p + 1), 3);
+            let mut entry: String = sname + "=";
+            let mut fp = p + 5;
+            while fp < n && field_at(list_get(toks, fp), 0) != "RBRACE" {
+                if field_at(list_get(toks, fp), 0) == "COMMA" { fp = fp + 1; }
+                if fp >= n || field_at(list_get(toks, fp), 0) != "IDENT" { break; }
+                let fname: String = field_at(list_get(toks, fp), 3);
+                fp = fp + 1;
+                if fp < n && field_at(list_get(toks, fp), 0) == "COLON" { fp = fp + 1; }
+                let mut fty = "Int";
+                if fp < n {
+                    if field_at(list_get(toks, fp), 0) == "AMP" { fp = fp + 1; }
+                    fty = field_at(list_get(toks, fp), 3);
+                    fp = fp + 1;
+                    if fp < n && field_at(list_get(toks, fp), 0) == "LBRACKET" {
+                        fp = fp + 1;
+                        let elem: String = field_at(list_get(toks, fp), 3);
+                        fty = fty + "[" + elem + "]";
+                        fp = fp + 2;
+                    }
+                }
+                entry = entry + fname + ":" + fty + ",";
+            }
+            tab = tab + entry + "|";
+        }
+        p = p + 1;
+    }
+    return tab;
+}
+
+pub fn llvm_struct_field_idx(stab: String, sname: String, fname: String) -> Int {
+    let needle: String = "|" + sname + "=";
+    let slen = chars_len(stab);
+    let nlen = chars_len(needle);
+    let mut i = 0;
+    while i + nlen <= slen {
+        if str_slice(stab, i, i + nlen) == needle {
+            let mut j = i + nlen;
+            let mut fidx = 0;
+            let mut cur_field = "";
+            while j < slen && char_at(stab, j) != "|" {
+                let c = char_at(stab, j);
+                if c == ":" {
+                    if cur_field == fname { return fidx; }
+                    fidx = fidx + 1;
+                    while j < slen && char_at(stab, j) != "," && char_at(stab, j) != "|" { j = j + 1; }
+                    cur_field = "";
+                } else if c != "," { cur_field = cur_field + c; }
+                j = j + 1;
+            }
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+pub fn llvm_struct_field_ty(stab: String, sname: String, fname: String) -> String {
+    let needle: String = "|" + sname + "=";
+    let slen = chars_len(stab);
+    let nlen = chars_len(needle);
+    let mut i = 0;
+    while i + nlen <= slen {
+        if str_slice(stab, i, i + nlen) == needle {
+            let mut j = i + nlen;
+            let mut cur_field = "";
+            while j < slen && char_at(stab, j) != "|" {
+                let c = char_at(stab, j);
+                if c == ":" {
+                    let is_match = cur_field == fname;
+                    j = j + 1;
+                    let mut ty_str = "";
+                    while j < slen && char_at(stab, j) != "," && char_at(stab, j) != "|" {
+                        ty_str = ty_str + char_at(stab, j);
+                        j = j + 1;
+                    }
+                    if is_match { return llvm_ty_map(ty_str); }
+                    cur_field = "";
+                } else if c != "," { cur_field = cur_field + c; }
+                j = j + 1;
+            }
+            return "i64";
+        }
+        i = i + 1;
+    }
+    return "i64";
+}
+
+pub fn llvm_emit_struct_gep(sname: String, slot_var: String, fidx: Int, env: List[String]) -> List[String] {
+    let mut clean_sname = sname;
+    if chars_len(sname) >= 8 && str_slice(sname, 0, 8) == "%struct." {
+        clean_sname = str_slice(sname, 8, chars_len(sname));
+    }
+    let reg_res: List[String] = llvm_gen_reg(env);
+    let ptr_reg = list_get(reg_res, 0);
+    let mut cur_env: List[String] = list_new();
+    cur_env = list_push(cur_env, list_get(reg_res, 1));
+    cur_env = list_push(cur_env, list_get(reg_res, 2));
+    cur_env = list_push(cur_env, list_get(reg_res, 3));
+    cur_env = list_push(cur_env, list_get(reg_res, 4));
+    cur_env = list_push(cur_env, list_get(reg_res, 5));
+
+    println("  " + ptr_reg + " = getelementptr inbounds %struct." + clean_sname + ", %struct." + clean_sname + "* %" + slot_var + ".slot, i32 0, i32 " + fidx.to_string());
+
+    let mut out: List[String] = list_new();
+    out = list_push(out, ptr_reg);
+    out = list_push(out, list_get(cur_env, 0));
+    out = list_push(out, list_get(cur_env, 1));
+    out = list_push(out, list_get(cur_env, 2));
+    out = list_push(out, list_get(cur_env, 3));
+    out = list_push(out, list_get(cur_env, 4));
+    return out;
+}
+
+pub fn llvm_emit_struct_field_get(txt: String, fname: String, env: List[String]) -> List[String] {
+    let vty: String = llvm_env_get_var_ty(env, txt);
+    let lty: String = llvm_ty_map(vty);
+    let sname: String = str_slice(lty, 8, chars_len(lty));
+    let stab: String = llvm_env_get_var_ty(env, "__stab__");
+    let fidx: Int = 0 + llvm_struct_field_idx(stab, sname, fname);
+    let fty: String = llvm_struct_field_ty(stab, sname, fname);
+    let gep_res: List[String] = llvm_emit_struct_gep(sname, txt, fidx, env);
+    let fptr: String = list_get(gep_res, 0);
+    let mut cur_env: List[String] = list_new();
+    cur_env = list_push(cur_env, list_get(gep_res, 1));
+    cur_env = list_push(cur_env, list_get(gep_res, 2));
+    cur_env = list_push(cur_env, list_get(gep_res, 3));
+    cur_env = list_push(cur_env, list_get(gep_res, 4));
+    cur_env = list_push(cur_env, list_get(gep_res, 5));
+    let reg_ld: List[String] = llvm_gen_reg(cur_env);
+    let fval: String = list_get(reg_ld, 0);
+    cur_env = list_new();
+    cur_env = list_push(cur_env, list_get(reg_ld, 1));
+    cur_env = list_push(cur_env, list_get(reg_ld, 2));
+    cur_env = list_push(cur_env, list_get(reg_ld, 3));
+    cur_env = list_push(cur_env, list_get(reg_ld, 4));
+    cur_env = list_push(cur_env, list_get(reg_ld, 5));
+    println("  " + fval + " = load " + fty + ", " + fty + "* " + fptr + ", align 8");
+    let mut out: List[String] = list_new();
+    out = list_push(out, fval);
+    out = list_push(out, fty);
+    out = list_push(out, list_get(cur_env, 0));
+    out = list_push(out, list_get(cur_env, 1));
+    out = list_push(out, list_get(cur_env, 2));
+    out = list_push(out, list_get(cur_env, 3));
+    out = list_push(out, list_get(cur_env, 4));
+    return out;
+}

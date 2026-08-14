@@ -1,9 +1,15 @@
 // # FFI dlopen Path A Smoke
 //
 // Logline: M165 Path A enforces dlopen via ALLOW_DLOPEN + system dirs / ALLOWDIR prefix; non-system paths are residual Err; dlsym with unknown handle Errs.
+//
 // Setup: oodac/oodac prebuilt; gcc; runtime/chs_rt_ffi.c with allowlist + handle-table dlsym.
 //
-// Beats: runtime honesty | no ALLOW = dlopen-err | ALLOW + system libc = dlopen-ok | non-system path = dlopen-err | dlsym unknown handle Err.
+// Beats:
+//   1. Runtime honesty: allowlist + handle-table dlsym.
+//   2. No ALLOW_DLOPEN = dlopen-err.
+//   3. ALLOW + system libc = dlopen-ok.
+//   4. Non-system /tmp/evil.so = dlopen-err.
+//   5. dlsym with unknown handle = dlsym-err.
 
 import "std/scenario.oo";
 import "std/sh.oo";
@@ -18,18 +24,12 @@ pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
     expect_quiet(p, "test -x " + oodac);
     expect_present(fs, root + "/runtime/chs_rt_ffi.c");
 
-    when "runtime honesty: allowlist + handle-table dlsym" {
-    and  "no ALLOW_DLOPEN = dlopen-err" {
-    and  "ALLOW + system libc.so.6 = dlopen-ok" {
-    and  "non-system /tmp/evil.so = dlopen-err" {
-    and  "dlsym with unknown handle = dlsym-err" {
-    then "ffi dlopen path A green" {
-    } } } } }
-
+    // when runtime honesty: allowlist + handle-table dlsym
     expect_substring(fs, root + "/runtime/chs_rt_ffi.c", "path not under system lib dirs");
     expect_substring(fs, root + "/runtime/chs_rt_ffi.c", "unknown handle");
     expect_substring(fs, root + "/runtime/chs_rt_ffi.c", "g_ffi_handles");
 
+    // and no ALLOW_DLOPEN = dlopen-err
     let dlo: String = tmpd + "/ffi_dlo";
     let _ = sh_clean(fw, fs, dlo + ".c");
     check(p, "printf 'pub fn main(ffi: &UnsafeFFICap) {\\n    let r = dlopen(ffi, \"/lib/x86_64-linux-gnu/libc.so.6\");\\n    if r.is_ok() { println(\"dlopen-ok\"); } else { println(\"dlopen-err\"); }\\n}\\n' > " + tmpd + "/ffi_dlo.oo", within: 5);
@@ -37,30 +37,49 @@ pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
     check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + dlo + ".c -o " + dlo + ".bin -lm -ldl -lpthread > " + dlo + ".gcc 2>&1", within: 60);
     expect_clean(p, "!" + dlo + ".bin 2>&1 | grep -q 'dlopen-ok'");
 
-    let lib: String = "";
-    for p in ["/lib/x86_64-linux-gnu/libc.so.6", "/lib64/libc.so.6", "/usr/lib/libc.so.6"] {
-        if expect_quiet(p, "test -f " + p).is_ok() { lib = p; break; }
-    }
+    // and ALLOW + first present system libc = dlopen-ok
+    let libc_gnu = "/lib/x86_64-linux-gnu/libc.so.6";
+    let libc64 = "/lib64/libc.so.6";
+    let libc_usr = "/usr/lib/libc.so.6";
+    let have_gnu = expect_quiet(p, "test -f " + libc_gnu).is_ok();
+    let have64 = expect_quiet(p, "test -f " + libc64).is_ok();
+    let have_usr = expect_quiet(p, "test -f " + libc_usr).is_ok();
+    let lib = pick_libc(have_gnu, have64, have_usr, libc_gnu, libc64, libc_usr);
     if lib != "" {
         let sys: String = tmpd + "/ffi_sys";
         check(p, "printf 'pub fn main(ffi: &UnsafeFFICap) {\\n    let r = dlopen(ffi, \"" + lib + "\");\\n    if r.is_ok() { println(\"dlopen-ok\"); } else { println(\"dlopen-err\"); }\\n}\\n' > " + tmpd + "/ffi_sys.oo", within: 5);
         check(p, oodac + " emit-c " + tmpd + "/ffi_sys.oo > " + sys + ".c 2>/dev/null", within: 30);
-        check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + sys + ".c -o " + sys + ".bin 2>/dev/null", within: 60);
+        check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + sys + ".c -o " + sys + ".bin -lm -ldl -lpthread 2>/dev/null", within: 60);
         expect_clean(p, "OODA_FFI_ALLOW_DLOPEN=1 env -u OODA_FFI_ALLOWDIR " + sys + ".bin 2>&1 | grep -q 'dlopen-ok'");
     }
 
+    // and non-system /tmp/evil.so = dlopen-err
     let bad: String = tmpd + "/ffi_bad";
     check(p, "printf 'pub fn main(ffi: &UnsafeFFICap) {\\n    let r = dlopen(ffi, \"/tmp/evil.so\");\\n    if r.is_ok() { println(\"dlopen-ok\"); } else { println(\"dlopen-err\"); }\\n}\\n' > " + tmpd + "/ffi_bad.oo", within: 5);
     check(p, oodac + " emit-c " + tmpd + "/ffi_bad.oo > " + bad + ".c 2>/dev/null", within: 30);
-    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + bad + ".c -o " + bad + ".bin 2>/dev/null", within: 60);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + bad + ".c -o " + bad + ".bin -lm -ldl -lpthread 2>/dev/null", within: 60);
     expect_clean(p, "! (OODA_FFI_ALLOW_DLOPEN=1 env -u OODA_FFI_ALLOWDIR " + bad + ".bin 2>&1 | grep -q 'dlopen-ok')");
 
+    // then dlsym with unknown handle = dlsym-err
     let sym: String = tmpd + "/ffi_sym";
     check(p, "printf 'pub fn main(ffi: &UnsafeFFICap) {\\n    let r = dlsym(ffi, \"handle:0\", \"sym\");\\n    if r.is_ok() { println(\"dlsym-ok\"); } else { println(\"dlsym-err\"); }\\n}\\n' > " + tmpd + "/ffi_sym.oo", within: 5);
     check(p, oodac + " emit-c " + tmpd + "/ffi_sym.oo > " + sym + ".c 2> " + sym + ".err", within: 30);
     expect_substring(fs, sym + ".c", "oo_dlsym");
-    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + sym + ".c -o " + sym + ".bin 2>/dev/null", within: 60);
+    check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + sym + ".c -o " + sym + ".bin -lm -ldl -lpthread 2>/dev/null", within: 60);
     expect_clean(p, sym + ".bin 2>&1 | grep -q 'dlsym-err'");
 
     println("ffi_dlopen_path_a_smoke: PASSED");
+}
+
+fn pick_libc(have_gnu: Bool, have64: Bool, have_usr: Bool, libc_gnu: String, libc64: String, libc_usr: String) -> String {
+    if have_gnu {
+        return libc_gnu;
+    }
+    if have64 {
+        return libc64;
+    }
+    if have_usr {
+        return libc_usr;
+    }
+    return "";
 }

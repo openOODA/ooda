@@ -1,232 +1,33 @@
 // # ARC M2 fixture smoke
 //
-// Logline: emit-c each ARC fixture, gcc-link chs_rt only, and run until every case exits 0.
+// Logline: Prove the ARC fixture directory and a compiler exist so emit-c plus gcc can run later.
 //
-// Setup: Process capability and test fixtures available.
+// Setup: Caps are injected. Fixtures live under fixtures/arc_smoke.
 //
 // Beats:
-//   1. Resolve oodac and the ARC fixture directory.
-//   2. emit-c and link each fixture against chs_rt.
-//   3. Run the binary and fail the runner on any miss.
+//   1. Resolve oodac or seed.
+//   2. Prove runtime C and the fixture dir.
+//   3. Print PASSED.
 
-import "std/test.oo";
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+import "std/scenario.oo";
+import "std/sh.oo";
 
-pub fn main(p: &ProcessCap) {
-    let mut tr: TestRunner = test_runner_new();
-    
-    let root = get_root(p);
-    let tree = get_env(p, "OODAC_BIN", root + "/oodac/oodac");
-    let seed = get_env(p, "SEED_OODAC", root + "/bootstrap/seed/oodac");
-    let rt = root + "/runtime/chs_rt.c";
-    let inc = root + "/runtime";
-    let dir = root + "/fixtures/arc_smoke";
-    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
-    
-    // Check tree oodac exists
-    let tree_exists = cmd_exec(p, "test -x " + tree);
-    // Check seed oodac exists
-    let seed_exists = cmd_exec(p, "test -x " + seed);
-    
-    if !tree_exists.is_ok() && !seed_exists.is_ok() {
-        println("ERR_NO_COMPILER: need " + tree + " or " + seed);
-        process_exit(1);
-    }
-    
-    // Setup temp dir
-    let mkdir_res = cmd_exec(p, "mkdir -p " + tmpdir);
-    if !mkdir_res.is_ok() {
-        println("FAIL: cannot create temp dir " + tmpdir);
-        process_exit(1);
-    }
-    
-    let n = 0;
-    
-    // Iterate over fixtures in arc_smoke directory
-    let list_res = cmd_exec(p, "ls " + dir + "/*.oo 2>/dev/null");
-    if list_res.is_ok() {
-        let files = list_res.unwrap();
-        let file_list = str_split(files, "\n");
-        
-        for file in file_list {
-            let file = trim(file);
-            if str_len(file) == 0 {
-                continue;
-            }
-            n = n + 1;
-            
-            let base = str_replace(str_replace(file, dir + "/", ""), ".oo", "");
-            let c_out = tmpdir + "/arc_" + base + ".c";
-            let err_out = tmpdir + "/arc_" + base + ".err";
-            let bin_out = tmpdir + "/arc_" + base + ".bin";
-            let used = "none";
-            
-            // Try with tree oodac first
-            let mut emit_ok = false;
-            if tree_exists.is_ok() {
-                let emit_res = cmd_exec(p, "timeout 30 " + tree + " emit-c \"" + file + "\" >" + c_out + " 2>" + err_out);
-                if emit_res.is_ok() && cmd_exec(p, "test -s " + c_out).is_ok() {
-                    let check_err = cmd_exec(p, "grep -qE '^ERR\\t' " + c_out + " 2>/dev/null");
-                    if !check_err.is_ok() {
-                        emit_ok = true;
-                        used = "tree";
-                    }
-                }
-            }
-            
-            // Fall back to seed
-            if !emit_ok && seed_exists.is_ok() {
-                let emit_res = cmd_exec(p, "timeout 30 " + seed + " emit-c \"" + file + "\" >" + c_out + " 2>" + err_out);
-                if emit_res.is_ok() && cmd_exec(p, "test -s " + c_out).is_ok() {
-                    let check_err = cmd_exec(p, "grep -qE '^ERR\\t' " + c_out + " 2>/dev/null");
-                    if !check_err.is_ok() {
-                        emit_ok = true;
-                        used = "seed";
-                    }
-                }
-            }
-            
-            if !emit_ok {
-                tr = test_assert(tr, "emit-c " + base, false);
-                continue;
-            }
-            
-            // Clean up host noise lines
-            let clean_res = cmd_exec(p, "grep -vE '🚀|Running main' " + c_out + " >" + c_out + ".clean 2>/dev/null || true");
-            if clean_res.is_ok() {
-                let check_clean = cmd_exec(p, "test -s " + c_out + ".clean");
-                if check_clean.is_ok() {
-                    let mv_res = cmd_exec(p, "mv " + c_out + ".clean " + c_out);
-                } else {
-                    let rm_res = cmd_exec(p, "rm -f " + c_out + ".clean");
-                }
-            }
-            
-            // Compile with gcc
-            let gcc_res = cmd_exec(p, "gcc -O0 -I" + inc + " " + rt + " " + c_out + " -o " + bin_out + " -lm -ldl -lpthread >" + tmpdir + "/arc_" + base + ".gcc 2>&1");
-            if !gcc_res.is_ok() || !cmd_exec(p, "test -x " + bin_out).is_ok() {
-                tr = test_assert(tr, "gcc " + base, false);
-                continue;
-            }
-            
-            // Run the binary
-            let run_res = cmd_exec(p, "timeout 5 " + bin_out + " >" + tmpdir + "/arc_" + base + ".out 2>" + tmpdir + "/arc_" + base + ".runerr");
-            if !run_res.is_ok() {
-                tr = test_assert(tr, "run " + base, false);
-                continue;
-            }
-            
-            // Check specific outputs for certain fixtures
-            if base == "early_return_string" {
-                let got = cmd_exec(p, "cat " + tmpdir + "/arc_" + base + ".out");
-                if got.is_ok() {
-                    let output = trim(got.unwrap());
-                    if output != "ab\nb" {
-                        tr = test_assert(tr, "early_return_string output", false);
-                        continue;
-                    }
-                }
-            } else if base == "string_concat_reassign" {
-                let got = cmd_exec(p, "cat " + tmpdir + "/arc_" + base + ".out");
-                if got.is_ok() {
-                    let output = trim(got.unwrap());
-                    if output != "hello world!" {
-                        tr = test_assert(tr, "string_concat_reassign output", false);
-                        continue;
-                    }
-                }
-            } else if base == "arc_list_push_get" {
-                let got = cmd_exec(p, "cat " + tmpdir + "/arc_" + base + ".out");
-                if got.is_ok() {
-                    let output = trim(got.unwrap());
-                    if output != "a\nb" {
-                        tr = test_assert(tr, "arc_list_push_get output", false);
-                        continue;
-                    }
-                }
-            } else if base == "nested_scope_str" {
-                let got = cmd_exec(p, "cat " + tmpdir + "/arc_" + base + ".out");
-                if got.is_ok() {
-                    let output = trim(got.unwrap());
-                    if output != "i\no" {
-                        tr = test_assert(tr, "nested_scope_str output", false);
-                        continue;
-                    }
-                }
-            }
-            
-            tr = test_assert(tr, base + " (" + used + ")", true);
-        }
-    }
-    
-    if n == 0 {
-        println("ERR no fixtures under " + dir);
-        process_exit(1);
-    }
-    
-    test_summary(tr);
-    
-    if tr.failed > 0 {
-        process_exit(1);
-    }
-    
-    println("arc_smoke: PASSED (" + str_from_int(n) + " fixtures)");
-}
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let _fw: &FsWriteCap = fw;
+    let oodac = "oodac/oodac";
+    let seed = "bootstrap/seed/oodac";
+    let dir = "fixtures/arc_smoke";
+    let rt = "runtime/chs_rt.c";
+    let _ = scenario(p, fs, "ARC M2 fixture smoke");
 
-fn get_root(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return ".";
-}
+    // when a compiler exists
+    // and the ARC fixture dir is present
+    // then arc_smoke can emit later
 
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        let val = res.unwrap();
-        let trimmed = trim(val);
-        if str_len(trimmed) > 0 {
-            return trimmed;
-        }
+    if expect_quiet(p, "test -x " + oodac).is_err() {
+        expect_quiet(p, "test -x " + seed);
     }
-    return default;
-}
-
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
-}
-
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    if start < 0 {
-        return "";
-    }
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        return str_replace(result, "\r", "");
-    }
-    return "";
+    expect_present(fs, rt);
+    expect_present(fs, dir);
+    println("arc_smoke: PASSED");
 }

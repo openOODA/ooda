@@ -1,68 +1,50 @@
 // # LLVM Execute Smoke
 //
-// Logline: M5 — emit-llvm produces IR with oo_print_int + i64 42, and clang (or llc+linker) compiles+runs it to stdout 42; multi-binop 2+3*4=14 + 10%3=1 too.
+// Logline: emit-llvm produces IR with oo_print_int + i64 42, and clang compiles+runs it to stdout 42; multi-binop 2+3*4=14 + 10%3=1 too.
 //
-// Setup: Process capability and test fixtures available.
-// Beats: emit-llvm IR | compile+link via clang or llc | run 42 | multi-binop+mod 14/1.
+// Setup: Process capability, oodac, runtime, and clang on PATH.
+//
+// Beats:
+//   1. Tiny int fixture emits IR with define + i64 42 + oo_print_int.
+//   2. clang + chs_rt compiles and run stdout is 42.
+//   3. Multi-binop + modulo IR has mul/add/srem and run stdout is 14 then 1.
 
 import "std/scenario.oo";
 import "std/sh.oo";
 
-const HELLO_SRC: String = ".ooda-cache/ooda-tmp/llvm_hello.oo";
-const HELLO_LL: String = ".ooda-cache/ooda-tmp/llvm_hello.ll";
-const HELLO_BIN: String = ".ooda-cache/ooda-tmp/llvm_hello.bin";
-const BINOP_SRC: String = ".ooda-cache/ooda-tmp/llvm_binop.oo";
-const BINOP_LL: String = ".ooda-cache/ooda-tmp/llvm_binop.ll";
-const BINOP_BIN: String = ".ooda-cache/ooda-tmp/llvm_binop.bin";
-
 pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
     let root = sh_realpath(p, ".").unwrap_or(".");
     let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
-    let rt = root + "/ooda/runtime";
-    let tmp = root + "/.ooda-cache/ooda-tmp";
+    let rt = root + "/runtime";
+    let tmp = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let clang = sh_which(p, "clang").unwrap_or("clang");
     let _ = sh_mkdir_p(fw, tmp);
-    let _ = scenario(p, fs, "M5 llvm execute: emit IR + compile + run + multi-binop");
+    let _ = scenario(p, fs, "llvm execute: emit IR + clang + run + multi-binop");
 
-    // when: tiny int fixture emits IR with define + i64 42 + oo_print_int
-    let _ = process_exec(p, "cat > " + tmp + "/llvm_hello.oo <<'EOF'\npub fn main() {\n    println(42)\n}\nEOF");
+    // when tiny int fixture emits IR with define + i64 42 + oo_print_int
+    check(p, "printf 'pub fn main() {\\n    println(42)\\n}\\n' > " + tmp + "/llvm_hello.oo", within: 5);
     check(p, oodac + " emit-llvm " + tmp + "/llvm_hello.oo > " + tmp + "/llvm_hello.ll 2>&1", within: 30);
     expect_substring(fs, tmp + "/llvm_hello.ll", "define ");
     expect_substring(fs, tmp + "/llvm_hello.ll", "i64 42");
     expect_substring(fs, tmp + "/llvm_hello.ll", "oo_print_int");
 
-    // and: clang (prefer) or llc+linker compiles+links with chs_rt
-    let clang = sh_which(p, "clang").unwrap_or("");
-    let llc = sh_which(p, "llc").unwrap_or("");
-    let linker = "";
-    if chars_len(clang) > 0 { linker = clang; }
-    else if chars_len(sh_which(p, "gcc").unwrap_or("")) > 0 { linker = sh_which(p, "gcc").unwrap_or(""); }
-    else { linker = sh_which(p, "cc").unwrap_or(""); }
-    if chars_len(clang) == 0 && chars_len(llc) == 0 {
-        println("ERR_NO_LLVM: need clang or llc on PATH");
+    // and clang compiles+links with chs_rt
+    if chars_len(clang) == 0 {
+        println("ERR_NO_LLVM: need clang on PATH");
         return;
     }
-    if chars_len(clang) > 0 {
-        check(p, clang + " -O0 -Wno-override-module -Wno-unused-command-line-argument -I " + rt + " " + tmp + "/llvm_hello.ll " + rt + "/chs_rt.c -o " + tmp + "/llvm_hello.bin -lm", within: 60);
-    } else {
-        check(p, llc + " -filetype=obj -o " + tmp + "/llvm_hello.o " + tmp + "/llvm_hello.ll", within: 60);
-        check(p, linker + " -O0 -I " + rt + " " + tmp + "/llvm_hello.o " + rt + "/chs_rt.c -o " + tmp + "/llvm_hello.bin -lm", within: 60);
-    }
+    check(p, clang + " -O0 -Wno-override-module -Wno-unused-command-line-argument -I " + rt + " " + tmp + "/llvm_hello.ll " + rt + "/chs_rt.c -o " + tmp + "/llvm_hello.bin -lm", within: 60);
 
-    // then: run stdout matches 42
+    // then run stdout matches 42
     expect_clean(p, tmp + "/llvm_hello.bin 2>&1 | tr -d '\\r' | grep -qx '42'");
 
-    // and: multi-binop + modulo — 2+3*4=14, 10%3=1
-    let _ = process_exec(p, "cat > " + tmp + "/llvm_binop.oo <<'EOF'\npub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {\n    let x = 2 + 3 * 4;\n    println(x.to_string());\n    let w = 10 % 3;\n    println(w.to_string());\n}\nEOF");
+    // and multi-binop + modulo — 2+3*4=14, 10%3=1
+    check(p, "printf 'pub fn main() {\\n    let x = 2 + 3 * 4;\\n    println(x);\\n    let w = 10 % 3;\\n    println(w);\\n}\\n' > " + tmp + "/llvm_binop.oo", within: 5);
     check(p, oodac + " emit-llvm " + tmp + "/llvm_binop.oo > " + tmp + "/llvm_binop.ll 2>&1", within: 30);
     expect_substring(fs, tmp + "/llvm_binop.ll", "mul i64");
     expect_substring(fs, tmp + "/llvm_binop.ll", "add i64");
     expect_substring(fs, tmp + "/llvm_binop.ll", "srem i64");
-    if chars_len(clang) > 0 {
-        check(p, clang + " -O0 -Wno-override-module -Wno-unused-command-line-argument -I " + rt + " " + tmp + "/llvm_binop.ll " + rt + "/chs_rt.c -o " + tmp + "/llvm_binop.bin -lm", within: 60);
-    } else {
-        check(p, llc + " -filetype=obj -o " + tmp + "/llvm_binop.o " + tmp + "/llvm_binop.ll", within: 60);
-        check(p, linker + " -O0 -I " + rt + " " + tmp + "/llvm_binop.o " + rt + "/chs_rt.c -o " + tmp + "/llvm_binop.bin -lm", within: 60);
-    }
+    check(p, clang + " -O0 -Wno-override-module -Wno-unused-command-line-argument -I " + rt + " " + tmp + "/llvm_binop.ll " + rt + "/chs_rt.c -o " + tmp + "/llvm_binop.bin -lm", within: 60);
     expect_clean(p, tmp + "/llvm_binop.bin 2>&1 | tr -d '\\r' | grep -qx '14'");
     expect_clean(p, tmp + "/llvm_binop.bin 2>&1 | tr -d '\\r' | grep -qx '1'");
 

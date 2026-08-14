@@ -1,20 +1,19 @@
 // # Lower LLVM functions
 //
-// Logline: Emit an LLVM function signature and body.
+// Logline: Emits an LLVM function signature, stack slot allocations, capabilities, and body block.
 //
 // Setup: Function declarations and parameter lists are prepared for LLVM IR translation.
 //
 // Beats:
-//   1. Lower the signature.
-//   2. Lower the body.
-//   3. Hand types to llvm_emit_ty.
+//   1. Lower the function signature and parameter types.
+//   2. Allocate stack slots and bind initial values or capability grants.
+//   3. Lower the body block and emit default return if needed.
 
 import "token_fmt.oo";
 import "llvm_emit_ty.oo";
 import "llvm_emit_env.oo";
-import "llvm_emit_stmt.oo";
+import "llvm_emit_block.oo";
 
-// Skip requires/ensures until LBRACE (same spirit as c_emit_skip_contracts).
 pub fn llvm_skip_contracts(toks: List[String], pos: Int, n: Int) -> Int {
     let mut p = pos;
     let mut depth = 0;
@@ -33,7 +32,6 @@ pub fn llvm_skip_contracts(toks: List[String], pos: Int, n: Int) -> Int {
     return p;
 }
 
-// Skip optional co-located verify name { ... } after a fn body.
 pub fn llvm_skip_verify(toks: List[String], pos: Int, n: Int) -> Int {
     let mut p = pos;
     if p < n && field_at(list_get(toks, p), 0) == "KW_VERIFY" {
@@ -63,8 +61,7 @@ pub fn llvm_skip_verify(toks: List[String], pos: Int, n: Int) -> Int {
     return p;
 }
 
-// Returns [new_pos, str_counter, str_table] so module can accumulate string pool.
-pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: String, fntab: String) -> List[String] {
+pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: String, fntab: String, stab: String) -> List[String] {
     let mut p = pos;
     if field_at(list_get(toks, p), 0) == "KW_PUB" {
         p = p + 1;
@@ -149,7 +146,6 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
     println("define " + llvm_ret_ty + " @" + fn_name + "(" + param_sig + ") {");
     println("entry:");
 
-    // Seed env with module-level string pool state + fn return table
     let mut env: List[String] = list_new();
     env = list_push(env, "0");
     env = list_push(env, "0");
@@ -157,6 +153,7 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
     env = list_push(env, "");
     env = list_push(env, str_t);
     env = llvm_env_seed_fnrets(env, fntab);
+    env = llvm_env_add_var(env, "__stab__", stab);
     env = llvm_env_push_scope(env);
 
     i = 0;
@@ -211,12 +208,17 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
         }
     }
 
-    // Avoid double-ret when body already emitted `ret`
     if !did_ret {
         if fn_name == "main" || llvm_ret_ty == "i32" {
             println("  ret i32 0");
         } else if llvm_ret_ty == "i64" {
             println("  ret i64 0");
+        } else if llvm_ret_ty == "double" {
+            println("  ret double 0.0");
+        } else if llvm_ret_ty == "%OoStr" {
+            println("  ret %OoStr zeroinitializer");
+        } else if chars_len(llvm_ret_ty) >= 8 && str_slice(llvm_ret_ty, 0, 8) == "%struct." {
+            println("  ret " + llvm_ret_ty + " zeroinitializer");
         } else {
             println("  ret void");
         }
@@ -231,21 +233,4 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
     res = list_push(res, out_sc);
     res = list_push(res, out_st);
     return res;
-}
-
-pub fn llvm_emit_type_decl(toks: List[String], pos: Int, n: Int) -> Int {
-    let mut p = pos;
-    if field_at(list_get(toks, p), 0) == "KW_PUB" { p = p + 1; }
-    if p < n && field_at(list_get(toks, p), 0) == "KW_TYPE" { p = p + 1; }
-
-    let tname: String = field_at(list_get(toks, p), 3);
-    p = p + 1;
-
-    println("%struct." + tname + " = type { i64 }");
-
-    while p < n && field_at(list_get(toks, p), 0) != "SEMI" && field_at(list_get(toks, p), 0) != "RBRACE" {
-        p = p + 1;
-    }
-    if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
-    return p;
 }

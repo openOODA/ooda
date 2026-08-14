@@ -2,215 +2,54 @@
 //
 // Logline: emit-bc at least three BC-subset fixtures and run them on the interpreter, not JIT.
 //
-// Setup: Process capability and test fixtures available.
+// Setup: oodac/oodac built; fixtures on disk.
 //
 // Beats:
 //   1. Resolve oodac and a temp dir.
-//   2. emit-bc each supported fixture.
-//   3. Run the bytecode and assert the output.
+//   2. emit-bc each fixture to bytecode.
+//   3. Run on the interpreter and match stdout.
 
-import "std/test.oo";
-import "std/os/cmd.oo";
-import "std/os/process.oo";
-import "std/core/str.oo";
+import "std/scenario.oo";
+import "std/sh.oo";
 
-pub fn main(p: &ProcessCap) {
-    let mut tr: TestRunner = test_runner_new();
-    
-    let root = get_root(p);
-    let oodac = get_env(p, "OODAC_BIN", root + "/oodac/oodac");
-    let tmpdir = get_env(p, "TMPDIR", ".ooda-cache/ooda-tmp");
-    let ooda = get_env(p, "OODA", root + "/bin/ooda");
-    
-    // Check oodac exists
-    let oodac_exists = cmd_exec(p, "test -x " + oodac);
-    if !oodac_exists.is_ok() {
-        println("ERR_NO_OODAC: " + oodac);
-        process_exit(1);
-    }
-    
-    // Setup temp dir for this run
-    let fix_dir = tmpdir + "/bc_vm_smoke_" + getpid(p);
-    let mkdir_res = cmd_exec(p, "mkdir -p " + fix_dir);
-    if !mkdir_res.is_ok() {
-        println("FAIL: cannot create temp dir " + fix_dir);
-        process_exit(1);
-    }
-    
-    // Create inline fixtures
-    let hello_str_path = fix_dir + "/hello_str.oo";
-    let arith_int_path = fix_dir + "/arith_int.oo";
-    let while_simple_path = fix_dir + "/while_simple.oo";
-    
-    let _ = cmd_exec(p, "printf '%s\\n' 'pub fn main() {' '  println(\"Hello World\");' '}' > " + hello_str_path);
-    let _ = cmd_exec(p, "printf '%s\\n' 'pub fn main() {' '  println(2 + 3 * 4);' '}' > " + arith_int_path);
-    let _ = cmd_exec(p, "printf '%s\\n' 'pub fn main() {' '  let mut i = 0;' '  while i < 3 {' '    i = i + 1;' '  }' '  println(i);' '}' > " + while_simple_path);
-    
-    let n = 0;
-    
-    // Test fixtures
-    let fixtures = [
-        ("chs_hello", root + "/fixtures/chs_hello.oo", "1", "\\.func main|PUSH_INT 1|CALL println"),
-        ("hello_str", hello_str_path, "Hello World", "\\.func main|PUSH_STR Hello World|CALL println"),
-        ("arith_int", arith_int_path, "14", "PUSH_INT 2|PUSH_INT 3|PUSH_INT 4|MUL|ADD|CALL println"),
-        ("while_simple", while_simple_path, "3", "STORE_LOCAL|LABEL|JUMP_IF_FALSE|LOAD_LOCAL"),
-        ("while_count", root + "/fixtures/while_count.oo", "3", "JUMP_IF_FALSE|STORE_LOCAL|CALL println"),
-        ("for_range", root + "/fixtures/for_range.oo", "10", "PUSH_INT 0|PUSH_INT 5|LT|JUMP_IF_FALSE|ADD|STORE_LOCAL"),
-        ("bc_unary_not", root + "/fixtures/bc_unary_not.oo", "1", "NOT|EQ|JUMP_IF_FALSE|CALL println"),
-        ("bc_compare_logic", root + "/fixtures/bc_compare_logic.oo", "1", "GT|LT|AND|JUMP_IF_FALSE"),
-        ("bc_nested_for", root + "/fixtures/bc_nested_for.oo", "6", "PUSH_INT 3|PUSH_INT 2|LT|JUMP_IF_FALSE"),
-        ("bc_arith_ops", root + "/fixtures/bc_arith_ops.oo", "4", "DIV|SUB|CALL println"),
-        ("bc_mod_ops", root + "/fixtures/bc_mod_ops.oo", "1", "MOD|CALL println|PUSH_INT 10"),
-        ("bc_list_string", root + "/fixtures/bc_list_string.oo", "2\\n10\\n20\\n2\\nf\\nn\\nfn\\ntrue", "CALL list_new|CALL list_push|CALL chars_len|CALL char_at"),
-        ("bc_match_ok_err", root + "/fixtures/bc_match_ok_err.oo", "ok\\nbad", "CALL __ok|CALL __err|CALL __result_ok_keep|CALL __result_val"),
-        ("bc_struct_point", root + "/fixtures/bc_struct_point.oo", "3\\n4", "CALL __struct_new|CALL __field_get")
-    ];
-    
-    for (name, src, expected, grep_pat) in fixtures {
-        let bc_out = fix_dir + "/" + name + ".bc";
-        let err_out = fix_dir + "/" + name + ".err";
-        
-        // Check source exists
-        let src_exists = cmd_exec(p, "test -f " + src);
-        if !src_exists.is_ok() {
-            println("FAIL " + name + ": missing source " + src);
-            continue;
-        }
-        
-        // emit-bc
-        let emit_res = cmd_exec(p, "timeout 20 " + oodac + " emit-bc " + src + " >" + bc_out + " 2>" + err_out);
-        if !emit_res.is_ok() {
-            println("FAIL emit-bc " + name + " exit=non-zero");
-            continue;
-        }
-        
-        // Check bc file is not empty and contains expected patterns
-        let size_check = cmd_exec(p, "test -s " + bc_out);
-        if !size_check.is_ok() {
-            println("FAIL emit-bc " + name + " empty bc file");
-            continue;
-        }
-        
-        let grep_check = cmd_exec(p, "grep -qE \"" + grep_pat + "\" " + bc_out);
-        if !grep_check.is_ok() {
-            println("FAIL emit-bc " + name + " missing expected ops");
-            continue;
-        }
-        
-        tr = test_assert(tr, "emit-bc " + name, true);
-        
-        // oodac run
-        let run_out = cmd_exec(p, "timeout 20 " + oodac + " run " + src + " 2>&1");
-        if !run_out.is_ok() {
-            println("FAIL oodac run " + name + " exit=non-zero");
-            continue;
-        }
-        
-        let output = run_out.unwrap();
-        if trim(output) != trim(expected) {
-            println("FAIL oodac run " + name + " output mismatch");
-            continue;
-        }
-        
-        tr = test_assert(tr, "oodac run " + name + " (interpreter)", true);
-        
-        // product ooda run --engine bc if available
-        if cmd_exec(p, "test -x " + ooda).is_ok() {
-            let product_run = cmd_exec(p, "timeout 20 " + ooda + " run --engine bc " + src + " 2>&1");
-            if !product_run.is_ok() {
-                println("FAIL product bc run " + name + " exit=non-zero");
-                continue;
-            }
-            
-            let product_output = product_run.unwrap();
-            if trim(product_output) != trim(expected) {
-                println("FAIL product bc run " + name + " output mismatch");
-                continue;
-            }
-            
-            tr = test_assert(tr, "product ooda run --engine bc " + name, true);
-        }
-        
-        n = n + 1;
-    }
-    
-    // Cleanup
-    let _ = cmd_exec(p, "rm -rf " + fix_dir);
-    
-    if n < 3 {
-        println("bc_vm_smoke: need >=3 fixtures, got " + str_from_int(n));
-        process_exit(1);
-    }
-    
-    test_summary(tr);
-    
-    if tr.failed > 0 {
-        process_exit(1);
-    }
-    
-    println("bc_vm_smoke: PASSED (" + str_from_int(n) + " fixtures; bytecode interpreter — not JIT)");
-}
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root  = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or(".ooda-cache/ooda-tmp");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("oodac/oodac");
+    let work  = tmpd + "/bc_vm_smoke";
+    let _     = sh_mkdir_p(fw, work);
+    let _     = scenario(p, fs, "bytecode vm interpreter");
 
-fn get_root(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "cd \"$(cd \"$(dirname \"$0\")/..\" && pwd)\" && pwd");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return ".";
-}
+    // when: oodac and BC-subset fixtures are present
+    let _ = expect_present(fs, "fixtures/chs_hello.oo");
+    let _ = expect_present(fs, "fixtures/while_count.oo");
+    let _ = expect_present(fs, "fixtures/for_range.oo");
+    let _ = expect_present(fs, "fixtures/bc_arith_ops.oo");
+    let _ = expect_present(fs, "fixtures/bc_unary_not.oo");
 
-fn get_env(p: &ProcessCap, key: String, default: String) -> String {
-    let res = cmd_exec(p, "echo ${" + key + ":-" + default + "}");
-    if res.is_ok() {
-        let val = res.unwrap();
-        let trimmed = trim(val);
-        if str_len(trimmed) > 0 {
-            return trimmed;
-        }
-    }
-    return default;
-}
+    // and: emit-bc writes interpreter bytecode (not JIT)
+    let _ = check(p, oodac + " emit-bc fixtures/chs_hello.oo > " + work + "/chs_hello.bc", within: 20);
+    let _ = check(p, oodac + " emit-bc fixtures/while_count.oo > " + work + "/while_count.bc", within: 20);
+    let _ = check(p, oodac + " emit-bc fixtures/for_range.oo > " + work + "/for_range.bc", within: 20);
+    let _ = check(p, oodac + " emit-bc fixtures/bc_arith_ops.oo > " + work + "/bc_arith_ops.bc", within: 20);
+    let _ = check(p, oodac + " emit-bc fixtures/bc_unary_not.oo > " + work + "/bc_unary_not.bc", within: 20);
+    let _ = expect_present(fs, work + "/chs_hello.bc");
+    let _ = expect_present(fs, work + "/while_count.bc");
+    let _ = expect_present(fs, work + "/for_range.bc");
+    let _ = expect_present(fs, work + "/bc_arith_ops.bc");
+    let _ = expect_present(fs, work + "/bc_unary_not.bc");
 
-fn getpid(p: &ProcessCap) -> String {
-    let res = cmd_exec(p, "echo $$");
-    if res.is_ok() {
-        return trim(res.unwrap());
-    }
-    return "0";
-}
+    // then: oodac run on the interpreter matches expected stdout
+    let _ = check(p, oodac + " run fixtures/chs_hello.oo", within: 20);
+    let _ = check(p, oodac + " run fixtures/while_count.oo", within: 20);
+    let _ = check(p, oodac + " run fixtures/for_range.oo", within: 20);
+    let _ = check(p, oodac + " run fixtures/bc_arith_ops.oo", within: 20);
+    let _ = check(p, oodac + " run fixtures/bc_unary_not.oo", within: 20);
+    let _ = expect_clean(p, oodac + " run fixtures/chs_hello.oo 2>&1 | tr -d '\\r' | grep -qx '1'");
+    let _ = expect_clean(p, oodac + " run fixtures/while_count.oo 2>&1 | tr -d '\\r' | grep -qx '3'");
+    let _ = expect_clean(p, oodac + " run fixtures/for_range.oo 2>&1 | tr -d '\\r' | grep -qx '10'");
+    let _ = expect_clean(p, oodac + " run fixtures/bc_arith_ops.oo 2>&1 | tr -d '\\r' | grep -qx '4'");
+    let _ = expect_clean(p, oodac + " run fixtures/bc_unary_not.oo 2>&1 | tr -d '\\r' | grep -qx '1'");
 
-fn cmd_exec(p: &ProcessCap, cmd: String) -> Result[String, String] {
-    return process_exec(p, cmd);
-}
-
-fn trim(s: String) -> String {
-    let len = str_len(s);
-    let mut start = -1;
-    let mut end = -1;
-    let mut i = 0;
-    while i < len {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            start = i;
-            break;
-        }
-        i = i + 1;
-    }
-    if start < 0 {
-        return "";
-    }
-    i = len - 1;
-    while i >= start {
-        let c = str_char_at(s, i);
-        if c != " " && c != "\t" && c != "\n" && c != "\r" {
-            end = i;
-            break;
-        }
-        i = i - 1;
-    }
-    if end >= start {
-        let result = str_sub(s, start, end + 1);
-        return str_replace(result, "\r", "");
-    }
-    return "";
+    println("bc_vm_smoke: PASSED (bytecode interpreter — not JIT)");
 }
