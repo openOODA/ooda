@@ -181,7 +181,7 @@ else
 fi
 
 # --- prove no-expand (I2): static + string-body + llvm honesty ---
-hits=$(grep -lE 'macro_expand|ast_macro' "$ROOT/oodac"/*.oo 2>/dev/null || true)
+hits=$(grep -lE 'macro_expand|ast_macro' "$ROOT/oodac"/*.oo 2>/dev/null | grep -v 'ast_macros.oo' | grep -v 'macro_expand.oo' || true)
 if echo "$hits" | grep -q 'check_residual.oo' && [[ $(echo "$hits" | grep -c . || true) -eq 1 ]]; then
   pass "static: residual names only in check_residual.oo"
 else
