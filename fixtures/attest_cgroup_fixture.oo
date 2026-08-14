@@ -1,0 +1,140 @@
+// # Hardware attestation and cgroup v2 resource quota fixture
+//
+// Logline: Fixture driving TPM quotes, PCR banks, NIST SP 800-90B entropy tests, and cgroups v2 quotas.
+//
+// Setup: Test fixture importing unified Attest and Cgroup facades to exercise end-to-end platform security.
+//
+// Beats:
+//   1. Build PCR measurement bank, generate signed TPM quote, and verify against security policy.
+//   2. Run NIST SP 800-90B RCT and APT entropy health tests on valid and degraded entropy streams.
+//   3. Prove monotonic time step and clock drift boundaries under attested hardware clocking.
+//   4. Construct cgroups v2 quota, configure controllers, apply POSIX rlimits, and audit process resources.
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+import "src/ooda/sec/attest/attest.oo";
+import "src/ooda/os/cgroup/cgroup.oo";
+
+pub fn verify_hardware_attestation_and_entropy() -> Bool {
+    // 1. PCR Bank creation and extension
+    let mut bank = pcr_bank_empty("bank_sha256", "SHA256");
+    bank = pcr_bank_extend(bank, 0, "bios_measurement_v1.0");
+    bank = pcr_bank_extend(bank, 1, "kernel_cmdline_trusted");
+    bank = pcr_bank_extend(bank, 2, "rootfs_dm_verity_hash");
+
+    let golden_digest = bank.digest;
+    let cert = attest_cert_new("cert_node_01", "key_subject_01", "key_issuer_ca", "HW-SN-998822", "2.0", 1000, 9000);
+
+    // 2. TPM Quote generation and signature verification
+    let quote = tpm_quote_create("quote_boot_01", bank, "ak_primary_01", "nonce_chal_55a", 2500, true);
+    let sig_ok = tpm_quote_verify_signature(quote, cert);
+    if sig_ok == false {
+        return false;
+    }
+
+    // 3. Policy validation
+    let pol = attest_policy_default("policy_strict_pcr", golden_digest);
+    let pol_res = tpm_quote_validate_policy(quote, bank, pol);
+    if pol_res.is_err() {
+        return false;
+    }
+
+    // 4. NIST SP 800-90B continuous entropy health tests
+    let mut good_entropy: List[Int] = list_new();
+    let mut i = 0;
+    while i < 128 {
+        let sample = (i * 37 + 13) % 256;
+        good_entropy = list_push(good_entropy, sample);
+        i = i + 1;
+    }
+
+    let ent_res = attest_entropy_stream_verify(good_entropy, 500);
+    if ent_res.is_err() {
+        return false;
+    }
+
+    // Degraded entropy stream with stuck-at repetition
+    let mut bad_entropy: List[Int] = list_new();
+    let mut j = 0;
+    while j < 64 {
+        bad_entropy = list_push(bad_entropy, 42);
+        j = j + 1;
+    }
+    let bad_rct = entropy_rct_test(bad_entropy, 8);
+    if bad_rct.is_ok() {
+        return false;
+    }
+
+    // 5. Monotonic Time and Drift Proof
+    let t0 = timestamp_token_new("ts_0", 2000, 100000, "TSC", 1000, 20, 0);
+    let t1 = timestamp_token_new("ts_1", 2002, 500000, "TSC", 1050, 25, 0);
+    let step_res = monotonic_time_verify_step(t0, t1);
+    if step_res.is_err() {
+        return false;
+    }
+
+    // 6. Unified Full Platform Attestation Verification
+    let full_attest = attest_verify_full_system(quote, bank, cert, good_entropy, t1, pol, 3000, "HW-SN-998822");
+    if full_attest.is_err() {
+        return false;
+    }
+
+    return true;
+}
+
+pub fn verify_cgroup_and_rlimit_quotas() -> Bool {
+    // 1. Create CgroupQuota hierarchy (Memory 512MB, CPU 50ms/100ms, PIDs 256)
+    let mem_max = 536870912;
+    let cpu_quota = 50000;
+    let cpu_period = 100000;
+    let pids_max = 256;
+
+    let mut quota = cgroup_quota_create("sandbox_worker_0", "/sys/fs/cgroup/sandbox_worker_0", mem_max, cpu_quota, cpu_period, pids_max);
+    quota = cgroup_v2_set_memory_high(quota, 400000000);
+    quota = cgroup_v2_set_cpu_weight(quota, 200);
+
+    // 2. Format spec validation
+    let spec_str = cgroup_v2_format_spec(quota);
+    if chars_len(spec_str) == 0 {
+        return false;
+    }
+
+    // 3. Apply POSIX rlimits
+    quota = cgroup_quota_apply_rlimits(quota, mem_max, 120, 1024);
+
+    // 4. Audit process resource consumption (Compliant case)
+    let cur_mem = 104857600; // 100MB
+    let cur_pids = 32;
+    let cur_cpu_sec = 10;
+    let cur_nofile = 64;
+
+    let audit_res = cgroup_quota_audit_process(quota, cur_mem, cur_pids, cur_cpu_sec, cur_nofile);
+    if audit_res.is_err() {
+        return false;
+    }
+
+    // 5. Negative case: process memory exceeding cgroup memory.max
+    let oom_mem = 600000000; // 600MB > 512MB
+    let fail_audit = cgroup_quota_audit_process(quota, oom_mem, cur_pids, cur_cpu_sec, cur_nofile);
+    if fail_audit.is_ok() {
+        return false;
+    }
+
+    return true;
+}
+
+pub fn main() {
+    let attest_ok = verify_hardware_attestation_and_entropy();
+    if attest_ok == false {
+        println("FAIL: verify_hardware_attestation_and_entropy");
+        process_exit(1);
+    }
+
+    let cgroup_ok = verify_cgroup_and_rlimit_quotas();
+    if cgroup_ok == false {
+        println("FAIL: verify_cgroup_and_rlimit_quotas");
+        process_exit(1);
+    }
+
+    println("attest_cgroup_fixture: ALL ASSERTIONS PASSED");
+}
