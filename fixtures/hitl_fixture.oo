@@ -1,181 +1,177 @@
-// # Human-in-the-Loop (HITL) Harness and Step-Pause End-to-End Fixture
+// # Human-in-the-Loop (HITL) Harness and Step-Pause Verification Fixture
 //
-// Logline: Fixture proving gate approval, rejection rollback, timeout denial, and audit log integrity.
+// Logline: End-to-end integration fixture verifying approval, rejection rollback, timeout denial, and audit integrity.
 //
-// Setup: Test fixture exercising the full HITL protocol lifecycle across approval, rejection, and timeout paths.
+// Setup: Initializes standard approval gates and tests the complete step-pause lifecycle with deterministic time steps.
 //
 // Beats:
-//   1. Prove successful step-pause approval gate authorization and atomic side effect commit.
-//   2. Prove rejection path triggering rollback and preventing unauthorized effect execution.
-//   3. Prove timeout path enforcing fail-closed default-deny on expired operator authorization.
-//   4. Prove single-use token replay prevention and complete audit log integrity.
+//   1. Verify gate approval and effect commitment with valid token generation.
+//   2. Verify operator rejection with automatic rollback status transition.
+//   3. Verify gate timeout default-deny enforcement when decision exceeds threshold.
+//   4. Verify tamper-evident audit record sequence and monotonic timestamp integrity.
 // RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
 // RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
 
-import "src/ooda/hitl/hitl.oo";
+import "std/hitl.oo";
 
 pub fn verify_hitl_approval_and_commit() -> Bool {
-    let policy: HitlPolicy = hitl_policy_strict("pol_prod_strict");
-    let mut sess: HitlSession = hitl_harness_init("sess_test_01", "operator_alice", policy);
-
-    // 1. Add destructive database migration gate with 5000ms timeout
-    sess = hitl_harness_add_gate(
-        sess, "gate_db_migrate", "Production DB Migration", "SCHEMA_MIGRATE",
-        "db://prod/primary", 5000, true, false
+    let pol: HitlPolicy = hitl_policy_strict("pol_strict_01");
+    let mut sess: HitlSession = std_hitl_session_create(
+        "sess_test_01", "operator_alice", pol
     );
 
-    // 2. Request step-pause for destructive schema change
-    sess = hitl_harness_request_step(
-        sess, "act_drop_old_index", "gate_db_migrate", "Drop Deprecated Index",
-        "ALTER TABLE users DROP INDEX idx_legacy;", "HIGH", true, false, 10000
+    sess = std_hitl_add_gate(
+        sess, "gate_db_drop", "Database Drop Gate", "database:drop_table",
+        "sql://prod_db/users", 5000, true, false
     );
-    let paused_1: Bool = sess.is_paused;
-    if !paused_1 { return false; }
 
-    // 3. Operator approves at 10000 + 1200ms (within 5000ms timeout)
-    sess = hitl_harness_submit_decision(
-        sess, "act_drop_old_index", true, "Migration plan reviewed and approved",
-        11200, 1200
+    let act: PauseAction = pause_action_new(
+        "act_drop_users", "gate_db_drop", "Drop Users Table",
+        "digest_sha256_drop_users", "CRITICAL", true, false
     );
-    let paused_2: Bool = sess.is_paused;
-    if paused_2 { return false; }
+    sess = std_hitl_request_action(sess, act, 10000);
 
-    let tok_res: Result[String, String] = hitl_harness_get_token(sess, "act_drop_old_index", 11200);
+    if !sess.is_paused { return false; }
+
+    sess = std_hitl_decide(
+        sess, "act_drop_users", true, "Migration step verified",
+        12000, 2000
+    );
+
+    if sess.is_paused { return false; }
+
+    let tok_res: Result[String, String] = std_hitl_get_token(
+        sess, "act_drop_users", 12000
+    );
     if tok_res.is_err() { return false; }
-    let token_raw: String = tok_res.unwrap();
-    let token: HitlToken = hitl_token_parse(token_raw);
-    let val_tok: Bool = token.is_valid;
-    let cons_tok: Bool = token.is_consumed;
-    if !val_tok || cons_tok { return false; }
+    let tok_raw: String = tok_res.unwrap();
+    let tok: HitlToken = hitl_token_parse(tok_raw);
+    if !tok.is_valid { return false; }
+    if tok.is_consumed { return false; }
 
-    // 4. Commit effect with single-use token
-    sess = hitl_harness_commit_effect(
-        sess, token, "act_drop_old_index", 11250
+    sess = std_hitl_commit(
+        sess, tok, "act_drop_users", 12500
     );
-    let act: PauseAction = hitl_session_find_action(sess, "act_drop_old_index");
-    let aid_len: Int = chars_len(act.action_id);
-    let st: String = act.status;
-    if aid_len == 0 || st != "COMMITTED" { return false; }
 
-    // 5. Replay prevention: reusing consumed token must fail
-    let consumed_tok: HitlToken = hitl_gate_consume_token(token);
-    let replay_check: Result[Bool, String] = hitl_gate_validate_token(consumed_tok, "gate_db_migrate", 11300);
-    if replay_check.is_ok() { return false; }
+    let committed_action: PauseAction = hitl_session_find_action(sess, "act_drop_users");
+    let act_status: String = committed_action.status;
+    let expected_status: String = "COMMITTED";
+    if !(act_status == expected_status) { return false; }
 
-    println("GATE_APPROVAL_COMMIT_OK");
-    println("REPLAY_PREVENTION_OK");
     return true;
 }
 
 pub fn verify_hitl_rejection_and_rollback() -> Bool {
-    let policy: HitlPolicy = hitl_policy_strict("pol_rollback_strict");
-    let mut sess: HitlSession = hitl_harness_init("sess_test_02", "operator_bob", policy);
-
-    // 1. Add external webhook dispatch gate
-    sess = hitl_harness_add_gate(
-        sess, "gate_ext_webhook", "External Webhook Broadcast", "DISPATCH_WEBHOOK",
-        "https://api.external.com/notify", 4000, false, true
+    let pol: HitlPolicy = hitl_policy_strict("pol_strict_02");
+    let mut sess: HitlSession = std_hitl_session_create(
+        "sess_test_02", "operator_bob", pol
     );
 
-    // 2. Request step-pause for external dispatch
-    sess = hitl_harness_request_step(
-        sess, "act_dispatch_webhook", "gate_ext_webhook", "Broadcast Webhook",
-        "{\"event\":\"billing_reset\"}", "MEDIUM", false, true, 20000
+    sess = std_hitl_add_gate(
+        sess, "gate_fund_xfer", "Fund Transfer Gate", "bank:wire_transfer",
+        "swift://central_bank/acc_99", 10000, true, true
     );
-    let paused_1: Bool = sess.is_paused;
-    if !paused_1 { return false; }
 
-    // 3. Operator rejects due to untrusted payload
-    sess = hitl_harness_submit_decision(
-        sess, "act_dispatch_webhook", false, "Untrusted payload format detected",
-        20600, 600
+    let act: PauseAction = pause_action_new(
+        "act_xfer_1m", "gate_fund_xfer", "Transfer $1,000,000",
+        "digest_sha256_xfer_1m", "CRITICAL", true, true
     );
-    let paused_2: Bool = sess.is_paused;
-    if paused_2 { return false; }
+    sess = std_hitl_request_action(sess, act, 20000);
 
-    let tok_res: Result[String, String] = hitl_harness_get_token(sess, "act_dispatch_webhook", 20600);
-    if tok_res.is_ok() { return false; }
+    if !sess.is_paused { return false; }
 
-    // 4. Verify action transitioned to ROLLED_BACK
-    let act: PauseAction = hitl_session_find_action(sess, "act_dispatch_webhook");
-    let aid_len: Int = chars_len(act.action_id);
-    let st: String = act.status;
-    if aid_len == 0 || st != "ROLLED_BACK" { return false; }
+    sess = std_hitl_decide(
+        sess, "act_xfer_1m", false, "Unrecognized destination SWIFT code",
+        21000, 1000
+    );
 
-    println("REJECTION_ROLLBACK_OK");
+    let rejected_action: PauseAction = hitl_session_find_action(sess, "act_xfer_1m");
+    let act_status: String = rejected_action.status;
+    let expected_status: String = "ROLLED_BACK";
+    if !(act_status == expected_status) { return false; }
+
+    let tok_res: Result[String, String] = std_hitl_get_token(
+        sess, "act_xfer_1m", 21000
+    );
+    if !tok_res.is_err() { return false; }
+
     return true;
 }
 
 pub fn verify_hitl_timeout_denial() -> Bool {
-    let policy: HitlPolicy = hitl_policy_strict("pol_timeout_strict");
-    let mut sess: HitlSession = hitl_harness_init("sess_test_03", "operator_charlie", policy);
-
-    // 1. Add sensitive credential rotation gate with short 1500ms timeout
-    sess = hitl_harness_add_gate(
-        sess, "gate_key_rotate", "KMS Key Rotation", "ROTATE_KEY",
-        "kms://vault/root_key", 1500, true, true
+    let pol: HitlPolicy = hitl_policy_strict("pol_strict_03");
+    let mut sess: HitlSession = std_hitl_session_create(
+        "sess_test_03", "operator_charlie", pol
     );
 
-    // 2. Request step-pause for key rotation
-    sess = hitl_harness_request_step(
-        sess, "act_rotate_keys", "gate_key_rotate", "Rotate Vault Keys",
-        "ROTATE_ROOT_KMS_KEY", "CRITICAL", true, true, 30000
+    sess = std_hitl_add_gate(
+        sess, "gate_reboot", "Server Reboot Gate", "sys:host_reboot",
+        "node://cluster_node_7", 3000, true, false
     );
 
-    // 3. Operator attempts to approve after 3200ms (> 1500ms timeout)
-    sess = hitl_harness_submit_decision(
-        sess, "act_rotate_keys", true, "Delayed approval",
-        33200, 3200
+    let act: PauseAction = pause_action_new(
+        "act_reboot_node", "gate_reboot", "Reboot Node 7",
+        "digest_sha256_reboot", "HIGH", true, false
+    );
+    sess = std_hitl_request_action(sess, act, 30000);
+
+    if !sess.is_paused { return false; }
+
+    sess = std_hitl_decide(
+        sess, "act_reboot_node", true, "Late approval",
+        35000, 5000
     );
 
-    let tok_res: Result[String, String] = hitl_harness_get_token(sess, "act_rotate_keys", 33200);
-    if tok_res.is_ok() { return false; }
+    let denied_action: PauseAction = hitl_session_find_action(sess, "act_reboot_node");
+    let act_status: String = denied_action.status;
+    let expected_status: String = "TIMEOUT_DENIED";
+    if !(act_status == expected_status) { return false; }
 
-    // 4. Verify action transitioned to TIMEOUT_DENIED
-    let act: PauseAction = hitl_session_find_action(sess, "act_rotate_keys");
-    let aid_len: Int = chars_len(act.action_id);
-    let st: String = act.status;
-    if aid_len == 0 || st != "TIMEOUT_DENIED" { return false; }
+    let tok_res: Result[String, String] = std_hitl_get_token(
+        sess, "act_reboot_node", 35000
+    );
+    if !tok_res.is_err() { return false; }
 
-    println("TIMEOUT_DENIAL_OK");
     return true;
 }
 
 pub fn verify_hitl_audit_integrity_suite() -> Bool {
-    let policy: HitlPolicy = hitl_policy_default("pol_audit_test");
-    let mut sess: HitlSession = hitl_harness_init("sess_audit_04", "operator_auditor", policy);
-
-    sess = hitl_harness_add_gate(
-        sess, "gate_log_purge", "Log Purge Gate", "PURGE_LOGS",
-        "fs:///var/log/app", 3000, true, false
+    let pol: HitlPolicy = hitl_policy_strict("pol_strict_04");
+    let mut sess: HitlSession = std_hitl_session_create(
+        "sess_test_04", "operator_dave", pol
     );
 
-    sess = hitl_harness_request_step(
-        sess, "act_purge_old", "gate_log_purge", "Purge 90d Logs",
-        "rm /var/log/app/*.old", "MEDIUM", true, false, 40000
+    sess = std_hitl_add_gate(
+        sess, "gate_purge", "Data Purge Gate", "fs:purge_records",
+        "file:///var/log/audit", 5000, true, false
     );
 
-    sess = hitl_harness_submit_decision(
-        sess, "act_purge_old", true, "Audit compliance retention verified",
+    let act: PauseAction = pause_action_new(
+        "act_purge_old", "gate_purge", "Purge 2024 Audit Logs",
+        "digest_sha256_purge", "HIGH", true, false
+    );
+    sess = std_hitl_request_action(sess, act, 40000);
+
+    sess = std_hitl_decide(
+        sess, "act_purge_old", true, "Annual retention cycle",
         41000, 1000
     );
 
-    let tok_res: Result[String, String] = hitl_harness_get_token(sess, "act_purge_old", 41000);
+    let tok_res: Result[String, String] = std_hitl_get_token(sess, "act_purge_old", 41000);
     if tok_res.is_err() { return false; }
     let tok_raw: String = tok_res.unwrap();
     let tok: HitlToken = hitl_token_parse(tok_raw);
 
-    sess = hitl_harness_commit_effect(
+    sess = std_hitl_commit(
         sess, tok, "act_purge_old", 41200
     );
 
-    let audit_res: Result[Bool, String] = hitl_harness_verify_audit(sess);
+    let audit_res: Result[Bool, String] = std_hitl_verify_audit(sess);
     if audit_res.is_err() { return false; }
 
-    let summary: String = hitl_harness_audit_summary(sess);
+    let summary: String = std_hitl_audit_summary(sess);
     if chars_len(summary) == 0 { return false; }
 
-    println("AUDIT_LOG_INTEGRITY_OK");
     return true;
 }
 

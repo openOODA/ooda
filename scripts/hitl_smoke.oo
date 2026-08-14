@@ -1,33 +1,58 @@
-// # Human-in-the-Loop Harness and Step-Pause Smoke
+// # Human-in-the-Loop (HITL) Harness and Step-Pause Verification Smoke
 //
-// Logline: Smoke validation for HITL approval gates, timeout enforcement, session audit, and step-pause execution.
+// Logline: Smoke test verifying static typechecking, line limits, and runtime step-pause fixture execution.
 //
-// Setup: Exercises oodac typechecking over all HITL standard modules and validates fixture integrity.
+// Setup: Process, filesystem, and compiler binaries available in test environment.
 //
 // Beats:
-//   1. Verify oodac check on HITL modules (types, gate, session, facade, top-level entry).
-//   2. Verify oodac check on the integrated hitl_fixture.
+//   1. Check static types and compilation of all HITL stdlib modules.
+//   2. Verify top-level std/hitl.oo facade and fixtures typecheck cleanly.
+//   3. Enforce the <= 256 lines per file rule across all HITL sources.
+//   4. Compile and execute end-to-end hitl_fixture binary, verifying approval and audit loops.
 // RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
 // RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
 
 import "std/scenario.oo";
 import "std/sh.oo";
 
-pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
     let root = sh_realpath(p, ".").unwrap_or(".");
-    let oodac = root + "/oodac/oodac";
-    let std_root = root + "/../std";
-    let _ = scenario(p, fs, "HITL Harness and Step-Pause Smoke");
+    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let fix = root + "/fixtures";
+    let std_root = sh_env_get_or(p, "STD_ROOT", root + "/../std").unwrap_or("");
+    let hitl_dir = std_root + "/src/ooda/hitl";
+    let _ = sh_mkdir_p(fw, tmpd);
+    let _ = scenario(p, fs, "human in the loop harness and step pause protocol");
 
-    // Beat 1: Check HITL modules
-    check(p, oodac + " check " + std_root + "/src/ooda/hitl/hitl_types.oo", within: 15);
-    check(p, oodac + " check " + std_root + "/src/ooda/hitl/hitl_gate.oo", within: 15);
-    check(p, oodac + " check " + std_root + "/src/ooda/hitl/hitl_session.oo", within: 15);
-    check(p, oodac + " check " + std_root + "/src/ooda/hitl/hitl.oo", within: 15);
-    check(p, oodac + " check " + std_root + "/hitl.oo", within: 15);
+    // when — hitl types, gate, session, and facade pass oodac typecheck
+    let _ = check(p, oodac + " check " + hitl_dir + "/hitl_types.oo >/dev/null 2>&1", 30);
+    let _ = check(p, oodac + " check " + hitl_dir + "/hitl_gate.oo >/dev/null 2>&1", 30);
+    let _ = check(p, oodac + " check " + hitl_dir + "/hitl_session.oo >/dev/null 2>&1", 30);
+    let _ = check(p, oodac + " check " + hitl_dir + "/hitl.oo >/dev/null 2>&1", 30);
 
-    // Beat 2: Check Integrated HITL Fixture
-    check(p, oodac + " check " + root + "/fixtures/hitl_fixture.oo", within: 30);
+    // and — top-level std/hitl.oo facade passes typecheck
+    let _ = check(p, oodac + " check " + std_root + "/hitl.oo >/dev/null 2>&1", 30);
 
-    println("hitl_smoke: PASSED");
+    // and — end-to-end hitl fixture passes typecheck
+    let _ = check(p, oodac + " check " + fix + "/hitl_fixture.oo >/dev/null 2>&1", 30);
+
+    // and — all HITL source files strictly satisfy <= 256 lines rule
+    let _ = check(p, "test $(wc -l < " + hitl_dir + "/hitl_types.oo) -le 256", 10);
+    let _ = check(p, "test $(wc -l < " + hitl_dir + "/hitl_gate.oo) -le 256", 10);
+    let _ = check(p, "test $(wc -l < " + hitl_dir + "/hitl_session.oo) -le 256", 10);
+    let _ = check(p, "test $(wc -l < " + hitl_dir + "/hitl.oo) -le 256", 10);
+    let _ = check(p, "test $(wc -l < " + std_root + "/hitl.oo) -le 256", 10);
+    let _ = check(p, "test $(wc -l < " + fix + "/hitl_fixture.oo) -le 256", 10);
+
+    // and — emit C and compile hitl_fixture binary
+    let emit_cmd = oodac + " emit-c " + fix + "/hitl_fixture.oo > " + tmpd + "/hitl_smoke_fix.c";
+    let _ = process_exec(p, emit_cmd);
+    let gcc_cmd = "gcc -O2 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + tmpd + "/hitl_smoke_fix.c -lm -ldl -lpthread -o " + tmpd + "/hitl_smoke_fix.bin";
+    let _ = check(p, gcc_cmd, 30);
+
+    // and — runtime execution passes all gate, rollback, timeout, and audit assertions
+    let _ = check(p, tmpd + "/hitl_smoke_fix.bin | grep -q 'HITL_FIXTURE_ALL_PASSED'", 30);
+
+    println("HITL_SMOKE_ALL_PASSED");
 }
