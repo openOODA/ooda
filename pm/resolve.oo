@@ -2,192 +2,25 @@
 //
 // Logline: Match version constraints and reject capability escalation on flat DOD records.
 //
-// Setup: Package repository indexes and capability constraints are loaded for resolution.
+// Setup: Re-export dependency resolution and constraint checking from resolve_tree.
 //
 // Beats:
-//   1. Walk dependency ids and SemVer requirements.
-//   2. Solve OCap grants without escalating the caller's mask.
-//   3. Keep the work on flat arrays and bitmasks.
+//   1. Re-export SemVer constraint checking.
+//   2. Validate capability escalation.
+//   3. Solve dependency trees under capability bounds.
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
 
-type Dependency = struct {
-    id: PackageId,
-    version_req: SemVer,
-    is_wildcard: Bool,
-    grants: Caps,
-};
+import "./resolve_tree.oo";
 
-type CapabilityContext = struct {
-    needs: Caps,
-};
-
-type PackageManifest = struct {
-    id: PackageId,
-    version: SemVer,
-    context: CapabilityContext,
-    deps_offset: u32,
-    deps_len: u32,
-};
-
-type ResolutionGraphNode = struct {
-    id: PackageId,
-    version: SemVer,
-};
-
-type ResolveResult = struct {
-    success: Bool,
-    error_code: u32,
-    new_offset: u32,
-};
-
-// Validates whether the capabilities requested by a candidate are fully 
-// satisfied by the capabilities explicitly granted by the parent.
-// If this returns false, it indicates a capability escalation attempt.
-pub fn validate_capability_escalation(requested_caps: Caps, granted_caps: Caps) -> Bool {
-    let req = requested_caps.mask;
-    let granted = granted_caps.mask;
-    return (req & granted) == req;
+pub fn validate_capability_escalation(requested_caps: Int, granted_caps: Int) -> Bool {
+    return pm_validate_capability_escalation(requested_caps, granted_caps);
 }
 
-pub fn check_version_constraint(req: SemVer, is_wildcard: Bool, actual: SemVer) -> Bool {
-    if is_wildcard {
-        return true;
-    }
-    if req.major == actual.major {
-        if req.minor == actual.minor {
-            if req.patch == actual.patch {
-                return true;
-            }
-        }
-    }
-    return false;
+pub fn check_version_constraint(actual: &PmSemVer, dep: &PmDependency) -> Bool {
+    return pm_semver_satisfies(actual, dep);
 }
 
-pub fn resolve_dependency(
-    granted_caps: Caps,
-    dep: Dependency,
-    registry: [PackageManifest],
-    registry_len: u32,
-    registry_deps: [Dependency],
-    out_graph: [ResolutionGraphNode],
-    out_offset: u32
-) -> ResolveResult {
-    let mut candidate_idx: u32 = 0;
-    let mut found_version_match: Bool = false;
-    let mut found_candidate: Bool = false;
-    
-    let mut i: u32 = 0;
-    while i < registry_len {
-        let p = registry[i];
-        if p.id.vendor_hash == dep.id.vendor_hash {
-            if p.id.name_hash == dep.id.name_hash {
-                if check_version_constraint(dep.version_req, dep.is_wildcard, p.version) {
-                    found_version_match = true;
-                    if validate_capability_escalation(p.context.needs, dep.grants) {
-                        if !found_candidate {
-                            candidate_idx = i;
-                            found_candidate = true;
-                        }
-                    }
-                }
-            }
-        }
-        i = i + 1;
-    }
-
-    if !found_version_match {
-        return ResolveResult {
-            success: false,
-            error_code: 1, // Version constraint conflict
-            new_offset: out_offset,
-        };
-    }
-
-    if !validate_capability_escalation(dep.grants, granted_caps) {
-        return ResolveResult {
-            success: false,
-            error_code: 2, // Parent delegates capabilities it lacks
-            new_offset: out_offset,
-        };
-    }
-
-    if !found_candidate {
-        return ResolveResult {
-            success: false,
-            error_code: 3, // Candidates rejected due to capability requests exceeding grants
-            new_offset: out_offset,
-        };
-    }
-
-    let selected = registry[candidate_idx];
-    
-    let node = ResolutionGraphNode { id: selected.id, version: selected.version };
-    out_graph[out_offset] = node;
-    let mut current_offset = out_offset + 1;
-
-    let mut j: u32 = 0;
-    while j < selected.deps_len {
-        let child_dep = registry_deps[selected.deps_offset + j];
-        let child_res = resolve_dependency(
-            selected.context.needs, 
-            child_dep, 
-            registry, 
-            registry_len, 
-            registry_deps, 
-            out_graph, 
-            current_offset
-        );
-        
-        if !child_res.success {
-            return child_res;
-        }
-        
-        current_offset = child_res.new_offset;
-        j = j + 1;
-    }
-
-    return ResolveResult {
-        success: true,
-        error_code: 0,
-        new_offset: current_offset,
-    };
-}
-
-// Phase 3: Recursive resolution and backtracking (Constraint Solving).
-pub fn resolve_graph(
-    manifest: PackageManifest,
-    registry: [PackageManifest],
-    registry_len: u32,
-    registry_deps: [Dependency],
-    out_graph: [ResolutionGraphNode]
-) -> ResolveResult {
-    let root_node = ResolutionGraphNode { id: manifest.id, version: manifest.version };
-    out_graph[0] = root_node;
-    let mut current_offset: u32 = 1;
-    
-    let mut i: u32 = 0;
-    while i < manifest.deps_len {
-        let dep = registry_deps[manifest.deps_offset + i];
-        let res = resolve_dependency(
-            manifest.context.needs, 
-            dep, 
-            registry, 
-            registry_len, 
-            registry_deps, 
-            out_graph, 
-            current_offset
-        );
-        
-        if !res.success {
-            return res;
-        }
-        
-        current_offset = res.new_offset;
-        i = i + 1;
-    }
-    
-    return ResolveResult {
-        success: true,
-        error_code: 0,
-        new_offset: current_offset,
-    };
+pub fn resolve_graph(root: &PmManifest, registry: List[PmManifest], max_depth: Int) -> PmResolveResult {
+    return pm_resolve_tree(root, registry, max_depth);
 }

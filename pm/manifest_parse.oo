@@ -1,0 +1,223 @@
+// # Package manifest parser
+//
+// Logline: Parse SemVer specifications, evaluate constraint operators, and build validated package manifests.
+//
+// Setup: Imports manifest_types. Pure constraint parsing and SemVer satisfaction solver.
+//
+// Beats:
+//   1. Parse numeric SemVer major.minor.patch components.
+//   2. Compare versions and solve exact, caret (^), tilde (~), and wildcard (*) constraints.
+//   3. Construct validated PmManifest records and compute manifest checksums.
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+import "./manifest_types.oo";
+
+pub fn pm_parse_int(s: String) -> Int {
+    let len: Int = s.len();
+    let mut i: Int = 0;
+    let mut res: Int = 0;
+    while i < len {
+        let b: Int = byte_at(s, i);
+        if b >= 48 && b <= 57 {
+            let res_scaled: Int = res * 10;
+            let b_diff: Int = b - 48;
+            res = res_scaled + b_diff;
+        }
+        i = i + 1;
+    }
+    return res;
+}
+
+pub fn pm_semver_parse(s: String) -> Result[PmSemVer, String] {
+    let len: Int = s.len();
+    if len == 0 {
+        return Err("Empty SemVer string");
+    }
+    let mut dot1: Int = -1;
+    let mut dot2: Int = -1;
+    let mut i: Int = 0;
+    while i < len {
+        let ch: String = char_at(s, i);
+        if ch == "." {
+            if dot1 == -1 {
+                dot1 = i;
+            } else if dot2 == -1 {
+                dot2 = i;
+            }
+        }
+        i = i + 1;
+    }
+    if dot1 <= 0 {
+        return Err("Invalid SemVer format; expected X.Y.Z");
+    }
+    if dot2 <= dot1 + 1 {
+        return Err("Invalid SemVer format; expected X.Y.Z");
+    }
+    if dot2 >= len - 1 {
+        return Err("Invalid SemVer format; expected X.Y.Z");
+    }
+    let maj_str: String = str_slice(s, 0, dot1);
+    let min_str: String = str_slice(s, dot1 + 1, dot2);
+    let pat_str: String = str_slice(s, dot2 + 1, len);
+    let maj: Int = pm_parse_int(maj_str);
+    let min_val: Int = pm_parse_int(min_str);
+    let pat: Int = pm_parse_int(pat_str);
+    return Ok(pm_semver_new(maj, min_val, pat));
+}
+
+pub fn pm_int_to_str(x: Int) -> String {
+    return x.to_string();
+}
+
+pub fn pm_semver_to_str(v: &PmSemVer) -> String {
+    let maj: Int = v.major;
+    let min_val: Int = v.minor;
+    let pat: Int = v.patch;
+    let s1: String = maj.to_string();
+    let s2: String = min_val.to_string();
+    let s3: String = pat.to_string();
+    let dot: String = ".";
+    let mut out: String = s1;
+    out = out + dot;
+    out = out + s2;
+    out = out + dot;
+    out = out + s3;
+    return out;
+}
+
+pub fn pm_is_gt(a: Int, b: Int) -> Bool {
+    return a > b;
+}
+
+pub fn pm_is_lt(a: Int, b: Int) -> Bool {
+    return a < b;
+}
+
+pub fn pm_is_gte(a: Int, b: Int) -> Bool {
+    return a >= b;
+}
+
+pub fn pm_semver_compare(v1: &PmSemVer, v2: &PmSemVer) -> Int {
+    if pm_is_lt(v1.major, v2.major) { return -1; }
+    if pm_is_gt(v1.major, v2.major) { return 1; }
+    if pm_is_lt(v1.minor, v2.minor) { return -1; }
+    if pm_is_gt(v1.minor, v2.minor) { return 1; }
+    if pm_is_lt(v1.patch, v2.patch) { return -1; }
+    if pm_is_gt(v1.patch, v2.patch) { return 1; }
+    return 0;
+}
+
+pub fn pm_semver_satisfies(actual: &PmSemVer, dep: &PmDependency) -> Bool {
+    if dep.is_wildcard {
+        return true;
+    }
+    if dep.constraint_op == "*" {
+        return true;
+    }
+    let req = pm_semver_new(dep.req_major, dep.req_minor, dep.req_patch);
+    let cmp = pm_semver_compare(actual, &req);
+
+    if dep.constraint_op == "=" {
+        return cmp == 0;
+    }
+    if dep.constraint_op == "==" {
+        return cmp == 0;
+    }
+    if dep.constraint_op == ">=" {
+        return pm_is_gte(cmp, 0);
+    }
+    if dep.constraint_op == "~" {
+        // Tilde: allows patch-level changes within same minor version
+        if actual.major != req.major {
+            return false;
+        }
+        if actual.minor != req.minor {
+            return false;
+        }
+        return pm_is_gte(actual.patch, req.patch);
+    }
+    if dep.constraint_op == "^" {
+        // Caret: compatible updates according to SemVer rules
+        if pm_is_gt(req.major, 0) {
+            if actual.major != req.major { return false; }
+            if pm_is_lt(actual.minor, req.minor) { return false; }
+            if actual.minor == req.minor {
+                if pm_is_lt(actual.patch, req.patch) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if pm_is_gt(req.minor, 0) {
+            if actual.major != 0 { return false; }
+            if actual.minor != req.minor { return false; }
+            return pm_is_gte(actual.patch, req.patch);
+        }
+        // 0.0.Z only allows exact patch
+        if actual.major != 0 { return false; }
+        if actual.minor != 0 { return false; }
+        return actual.patch == req.patch;
+    }
+    return cmp == 0;
+}
+
+pub fn pm_manifest_create(
+    name: String,
+    vendor: String,
+    version_str: String,
+    req_caps: Int,
+    checksum: String
+) -> Result[PmManifest, String] {
+    let ver_res = pm_semver_parse(version_str);
+    let ver: PmSemVer = match ver_res {
+        Ok(v) => v,
+        Err(e) => return Err(e),
+    };
+    if name.len() == 0 {
+        return Err("Manifest name cannot be empty");
+    }
+    if vendor.len() == 0 {
+        return Err("Manifest vendor cannot be empty");
+    }
+    let empty_deps: List[PmDependency] = [];
+    return Ok(PmManifest {
+        name: name,
+        vendor: vendor,
+        version: ver,
+        version_str: version_str,
+        required_caps: req_caps,
+        checksum: checksum,
+        dependencies: empty_deps,
+        is_valid: true,
+    });
+}
+
+pub fn pm_manifest_add_dep(mut_man: &mut PmManifest, dep: PmDependency) -> Bool {
+    let cur_deps: List[PmDependency] = mut_man.dependencies;
+    mut_man.dependencies = list_push(cur_deps, dep);
+    return true;
+}
+
+pub fn pm_manifest_calc_checksum(man: &PmManifest) -> String {
+    let m_vendor = man.vendor;
+    let m_name = man.name;
+    let m_ver = man.version_str;
+    let req_caps = man.required_caps;
+    let mut payload = m_vendor;
+    payload = payload + "/";
+    payload = payload + m_name;
+    payload = payload + "@";
+    payload = payload + m_ver;
+    payload = payload + "#";
+    payload = payload + pm_int_to_str(req_caps);
+    let len: Int = payload.len();
+    let mut i: Int = 0;
+    let mut hash: Int = 5381;
+    while i < len {
+        let ch: Int = byte_at(payload, i);
+        let h_scaled = hash * 33;
+        hash = h_scaled + ch;
+        i = i + 1;
+    }
+    return "chk_" + pm_int_to_str(hash);
+}
