@@ -1,5 +1,9 @@
 /* CHS runtime umbrella — single TU for existing gcc command lines */
 #include "chs_rt_str.c"
+#include "chs_rt_str_intern.c"
+#include "chs_rt_str_int.c"
+#include "chs_rt_str_tok.c"
+#include "chs_rt_emit_tmp.c"
 #include "chs_rt_list.c"
 #include "chs_rt_sys.c"
 #include "chs_rt_ffi.c"

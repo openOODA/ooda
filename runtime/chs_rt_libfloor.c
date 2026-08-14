@@ -52,30 +52,75 @@ void oo_cap_require_gpu(long long got, const char *op) {
   }
 }
 
-/* CAP-G4: process residual seals — ProcessCap OR SysCap; real process via sys_exec */
+/* CAP-G4: ProcessCap OR SysCap. spawn/wait/kill are real fork/waitpid/kill. */
+#include <sys/wait.h>
+#include <signal.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
 void oo_cap_require_process(long long got, const char *op);
+static int oo_cmd_cbuf(OoStr s, char *c, int max) {
+  long long i;
+  if (!c || max < 2 || !s.data || s.len <= 0 || s.len >= max) return 0;
+  for (i = 0; i < s.len; i++) {
+    if (s.data[i] == '\0') return 0;
+  }
+  memcpy(c, s.data, (size_t)s.len);
+  c[s.len] = '\0';
+  return 1;
+}
 OoResS oo_sys_spawn(long long cap, OoStr cmd) {
   OoResS r;
+  char buf[4096];
+  char pidbuf[32];
+  pid_t pid;
   oo_cap_require_process(cap, "sys_spawn");
   r.ok = 0;
-  r.val = oo_str_lit("sys_spawn residual: use sys_exec for blocking spawn+wait");
-  (void)cmd;
+  r.val = oo_str_lit("sys_spawn failed");
+  if (!oo_cmd_cbuf(cmd, buf, 4096)) return r;
+  pid = fork();
+  if (pid < 0) return r;
+  if (pid == 0) {
+    oo_child_filter_env();
+    execl("/bin/sh", "sh", "-c", buf, (char *)NULL);
+    _exit(127);
+  }
+  r.ok = 1;
+  snprintf(pidbuf, sizeof pidbuf, "%lld", (long long)pid);
+  r.val = oo_str_lit(pidbuf);
   return r;
 }
 OoResS oo_sys_wait(long long cap, long long pid) {
   OoResS r;
+  int st;
+  char stbuf[32];
+  pid_t w;
   oo_cap_require_process(cap, "sys_wait");
   r.ok = 0;
-  r.val = oo_str_lit("sys_wait residual: path A seal only");
-  (void)pid;
+  r.val = oo_str_lit("sys_wait failed");
+  if (pid == 0) return r;
+  w = waitpid((pid_t)pid, &st, 0);
+  if (w < 0) return r;
+  r.ok = 1;
+  if (WIFEXITED(st)) {
+    snprintf(stbuf, sizeof stbuf, "%d", WEXITSTATUS(st));
+  } else if (WIFSIGNALED(st)) {
+    snprintf(stbuf, sizeof stbuf, "sig:%d", WTERMSIG(st));
+  } else {
+    snprintf(stbuf, sizeof stbuf, "st:%d", st);
+  }
+  r.val = oo_str_lit(stbuf);
   return r;
 }
 OoResS oo_sys_kill(long long cap, long long pid, long long sig) {
   OoResS r;
   oo_cap_require_process(cap, "sys_kill");
   r.ok = 0;
-  r.val = oo_str_lit("sys_kill residual: path A seal only");
-  (void)pid; (void)sig;
+  r.val = oo_str_lit("sys_kill failed");
+  if (pid <= 0 || sig < 0 || sig > 64) return r;
+  if (kill((pid_t)pid, (int)sig) != 0) return r;
+  r.ok = 1;
+  r.val = oo_str_lit("");
   return r;
 }
 

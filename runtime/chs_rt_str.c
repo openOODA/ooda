@@ -50,16 +50,12 @@ void oo_str_release(OoStr s) {
 }
 
 OoStr oo_str_lit(const char *s) {
-  OoStr r;
+  /* Unnamed `== "IDENT"` / `== "\t"` temps are never released.
+   * Intern so check of 174 modules does not heap-allocate each compare. */
   if (!s) {
-    r.len = 0;
-    r.data = oo_str_alloc_payload(0);
-    return r;
+    return oo_str_intern_bytes("", 0);
   }
-  r.len = (long long)strlen(s);
-  r.data = oo_str_alloc_payload((size_t)r.len);
-  memcpy(r.data, s, (size_t)r.len);
-  return r;
+  return oo_str_intern_bytes(s, (long long)strlen(s));
 }
 
 /* Non-consuming concat: borrows a/b (M2: s=s+t safe with reassign_arc). */
@@ -206,6 +202,9 @@ OoStr oo_char_at(OoStr s, long long idx) {
   if (c >= 0xF0) nbytes = 4;
   else if (c >= 0xE0) nbytes = 3;
   else if (c >= 0xC0) nbytes = 2;
+  if (nbytes == 1) {
+    return oo_str_ascii_intern(c);
+  }
   OoStr r;
   r.len = nbytes;
   r.data = oo_str_alloc_payload((size_t)nbytes);
@@ -217,17 +216,9 @@ OoStr oo_str_slice(OoStr s, long long start, long long end) {
   long long bs = utf8_byte_index(s, start);
   long long be = (end == oo_chars_len(s)) ? s.len : utf8_byte_index(s, end);
   if (bs < 0 || be < 0 || be < bs) {
-    /* Fail soft for bootstrap emit edge cases (empty field / OOB) — empty string. */
-    OoStr empty;
-    empty.len = 0;
-    empty.data = oo_str_alloc_payload(0);
-    return empty;
+    return oo_str_intern_bytes("", 0);
   }
-  OoStr r;
-  r.len = be - bs;
-  r.data = oo_str_alloc_payload((size_t)r.len);
-  memcpy(r.data, s.data + bs, (size_t)r.len);
-  return r;
+  return oo_str_intern_bytes(s.data + bs, be - bs);
 }
 
 int oo_char_is_digit(OoStr s) {

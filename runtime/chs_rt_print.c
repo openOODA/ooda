@@ -22,11 +22,7 @@ int oo_str_contains(OoStr hay, OoStr needle) {
   return 0;
 }
 OoStr oo_int_to_str(long long n) {
-  /* Fixed stack buffer then one owned heap copy of exact printed length. */
-  char buf[32];
-  int nwritten = snprintf(buf, sizeof(buf), "%lld", n);
-  if (nwritten < 0) abort();
-  return oo_str_lit(buf);
+  return oo_int_intern(n);
 }
 
 OoStr oo_str_trim(OoStr s) {

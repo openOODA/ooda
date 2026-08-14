@@ -17,9 +17,15 @@ size_t n=(size_t)(s-p); if(n+1>sz)return NULL;
 memcpy(out,p,n); out[n]='\0';
 return s[1]=='\0'?NULL:s+1;
 }
-static void to_cpath(OoStr p, char* c, int max) {
-long long n = p.len >= max ? max - 1 : p.len;
-memcpy(c, p.data ? p.data : "", n); c[n] = '\0';
+static int to_cpath(OoStr p, char* c, int max) {
+long long i;
+if (!c || max < 2 || !p.data || p.len <= 0 || p.len >= max) return 0;
+for (i = 0; i < p.len; i++) {
+if (p.data[i] == '\0') return 0;
+}
+memcpy(c, p.data, (size_t)p.len);
+c[p.len] = '\0';
+return 1;
 }
 static int path_under_writedir(const char *path, const char *dir) {
 char rp[PATH_MAX], rd[PATH_MAX], par[PATH_MAX];
@@ -40,7 +46,9 @@ close(dfd); return fd;
 }
 OoResS oo_read_file(long long cap, OoStr path) {
 oo_cap_require_fsread(cap, "read_file"); OoResS r={0, oo_str_lit("read_file failed")};
-FILE *f = fopen(path.data, "rb"); if (!f) return r;
+char cpath[PATH_MAX];
+if (!to_cpath(path, cpath, PATH_MAX)) return r;
+FILE *f = fopen(cpath, "rb"); if (!f) return r;
 if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return r; }
 long sz = ftell(f); if (sz < 0) { fclose(f); return r; }
 if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return r; }
@@ -53,7 +61,8 @@ return r;
 }
 OoResV oo_write_file(long long cap, OoStr path, OoStr content) {
 oo_cap_require_fswrite(cap, "write_file"); OoResV r={0, oo_str_lit("write_file failed")};
-char cpath[PATH_MAX]; to_cpath(path, cpath, PATH_MAX);
+char cpath[PATH_MAX];
+if (!to_cpath(path, cpath, PATH_MAX)) return r;
 const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
 r.err = oo_str_lit("write_file denied: path not under OODA_FS_WRITEDIR"); return r; }
@@ -67,13 +76,17 @@ return r;
 }
 int oo_path_exists(long long cap, OoStr path) {
 oo_cap_require_fsread(cap, "path_exists");
-FILE *f=fopen(path.data,"rb");
+char cpath[PATH_MAX];
+if (!to_cpath(path, cpath, PATH_MAX)) return 0;
+FILE *f=fopen(cpath,"rb");
 if(f){fclose(f);return 1;}
 return 0;
 }
 long long oo_file_size(long long cap, OoStr path) {
 oo_cap_require_fsread(cap, "file_size");
-FILE *f=fopen(path.data,"rb"); if(!f)return -1;
+char cpath[PATH_MAX];
+if (!to_cpath(path, cpath, PATH_MAX)) return -1;
+FILE *f=fopen(cpath,"rb"); if(!f)return -1;
 fseek(f,0,SEEK_END); long long sz=ftell(f); fclose(f);
 return sz;
 }
@@ -99,8 +112,9 @@ return us > 0LL ? us : 1LL;
 OoSList oo_fs_read_dir(long long cap, OoStr path) {
 oo_cap_require_fsread(cap, "fs_read_dir");
 OoSList l = oo_slist_new();
-const char *p = path.data ? path.data : "";
-DIR *d = opendir(p);
+char cpath[PATH_MAX];
+if (!to_cpath(path, cpath, PATH_MAX)) return l;
+DIR *d = opendir(cpath);
 if (!d) return l;
 struct dirent *dir;
 while ((dir = readdir(d)) != NULL) {
@@ -116,13 +130,15 @@ return l;
 }
 int oo_fs_is_dir(long long cap, OoStr path) {
 oo_cap_require_fsread(cap, "fs_is_dir");
-char cpath[1024]; to_cpath(path, cpath, 1024);
+char cpath[PATH_MAX];
+if (!to_cpath(path, cpath, PATH_MAX)) return 0;
 struct stat st;
 return (stat(cpath, &st) == 0 && S_ISDIR(st.st_mode)) ? 1 : 0;
 }
 OoResV oo_fs_remove_file(long long cap, OoStr path) {
 oo_cap_require_fswrite(cap, "fs_remove_file");
-char cpath[PATH_MAX]; to_cpath(path, cpath, PATH_MAX);
+char cpath[PATH_MAX];
+if (!to_cpath(path, cpath, PATH_MAX)) { OoResV r={0, oo_str_lit("fs_remove_file failed")}; return r; }
 OoResV r={0, oo_str_lit("fs_remove_file failed")};
 const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
@@ -132,7 +148,8 @@ return r;
 }
 OoResV oo_fs_rmdir(long long cap, OoStr path) {
 oo_cap_require_fswrite(cap, "fs_rmdir");
-char cpath[PATH_MAX]; to_cpath(path, cpath, PATH_MAX);
+char cpath[PATH_MAX];
+if (!to_cpath(path, cpath, PATH_MAX)) { OoResV r={0, oo_str_lit("fs_rmdir failed")}; return r; }
 OoResV r={0, oo_str_lit("fs_rmdir failed")};
 const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
@@ -142,7 +159,8 @@ return r;
 }
 OoResV oo_fs_mkdir(long long cap, OoStr path) {
 oo_cap_require_fswrite(cap, "fs_mkdir");
-char cpath[PATH_MAX]; to_cpath(path, cpath, PATH_MAX);
+char cpath[PATH_MAX];
+if (!to_cpath(path, cpath, PATH_MAX)) { OoResV r={0, oo_str_lit("fs_mkdir failed")}; return r; }
 OoResV r={0, oo_str_lit("fs_mkdir failed")};
 const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
@@ -153,7 +171,9 @@ return r;
 OoResV oo_fs_hardlink(long long cap, OoStr oldpath, OoStr newpath) {
 oo_cap_require_fswrite(cap, "fs_hardlink");
 char cold[PATH_MAX], cnew[PATH_MAX];
-to_cpath(oldpath, cold, PATH_MAX); to_cpath(newpath, cnew, PATH_MAX);
+if (!to_cpath(oldpath, cold, PATH_MAX) || !to_cpath(newpath, cnew, PATH_MAX)) {
+OoResV bad={0,oo_str_lit("fs_hardlink failed")}; return bad;
+}
 OoResV r={0,oo_str_lit("fs_hardlink failed")}; const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cnew, dir) || !path_under_writedir(cold, dir)) { r.err=oo_str_lit("fs_hardlink denied"); return r; }
 if (link(cold, cnew) == 0) { r.ok = 1; r.err = oo_str_lit(""); }
@@ -162,7 +182,9 @@ return r;
 OoResV oo_fs_symlink(long long cap, OoStr target, OoStr linkpath) {
 oo_cap_require_fswrite(cap, "fs_symlink");
 char ctarget[PATH_MAX], clink[PATH_MAX];
-to_cpath(target, ctarget, PATH_MAX); to_cpath(linkpath, clink, PATH_MAX);
+if (!to_cpath(target, ctarget, PATH_MAX) || !to_cpath(linkpath, clink, PATH_MAX)) {
+OoResV bad={0,oo_str_lit("fs_symlink failed")}; return bad;
+}
 OoResV r={0,oo_str_lit("fs_symlink failed")}; const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(clink, dir) || !path_under_writedir(ctarget, dir)) { r.err=oo_str_lit("fs_symlink denied"); return r; }
 if (symlink(ctarget, clink) == 0) { r.ok = 1; r.err = oo_str_lit(""); }

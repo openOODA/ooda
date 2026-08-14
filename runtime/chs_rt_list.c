@@ -112,9 +112,21 @@ void oo_ilist_free(OoIList l) {
   oo_ilist_release(l);
 }
 
+static int oo_list_owned(void *data) {
+  OoListHeader *h = data ? ((OoListHeader *)data) - 1 : NULL;
+  return h && __atomic_load_n(&h->ref_count, __ATOMIC_ACQUIRE) == 1
+      && __atomic_load_n(&h->flags, __ATOMIC_ACQUIRE) == 0;
+}
+
 OoIList oo_ilist_push(OoIList l, long long v) {
   OoIList n;
   long long ncap = l.cap ? l.cap : 8;
+  if (l.data && l.len < l.cap && oo_list_owned(l.data)) {
+    l.data[l.len] = v;
+    l.len = l.len + 1;
+    oo_ilist_retain(l);
+    return l;
+  }
   while (ncap < l.len + 1) ncap *= 2;
   n.data = (long long *)oo_list_alloc_payload(sizeof(long long), (size_t)ncap);
   if (l.data && l.len > 0) {
@@ -123,9 +135,7 @@ OoIList oo_ilist_push(OoIList l, long long v) {
   n.data[l.len] = v;
   n.len = l.len + 1;
   n.cap = ncap;
-  /* CRIT-2: publish the freshly populated slot by setting ref_count=1
-   * with release ordering so concurrent retainers either skip (rc==0)
-   * or observe fully initialised payload (rc==1 + acquire load). */
+  /* CRIT-2: publish payload then store rc=1 with release. */
   {
     OoListHeader *hdr = ((OoListHeader *)n.data) - 1;
     __atomic_store_n(&hdr->ref_count, 1, __ATOMIC_RELEASE);
@@ -198,6 +208,13 @@ void oo_slist_free(OoSList l) {
 OoSList oo_slist_push(OoSList l, OoStr v) {
   OoSList n;
   long long ncap = l.cap ? l.cap : 8;
+  if (l.data && l.len < l.cap && oo_list_owned(l.data)) {
+    l.data[l.len] = v;
+    oo_str_retain(v);
+    l.len = l.len + 1;
+    oo_slist_retain(l);
+    return l;
+  }
   while (ncap < l.len + 1) ncap *= 2;
   n.data = (OoStr *)oo_list_alloc_payload(sizeof(OoStr), (size_t)ncap);
   if (l.data && l.len > 0) {
@@ -210,9 +227,7 @@ OoSList oo_slist_push(OoSList l, OoStr v) {
   oo_str_retain(v);
   n.len = l.len + 1;
   n.cap = ncap;
-  /* CRIT-2: publish the freshly populated slot by setting ref_count=1
-   * with release ordering so concurrent retainers either skip (rc==0)
-   * or observe fully initialised payload (rc==1 + acquire load). */
+  /* CRIT-2: publish payload then store rc=1 with release. */
   {
     OoListHeader *hdr = ((OoListHeader *)n.data) - 1;
     __atomic_store_n(&hdr->ref_count, 1, __ATOMIC_RELEASE);

@@ -2,26 +2,18 @@
 //
 // Logline: Lexes source to token lines, packs kind, line, col, and text with escapes, and pulls a field back with field 3 decoded.
 //
-// Setup: lex_all and collect_tokens live in lex.oo and token_stream.oo; a token line is four tab-separated fields.
+// Setup: collect_tokens lives in token_stream.oo; a token line is four tab-separated fields.
 //
 // Beats:
-//   1. tokenize_lines runs lex_all and exits on Err, else collect_tokens, then caps at 1048576 rows.
+//   1. tokenize_lines collects tokens once (lex ERR is fail-closed there) and caps at 1048576 rows.
 //   2. tok_line escapes tab, newline, and backslash in the text field.
 //   3. field_at slices the which-th field; field 3 runs field_decode3.
 
-import "lex.oo";
 import "token_stream.oo";
 
 pub fn tokenize_lines(src: String) -> List[String] {
-    let probe: Result[String, String] = lex_all(src);
-    if probe.is_err() {
-        let e = match probe {
-            Ok(s) => s,
-            Err(msg) => msg,
-        };
-        println("ERR\tlex\t" + e);
-        process_exit(1);
-    }
+    // collect_tokens already fail-closes on lex ERR. A prior lex_all
+    // walk doubled cost on every module (174 files on main.oo).
     let toks: List[String] = collect_tokens(src);
     if list_len(toks) > 1048576 {
         println("ERR\tlex\ttoo many tokens");
@@ -32,9 +24,26 @@ pub fn tokenize_lines(src: String) -> List[String] {
 
 // Encode tab/newline so TSV token lines stay 4 fields.
 pub fn tok_line(kind: String, line: Int, col: Int, text: String) -> String {
-    let mut enc = "";
+    // Product emit lowers this name to oo_tok_line (one alloc). Body is the seed path.
     let tn = chars_len(text);
+    let mut need = false;
     let mut ti = 0;
+    while ti < tn {
+        let c = char_at(text, ti);
+        if c == "\t" || c == "\n" || c == "\\" {
+            need = true;
+            ti = tn;
+        } else {
+            ti = ti + 1;
+        }
+    }
+    let ls: String = line.to_string();
+    let cs: String = col.to_string();
+    if !need {
+        return kind + "\t" + ls + "\t" + cs + "\t" + text;
+    }
+    let mut enc = "";
+    ti = 0;
     while ti < tn {
         let c = char_at(text, ti);
         if c == "\t" {
@@ -48,14 +57,25 @@ pub fn tok_line(kind: String, line: Int, col: Int, text: String) -> String {
         }
         ti = ti + 1;
     }
-    let ls: String = line.to_string();
-    let cs: String = col.to_string();
     return kind + "\t" + ls + "\t" + cs + "\t" + enc;
 }
 
 // Decode field 3 escapes produced by tok_line.
 pub fn field_decode3(raw: String) -> String {
     let rn = chars_len(raw);
+    let mut esc = false;
+    let mut k = 0;
+    while k < rn {
+        if char_at(raw, k) == "\\" {
+            esc = true;
+            k = rn;
+        } else {
+            k = k + 1;
+        }
+    }
+    if !esc {
+        return raw;
+    }
     let mut out = "";
     let mut ri = 0;
     while ri < rn {

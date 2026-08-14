@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# Why not .oo: this starts gcc and the seed (first compiler). RULES 1.13 host exception.
+# job: official in-repo pure multi-module oodac rebuild (emit each .oo, link once)
+# in:  <main.oo> <out_bin>
+# out: native binary via emit-c + gcc + chs_rt only
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+MAIN="${1:?main.oo}"
+OUT="${2:?out_bin}"
+OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/oodac_pure_$$"
+mkdir -p "$TMP"
+if [[ ! -x "$OODAC_BIN" ]]; then
+  if [[ -x "$ROOT/oodac/oodac" ]]; then OODAC_BIN="$ROOT/oodac/oodac"
+  elif [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then OODAC_BIN="$ROOT/bootstrap/seed/oodac"
+  elif [[ -x "$ROOT/oodac/main" ]]; then OODAC_BIN="$ROOT/oodac/main"
+  else echo "ERR_NO_OODAC" >&2; exit 1; fi
+fi
+if [[ ! -f "$MAIN" && -f "$ROOT/$MAIN" ]]; then MAIN="$ROOT/$MAIN"; fi
+if [[ ! -f "$MAIN" ]]; then echo "ERR_MISSING $MAIN" >&2; exit 1; fi
+DIR="$(cd "$(dirname "$MAIN")" && pwd)"
+BASE="$(basename "$MAIN")"
+MAIN_ABS="$DIR/$BASE"
+# Collect modules (DFS, cycle/missing fail-closed). Order: deps first, main last.
+MODS=()
+declare -A SEEN=()
+declare -A STACK=()
+collect() {
+  local path="$1"
+  local abs
+  if [[ "$path" = /* ]]; then abs="$path"
+  else abs="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
+  fi
+  if [[ -n "${STACK[$abs]:-}" ]]; then echo "ERR_IMPORT_CYCLE $abs" >&2; exit 1; fi
+  if [[ -n "${SEEN[$abs]:-}" ]]; then return 0; fi
+  if [[ ! -f "$abs" ]]; then
+    local fname="$(basename "$abs")"
+    if [[ -n "${OODA_STD:-}" && -f "${OODA_STD}/$fname" ]]; then abs="${OODA_STD}/$fname"
+    elif [[ -f "$ROOT/std/$fname" ]]; then abs="$ROOT/std/$fname"
+    elif [[ -f "std/$fname" ]]; then abs="$(pwd)/std/$fname"
+    elif [[ -f "../std/$fname" ]]; then abs="$(pwd)/../std/$fname"
+    else echo "ERR_MISSING $abs" >&2; exit 1; fi
+  fi
+  STACK[$abs]=1
+  local dir
+  dir="$(cd "$(dirname "$abs")" && pwd)"
+  local imp
+  while IFS= read -r imp; do
+    [[ -z "$imp" ]] && continue
+    if [[ "$imp" = /* ]]; then
+      collect "$imp"
+    else
+      collect "$dir/$imp"
+    fi
+  done < <(grep -E '^import "' "$abs" 2>/dev/null | sed -n 's/^import "\(.*\)";.*/\1/p' || true)
+  unset 'STACK[$abs]'
+  SEEN[$abs]=1
+  MODS+=("$abs")
+}
+collect "$MAIN_ABS"
+
+# Same tree → same input_fp. Not a bit-identical product binary claim.
+PURE_INPUT_FP="$(
+  {
+    for src in "${MODS[@]}"; do
+      if [[ "$src" == "$ROOT/"* ]]; then
+        rel="${src#"$ROOT"/}"
+      else
+        rel="$(basename "$src")"
+      fi
+      printf '%s\0' "$rel"
+      cat -- "$src"
+    done
+  } | sha256sum | awk '{print $1}'
+)"
+echo "pure_build: input_fp=$PURE_INPUT_FP"
+if [[ -n "${PURE_BUILD_FP_OUT:-}" ]]; then
+  printf '%s\n' "$PURE_INPUT_FP" >"$PURE_BUILD_FP_OUT"
+fi
+
+# Check gate unless PURE_SKIP_CHECK=1.
+if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
+  nmods=${#MODS[@]}
+  ck_to=$((60 + nmods * 2))
+  if [[ $ck_to -gt 180 ]]; then ck_to=180; fi
+  set +e
+  timeout "$ck_to" "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
+  main_ck=$?
+  set -e
+  if [[ $main_ck -eq 124 ]]; then
+    echo "ERR_CHECK_TIMEOUT $MAIN_ABS (nmods=$nmods timeout=${ck_to}s)" >&2
+    exit 1
+  fi
+  if [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; then
+    echo "ERR_CHECK $MAIN_ABS" >&2
+    cat "$TMP/main_check.err" "$TMP/main_check.out" >&2 || true
+    exit 1
+  fi
+fi
+
+FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) \{'
+MCS=()
+for src in "${MODS[@]}"; do
+  mc="$TMP/$(echo "$src" | tr '/.' '__').c"
+  OODA_EMIT_NO_CONCAT=1 EMIT_NO_CONCAT=1 timeout 60 "$OODAC_BIN" emit-c "$src" >"$mc" || true
+  if [[ ! -s "$mc" ]] || ! grep -qE "$FN_DEF" "$mc"; then
+    echo "ERR_EMIT $src" >&2
+    exit 1
+  fi
+  if grep -qE $'^ERR\tc_emit' "$mc"; then
+    echo "ERR_EMIT_LINE $src" >&2
+    grep -E $'^ERR\tc_emit' "$mc" >&2 || true
+    exit 1
+  fi
+  MCS+=("$mc")
+done
+
+awk "/$FN_DEF/{exit} {print}" "${MCS[0]}" >"$TMP/preamble.c"
+# First definition of each symbol wins (import doubles).
+python3 - "$TMP" "${MCS[@]}" <<'PY'
+import re, sys
+from pathlib import Path
+tmp = Path(sys.argv[1])
+mcs = [Path(p) for p in sys.argv[2:]]
+fn_start = re.compile(
+    r"^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) "
+    r"([A-Za-z_][A-Za-z0-9_]*)\s*\(.*\)\s*\{\s*$"
+)
+protos: list[str] = []
+bodies: list[str] = []
+seen: set[str] = set()
+for mc in mcs:
+    text = mc.read_text(errors="replace").splitlines(keepends=True)
+    i = 0
+    n = len(text)
+    while i < n:
+        m = fn_start.match(text[i].rstrip("\n"))
+        if not m:
+            i += 1
+            continue
+        name = m.group(2)
+        j = i + 1
+        while j < n and not fn_start.match(text[j].rstrip("\n")):
+            j += 1
+        chunk = text[i:j]
+        if name not in seen:
+            seen.add(name)
+            line = text[i].rstrip()
+            if line.endswith("{"):
+                line = line[:-1].rstrip() + ";"
+            protos.append(line + "\n")
+            bodies.extend(chunk)
+        i = j
+(tmp / "protos.c").write_text("".join(protos))
+MAX_LINES = 200
+bodies_c_content = []
+part = 0
+lines = 0
+chunk = []
+for line in bodies:
+    chunk.append(line)
+    lines += 1
+    if lines >= MAX_LINES and line.rstrip() == "}":
+        (tmp / f"bodies_{part}.c").write_text("".join(chunk))
+        bodies_c_content.append(f'#include "bodies_{part}.c"\n')
+        part += 1
+        chunk = []
+        lines = 0
+if chunk:
+    (tmp / f"bodies_{part}.c").write_text("".join(chunk))
+    bodies_c_content.append(f'#include "bodies_{part}.c"\n')
+(tmp / "bodies.c").write_text("".join(bodies_c_content))
+print(f"pure_build: unique_fns={len(seen)} from_modules={len(mcs)}", flush=True)
+PY
+
+echo "long long oo_cap_grant_fs(void); long long oo_cap_grant_sys(void); long long oo_cap_grant_env(void); long long oo_cap_grant_net(void);" >> "$TMP/preamble.c"
+echo "int oo_path_exists(long long,OoStr); long long oo_file_size(long long,OoStr); OoResS oo_env_get(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_read_file(long long,OoStr); OoResV oo_write_file(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoResV oo_fs_remove_file(long long,OoStr); OoResV oo_fs_mkdir(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResV oo_fs_hardlink(long long,OoStr,OoStr); OoResV oo_fs_symlink(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_sys_exec(long long,int,OoStr*); OoResS oo_sys_exec1(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoSList str_split(OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "void oo_emit_tmp_reset(void); void oo_emit_tmp_enter(void);" >> "$TMP/preamble.c"
+echo "void oo_emit_tmp_leave(void); void oo_emit_tmp_release_print(void);" >> "$TMP/preamble.c"
+echo "void oo_emit_tmp_own(OoStr); void oo_emit_tmp_release_all_print(void);" >> "$TMP/preamble.c"
+echo "OoStr oo_emit_tmp_bind(OoStr);" >> "$TMP/preamble.c"
+sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/preamble.c"
+cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
+sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/all.c"
+echo "pure_build: native_caps"
+
+if ! grep -q 'int main\|long long main' "$TMP/all.c" && ! grep -q 'main(int argc' "$TMP/all.c"; then
+  echo "int main(void) { return 0; }" >> "$TMP/all.c"
+fi
+
+OO_SSL_CFLAGS=()
+OO_SSL_LIBS=()
+if [[ -z "${OO_HAVE_OPENSSL:-}" ]]; then
+  if [[ -f /usr/include/openssl/ssl.h || -f /usr/local/include/openssl/ssl.h \
+    || -e /usr/lib64/libssl.so || -e /usr/lib/x86_64-linux-gnu/libssl.so \
+    || -e /lib64/libssl.so.3 || -e /lib/x86_64-linux-gnu/libssl.so.3 ]]; then
+    OO_HAVE_OPENSSL=1
+  else
+    OO_HAVE_OPENSSL=0
+  fi
+fi
+if [[ "${OO_HAVE_OPENSSL}" == "1" ]]; then
+  OO_SSL_CFLAGS=(-DOO_HAVE_OPENSSL)
+  if [[ -e /usr/lib64/libssl.so.3 ]]; then
+    OO_SSL_LIBS=(/usr/lib64/libssl.so.3 /usr/lib64/libcrypto.so.3)
+  elif [[ -e /lib64/libssl.so.3 ]]; then
+    OO_SSL_LIBS=(/lib64/libssl.so.3 /lib64/libcrypto.so.3)
+  elif [[ -e /usr/lib/x86_64-linux-gnu/libssl.so.3 ]]; then
+    OO_SSL_LIBS=(/usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3)
+  else
+    OO_SSL_LIBS=(-lssl -lcrypto)
+  fi
+  echo "pure_build: OO_HAVE_OPENSSL=1 (link ${OO_SSL_LIBS[*]})"
+else
+  echo "pure_build: OO_HAVE_OPENSSL=0 (TLS residual; no -lssl)"
+fi
+gcc -O2 -I"$ROOT/runtime" "${OO_SSL_CFLAGS[@]}" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" \
+  -lm -ldl -lpthread "${OO_SSL_LIBS[@]}" -o "$OUT"
+test -x "$OUT"
+echo "pure_build: input_fp=$PURE_INPUT_FP"
+echo OK_PURE_MULTI
+rm -rf "$TMP"
