@@ -1,0 +1,149 @@
+// # End-to-end compiler RSS profiler and peak memory fixture
+//
+// Logline: Simulate multi-phase compiler execution, sample resident memory, and verify peak memory and 8GB budget limits.
+//
+// Setup: Emulates lexing, parsing, typechecking, optimization, and code generation phases with memory telemetry.
+//
+// Beats:
+//   1. Initialize RSS monitor with 8GB memory budget and parse baseline process status.
+//   2. Step through compilation phases recording VmRSS, VmHWM, and VmPeak telemetry.
+//   3. Generate PeakMemoryReport and assert phase deltas, peak tracking, and 8GB compliance.
+//   4. Validate tabular report and summary formatting diagnostics.
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+import "src/ooda/perf/perf_rss_types.oo";
+import "src/ooda/perf/perf_rss_monitor.oo";
+import "src/ooda/perf/perf_rss_report.oo";
+import "src/ooda/perf/perf.oo";
+
+pub fn main() {
+    // ---------------------------------------------------------------
+    // Beat 1: Initialize RSS monitor & parse baseline status sample
+    // ---------------------------------------------------------------
+    let mut monitor: RssMonitor = perf_monitor_init("compiler-perf-run", 8388608);
+
+    let baseline_status: String = "VmPeak:\t  120000 kB\nVmSize:\t  120000 kB\nVmHWM:\t   45000 kB\nVmRSS:\t   45000 kB\n";
+    let s0: RssSample = perf_monitor_sample(&mut monitor, baseline_status, "init", 0);
+    if s0.vm_rss_kb != 45000 {
+        println("FAIL: baseline VmRSS parse mismatch");
+        process_exit(1);
+    }
+    if s0.vm_hwm_kb != 45000 {
+        println("FAIL: baseline VmHWM parse mismatch");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 2: Step through compilation phases with telemetry
+    // ---------------------------------------------------------------
+    // Phase 1: Lexing & Parsing
+    perf_monitor_start_phase(&mut monitor, "lex_and_parse", 10);
+    let p1_status: String = "VmPeak:\t  300000 kB\nVmSize:\t  300000 kB\nVmHWM:\t  180000 kB\nVmRSS:\t  180000 kB\n";
+    let _s1: RssSample = perf_monitor_sample(&mut monitor, p1_status, "lex_and_parse", 130);
+    let p1: PhaseBreakdown = perf_monitor_end_phase(&mut monitor, "lex_and_parse", 180000, 130, 4200);
+    if p1.delta_rss_kb != 135000 {
+        println("FAIL: phase 1 delta calculation");
+        process_exit(1);
+    }
+
+    // Phase 2: Macro Expansion
+    perf_monitor_start_phase(&mut monitor, "macro_expand", 130);
+    let p2_status: String = "VmPeak:\t  600000 kB\nVmSize:\t  600000 kB\nVmHWM:\t  420000 kB\nVmRSS:\t  420000 kB\n";
+    let _s2: RssSample = perf_monitor_sample(&mut monitor, p2_status, "macro_expand", 310);
+    let p2: PhaseBreakdown = perf_monitor_end_phase(&mut monitor, "macro_expand", 420000, 310, 8500);
+    if p2.duration_ms != 180 {
+        println("FAIL: phase 2 duration calculation");
+        process_exit(1);
+    }
+
+    // Phase 3: Typecheck & Name Resolution
+    perf_monitor_start_phase(&mut monitor, "typecheck_names", 310);
+    let p3_status: String = "VmPeak:\t 1200000 kB\nVmSize:\t 1200000 kB\nVmHWM:\t  950000 kB\nVmRSS:\t  950000 kB\n";
+    let _s3: RssSample = perf_monitor_sample(&mut monitor, p3_status, "typecheck_names", 760);
+    let _p3: PhaseBreakdown = perf_monitor_end_phase(&mut monitor, "typecheck_names", 950000, 760, 24000);
+
+    // Phase 4: Optimization & IR Transforms (Peak Phase)
+    perf_monitor_start_phase(&mut monitor, "optimization_ir", 760);
+    let p4_status: String = "VmPeak:\t 2100000 kB\nVmSize:\t 2100000 kB\nVmHWM:\t 1450000 kB\nVmRSS:\t 1450000 kB\n";
+    let _s4: RssSample = perf_monitor_sample(&mut monitor, p4_status, "optimization_ir", 1080);
+    let p4: PhaseBreakdown = perf_monitor_end_phase(&mut monitor, "optimization_ir", 1450000, 1080, 31000);
+    if p4.peak_rss_kb != 1450000 {
+        println("FAIL: phase 4 peak RSS calculation");
+        process_exit(1);
+    }
+
+    // Phase 5: C Backend Emission (Memory Freed/Reduced)
+    perf_monitor_start_phase(&mut monitor, "c_backend_emit", 1080);
+    let p5_status: String = "VmPeak:\t 2100000 kB\nVmSize:\t 1800000 kB\nVmHWM:\t 1450000 kB\nVmRSS:\t 1200000 kB\n";
+    let _s5: RssSample = perf_monitor_sample(&mut monitor, p5_status, "c_backend_emit", 1230);
+    let _p5: PhaseBreakdown = perf_monitor_end_phase(&mut monitor, "c_backend_emit", 1200000, 1230, 9500);
+
+    // ---------------------------------------------------------------
+    // Beat 3: Build PeakMemoryReport & verify <8GB compliance
+    // ---------------------------------------------------------------
+    let report: PeakMemoryReport = perf_monitor_build_report(&monitor, "oodac_self_check");
+
+    if list_len(report.phases) != 5 {
+        println("FAIL: phase count mismatch");
+        process_exit(1);
+    }
+    if report.peak_rss_kb != 1450000 {
+        println("FAIL: peak RSS report mismatch");
+        process_exit(1);
+    }
+    if report.is_within_budget == false {
+        println("FAIL: expected within 8GB budget target");
+        process_exit(1);
+    }
+    if report.headroom_kb != (8388608 - 1450000) {
+        println("FAIL: headroom calculation mismatch");
+        process_exit(1);
+    }
+
+    let is_compliant: Bool = perf_verify_8gb_compliance(&report);
+    if is_compliant == false {
+        println("FAIL: 8GB compliance predicate returned false");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 4: Metrics, Throughput, and Tabular Reporting
+    // ---------------------------------------------------------------
+    let metrics: CompilationMetrics = perf_compiler_metrics(
+        "oodac/main.oo",
+        50000,
+        120000,
+        4500,
+        15000,
+        1220,
+        report.peak_rss_kb,
+        8388608
+    );
+    if metrics.budget_exceeded {
+        println("FAIL: metrics budget exceeded check");
+        process_exit(1);
+    }
+
+    let bench: ThroughputBenchmark = perf_benchmark_phase("bench-tc", "typecheck_names", 50000, 450, 530000);
+    if bench.items_per_second <= 0 {
+        println("FAIL: throughput items_per_second calculation");
+        process_exit(1);
+    }
+
+    let table_str: String = perf_monitor_format_table(&report);
+    let summary_str: String = perf_monitor_format_summary(&report);
+    let metrics_str: String = rss_report_format_metrics(&metrics);
+    let bench_str: String = rss_report_format_throughput(&bench);
+
+    if chars_len(table_str) == 0 || chars_len(summary_str) == 0 || chars_len(metrics_str) == 0 || chars_len(bench_str) == 0 {
+        println("FAIL: report formatting generated empty output");
+        process_exit(1);
+    }
+
+    println(summary_str);
+    println(table_str);
+    println(metrics_str);
+    println(bench_str);
+    println("COMPILER_RSS_FIXTURE: SUCCESS");
+}
