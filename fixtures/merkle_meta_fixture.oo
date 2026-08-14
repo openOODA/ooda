@@ -1,0 +1,218 @@
+// # Merkle state store and metamorphic security fixture
+//
+// Logline: Prove Merkle DAG state integrity, cryptographic inclusion proofs, transactional rollbacks, and metamorphic struct offset diversification.
+//
+// Setup: Test fixture importing Merkle DAG and Metamorphic modules under METAMORPHIC: path-a.
+//
+// Beats:
+//   1. Build Merkle DAG, compute cryptographic roots, and verify leaf inclusion proofs and audit paths.
+//   2. Capture immutable DAG state snapshots, execute leaf mutations, and prove transactional rollback integrity.
+//   3. Diversify struct memory layouts with metamorphic decoy padding, resolve offsets, and verify memory accessors.
+//   4. Verify security negatives: reject tampered inclusion proofs and detect corrupted decoy canaries.
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+// METAMORPHIC: path-a
+
+import "src/ooda/merkle/merkle.oo";
+import "src/ooda/sec/metamorphic/meta.oo";
+
+pub fn main() {
+    // ---------------------------------------------------------------
+    // Beat 1: Merkle DAG construction & cryptographic inclusion proofs
+    // ---------------------------------------------------------------
+    let mut payloads: List[String] = list_new();
+    payloads = list_push(payloads, "state:account_0:balance=1000");
+    payloads = list_push(payloads, "state:account_1:balance=2500");
+    payloads = list_push(payloads, "state:account_2:balance=4200");
+    payloads = list_push(payloads, "state:account_3:balance=9800");
+
+    let mut dag: MerkleDag = merkle_store_init("state_db");
+    let root_digest: String = merkle_store_commit_batch(&mut dag, payloads);
+    if root_digest == "" {
+        println("FAIL: empty root digest");
+        process_exit(1);
+    }
+
+    let dag_ok: Bool = merkle_store_verify_dag(&dag);
+    if !dag_ok {
+        println("FAIL: Merkle DAG structural integrity check");
+        process_exit(1);
+    }
+
+    // Generate and verify inclusion proof for leaf_1
+    let proof_res: Result[MerkleProof, String] = merkle_store_prove_leaf(&dag, "state_db_leaf_1");
+    if proof_res.is_err() {
+        println("FAIL: proof generation for leaf_1");
+        process_exit(1);
+    }
+    let proof: MerkleProof = proof_res.unwrap();
+    let proof_valid: Bool = merkle_store_verify_proof(&proof);
+    if !proof_valid {
+        println("FAIL: Merkle proof verification for leaf_1");
+        process_exit(1);
+    }
+
+    // Generate and verify audit path
+    let audit_res: Result[MerkleAuditPath, String] = merkle_audit_path_generate(&dag, "state_db_leaf_2", 2);
+    if audit_res.is_err() {
+        println("FAIL: audit path generation for leaf_2");
+        process_exit(1);
+    }
+    let audit_path: MerkleAuditPath = audit_res.unwrap();
+    let audit_ok: Bool = merkle_audit_path_verify(&audit_path, "state:account_2:balance=4200");
+    if !audit_ok {
+        println("FAIL: Merkle audit path verification for leaf_2");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 2: Immutable snapshots and transactional rollback
+    // ---------------------------------------------------------------
+    let snap1: MerkleSnapshot = merkle_store_snapshot(&mut dag, "snap_v1", 1000, "Initial balances");
+    let original_root: String = snap1.root_hash;
+
+    // Mutate leaf_0 balance transactionally
+    let update_res: Result[String, String] = merkle_dag_update_leaf(
+        &mut dag,
+        "state_db_leaf_0",
+        "state:account_0:balance=999999",
+        1050
+    );
+    if update_res.is_err() {
+        println("FAIL: DAG leaf update");
+        process_exit(1);
+    }
+    let mutated_root: String = update_res.unwrap();
+    if mutated_root == original_root {
+        println("FAIL: mutated root must differ from original snapshot");
+        process_exit(1);
+    }
+
+    // Rollback to snap_v1
+    let roll_res: Result[MerkleSnapshot, String] = merkle_store_rollback(&mut dag, "snap_v1");
+    if roll_res.is_err() {
+        println("FAIL: DAG rollback to snap_v1");
+        process_exit(1);
+    }
+    let rolled_snap: MerkleSnapshot = roll_res.unwrap();
+    if rolled_snap.root_hash != original_root {
+        println("FAIL: restored root hash mismatch after rollback");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 3: Metamorphic memory layout diversification & accessors
+    // ---------------------------------------------------------------
+    let epoch: Int = meta_epoch();
+    let mut fields: List[String] = list_new();
+    fields = list_push(fields, "header_flags");
+    fields = list_push(fields, "security_descriptor");
+    fields = list_push(fields, "payload_pointer");
+    fields = list_push(fields, "canary_tail");
+
+    let mut sizes: List[Int] = list_new();
+    sizes = list_push(sizes, 8);
+    sizes = list_push(sizes, 8);
+    sizes = list_push(sizes, 8);
+    sizes = list_push(sizes, 8);
+
+    let layout: LayoutTable = meta_struct_diversify("StateTransaction", fields, sizes, epoch);
+    if !layout.is_valid {
+        println("FAIL: metamorphic layout synthesis");
+        process_exit(1);
+    }
+    if layout.total_physical_size <= 32 {
+        println("FAIL: layout must contain decoy padding bytes");
+        process_exit(1);
+    }
+
+    let entropy_metric: Int = meta_audit_layout(&layout);
+    if entropy_metric <= 0 {
+        println("FAIL: layout entropy metric must be positive");
+        process_exit(1);
+    }
+
+    // Verify simulated memory operations using semantic field accessors
+    let mut sim_mem: List[Int] = list_new();
+    let w_ok1: Bool = meta_write_field(&layout, &mut sim_mem, "header_flags", 42);
+    let w_ok2: Bool = meta_write_field(&layout, &mut sim_mem, "payload_pointer", 9999);
+    if !w_ok1 || !w_ok2 {
+        println("FAIL: semantic write to metamorphic memory");
+        process_exit(1);
+    }
+
+    let r_res1: Result[Int, String] = meta_read_field(&layout, sim_mem, "header_flags");
+    let r_res2: Result[Int, String] = meta_read_field(&layout, sim_mem, "payload_pointer");
+    if r_res1.is_err() || r_res2.is_err() {
+        println("FAIL: semantic read from metamorphic memory");
+        process_exit(1);
+    }
+    if r_res1.unwrap() != 42 || r_res2.unwrap() != 9999 {
+        println("FAIL: semantic data mismatch in metamorphic memory");
+        process_exit(1);
+    }
+
+    // Plant expected canary values in simulated memory
+    let n_cans: Int = list_len(layout.canaries);
+    let mut c_i: Int = 0;
+    while c_i < n_cans {
+        let can_item: DecoyCanary = list_get(layout.canaries, c_i);
+        let slot: Int = can_item.offset / 8;
+        while list_len(sim_mem) <= slot {
+            sim_mem = list_push(sim_mem, 0);
+        }
+        // Write canary value into memory slot
+        let mut new_mem: List[Int] = list_new();
+        let mut m_idx: Int = 0;
+        while m_idx < list_len(sim_mem) {
+            if m_idx == slot {
+                new_mem = list_push(new_mem, can_item.expected_value);
+            } else {
+                new_mem = list_push(new_mem, list_get(sim_mem, m_idx));
+            }
+            m_idx = m_idx + 1;
+        }
+        sim_mem = new_mem;
+        c_i = c_i + 1;
+    }
+
+    let canaries_ok: Bool = meta_verify_canaries(&layout, sim_mem);
+    if !canaries_ok {
+        println("FAIL: canary verification in metamorphic layout");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 4: Security Negatives (Tamper Detection)
+    // ---------------------------------------------------------------
+    // Negative 1: Tampered leaf payload must fail Merkle audit verification
+    let bad_audit_ok: Bool = merkle_audit_path_verify(&audit_path, "state:account_2:balance=ATTACKER_OVERWRITE");
+    if bad_audit_ok {
+        println("FAIL: tampered payload must be rejected by Merkle audit path");
+        process_exit(1);
+    }
+
+    // Negative 2: Tampered decoy canary memory must fail canary verification
+    if n_cans > 0 {
+        let first_can: DecoyCanary = list_get(layout.canaries, 0);
+        let bad_slot: Int = first_can.offset / 8;
+        let mut corrupted_mem: List[Int] = list_new();
+        let mut corrupt_idx: Int = 0;
+        while corrupt_idx < list_len(sim_mem) {
+            if corrupt_idx == bad_slot {
+                corrupted_mem = list_push(corrupted_mem, 305419896); // 0x12345678 (tampered canary)
+            } else {
+                corrupted_mem = list_push(corrupted_mem, list_get(sim_mem, corrupt_idx));
+            }
+            corrupt_idx = corrupt_idx + 1;
+        }
+        let bad_canary_ok: Bool = meta_verify_canaries(&layout, corrupted_mem);
+        if bad_canary_ok {
+            println("FAIL: corrupted decoy canary must be detected and rejected");
+            process_exit(1);
+        }
+    }
+
+    println("merkle_meta_fixture-ok");
+}
