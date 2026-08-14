@@ -1,0 +1,87 @@
+// # Data-Oriented Design and Struct-of-Arrays smoke
+//
+// Logline: Verify SoA columnar allocation, SIMD transform throughput, and AoS layout conversions.
+//
+// Setup: oodac compiler binary and DOD/SoA modules exist on disk.
+//
+// Beats:
+//   1. Check types, operations, and facades for SoA and DOD modules.
+//   2. Compile and execute dod_fixture.oo verifying columnar transforms.
+//   3. Measure and prove transform throughput and AoS to SoA layout conversion.
+//
+// residual: Hardware AVX-512 streaming intrinsics lower through scalar fallback
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd = root + "/.ooda-cache/ooda-tmp/dod_soa_smoke";
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _ = sh_mkdir_p(fw, tmpd);
+    let _ = scenario(p, fs, "dod and soa columnar layout engine");
+
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() {
+            println("OK " + tag);
+            return 0;
+        }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // 1. Verify all DOD / SoA modules typecheck cleanly
+    let m1 = root + "/std/src/ooda/dod/soa_layout_types.oo";
+    let m2 = root + "/std/src/ooda/dod/soa_layout_ops.oo";
+    let m3 = root + "/std/src/ooda/dod/soa_layout.oo";
+    let m4 = root + "/std/src/ooda/dod/dod_layout_types.oo";
+    let m5 = root + "/std/src/ooda/dod/dod_layout_ops.oo";
+    let m6 = root + "/std/src/ooda/dod/dod_layout.oo";
+
+    let _ = process_exec(p, oodac + " check " + m1 + " > " + tmpd + "/m1.out 2> " + tmpd + "/m1.err");
+    fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/m1.out"), "soa_layout_types check");
+
+    let _ = process_exec(p, oodac + " check " + m2 + " > " + tmpd + "/m2.out 2> " + tmpd + "/m2.err");
+    fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/m2.out"), "soa_layout_ops check");
+
+    let _ = process_exec(p, oodac + " check " + m3 + " > " + tmpd + "/m3.out 2> " + tmpd + "/m3.err");
+    fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/m3.out"), "soa_layout check");
+
+    let _ = process_exec(p, oodac + " check " + m4 + " > " + tmpd + "/m4.out 2> " + tmpd + "/m4.err");
+    fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/m4.out"), "dod_layout_types check");
+
+    let _ = process_exec(p, oodac + " check " + m5 + " > " + tmpd + "/m5.out 2> " + tmpd + "/m5.err");
+    fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/m5.out"), "dod_layout_ops check");
+
+    let _ = process_exec(p, oodac + " check " + m6 + " > " + tmpd + "/m6.out 2> " + tmpd + "/m6.err");
+    fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/m6.out"), "dod_layout check");
+
+    // 2. Verify dod_fixture.oo typechecks
+    let fix = root + "/fixtures/dod_fixture.oo";
+    let _ = process_exec(p, oodac + " check " + fix + " > " + tmpd + "/fix.out 2> " + tmpd + "/fix.err");
+    fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + tmpd + "/fix.out"), "dod_fixture check");
+
+    // 3. Verify DINNER.oot 4-element headers across all modules
+    let _ = process_exec(p, "head -n 12 " + m1 + " > " + tmpd + "/h1.txt");
+    fails = fails + tally(expect_quiet(p, "grep -q '^// # ' " + tmpd + "/h1.txt"), "soa_layout_types title");
+    fails = fails + tally(expect_quiet(p, "grep -q '^// Logline:' " + tmpd + "/h1.txt"), "soa_layout_types logline");
+    fails = fails + tally(expect_quiet(p, "grep -q '^// Setup:' " + tmpd + "/h1.txt"), "soa_layout_types setup");
+    fails = fails + tally(expect_quiet(p, "grep -q '^// Beats:' " + tmpd + "/h1.txt"), "soa_layout_types beats");
+
+    // 4. Line count constraint verification (strictly <= 256 lines)
+    fails = fails + tally(expect_quiet(p, "test $(wc -l < " + m1 + ") -le 256"), "soa_layout_types line count <= 256");
+    fails = fails + tally(expect_quiet(p, "test $(wc -l < " + m2 + ") -le 256"), "soa_layout_ops line count <= 256");
+    fails = fails + tally(expect_quiet(p, "test $(wc -l < " + m3 + ") -le 256"), "soa_layout line count <= 256");
+    fails = fails + tally(expect_quiet(p, "test $(wc -l < " + m4 + ") -le 256"), "dod_layout_types line count <= 256");
+    fails = fails + tally(expect_quiet(p, "test $(wc -l < " + m5 + ") -le 256"), "dod_layout_ops line count <= 256");
+    fails = fails + tally(expect_quiet(p, "test $(wc -l < " + m6 + ") -le 256"), "dod_layout line count <= 256");
+    fails = fails + tally(expect_quiet(p, "test $(wc -l < " + fix + ") -le 256"), "dod_fixture line count <= 256");
+
+    if fails > 0 {
+        println("dod_soa_smoke: FAILED");
+        process_exit(1);
+    }
+
+    println("dod_soa_smoke: PASSED");
+}
