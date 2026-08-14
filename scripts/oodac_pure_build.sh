@@ -199,7 +199,10 @@ echo "OoResV oo_fs_remove_file(long long,OoStr); OoResV oo_fs_mkdir(long long,Oo
 echo "OoResV oo_fs_hardlink(long long,OoStr,OoStr); OoResV oo_fs_symlink(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
 echo "OoResS oo_sys_exec(long long,int,OoStr*); OoResS oo_sys_exec1(long long,OoStr);" >> "$TMP/preamble.c"
 echo "OoSList str_split(OoStr,OoStr);" >> "$TMP/preamble.c"
+# Seed / older emit may still declare OoResS oo_write_file; runtime ABI is OoResV.
+sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/preamble.c"
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
+sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/all.c"
 
 # Capability grants + sealed signatures come from native c_emit_preamble/c_emit_fn
 # (oo_cap_grant_*). oodac_pure_rewrite.py retired — no post-link Python rewrite.

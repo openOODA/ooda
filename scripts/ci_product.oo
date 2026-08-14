@@ -1,48 +1,142 @@
-// # CI Product
+// # CI Product Rails
 //
-// Logline: product rails stay green when run as the local pre-product suite under cargo-shadow PATH.
-// Setup: prebuilt SEED_OODAC (bootstrap/seed/oodac or tree oodac); gcc + bash available.
+// Logline: Local product rails stay green: no host cargo, a shadowed PATH, a pure tree, then every named rail and fixed_point.
 //
-// Beats: no host toolchain in scripts | shadow intercepts cargo | tree pure (no .rs, no Cargo.toml) | every listed rail passes | fixed_point green + no OK_HOST.
+// Setup: cwd is the product root. SEED_OODAC or bootstrap/seed/oodac exists. gcc and bash exist.
+//
+// Beats:
+//   1. Product scripts do not invoke cargo or rustc.
+//   2. Shadow PATH, RS=0, no Cargo.toml, no src/.
+//   3. Bootstrap, 132 rails, fixed_point with no OK_HOST.
+//
+// residual: prebuilt SEED_OODAC required; remote GHA not proven; rails still run the .sh files
 
 import "std/scenario.oo";
 import "std/sh.oo";
+import "scripts/ci_product_rails.oo";
 
 pub fn main(p: &ProcessCap, fs: &FsReadCap) {
-    let root = sh_realpath(p, ".").unwrap_or(".");
-    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let root_raw = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let root = str_replace(str_replace(root_raw, "\n", ""), "\r", "");
+    let tmpd_raw = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let tmpd = str_replace(str_replace(tmpd_raw, "\n", ""), "\r", "");
+    if !sh_arg_ok(root) || !sh_arg_ok(tmpd) {
+        println("FAIL root or tmpd unsafe");
+        process_exit(1);
+    }
     let _ = sh_mkdir_p(p, tmpd);
     let _ = scenario(p, fs, "ci_product local product rails");
 
-    when "product scripts clean of host toolchain" {
-    and  "shadow intercepts cargo/rustc" {
-    and  "tree is pure (no .rs, no Cargo.toml)" {
-    and  "bootstrap_no_cargo under shadow" {
-    and  "every listed rail exits 0" {
-    and  "fixed_point green + no OK_HOST" {
-    then "ci_product PASSED" {
-    } } } } } }
+    // when product scripts stay clean of host cargo/rustc
+    // and PATH shadow intercepts cargo
+    // and the tree has no .rs, Cargo.toml, or src/
+    // and bootstrap plus every named rail plus fixed_point pass
+    // then ci_product PASSED
 
-    expect_clean(p, "! grep -nE '^[[:space:]]*(cargo|rustc)([[:space:]]|$)' " + root + "/scripts/bootstrap_no_cargo.sh " + root + "/scripts/fixed_point.sh " + root + "/scripts/release.sh + | grep -vE '^[^:]*:\\s*#'");
+    let mut fails: Int = 0;
+    let boot = root + "/scripts/bootstrap_no_cargo.sh";
+    let fp = root + "/scripts/fixed_point.sh";
+    let rel = root + "/scripts/release.sh";
+    if !sh_arg_ok(boot) || !sh_arg_ok(fp) || !sh_arg_ok(rel) {
+        println("FAIL script path unsafe");
+        process_exit(1);
+    }
+    if expect_clean(p, "! grep -nE '^[[:space:]]*(cargo|rustc)([[:space:]]|$)' " + boot + " " + fp + " " + rel + " | grep -vE 'grep|comment|#'").is_err() {
+        println("FAIL product script invokes host toolchain");
+        fails = fails + 1;
+    } else {
+        println("OK product scripts clean");
+    }
 
-    let shadow: String = tmpd + "/ci_shadow";
+    let shadow: String = tmpd + "/ci_product_shadow";
+    if !sh_arg_ok(shadow) {
+        println("FAIL shadow path unsafe");
+        process_exit(1);
+    }
     let _ = sh_mkdir_p(p, shadow);
-    check(p, "printf '#!/bin/sh\\necho ERR_SHADOW\\nexit 99\\n' > " + shadow + "/cargo && printf '#!/bin/sh\\necho ERR_SHADOW\\nexit 99\\n' > " + shadow + "/rustc && chmod +x " + shadow + "/cargo " + shadow + "/rustc", within: 10);
+    let mk = "printf '%s\\n' '#!/bin/sh' 'echo ERR_SHADOW_CARGO >&2' 'exit 99' > " + shadow + "/cargo && printf '%s\\n' '#!/bin/sh' 'echo ERR_SHADOW_RUSTC >&2' 'exit 99' > " + shadow + "/rustc && chmod +x " + shadow + "/cargo " + shadow + "/rustc";
+    if check(p, mk, within: 10).is_err() {
+        println("FAIL shadow install");
+        process_exit(1);
+    }
+    if expect_quiet(p, "PATH=" + shadow + ":/usr/bin:/bin env -u OODA cargo version >/dev/null 2>&1").is_ok() {
+        println("FAIL host toolchain shadow did not intercept");
+        fails = fails + 1;
+    } else {
+        println("OK host toolchain shadowed");
+    }
 
-    expect_quiet(p, "PATH=" + shadow + ":/usr/bin:/bin env -u OODA cargo version >/dev/null 2>&1 || true");
-    expect_quiet(p, "! PATH=" + shadow + ":/usr/bin:/bin env -u OODA cargo version >/dev/null 2>&1");
-    expect_present(fs, root + "/.gitignore");
+    if expect_quiet(p, "test -z \"$(find " + root + " -name '*.rs' -not -path '*/.git/*' -not -path '*/target/*' -not -path '*/.ooda-cache/*' 2>/dev/null)\"").is_err() {
+        println("FAIL RS != 0");
+        fails = fails + 1;
+    } else {
+        println("OK product tree purity: RS=0");
+    }
+    if expect_absent(fs, root + "/Cargo.toml").is_err() {
+        println("FAIL Cargo.toml present");
+        fails = fails + 1;
+    } else {
+        println("OK no Cargo.toml");
+    }
+    if expect_quiet(p, "test ! -d " + root + "/src").is_err() {
+        println("FAIL src/ present");
+        fails = fails + 1;
+    } else {
+        println("OK no src/");
+    }
 
-    expect_quiet(p, "test -z \"$(find " + root + " -name '*.rs' -not -path '*/.git/*' -not -path '*/target/*' -not -path '*/.ooda-cache/*' 2>/dev/null)\"");
-    expect_absent(fs, root + "/Cargo.toml");
-    expect_absent(fs, root + "/src");
+    let seed_raw = match sh_env_get_or(p, "SEED_OODAC", root + "/bootstrap/seed/oodac") { Ok(s) => s, Err(_) => "" };
+    let seed = str_replace(str_replace(seed_raw, "\n", ""), "\r", "");
+    if !sh_arg_ok(seed) {
+        println("FAIL SEED_OODAC unsafe");
+        process_exit(1);
+    }
+    let boot_out: String = tmpd + "/ci_boot.out";
+    let boot_err: String = tmpd + "/ci_boot.err";
+    if !sh_arg_ok(boot_out) || !sh_arg_ok(boot_err) {
+        println("FAIL boot log unsafe");
+        process_exit(1);
+    }
+    let boot_cmd: String = "SEED_OODAC=" + seed + " PATH=" + shadow + ":/usr/bin:/bin " + boot + " >" + boot_out + " 2>" + boot_err;
+    if check(p, boot_cmd, within: 600).is_err() {
+        println("FAIL bootstrap_no_cargo");
+        fails = fails + 1;
+    } else {
+        println("OK bootstrap_no_cargo under cargo-shadow PATH");
+    }
 
-    let seed: String = match sh_env_get_or(p, "SEED_OODAC", root + "/bootstrap/seed/oodac") { Ok(s) => s, Err(_) => "" };
-    check(p, "SEED_OODAC=" + seed + " PATH=" + shadow + ":/usr/bin:/bin " + root + "/scripts/bootstrap_no_cargo.sh > " + tmpd + "/ci_boot.out 2> " + tmpd + "/ci_boot.err", within: 600);
+    fails = fails + ci_run_product_rails(p, root, tmpd);
 
-    check(p, root + "/scripts/fixed_point.sh > " + tmpd + "/ci_fp.out 2> " + tmpd + "/ci_fp.err", within: 600);
-    expect_clean(p, "! grep -q 'OK_HOST' " + tmpd + "/ci_fp.out");
-    expect_clean(p, "! grep -rq 'ERR_SHADOW' " + tmpd + "/ci_boot.out " + tmpd + "/ci_boot.err " + tmpd + "/ci_fp.out " + tmpd + "/ci_fp.err 2>/dev/null");
+    let fp_out: String = tmpd + "/ci_fp.out";
+    let fp_err: String = tmpd + "/ci_fp.err";
+    if !sh_arg_ok(fp_out) || !sh_arg_ok(fp_err) {
+        println("FAIL fixed_point log unsafe");
+        process_exit(1);
+    }
+    if check(p, "PATH=" + shadow + ":/usr/bin:/bin " + fp + " >" + fp_out + " 2>" + fp_err, within: 600).is_err() {
+        println("FAIL fixed_point");
+        fails = fails + 1;
+    } else {
+        println("OK fixed_point");
+        if expect_clean(p, "! grep -q OK_HOST " + fp_out).is_err() {
+            println("FAIL OK_HOST in fixed_point log");
+            fails = fails + 1;
+        } else {
+            println("OK no OK_HOST in fixed_point log");
+        }
+    }
 
+    if expect_clean(p, "! grep -rqE 'ERR_SHADOW_CARGO|ERR_SHADOW_RUSTC' " + tmpd + "/ci_ 2>/dev/null").is_err() {
+        println("FAIL a rail tried to invoke host toolchain");
+        fails = fails + 1;
+    } else {
+        println("OK no rail invoked host toolchain");
+    }
+
+    if fails > 0 {
+        println("ci_product: FAILED");
+        process_exit(1);
+    }
     println("ci_product: PASSED");
+    println("residual: prebuilt SEED_OODAC required; remote GHA not proven");
 }

@@ -156,9 +156,12 @@ PY
 
 echo "long long oo_cap_grant_fs(void); long long oo_cap_grant_sys(void); long long oo_cap_grant_env(void); long long oo_cap_grant_net(void);" >> "$TMP/preamble.c"
 echo "int oo_path_exists(long long,OoStr); long long oo_file_size(long long,OoStr); OoResS oo_env_get(long long,OoStr);" >> "$TMP/preamble.c"
-echo "OoResS oo_read_file(long long,OoStr); OoResS oo_write_file(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_read_file(long long,OoStr); OoResV oo_write_file(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
 echo "OoResS oo_sys_exec(long long,int,OoStr*); OoResS oo_sys_exec1(long long,OoStr);" >> "$TMP/preamble.c"
+# Seed / older emit may still declare OoResS oo_write_file; runtime ABI is OoResV.
+sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/preamble.c"
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
+sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/all.c"
 
 # Capability grants + sealed signatures come from native c_emit_preamble/c_emit_fn
 # (oo_cap_grant_*). oodac_pure_rewrite.py retired — no post-link Python rewrite.

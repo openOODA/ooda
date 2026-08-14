@@ -1,0 +1,142 @@
+// # Probe Chaos Tests
+//
+// Logline: Chaos pack C1-C5 on product binaries fail closed under FD starvation, unwritable temp, and corrupt input without pipe masking.
+//
+// Setup: bin/ooda and oodac/oodac are built; qa/probe_chaos_tests.sh remains the runnable fallback.
+//
+// Beats:
+//   1. C1 FD starvation fail-closed.
+//   2. C2 unwritable TMPDIR fail-closed.
+//   3. C3 empty, oversize, and binary garbage rejected.
+//   4. C4 missing runtime headers gcc build fails.
+//   5. C5 direct process exit without pipe masking.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let fix = ".ooda-cache/ooda-tmp/probe_chaos";
+    let twin = "qa/probe_chaos_tests.sh";
+    let happy = "fixtures/chs_list_string.oo";
+    let rt = "runtime/chs_rt.c";
+    let src = "fixtures/test_100.oo.c";
+    let ooda_raw = match sh_env_get_or(p, "OODA", "bin/ooda") { Ok(s) => s, Err(_) => "bin/ooda" };
+    let oodac_raw = match sh_env_get_or(p, "OODAC_BIN", "oodac/oodac") { Ok(s) => s, Err(_) => "oodac/oodac" };
+    let ooda = gate_arg(probe_trim(ooda_raw), "ooda");
+    let oodac = gate_arg(probe_trim(oodac_raw), "oodac");
+    let _ = scenario(p, fs, "probe chaos C1-C5");
+
+    // when FD starvation and unwritable TMPDIR fail closed
+    // and empty oversize and binary garbage are rejected
+    // and missing runtime headers gcc build fails
+    // and direct process exit is measured without pipe masking
+    // then probe_chaos_tests PASSED
+
+    let _fix = gate_arg(fix, "fix");
+    let _ = sh_clean(p, fix);
+    let _ = sh_mkdir_p(p, fix);
+    expect_present(fs, twin);
+    expect_present(fs, happy);
+    expect_present(fs, rt);
+    if expect_quiet(p, "test -x " + ooda).is_err() {
+        println("ERR_MISSING_OODA: " + ooda);
+        process_exit(1);
+    }
+    if expect_quiet(p, "test -x " + oodac).is_err() {
+        println("ERR_MISSING_OODAC: " + oodac);
+        process_exit(1);
+    }
+
+    let mut fails: Int = 0;
+    let c1_out = gate_arg(fix + "/c1.out", "c1.out");
+    let c1_err = gate_arg(fix + "/c1.err", "c1.err");
+    let c1_rc = gate_arg(fix + "/c1.rc", "c1.rc");
+    let _ = check(p, "ulimit -n 4; " + ooda + " check " + happy + " >" + c1_out + " 2>" + c1_err + "; echo $? > " + c1_rc, within: 30);
+    let rc1 = probe_trim(cat_file(fs, c1_rc));
+    let ok1 = expect_clean(p, "grep -qE '^OK$' " + c1_out);
+    fails = fails + mark(rc1 != "0" && ok1.is_err(), "C1 FD starvation fail-closed");
+
+    let c2_out = gate_arg(fix + "/c2.out", "c2.out");
+    let c2_err = gate_arg(fix + "/c2.err", "c2.err");
+    let c2_rc = gate_arg(fix + "/c2.rc", "c2.rc");
+    let _ = check(p, "TMPDIR=/proc " + ooda + " run " + happy + " >" + c2_out + " 2>" + c2_err + "; echo $? > " + c2_rc, within: 30);
+    fails = fails + mark(probe_trim(cat_file(fs, c2_rc)) != "0", "C2 unwritable TMPDIR fail-closed");
+
+    let empty_f = gate_arg(fix + "/empty.oo", "empty");
+    let c3e_out = gate_arg(fix + "/c3e.out", "c3e.out");
+    let c3e_err = gate_arg(fix + "/c3e.err", "c3e.err");
+    let c3e_rc = gate_arg(fix + "/c3e.rc", "c3e.rc");
+    let _ = expect_quiet(p, "touch " + empty_f);
+    let _ = check(p, ooda + " check " + empty_f + " >" + c3e_out + " 2>" + c3e_err + "; echo $? > " + c3e_rc, within: 30);
+    let rc3e = probe_trim(cat_file(fs, c3e_rc));
+    let g3e = expect_clean(p, "grep -qE 'ERR.*empty' " + c3e_out + " " + c3e_err);
+    fails = fails + mark(rc3e != "0" && g3e.is_ok(), "C3 empty input rejected with ERR");
+
+    let huge_f = gate_arg(fix + "/huge.oo", "huge");
+    let c3h_out = gate_arg(fix + "/c3h.out", "c3h.out");
+    let c3h_err = gate_arg(fix + "/c3h.err", "c3h.err");
+    let c3h_rc = gate_arg(fix + "/c3h.rc", "c3h.rc");
+    let _ = check(p, "head -c 70000 /dev/zero | tr '\\0' 'a' > " + huge_f, within: 10);
+    let _ = check(p, ooda + " check " + huge_f + " >" + c3h_out + " 2>" + c3h_err + "; echo $? > " + c3h_rc, within: 30);
+    let rc3h = probe_trim(cat_file(fs, c3h_rc));
+    let g3h = expect_clean(p, "grep -qE '64KiB' " + c3h_out + " " + c3h_err);
+    fails = fails + mark(rc3h != "0" && g3h.is_ok(), "C3 oversize input rejected");
+
+    let garb_f = gate_arg(fix + "/garbage.oo", "garbage");
+    let c3g_out = gate_arg(fix + "/c3g.out", "c3g.out");
+    let c3g_err = gate_arg(fix + "/c3g.err", "c3g.err");
+    let c3g_rc = gate_arg(fix + "/c3g.rc", "c3g.rc");
+    let _ = check(p, "head -c 100 /dev/urandom > " + garb_f, within: 10);
+    let _ = check(p, ooda + " check " + garb_f + " >" + c3g_out + " 2>" + c3g_err + "; echo $? > " + c3g_rc, within: 30);
+    let rc3g = probe_trim(cat_file(fs, c3g_rc));
+    let g3g = expect_clean(p, "grep -qE 'ERR.*lex' " + c3g_out + " " + c3g_err);
+    fails = fails + mark(rc3g != "0" && g3g.is_ok(), "C3 binary garbage rejected");
+
+    let _rt = gate_arg(rt, "rt");
+    let _src = gate_arg(src, "src");
+    let c4_out = gate_arg(fix + "/c4.out", "c4.out");
+    let c4_err = gate_arg(fix + "/c4.err", "c4.err");
+    let c4_rc = gate_arg(fix + "/c4.rc", "c4.rc");
+    let _ = check(p, "gcc -I/nonexistent_rt " + rt + " " + src + " >" + c4_out + " 2>" + c4_err + "; echo $? > " + c4_rc, within: 30);
+    fails = fails + mark(probe_trim(cat_file(fs, c4_rc)) != "0", "C4 missing runtime headers gcc build fails");
+
+    let c5_rc = gate_arg(fix + "/c5.rc", "c5.rc");
+    let _ = check(p, oodac + " check " + happy + " >/dev/null 2>/dev/null; echo $? > " + c5_rc, within: 30);
+    fails = fails + mark(probe_trim(cat_file(fs, c5_rc)) == "0", "C5 direct process exit verification without pipe masking");
+
+    let _ = sh_clean(p, fix);
+    if fails > 0 {
+        println("probe_chaos_tests: FAILED");
+        process_exit(1);
+    }
+    println("probe_chaos_tests: PASSED");
+}
+
+fn mark(ok: Bool, tag: String) -> Int {
+    if ok {
+        println("OK [C-PROBE] " + tag);
+        return 0;
+    }
+    println("FAIL [C-PROBE] " + tag);
+    return 1;
+}
+
+fn gate_arg(s: String, tag: String) -> String {
+    if !sh_arg_ok(s) {
+        println("FAIL sh_arg_ok " + tag);
+        process_exit(1);
+        return "";
+    }
+    return s;
+}
+
+fn probe_trim(s: String) -> String {
+    return str_replace(str_replace(s, "\n", ""), " ", "");
+}
+
+fn cat_file(fs: &FsReadCap, path: String) -> String {
+    let r = fs_read_file(fs, path);
+    if r.is_err() { return ""; }
+    let s = match r { Ok(v) => v, Err(_) => "" };
+    return probe_trim(s);
+}

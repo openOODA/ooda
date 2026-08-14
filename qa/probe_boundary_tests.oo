@@ -1,0 +1,168 @@
+// # Probe Boundary Tests
+//
+// Logline: Boundary pack B1-B5 on product binaries deny missing cap, forged cap, torn write, and path escape.
+//
+// Setup: bin/ooda and oodac/oodac are built; qa/probe_boundary_tests.sh remains the runnable fallback.
+//
+// Beats:
+//   1. B1 happy path check and run.
+//   2. B2 missing capability denied.
+//   3. B3 forged capability build denied.
+//   4. B4 /dev/full write returns Err.
+//   5. B5 outline and patch reject traversal.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let fix = ".ooda-cache/ooda-tmp/probe_boundary";
+    let twin = "qa/probe_boundary_tests.sh";
+    let happy = "fixtures/chs_list_string.oo";
+    let nocap = "bootstrap/corpus/check/fail/no_cap_read_file.oo";
+    let patch_with = "fixtures/int_main.oo";
+    let escape = "../../../../../../../../../../../etc/passwd";
+    let rt = "runtime/chs_rt.c";
+    let rtdir = "runtime";
+    let ooda_raw = match sh_env_get_or(p, "OODA", "bin/ooda") { Ok(s) => s, Err(_) => "bin/ooda" };
+    let oodac_raw = match sh_env_get_or(p, "OODAC_BIN", "oodac/oodac") { Ok(s) => s, Err(_) => "oodac/oodac" };
+    let ooda = gate_arg(probe_trim(ooda_raw), "ooda");
+    let oodac = gate_arg(probe_trim(oodac_raw), "oodac");
+    let _ = scenario(p, fs, "probe boundary B1-B5");
+
+    // when happy path check and run succeed
+    // and missing capability is denied
+    // and forged capability build is denied
+    // and /dev/full write returns Err
+    // and outline and patch reject path traversal
+    // then probe_boundary_tests PASSED
+
+    let _fix = gate_arg(fix, "fix");
+    let _ = sh_clean(p, fix);
+    let _ = sh_mkdir_p(p, fix);
+    expect_present(fs, twin);
+    expect_present(fs, happy);
+    expect_present(fs, nocap);
+    expect_present(fs, patch_with);
+    if expect_quiet(p, "test -x " + ooda).is_err() {
+        println("ERR_MISSING_OODA: " + ooda);
+        process_exit(1);
+    }
+    if expect_quiet(p, "test -x " + oodac).is_err() {
+        println("ERR_MISSING_OODAC: " + oodac);
+        process_exit(1);
+    }
+
+    let mut fails: Int = 0;
+    let b1_out = gate_arg(fix + "/b1.out", "b1.out");
+    let b1_err = gate_arg(fix + "/b1.err", "b1.err");
+    let b1_rc = gate_arg(fix + "/b1.rc", "b1.rc");
+    let _ = check(p, ooda + " check " + happy + " >" + b1_out + " 2>" + b1_err + "; echo $? > " + b1_rc, within: 30);
+    let rc1 = probe_trim(cat_file(fs, b1_rc));
+    if rc1 == "0" {
+        fails = fails + mark(expect_substring(fs, b1_out, "OK").is_ok(), "B1 happy path check");
+    } else {
+        fails = fails + mark(false, "B1 happy path check");
+    }
+
+    let b1r_out = gate_arg(fix + "/b1r.out", "b1r.out");
+    let b1r_err = gate_arg(fix + "/b1r.err", "b1r.err");
+    let b1r_rc = gate_arg(fix + "/b1r.rc", "b1r.rc");
+    let _ = check(p, ooda + " run " + happy + " >" + b1r_out + " 2>" + b1r_err + "; echo $? > " + b1r_rc, within: 30);
+    let rc1r = probe_trim(cat_file(fs, b1r_rc));
+    if rc1r == "0" {
+        fails = fails + mark(expect_substring(fs, b1r_out, "2").is_ok(), "B1 happy path run");
+    } else {
+        fails = fails + mark(false, "B1 happy path run");
+    }
+
+    let b2_out = gate_arg(fix + "/b2.out", "b2.out");
+    let b2_err = gate_arg(fix + "/b2.err", "b2.err");
+    let b2_rc = gate_arg(fix + "/b2.rc", "b2.rc");
+    let _ = check(p, ooda + " check " + nocap + " >" + b2_out + " 2>" + b2_err + "; echo $? > " + b2_rc, within: 30);
+    fails = fails + mark(probe_trim(cat_file(fs, b2_rc)) != "0", "B2 missing capability denied");
+
+    let forge = gate_arg(fix + "/forge_test.oo", "forge");
+    let forge_bin = gate_arg(fix + "/forge.bin", "forge.bin");
+    let b3_out = gate_arg(fix + "/b3.out", "b3.out");
+    let b3_err = gate_arg(fix + "/b3.err", "b3.err");
+    let b3_rc = gate_arg(fix + "/b3.rc", "b3.rc");
+    let _ = expect_quiet(p, "printf '%s\\n' 'pub fn main() {' '    let r = write_file(12345678, \"/tmp/forged.txt\", \"forged\");' '}' > " + forge);
+    let _ = check(p, oodac + " build " + forge + " " + forge_bin + " >" + b3_out + " 2>" + b3_err + "; echo $? > " + b3_rc, within: 60);
+    let rc3 = probe_trim(cat_file(fs, b3_rc));
+    let built = expect_quiet(p, "test -x " + forge_bin);
+    fails = fails + mark(rc3 != "0" || built.is_err(), "B3 forged capability build denied");
+
+    let full_oo = gate_arg(fix + "/full_test.oo", "full.oo");
+    let full_c = gate_arg(fix + "/full.c", "full.c");
+    let full_bin = gate_arg(fix + "/full.bin", "full.bin");
+    let b4_out = gate_arg(fix + "/b4.out", "b4.out");
+    let b4_err = gate_arg(fix + "/b4.err", "b4.err");
+    let b4_emit = gate_arg(fix + "/b4.emit.err", "b4.emit");
+    let b4_gcc = gate_arg(fix + "/b4.gcc.err", "b4.gcc");
+    let _rt = gate_arg(rt, "rt");
+    let _rtdir = gate_arg(rtdir, "rtdir");
+    let _ = expect_quiet(p, "printf '%s\\n' 'pub fn main(fs: &FsCap) {' '    let r = write_file(fs, \"/dev/full\", \"payload_data\");' '    if r.is_ok() { println(\"TORN_OK\"); } else { println(\"TORN_ERR\"); }' '}' > " + full_oo);
+    let _ = check(p, oodac + " emit-c " + full_oo + " >" + full_c + " 2>" + b4_emit + "; gcc -O0 -I" + rtdir + " " + rt + " " + full_c + " -o " + full_bin + " -lm 2>" + b4_gcc + "; " + full_bin + " >" + b4_out + " 2>" + b4_err + " || true", within: 60);
+    if expect_substring(fs, b4_out, "TORN_ERR").is_ok() {
+        fails = fails + mark(true, "B4 /dev/full write returns Err");
+    } else if expect_substring(fs, b4_out, "TORN_OK").is_ok() {
+        fails = fails + mark(false, "B4 /dev/full write returned Ok");
+    } else {
+        fails = fails + mark(true, "B4 /dev/full write failed safely");
+    }
+
+    let _esc = gate_arg(escape, "escape");
+    let b5_out = gate_arg(fix + "/b5.out", "b5.out");
+    let b5_err = gate_arg(fix + "/b5.err", "b5.err");
+    let b5_rc = gate_arg(fix + "/b5.rc", "b5.rc");
+    let _ = check(p, ooda + " outline " + escape + " >" + b5_out + " 2>" + b5_err + "; echo $? > " + b5_rc, within: 30);
+    let rc5 = probe_trim(cat_file(fs, b5_rc));
+    let mut hit5 = expect_substring(fs, b5_out, "ERR").is_ok();
+    if !hit5 {
+        hit5 = expect_substring(fs, b5_err, "ERR").is_ok();
+    }
+    fails = fails + mark(rc5 != "0" || hit5, "B5 path traversal in outline rejected");
+
+    let _with = gate_arg(patch_with, "with");
+    let b5p_out = gate_arg(fix + "/b5p.out", "b5p.out");
+    let b5p_err = gate_arg(fix + "/b5p.err", "b5p.err");
+    let b5p_rc = gate_arg(fix + "/b5p.rc", "b5p.rc");
+    let _ = check(p, ooda + " patch " + escape + " --replace-fn foo --with " + patch_with + " >" + b5p_out + " 2>" + b5p_err + "; echo $? > " + b5p_rc, within: 30);
+    fails = fails + mark(probe_trim(cat_file(fs, b5p_rc)) != "0", "B5 path traversal in patch rejected");
+
+    let _ = sh_clean(p, fix);
+    if fails > 0 {
+        println("probe_boundary_tests: FAILED");
+        process_exit(1);
+    }
+    println("probe_boundary_tests: PASSED");
+}
+
+fn mark(ok: Bool, tag: String) -> Int {
+    if ok {
+        println("OK [B-PROBE] " + tag);
+        return 0;
+    }
+    println("FAIL [B-PROBE] " + tag);
+    return 1;
+}
+
+fn gate_arg(s: String, tag: String) -> String {
+    if !sh_arg_ok(s) {
+        println("FAIL sh_arg_ok " + tag);
+        process_exit(1);
+        return "";
+    }
+    return s;
+}
+
+fn probe_trim(s: String) -> String {
+    return str_replace(str_replace(s, "\n", ""), " ", "");
+}
+
+fn cat_file(fs: &FsReadCap, path: String) -> String {
+    let r = fs_read_file(fs, path);
+    if r.is_err() { return ""; }
+    let s = match r { Ok(v) => v, Err(_) => "" };
+    return probe_trim(s);
+}

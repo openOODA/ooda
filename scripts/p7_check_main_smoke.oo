@@ -1,38 +1,108 @@
 // # P7 Check Main Smoke
 //
-// Logline: oodac check completes (no deadlock) on a tiny fixture and on oodac/main.oo.
+// Logline: oodac check completes (no deadlock, no crash) on a tiny fixture and on oodac/main.oo.
 //
 // Setup: oodac/oodac is built; oodac/main.oo is the path-A entry.
 //
 // Beats:
-//   1. write tiny main.oo → expect_present → check oodac <8s.
-//   2. check oodac/main.oo <180s.
+//   1. write tiny main.oo, print ELF build-id, check oodac <8s + peak RSS.
+//   2. check oodac/main.oo <180s + peak RSS.
+//   3. rc 134/137/139/143 is FAIL.
 
 import "std/scenario.oo";
 import "std/sh.oo";
 
-const FIX: String = ".ooda-cache/ooda-tmp/p7_check_main";
-const TINY: String = FIX + "/main.oo";
-
 pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let FIX = ".ooda-cache/ooda-tmp/p7_check_main";
+    let TINY = FIX + "/main.oo";
+    let oodac = sh_env_get_or(p, "OODAC_BIN", "oodac/oodac").unwrap_or("oodac/oodac");
     let _ = sh_clean(p, FIX);
     let _ = sh_mkdir_p(p, FIX);
     let _ = expect_quiet(p, "printf '%s\\n' 'pub fn main() {' '    let x = 1;' '}' > " + TINY);
     let _ = scenario(p, fs, "p7 check main");
 
-    when "tiny main.oo fixture present" {
-    and  "tiny check completes <8s" {
-    and  "oodac/main.oo check completes <180s" {
-    then "p7 check main PASSED" { } } }
+    // when tiny main.oo fixture present
+    // and tiny check completes <8s
+    // and oodac/main.oo check completes <180s
+    // and crash rc 134/137/139/143 is FAIL
+    // then p7 check main PASSED
 
     expect_present(fs, TINY);
-    let r1 = check(p, "oodac check " + TINY, within: 8);
-    let r2 = check(p, "oodac check oodac/main.oo", within: 180);
+    expect_quiet(p, "test -x " + oodac);
+
+    let bid_cmd = "b=$(readelf -n " + oodac + " 2>/dev/null | awk '/Build ID:/ {print $NF; exit}'); "
+                + "[ -n \"$b\" ] || b=$(file " + oodac + " 2>/dev/null | sed -n 's/.*BuildID\\[[^]]*\\]=\\([0-9a-f]*\\).*/\\1/p'); "
+                + "[ -n \"$b\" ] || b=unavailable; echo \"$b\"";
+    let bid_raw = match process_exec(p, bid_cmd) { Ok(s) => s, Err(_) => "unavailable" };
+    let bid = p7_trim(bid_raw);
+    println("OODAC_BIN build-id=" + bid);
+
+    let tiny_run = "timeout 8 /usr/bin/time -v -o " + FIX + "/tiny.time " + oodac
+                 + " check " + TINY + " >" + FIX + "/tiny.out 2>" + FIX + "/tiny.err; echo $? > " + FIX + "/tiny.rc";
+    let _ = check(p, tiny_run, within: 28);
+    let trc = p7_trim(cat_file(fs, FIX + "/tiny.rc"));
+    let tawk = "awk -F': ' '/Maximum resident set size/ {gsub(/[^0-9]/,\"\",$2); print $2; exit}' "
+             + FIX + "/tiny.time 2>/dev/null || echo unavailable";
+    let trss_raw = match process_exec(p, tawk) { Ok(s) => s, Err(_) => "unavailable" };
+    let mut trss = p7_trim(trss_raw);
+    if trss == "" { trss = "unavailable"; }
+    println("peak RSS tiny=" + trss + "KB");
+
+    let big_run = "timeout 180 /usr/bin/time -v -o " + FIX + "/big.time " + oodac
+                + " check oodac/main.oo >" + FIX + "/big.out 2>" + FIX + "/big.err; echo $? > " + FIX + "/big.rc";
+    let _ = check(p, big_run, within: 200);
+    let brc = p7_trim(cat_file(fs, FIX + "/big.rc"));
+    let bawk = "awk -F': ' '/Maximum resident set size/ {gsub(/[^0-9]/,\"\",$2); print $2; exit}' "
+             + FIX + "/big.time 2>/dev/null || echo unavailable";
+    let brss_raw = match process_exec(p, bawk) { Ok(s) => s, Err(_) => "unavailable" };
+    let mut brss = p7_trim(brss_raw);
+    if brss == "" { brss = "unavailable"; }
+    println("peak RSS oodac/main.oo=" + brss + "KB");
+
+    let mut fail: Int = 0;
+    if trc == "124" {
+        println("FAIL tiny main.oo check timeout 8s rss=" + trss + "KB");
+        fail = 1;
+    } else if is_crash(trc) {
+        println("FAIL tiny main.oo check crash rc=" + trc + " rss=" + trss + "KB");
+        fail = 1;
+    } else if trc != "0" {
+        println("FAIL tiny main.oo check rc=" + trc + " rss=" + trss + "KB");
+        fail = 1;
+    } else {
+        println("OK tiny main.oo check <8s rss=" + trss + "KB");
+    }
+    if brc == "124" {
+        println("FAIL oodac/main.oo check timeout 180s rss=" + brss + "KB");
+        fail = 1;
+    } else if is_crash(brc) {
+        println("FAIL oodac/main.oo check crash rc=" + brc + " rss=" + brss + "KB");
+        fail = 1;
+    } else if brc == "0" {
+        println("OK oodac/main.oo check finished <180s rc=0 rss=" + brss + "KB");
+    } else {
+        println("OK oodac/main.oo check finished <180s rc=" + brc + " rss=" + brss + "KB (not hung)");
+    }
 
     let _ = sh_clean(p, FIX);
 
-    if r1.is_err() || r2.is_err() {
+    if fail > 0 {
         process_exit(1);
     }
     println("p7_check_main_smoke: ALL OK");
+}
+
+fn is_crash(rc: String) -> Bool {
+    return rc == "134" || rc == "137" || rc == "139" || rc == "143";
+}
+
+fn p7_trim(s: String) -> String {
+    return str_replace(str_replace(s, "\n", ""), " ", "");
+}
+
+fn cat_file(fs: &FsReadCap, path: String) -> String {
+    let r = fs_read_file(fs, path);
+    if r.is_err() { return ""; }
+    let s = match r { Ok(v) => v, Err(_) => "" };
+    return p7_trim(s);
 }

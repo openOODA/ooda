@@ -1,0 +1,212 @@
+// # Install Dress Rehearsal Walks The Release Layout
+//
+// Logline: Offline dress rehearsal validates a pure-product release layout from RELEASE_TREE, RELEASE_TARBALL, dist/ooda-<pin>-linux-x86_64, or a staged bin+oodac tree.
+//
+// Setup: cwd is the product root; scripts/install_dress_rehearsal.sh remains the runnable fallback.
+//
+// Beats:
+//   1. Resolve pin then dress tree: env tree, gated tarball, dist/, or stage.
+//   2. Rail +x binaries, share/VERSION, no Cargo.toml, RS=0, no cargo/rustc invoke.
+//   3. Fail closed on a broken rail; print PASSED.
+//
+// residual: full XDG install.oo network fetch not exercised; layout+version only. Actual tar extract may still call the .sh or tar after the arg gate.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let dress_sh = "scripts/install_dress_rehearsal.sh";
+    let dress_oo = "scripts/install_dress_rehearsal.oo";
+    let pin_path = "install/BOOTSTRAP_PIN";
+    let _ = scenario(p, fs, "install dress rehearsal");
+    let mut fails: Int = 0;
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() { println("OK " + tag); return 0; }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // when RELEASE_TREE or RELEASE_TARBALL or dist/ooda-<pin>-linux-x86_64 or staged bin+oodac
+    // and bin/ooda +x and oodac/oodac +x and share/VERSION present
+    // and no Cargo.toml and no *.rs in the dress tree
+    // and dress script never invokes cargo/rustc
+    // then install dress rehearsal PASSED
+
+    if !sh_arg_ok(dress_sh) || !sh_arg_ok(dress_oo) || !sh_arg_ok(pin_path) {
+        println("FAIL sh_arg_ok path");
+        process_exit(1);
+    }
+
+    let tmpd_raw = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let tmpd = dress_trim(tmpd_raw);
+    dress_gate(tmpd, "TMPDIR");
+    let _ = sh_mkdir_p(p, tmpd);
+
+    let mut pin = "v0.187.0-alpha";
+    if expect_present(fs, pin_path).is_ok() {
+        let pin_raw = match fs_read_file(fs, pin_path) { Ok(s) => s, Err(_) => "" };
+        let raw = dress_trim(pin_raw);
+        if chars_len(raw) > 0 { pin = raw; }
+    }
+    if chars_len(pin) > 0 {
+        if char_at(pin, 0) == "v" { pin = pin; } else { pin = "v" + pin; }
+    }
+    dress_gate(pin, "pin");
+
+    let mut tree = "";
+    let mut cleanup = "";
+    let rt_raw = match sh_env_get(p, "RELEASE_TREE") { Ok(s) => s, Err(_) => "" };
+    let tb_raw = match sh_env_get(p, "RELEASE_TARBALL") { Ok(s) => s, Err(_) => "" };
+    let rt = dress_trim(rt_raw);
+    let tb_env = dress_trim(tb_raw);
+
+    if chars_len(rt) > 0 {
+        dress_gate(rt, "RELEASE_TREE");
+        fails = fails + tally(expect_quiet(p, "test -d " + rt), "RELEASE_TREE directory");
+        tree = rt;
+    } else if chars_len(tb_env) > 0 {
+        dress_gate(tb_env, "RELEASE_TARBALL");
+        if expect_present(fs, tb_env).is_err() {
+            println("FAIL RELEASE_TARBALL missing: " + tb_env);
+            process_exit(1);
+        }
+        tree = dress_extract(p, fs, tmpd, tb_env, pin);
+        if chars_len(tree) == 0 { println("FAIL RELEASE_TARBALL extract"); process_exit(1); }
+        cleanup = tmpd + "/dress_extract";
+    }
+
+    if chars_len(tree) == 0 {
+        let dist_tree = "dist/ooda-" + pin + "-linux-x86_64";
+        let dist_tb = dist_tree + ".tar.gz";
+        dress_gate(dist_tree, "dist tree");
+        dress_gate(dist_tb, "dist tarball");
+        if expect_quiet(p, "test -d " + dist_tree).is_ok() {
+            tree = dist_tree;
+        } else if expect_present(fs, dist_tb).is_ok() {
+            tree = dress_extract(p, fs, tmpd, dist_tb, pin);
+            if chars_len(tree) == 0 { println("FAIL dist tarball extract"); process_exit(1); }
+            cleanup = tmpd + "/dress_extract";
+        }
+    }
+
+    if chars_len(tree) == 0 {
+        if expect_quiet(p, "test -x bin/ooda").is_ok() {
+            if expect_quiet(p, "test -x oodac/oodac").is_ok() {
+                let staged = dress_stage(p, fs, tmpd);
+                if chars_len(staged) == 0 { println("FAIL stage from working tree"); process_exit(1); }
+                let ver = staged + "/share/VERSION";
+                dress_gate(ver, "stage VERSION");
+                if process_exec(p, "echo " + pin + " > " + ver).is_err() {
+                    println("FAIL stage share/VERSION");
+                    process_exit(1);
+                }
+                tree = staged;
+                cleanup = staged;
+                println("NOTE: no dist tarball; staged from working tree");
+            }
+        }
+    }
+
+    if chars_len(tree) == 0 {
+        println("FAIL no RELEASE_TREE, RELEASE_TARBALL, dist/ooda-<pin>-linux-x86_64, or local bin+oodac");
+        process_exit(1);
+    }
+    dress_gate(tree, "dress tree");
+    println("dress tree: " + tree);
+    println("pin: " + pin);
+
+    let ooda_bin = tree + "/bin/ooda";
+    let oodac_bin = tree + "/oodac/oodac";
+    let ver_path = tree + "/share/VERSION";
+    let cargo_path = tree + "/Cargo.toml";
+    let rt_c = tree + "/runtime/chs_rt.c";
+    let rt_h = tree + "/runtime/chs_rt.h";
+    dress_gate(ooda_bin, "bin/ooda");
+    dress_gate(oodac_bin, "oodac/oodac");
+    dress_gate(ver_path, "VERSION");
+    dress_gate(cargo_path, "Cargo.toml");
+    dress_gate(rt_c, "chs_rt.c");
+    dress_gate(rt_h, "chs_rt.h");
+
+    fails = fails + tally(expect_quiet(p, "test -x " + ooda_bin), "bin/ooda executable");
+    fails = fails + tally(expect_quiet(p, "test -x " + oodac_bin), "oodac/oodac executable");
+    fails = fails + tally(expect_present(fs, ver_path), "share/VERSION");
+    if expect_present(fs, ver_path).is_ok() {
+        let ver_raw = match fs_read_file(fs, ver_path) { Ok(s) => s, Err(_) => "" };
+        let ver = dress_trim(ver_raw);
+        let mut pin_bare = pin;
+        if chars_len(pin) > 0 {
+            if char_at(pin, 0) == "v" { pin_bare = str_slice(pin, 1, chars_len(pin)); }
+        }
+        if ver == pin || ver == pin_bare {
+            println("OK VERSION=" + ver + " matches pin");
+        } else {
+            println("FAIL VERSION=" + ver + " does not match pin " + pin);
+            fails = fails + 1;
+        }
+    }
+    if expect_present(fs, rt_c).is_ok() {
+        fails = fails + tally(expect_present(fs, rt_c), "runtime C present");
+    } else {
+        fails = fails + tally(expect_present(fs, rt_h), "runtime C present");
+    }
+    fails = fails + tally(expect_absent(fs, cargo_path), "no Cargo.toml in release");
+    fails = fails + tally(expect_clean(p, "test $(find " + tree + " -name '*.rs' 2>/dev/null | wc -l) -eq 0"), "RS=0 in release tree");
+    fails = fails + tally(expect_present(fs, dress_sh), "dress .sh fallback present");
+    let no_host = "! grep -nE '^[[:space:]]*(cargo|rustc)([[:space:]]|$)' " + dress_sh + " " + dress_oo + " | grep -vE 'grep|comment|#'";
+    fails = fails + tally(expect_clean(p, no_host), "dress script never invokes cargo/rustc");
+
+    if chars_len(cleanup) > 0 {
+        if sh_arg_ok(cleanup) { let _ = sh_clean(p, cleanup); }
+    }
+    if fails > 0 {
+        println("install_dress_rehearsal: FAILED");
+        process_exit(1);
+    }
+    println("install_dress_rehearsal: PASSED");
+}
+
+fn dress_trim(s: String) -> String {
+    return str_replace(str_replace(s, "\n", ""), "\r", "");
+}
+
+fn dress_gate(s: String, tag: String) {
+    if !sh_arg_ok(s) {
+        println("FAIL " + tag + " unsafe");
+        process_exit(1);
+    }
+}
+
+fn dress_extract(p: &ProcessCap, fs: &FsReadCap, tmpd: String, tb: String, pin: String) -> String {
+    let extract = tmpd + "/dress_extract";
+    if !sh_arg_ok(tb) || !sh_arg_ok(extract) { return ""; }
+    let _ = sh_clean(p, extract);
+    let _ = sh_mkdir_p(p, extract);
+    let er = sh_tar_extract(p, tb, extract);
+    if er.is_err() { return ""; }
+    let named = extract + "/ooda-" + pin + "-linux-x86_64";
+    if sh_arg_ok(named) {
+        if fs_path_exists(fs, named) { return named; }
+    }
+    return extract;
+}
+
+fn dress_stage(p: &ProcessCap, fs: &FsReadCap, tmpd: String) -> String {
+    let stage = tmpd + "/dress_stage";
+    if !sh_arg_ok(stage) { return ""; }
+    let _ = sh_clean(p, stage);
+    let _ = sh_mkdir_p(p, stage + "/bin");
+    let _ = sh_mkdir_p(p, stage + "/oodac");
+    let _ = sh_mkdir_p(p, stage + "/share");
+    let _ = sh_mkdir_p(p, stage + "/runtime");
+    let _ = sh_mkdir_p(p, stage + "/install");
+    let _ = sh_mkdir_p(p, stage + "/scripts");
+    let _ = sh_mkdir_p(p, stage + "/cli");
+    if sh_copy(p, "bin/ooda", stage + "/bin/ooda").is_err() { return ""; }
+    if sh_copy(p, "oodac/oodac", stage + "/oodac/oodac").is_err() { return ""; }
+    if expect_present(fs, "runtime/chs_rt.c").is_ok() { let _ = sh_copy(p, "runtime/chs_rt.c", stage + "/runtime/chs_rt.c"); }
+    if expect_present(fs, "runtime/chs_rt.h").is_ok() { let _ = sh_copy(p, "runtime/chs_rt.h", stage + "/runtime/chs_rt.h"); }
+    if expect_present(fs, "install/install.oo").is_ok() { let _ = sh_copy(p, "install/install.oo", stage + "/install/install.oo"); }
+    if expect_present(fs, "scripts/bootstrap_no_cargo.sh").is_ok() { let _ = sh_copy(p, "scripts/bootstrap_no_cargo.sh", stage + "/scripts/bootstrap_no_cargo.sh"); }
+    return stage;
+}
