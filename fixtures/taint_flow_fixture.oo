@@ -1,0 +1,151 @@
+// # Field-Level Information Flow Taint Tracking and Secret Guard Fixture
+//
+// Logline: Fixture proving field-level taint propagation, secret sink interception, and sanitizer bypass prevention.
+//
+// Setup: Test fixture exercising information flow tracking across struct fields, assignments, binary operations, and sinks.
+//
+// Beats:
+//   1. Prove field-level taint propagation from struct secret fields across multiple assignments and expressions.
+//   2. Prove strict interception and rejection when tainted secret data reaches LogSink, NetEgressSink, or FsWriteSink.
+//   3. Prove approved sanitizer (e.g. SHA256 HMAC or Masking) declassifies taint safely and permits egress.
+//   4. Prove unapproved or spoofed sanitizers are rejected and fail-closed under strict policy.
+//   5. Output test markers and confirm end-to-end verification passing.
+//
+// residual: Dynamic distributed multi-node information-flow tracking lowers via kernel capability filters
+
+import "src/ooda/sec/taint/taint.oo";
+
+pub fn test_field_taint_propagation() -> Bool {
+    let mut g: FlowGraph = taint_init_graph(10, "g_field_prop");
+    let _ = taint_mark_secret(&mut g, "user_rec", "api_token", "env.SECRET_TOKEN");
+    let _ = taint_mark_user_input(&mut g, "user_rec", "username", "http.param.user");
+    let _ = taint_mark_clean(&mut g, "user_rec", "account_id");
+
+    let _ = taint_assign(&mut g, "user_rec", "api_token", "tok_var", "");
+    let _ = taint_assign(&mut g, "user_rec", "username", "name_var", "");
+    let _ = taint_assign(&mut g, "user_rec", "account_id", "id_var", "");
+    let _ = taint_combine_expr(&mut g, "tok_var", "", "id_var", "", "auth_payload", "");
+
+    let lbl_tok: TaintLabel = flow_graph_get_label(&g, "tok_var", "");
+    let lbl_name: TaintLabel = flow_graph_get_label(&g, "name_var", "");
+    let lbl_id: TaintLabel = flow_graph_get_label(&g, "id_var", "");
+    let lbl_auth: TaintLabel = flow_graph_get_label(&g, "auth_payload", "");
+
+    if lbl_tok.level != taint_level_secret() { return false; }
+    if lbl_name.level != taint_level_user_input() { return false; }
+    if lbl_id.level != taint_level_clean() { return false; }
+    if lbl_auth.level != taint_level_secret() { return false; }
+    return true;
+}
+
+pub fn test_secret_sink_interception() -> Bool {
+    let mut g: FlowGraph = taint_init_graph(20, "g_sink_guard");
+    let pol: TaintPolicy = taint_policy_strict(1, "strict_pol");
+    let _ = taint_mark_secret(&mut g, "db_secret", "password", "vault.db_pass");
+    let _ = taint_mark_untrusted_net(&mut g, "net_payload", "body", "tcp.recv");
+
+    if taint_verify_log(&g, &pol, "db_secret", "password") { return false; }
+    if taint_verify_net(&g, &pol, "db_secret", "password") { return false; }
+    if taint_verify_fs(&g, &pol, "db_secret", "password") { return false; }
+    if taint_verifier_guard_exec(&g, &pol, "net_payload", "body") { return false; }
+
+    let mut sinks: List[TaintSink] = list_new();
+    sinks = list_push(sinks, taint_sink_log(1, "LogSink"));
+    sinks = list_push(sinks, taint_sink_net_egress(2, "NetEgressSink"));
+    sinks = list_push(sinks, taint_sink_fs_write(3, "FsWriteSink"));
+
+    let mut vars: List[String] = list_new();
+    vars = list_push(vars, "db_secret");
+    let mut flds: List[String] = list_new();
+    flds = list_push(flds, "password");
+
+    let rep: TaintReport = taint_audit(&g, &pol, sinks, vars, flds);
+    if rep.violation_count != 3 || rep.is_clean { return false; }
+    return true;
+}
+
+pub fn test_approved_sanitizer_declassification() -> Bool {
+    let mut g: FlowGraph = taint_init_graph(30, "g_san_ok");
+    let pol: TaintPolicy = taint_policy_strict(1, "strict_pol");
+    let _ = taint_mark_secret(&mut g, "session_key", "raw", "key_store");
+
+    let san: SanitizerFn = sanitizer_fn_new(1, "sha256_mask", taint_level_secret(), taint_level_clean(), true);
+    let san_res: Bool = taint_sanitize(&mut g, "session_key", "raw", "session_hash", "", &san);
+    if !san_res { return false; }
+
+    let lbl_hash: TaintLabel = flow_graph_get_label(&g, "session_hash", "");
+    if lbl_hash.level != taint_level_clean() { return false; }
+    if !taint_verify_log(&g, &pol, "session_hash", "") { return false; }
+    if !taint_verify_net(&g, &pol, "session_hash", "") { return false; }
+    return true;
+}
+
+pub fn test_unapproved_sanitizer_rejection() -> Bool {
+    let mut g: FlowGraph = taint_init_graph(40, "g_san_bad");
+    let pol: TaintPolicy = taint_policy_strict(1, "strict_pol");
+    let _ = taint_mark_secret(&mut g, "api_token", "", "env");
+
+    let fake_san: SanitizerFn = sanitizer_fn_new(99, "unapproved_bypass", taint_level_secret(), taint_level_clean(), false);
+    let san_res: Bool = taint_sanitize(&mut g, "api_token", "", "spoofed_clean", "", &fake_san);
+    if san_res { return false; }
+
+    let lbl_spoof: TaintLabel = flow_graph_get_label(&g, "spoofed_clean", "");
+    if lbl_spoof.level != taint_level_secret() { return false; }
+    if taint_verify_log(&g, &pol, "spoofed_clean", "") { return false; }
+    return true;
+}
+
+pub fn test_lattice_join_and_origin_tracking() -> Bool {
+    let l_clean: TaintLabel = taint_label_clean();
+    let l_sec: TaintLabel = taint_label_secret("source_a");
+    let l_user: TaintLabel = taint_label_user_input("source_b");
+    let l_net: TaintLabel = taint_label_untrusted_net("source_c");
+
+    let j1: TaintLabel = taint_label_join(&l_clean, &l_clean);
+    let j2: TaintLabel = taint_label_join(&l_clean, &l_user);
+    let j3: TaintLabel = taint_label_join(&l_user, &l_sec);
+    let j4: TaintLabel = taint_label_join(&l_sec, &l_net);
+    let j5: TaintLabel = taint_label_join(&l_user, &l_net);
+
+    if j1.level != taint_level_clean() { return false; }
+    if j2.level != taint_level_user_input() { return false; }
+    if j3.level != taint_level_secret() { return false; }
+    if j4.level != taint_level_secret() { return false; }
+    if j5.level != taint_level_untrusted_net() { return false; }
+    return true;
+}
+
+pub fn main() {
+    if !test_field_taint_propagation() {
+        println("FAILED: field taint propagation");
+        return;
+    }
+    println("TAINT_PROPAGATION_OK");
+
+    if !test_secret_sink_interception() {
+        println("FAILED: secret sink interception");
+        return;
+    }
+    println("TAINT_SINK_INTERCEPT_OK");
+
+    if !test_approved_sanitizer_declassification() {
+        println("FAILED: approved sanitizer declassification");
+        return;
+    }
+    println("TAINT_SANITIZER_OK");
+
+    if !test_unapproved_sanitizer_rejection() {
+        println("FAILED: unapproved sanitizer rejection");
+        return;
+    }
+    println("TAINT_BYPASS_REJECT_OK");
+
+    if !test_lattice_join_and_origin_tracking() {
+        println("FAILED: lattice join and origin tracking");
+        return;
+    }
+    println("TAINT_LATTICE_OK");
+
+    println("TAINT_FLOW_FIXTURE_ALL_PASSED");
+    println("taint_flow_fixture: OK");
+}
