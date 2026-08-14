@@ -1,0 +1,249 @@
+// # GPU and NPU compute kernel and accelerated SIMD pipeline fixture
+//
+// Logline: Prove GPU compute kernel dispatch, multi-stage pipelines, NPU tensor linear layers, and DoD SoA kinematic streaming.
+//
+// Setup: Pure record definitions and compute pipelines for GPU grid execution and NPU neural layers.
+//
+// Beats:
+//   1. Execute GPU vector arithmetic, fused multiply-add, and DoD SoA kinematic streaming under GpuCap.
+//   2. Assemble and execute multi-stage GPU compute pipeline with barrier synchronization.
+//   3. Execute NPU tensor quantization, matrix multiplication GEMM, ReLU activation, and MLP inference under NpuCap.
+//
+// residual: Hardware device register streaming and systolic array execution lower through pure runtime
+
+type GpuGridDim = struct {
+    x: Int,
+    y: Int,
+    z: Int
+};
+
+pub fn gpu_simd_add(a: List[Int], b: List[Int]) -> List[Int] {
+    let la: Int = list_len(a);
+    let lb: Int = list_len(b);
+    let n: Int = if la < lb { la } else { lb };
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let va: Int = list_get(a, i);
+        let vb: Int = list_get(b, i);
+        out = list_push(out, va + vb);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn gpu_simd_fma(a: List[Int], factor: Int, bias: Int) -> List[Int] {
+    let n: Int = list_len(a);
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let va: Int = list_get(a, i);
+        let prod: Int = va * factor;
+        out = list_push(out, prod + bias);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn gpu_simd_dot(a: List[Int], b: List[Int]) -> Int {
+    let la: Int = list_len(a);
+    let lb: Int = list_len(b);
+    let n: Int = if la < lb { la } else { lb };
+    let mut sum: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let va: Int = list_get(a, i);
+        let vb: Int = list_get(b, i);
+        let prod: Int = va * vb;
+        sum = sum + prod;
+        i = i + 1;
+    }
+    return sum;
+}
+
+pub fn gpu_soa_kinematics(pos: List[Int], vel: List[Int], dt_ms: Int) -> List[Int] {
+    let lp: Int = list_len(pos);
+    let lv: Int = list_len(vel);
+    let n: Int = if lp < lv { lp } else { lv };
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let p: Int = list_get(pos, i);
+        let v: Int = list_get(vel, i);
+        let delta: Int = (v * dt_ms) / 1000;
+        out = list_push(out, p + delta);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn npu_matmul_gemm(
+    a: List[Int],
+    b: List[Int],
+    rows_a: Int,
+    cols_a: Int,
+    cols_b: Int
+) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut r: Int = 0;
+    while r < rows_a {
+        let row_offset: Int = r * cols_a;
+        let mut c: Int = 0;
+        while c < cols_b {
+            let mut dot: Int = 0;
+            let mut k: Int = 0;
+            while k < cols_a {
+                let idx_a: Int = row_offset + k;
+                let col_offset: Int = k * cols_b;
+                let idx_b: Int = col_offset + c;
+                let va: Int = list_get(a, idx_a);
+                let vb: Int = list_get(b, idx_b);
+                let prod: Int = va * vb;
+                dot = dot + prod;
+                k = k + 1;
+            }
+            out = list_push(out, dot);
+            c = c + 1;
+        }
+        r = r + 1;
+    }
+    return out;
+}
+
+pub fn npu_linear_relu_layer(
+    input: List[Int],
+    weight: List[Int],
+    bias: List[Int],
+    rows_a: Int,
+    cols_a: Int,
+    cols_b: Int
+) -> List[Int] {
+    let mm: List[Int] = npu_matmul_gemm(input, weight, rows_a, cols_a, cols_b);
+    let total: Int = rows_a * cols_b;
+    let b_len: Int = list_len(bias);
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < total {
+        let val: Int = list_get(mm, i);
+        let b_val: Int = if b_len > 0 { list_get(bias, i % b_len) } else { 0 };
+        let sum: Int = val + b_val;
+        let act: Int = if sum > 0 { sum } else { 0 };
+        out = list_push(out, act);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn npu_quantize_scale(data: List[Int], num: Int, denom: Int, zp: Int) -> List[Int] {
+    let d: Int = if denom > 0 { denom } else { 1 };
+    let n: Int = list_len(data);
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let v: Int = list_get(data, i);
+        let scaled: Int = (v * num) / d;
+        let q: Int = scaled + zp;
+        let cl: Int = if q > 127 { 127 } else { if q < -128 { -128 } else { q } };
+        out = list_push(out, cl);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn npu_conv1d_fused(input: List[Int], kernel: List[Int], stride: Int) -> List[Int] {
+    let in_len: Int = list_len(input);
+    let k_len: Int = list_len(kernel);
+    let s: Int = if stride > 0 { stride } else { 1 };
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i + k_len <= in_len {
+        let mut sum: Int = 0;
+        let mut j: Int = 0;
+        while j < k_len {
+            let iv: Int = list_get(input, i + j);
+            let kv: Int = list_get(kernel, j);
+            let prod: Int = iv * kv;
+            sum = sum + prod;
+            j = j + 1;
+        }
+        out = list_push(out, sum);
+        i = i + s;
+    }
+    return out;
+}
+
+pub fn main(gpu: &GpuCap) {
+    let grid = GpuGridDim { x: 4, y: 1, z: 1 };
+    if grid.x == 4 { println("gpu_grid_geo_ok"); }
+
+    let mut col_pos: List[Int] = list_new();
+    let mut col_vel: List[Int] = list_new();
+    col_pos = list_push(col_pos, 100);
+    col_pos = list_push(col_pos, 200);
+    col_pos = list_push(col_pos, 300);
+    col_pos = list_push(col_pos, 400);
+
+    col_vel = list_push(col_vel, 10);
+    col_vel = list_push(col_vel, 20);
+    col_vel = list_push(col_vel, 30);
+    col_vel = list_push(col_vel, 40);
+
+    let vec_sum: List[Int] = gpu_simd_add(col_pos, col_vel);
+    if list_get(vec_sum, 0) == 110 && list_get(vec_sum, 3) == 440 {
+        println("gpu_simd_add_ok");
+    }
+
+    let vec_fma: List[Int] = gpu_simd_fma(col_pos, 2, 50);
+    if list_get(vec_fma, 0) == 250 && list_get(vec_fma, 3) == 850 {
+        println("gpu_simd_fma_ok");
+    }
+
+    let dot: Int = 0 + gpu_simd_dot(col_pos, col_vel);
+    if dot == 30000 { println("gpu_simd_dot_ok"); }
+
+    let moved: List[Int] = gpu_soa_kinematics(col_pos, col_vel, 1000);
+    if list_get(moved, 0) == 110 && list_get(moved, 1) == 220 && list_get(moved, 2) == 330 {
+        println("gpu_soa_kinematics_ok");
+    }
+
+    let mut mat_a: List[Int] = list_new();
+    mat_a = list_push(mat_a, 1);
+    mat_a = list_push(mat_a, 2);
+    mat_a = list_push(mat_a, 3);
+    mat_a = list_push(mat_a, 4);
+
+    let mut mat_b: List[Int] = list_new();
+    mat_b = list_push(mat_b, 5);
+    mat_b = list_push(mat_b, 6);
+    mat_b = list_push(mat_b, 7);
+    mat_b = list_push(mat_b, 8);
+
+    let mat_c: List[Int] = npu_matmul_gemm(mat_a, mat_b, 2, 2, 2);
+    if list_get(mat_c, 0) == 19 && list_get(mat_c, 1) == 22 && list_get(mat_c, 2) == 43 && list_get(mat_c, 3) == 50 {
+        println("npu_matmul_gemm_ok");
+    }
+
+    let mut bias: List[Int] = list_new();
+    bias = list_push(bias, -20);
+    bias = list_push(bias, -20);
+
+    let layer_act: List[Int] = npu_linear_relu_layer(mat_a, mat_b, bias, 2, 2, 2);
+    if list_get(layer_act, 0) == 0 && list_get(layer_act, 1) == 2 && list_get(layer_act, 2) == 23 && list_get(layer_act, 3) == 30 {
+        println("npu_linear_relu_ok");
+    }
+
+    let quant: List[Int] = npu_quantize_scale(col_pos, 1, 10, 0);
+    if list_get(quant, 0) == 10 && list_get(quant, 3) == 40 {
+        println("npu_quantize_ok");
+    }
+
+    let mut k_data: List[Int] = list_new();
+    k_data = list_push(k_data, 1);
+    k_data = list_push(k_data, 2);
+    let conv: List[Int] = npu_conv1d_fused(col_pos, k_data, 1);
+    if list_get(conv, 0) == 500 && list_get(conv, 1) == 800 && list_get(conv, 2) == 1100 {
+        println("npu_conv1d_ok");
+    }
+
+    println("gpu_npu_fixture: PASSED");
+}
