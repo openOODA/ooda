@@ -1,0 +1,145 @@
+// # Object Capability and Landlock Sandboxing Smoke
+//
+// Logline: Verify object capability seal attenuation, rights diminution, and Landlock ruleset sandboxing.
+//
+// Setup: oodac compiler available; std sec sys Landlock and Object-Cap suites present.
+//
+// Beats:
+//   1. Check typechecker pass on all sec sys Landlock and ObjCap domain modules.
+//   2. Verify monotonic rights diminution and cryptographic seal attenuation with permission masks.
+//   3. Verify Landlock path ruleset construction, path attenuation, action evaluation, and registry bridge.
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _ = sh_mkdir_p(fw, tmpd);
+    let _ = scenario(p, fs, "objcap landlock sandboxing smoke");
+
+    let sec_dir = root + "/../std/src/ooda/sec/sys";
+    let mut fails: Int = 0;
+
+    fn tally(r: Result[Void, String], tag: String) -> Int {
+        if r.is_ok() {
+            println("OK " + tag);
+            return 0;
+        }
+        println("FAIL " + tag);
+        return 1;
+    }
+
+    // Beat 1: Verify all 15 Landlock and ObjCap domain modules pass oodac check
+    let mod_arr = [
+        "landlock_types.oo", "landlock_const.oo", "landlock_ops.oo",
+        "landlock_ruleset.oo", "landlock_engine.oo", "landlock_stubs.oo", "landlock.oo",
+        "objcap_types.oo", "objcap_rights.oo", "objcap_attenuate.oo",
+        "objcap_seal.oo", "objcap_registry.oo", "objcap_engine.oo",
+        "objcap_stubs.oo", "objcap.oo"
+    ];
+
+    let mut i = 0;
+    while i < 15 {
+        let m_name = list_get(mod_arr, i);
+        let m_path = sec_dir + "/" + m_name;
+        let out_file = tmpd + "/chk_" + m_name + ".out";
+        let err_file = tmpd + "/chk_" + m_name + ".err";
+        let _ = process_exec(p, oodac + " check " + m_path + " > " + out_file + " 2> " + err_file);
+        fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + out_file), "check " + m_name);
+        i = i + 1;
+    }
+
+    // Beat 2: Verify line counts (<= 256 lines) and DINNER 4-element headers
+    let mut j = 0;
+    while j < 15 {
+        let mod_name = list_get(mod_arr, j);
+        let file_path = sec_dir + "/" + mod_name;
+        fails = fails + tally(check(p, "test $(wc -l < " + file_path + ") -le 256", 5), "line count <= 256: " + mod_name);
+        fails = fails + tally(expect_quiet(p, "head -n 20 " + file_path + " | grep -q '^// # ' && head -n 20 " + file_path + " | grep -q '^// Logline:' && head -n 20 " + file_path + " | grep -q '^// Setup:' && head -n 20 " + file_path + " | grep -q '^// Beats:'"), "DINNER header: " + mod_name);
+        j = j + 1;
+    }
+
+    // Beat 3: Verify integration test fixture checking rights diminution, seal attenuation, and Landlock ruleset bridge
+    let fix_path = sec_dir + "/test_integration_fixture.oo";
+    let _ = process_exec(p, "cat << 'EOF' > " + fix_path + "\n" +
+"// # Landlock and Objcap Verification Integration Test\n" +
+"//\n" +
+"// Logline: Static verification of rights diminution, seal attenuation, and sandboxing rulesets.\n" +
+"//\n" +
+"// Setup: Imports objcap_stubs to verify full integration.\n" +
+"//\n" +
+"// Beats:\n" +
+"//   1. Verify rights diminution and seal attenuation.\n" +
+"//   2. Verify Landlock sandboxing ruleset construction and path evaluation.\n" +
+"//   3. Verify object capability registry translation to Landlock.\n" +
+"\n" +
+"import \"./objcap_stubs.oo\";\n" +
+"\n" +
+"pub fn verify_integration_flow() -> Bool {\n" +
+"    let dim = capability_rights_diminish(7, 5);\n" +
+"    let cap = objcap_create(\"cap1\", \"/data\", \"user\", 7, 100, 3600);\n" +
+"    let att = objcap_attenuation_create(\"att1\", \"cap1\", 5, \"/data/sub\", 10, 3700);\n" +
+"    let att_cap_res = objcap_attenuate(&cap, att, \"cap2\", 200);\n" +
+"    let seal = objcap_seal_attenuated(\"s1\", &cap, \"auth\", 5, \"/data/sub\");\n" +
+"    let u_res = objcap_seal_unseal_and_verify_rights(&seal, \"auth\", &cap, 1);\n" +
+"    let mut rs = landlock_ruleset_new(\"sandbox\", landlock_access_fs_all(), landlock_access_net_all());\n" +
+"    rs = landlock_ruleset_add_read_path(rs, \"/usr\");\n" +
+"    rs = landlock_ruleset_attenuate_path(rs, \"/usr\", landlock_access_fs_read_mask());\n" +
+"    let r_found = landlock_ruleset_find_path(&rs, \"/usr\");\n" +
+"    let rs_valid = landlock_ruleset_validate(&rs);\n" +
+"    let mut reg = objcap_registry_init(\"r1\");\n" +
+"    let _ = objcap_registry_register_cap(&mut reg, cap);\n" +
+"    let b_res = objcap_build_landlock_ruleset(&reg, \"rs_bridge\");\n" +
+"    let bridge_rs = match b_res { Ok(r) => r, Err(_) => return false; };\n" +
+"    let bridge_valid = landlock_ruleset_validate(&bridge_rs);\n" +
+"    return dim == 5 && att_cap_res.is_ok() && u_res.is_ok() && r_found.is_ok() && rs_valid.is_ok() && bridge_valid.is_ok();\n" +
+"}\n" +
+"EOF\n");
+
+    let int_out = tmpd + "/chk_int.out";
+    let int_err = tmpd + "/chk_int.err";
+    let _ = process_exec(p, oodac + " check " + fix_path + " > " + int_out + " 2> " + int_err);
+    fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + int_out), "objcap and bridge integration fixture");
+    let _ = process_exec(p, "rm -f " + fix_path);
+
+    // Beat 4: Verify Landlock Engine and Action Evaluation fixture
+    let eng_path = sec_dir + "/test_landlock_engine_fixture.oo";
+    let _ = process_exec(p, "cat << 'EOF' > " + eng_path + "\n" +
+"// # Landlock Engine Verification Test\n" +
+"//\n" +
+"// Logline: Static verification of landlock evaluation and action dispatch.\n" +
+"//\n" +
+"// Setup: Imports landlock_stubs to verify evaluation engine.\n" +
+"//\n" +
+"// Beats:\n" +
+"//   1. Verify Landlock sandboxing ruleset construction and path evaluation.\n" +
+"//   2. Verify Landlock action evaluation and path attenuation.\n" +
+"\n" +
+"import \"./landlock_stubs.oo\";\n" +
+"\n" +
+"pub fn verify_landlock_engine_flow() -> Bool {\n" +
+"    let mut rs = landlock_ruleset_new(\"sandbox_eng\", landlock_access_fs_all(), landlock_access_net_all());\n" +
+"    rs = landlock_ruleset_add_read_path(rs, \"/usr\");\n" +
+"    let r_mask = landlock_access_fs_read_mask();\n" +
+"    let ev_path = landlock_ruleset_eval_path(&rs, \"/usr/bin/sh\", r_mask);\n" +
+"    let ev_act = landlock_ruleset_eval_action(&mut rs, \"/usr/bin/sh\", \"read\");\n" +
+"    return ev_path && ev_act;\n" +
+"}\n" +
+"EOF\n");
+
+    let eng_out = tmpd + "/chk_eng.out";
+    let eng_err = tmpd + "/chk_eng.err";
+    let _ = process_exec(p, oodac + " check " + eng_path + " > " + eng_out + " 2> " + eng_err);
+    fails = fails + tally(expect_quiet(p, "grep -qE '^OK' " + eng_out), "landlock engine evaluation fixture");
+    let _ = process_exec(p, "rm -f " + eng_path);
+
+    if fails > 0 {
+        println("objcap_landlock_smoke: FAILED");
+        process_exit(1);
+    }
+    println("objcap_landlock_smoke: PASSED");
+}

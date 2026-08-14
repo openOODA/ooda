@@ -1,0 +1,73 @@
+// # Object Capability and Landlock Sandboxing Fixture
+//
+// Logline: Fixture exercising seal attenuation, rights diminution, and ruleset construction.
+//
+// Setup: Imports objcap and landlock engines to exercise static type and semantics checks.
+//
+// Beats:
+//   1. Exercise rights diminution and object capability attenuation.
+//   2. Exercise cryptographic seal creation and verification with permission masks.
+//   3. Exercise Landlock ruleset construction, path attenuation, action eval, and registry bridge.
+
+import "../../std/src/ooda/sec/sys/landlock_engine.oo";
+import "../../std/src/ooda/sec/sys/objcap_engine.oo";
+
+pub fn verify_objcap_rights_and_seals() -> Bool {
+    // 1. Rights Diminution: 7 (rwx) diminished with 5 (rx) equals 5
+    let dim = capability_rights_diminish(7, 5);
+    if dim != 5 { return false; }
+
+    // 2. Object Capability Creation & Attenuation
+    let cap = objcap_create("cap_root", "/var/data", "alice", 7, 100, 3600);
+    let att = objcap_attenuation_create("att_1", "cap_root", 5, "/var/data/readonly", 10, 3700);
+    let att_cap_res = objcap_attenuate(&cap, att, "cap_child", 200);
+    let att_cap = match att_cap_res {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if att_cap.rights != 5 { return false; }
+
+    // 3. Cryptographic Sealed Attenuation
+    let seal = objcap_seal_attenuated("seal_1", &cap, "auth_ca", 5, "/var/data/readonly");
+    if seal.attenuated_rights_mask != 5 { return false; }
+    if seal.payload_uri != "/var/data/readonly" { return false; }
+
+    // 4. Unseal and verify rights
+    let u_ok = objcap_seal_unseal_and_verify_rights(&seal, "auth_ca", &cap, 1);
+    if u_ok.is_err() { return false; }
+    let u_deny = objcap_seal_unseal_and_verify_rights(&seal, "auth_ca", &cap, 2);
+    if u_deny.is_ok() { return false; }
+
+    return true;
+}
+
+pub fn verify_landlock_sandboxing_and_bridge() -> Bool {
+    // 1. Landlock Ruleset Creation and Path Rules
+    let mut rs = landlock_ruleset_new("sandbox_test", landlock_access_fs_all(), landlock_access_net_all());
+    rs = landlock_ruleset_add_read_path(rs, "/usr/lib");
+    rs = landlock_ruleset_add_write_path(rs, "/tmp");
+
+    // 2. Evaluate actions
+    let ev_read = landlock_ruleset_eval_action(&mut rs, "/usr/lib/libm.so", "read");
+    let ev_write = landlock_ruleset_eval_action(&mut rs, "/usr/lib/libm.so", "write");
+    if ev_read == false || ev_write == true { return false; }
+
+    // 3. Path Attenuation: drop write on /tmp
+    rs = landlock_ruleset_attenuate_path(rs, "/tmp", landlock_access_fs_read_mask());
+    let ev_tmp_write = landlock_ruleset_eval_action(&mut rs, "/tmp/test.txt", "write");
+    if ev_tmp_write == true { return false; }
+
+    // 4. ObjectCapability Registry Bridge to Landlock
+    let mut reg = objcap_registry_init("reg_test");
+    let cap_etc = objcap_create("cap_etc", "/etc", "root", 1, 100, 3600);
+    let _r1 = objcap_registry_register_cap(&mut reg, cap_etc);
+    let b_res = objcap_build_landlock_ruleset(&reg, "bridge_ruleset");
+    let mut bridge_rs = match b_res {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let ev_etc = landlock_ruleset_eval_action(&mut bridge_rs, "/etc/passwd", "read");
+    if ev_etc == false { return false; }
+
+    return true;
+}
