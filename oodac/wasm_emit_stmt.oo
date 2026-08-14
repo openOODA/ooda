@@ -1,23 +1,23 @@
 // # Lower a statement to WebAssembly
 //
-// Logline: Emits one WAT statement or a brace block and returns the next token position plus the updated env.
+// Logline: Emits one WAT statement or a brace block with control flow, bindings, print calls, loops, and returns.
 //
-// Setup: toks rows are kind, line, col, text; pos is the current token; n is the token count; env maps name:ty; str_tab is the string table; wasm_emit_expr is in scope.
+// Setup: token_fmt, tc_parse_int, wasm_emit_primary, and wasm_emit_expr are imported; env maps name:ty; str_tab is the string table.
 //
 // Beats:
-//   1. wasm_emit_block skips LBRACE, emits each statement, and returns [pos, env] at RBRACE.
-//   2. let binds a local and local.set; println calls $println_str; if/while emit WAT control; return emits return.
-//   3. IDENT ASSIGN local.sets; a bare expression is dropped unless void; any other token advances one.
+//   1. wasm_emit_block walks statements within balanced braces and updates env.
+//   2. Lower let bindings, variable assignments, println/print calls, if/else if/else, and return statements.
+//   3. Lower while and for loops, loop break/continue, and bare expressions.
 
+import "tc_parse_int.oo";
 import "token_fmt.oo";
+import "wasm_emit_primary.oo";
 import "wasm_emit_expr.oo";
 
 pub fn wasm_emit_block(toks: List[String], pos: Int, n: Int, env: String, str_tab: List[String]) -> List[String] {
     let mut p = pos;
     let mut cur_env: String = env;
-    if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
-        p = p + 1;
-    }
+    if p < n && field_at(list_get(toks, p), 0) == "LBRACE" { p = p + 1; }
     while p < n {
         let k: String = field_at(list_get(toks, p), 0);
         if k == "RBRACE" {
@@ -47,22 +47,27 @@ pub fn wasm_emit_stmt(toks: List[String], pos: Int, n: Int, env: String, str_tab
         let mut var_ty = "i64";
         if p < n && field_at(list_get(toks, p), 0) == "COLON" {
             p = p + 1;
-            let tname: String = field_at(list_get(toks, p), 3);
-            if tname == "String" || tname == "Bool" { var_ty = "i32"; }
-            else if tname == "Float" { var_ty = "f64"; }
-            p = p + 1;
-            if p < n && field_at(list_get(toks, p), 0) == "LBRACK" {
-                while p < n && field_at(list_get(toks, p), 0) != "RBRACK" { p = p + 1; }
+            if p < n && field_at(list_get(toks, p), 0) == "AMP" { p = p + 1; }
+            if p < n {
+                let tname: String = field_at(list_get(toks, p), 3);
+                if tname == "String" || tname == "Bool" || tname == "List" { var_ty = "i32"; }
+                else if tname == "Float" { var_ty = "f64"; }
+                p = p + 1;
+            }
+            if p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
+                while p < n && field_at(list_get(toks, p), 0) != "RBRACKET" { p = p + 1; }
                 if p < n { p = p + 1; }
                 var_ty = "i32";
             }
         }
-        if p < n && field_at(list_get(toks, p), 0) == "ASSIGN" {
+        if p < n && (field_at(list_get(toks, p), 0) == "EQ" || field_at(list_get(toks, p), 3) == "=") {
             p = p + 1;
             let er: List[String] = wasm_emit_expr(toks, p, n, env, str_tab);
             p = parse_int(list_get(er, 0));
             let ety = list_get(er, 1);
-            if ety == "i32" || ety == "f64" { var_ty = ety; }
+            let decl_ty: String = wasm_env_lookup_ty(env, var_name);
+            if decl_ty == "i64" && ety == "i32" { println("    i64.extend_i32_u"); }
+            else if decl_ty == "i32" && ety == "i64" { println("    i32.wrap_i64"); }
             println("    local.set $" + var_name);
         }
         if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
@@ -73,12 +78,19 @@ pub fn wasm_emit_stmt(toks: List[String], pos: Int, n: Int, env: String, str_tab
         return out;
     }
 
-    if k == "IDENT" && t == "println" {
+    if k == "IDENT" && (t == "println" || t == "print") {
+        let is_ln = (t == "println");
         p = p + 1;
         if p < n && field_at(list_get(toks, p), 0) == "LPAREN" { p = p + 1; }
         let er2: List[String] = wasm_emit_expr(toks, p, n, env, str_tab);
         p = parse_int(list_get(er2, 0));
-        println("    call $println_str");
+        let pty = list_get(er2, 1);
+        if is_ln {
+            if pty == "i64" { println("    call $println_i64"); }
+            else { println("    call $println_str"); }
+        } else {
+            println("    call $print_str");
+        }
         if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
         if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
         let mut outpr: List[String] = list_new();
@@ -91,6 +103,8 @@ pub fn wasm_emit_stmt(toks: List[String], pos: Int, n: Int, env: String, str_tab
         p = p + 1;
         let cr: List[String] = wasm_emit_expr(toks, p, n, env, str_tab);
         p = parse_int(list_get(cr, 0));
+        let cty: String = list_get(cr, 1);
+        if cty == "i64" { println("    i64.const 0"); println("    i64.ne"); }
         println("    (if");
         println("      (then");
         let b1: List[String] = wasm_emit_block(toks, p, n, env, str_tab);
@@ -99,8 +113,13 @@ pub fn wasm_emit_stmt(toks: List[String], pos: Int, n: Int, env: String, str_tab
         if p < n && field_at(list_get(toks, p), 0) == "KW_ELSE" {
             p = p + 1;
             println("      (else");
-            let b2: List[String] = wasm_emit_block(toks, p, n, env, str_tab);
-            p = parse_int(list_get(b2, 0));
+            if p < n && field_at(list_get(toks, p), 0) == "KW_IF" {
+                let se: List[String] = wasm_emit_stmt(toks, p, n, env, str_tab);
+                p = parse_int(list_get(se, 0));
+            } else {
+                let b2: List[String] = wasm_emit_block(toks, p, n, env, str_tab);
+                p = parse_int(list_get(b2, 0));
+            }
             println("      )");
         }
         println("    )");
@@ -116,6 +135,8 @@ pub fn wasm_emit_stmt(toks: List[String], pos: Int, n: Int, env: String, str_tab
         println("      (loop");
         let cr2: List[String] = wasm_emit_expr(toks, p, n, env, str_tab);
         p = parse_int(list_get(cr2, 0));
+        let cty2: String = list_get(cr2, 1);
+        if cty2 == "i64" { println("        i64.const 0"); println("        i64.ne"); }
         println("        i32.eqz");
         println("        br_if 1");
         let bw: List[String] = wasm_emit_block(toks, p, n, env, str_tab);
@@ -127,6 +148,60 @@ pub fn wasm_emit_stmt(toks: List[String], pos: Int, n: Int, env: String, str_tab
         outw = list_push(outw, p.to_string());
         outw = list_push(outw, env);
         return outw;
+    }
+
+    if k == "KW_FOR" {
+        p = p + 1;
+        let loop_var: String = field_at(list_get(toks, p), 3);
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 3) == "in" { p = p + 1; }
+        let lo_tok: String = field_at(list_get(toks, p), 3);
+        p = p + 1;
+        if p < n && (field_at(list_get(toks, p), 0) == "DOTDOT" || field_at(list_get(toks, p), 3) == "..") { p = p + 1; }
+        let hi_tok: String = field_at(list_get(toks, p), 3);
+        p = p + 1;
+        println("    i64.const " + lo_tok);
+        println("    local.set $" + loop_var);
+        println("    (block");
+        println("      (loop");
+        println("        local.get $" + loop_var);
+        println("        i64.const " + hi_tok);
+        println("        i64.lt_s");
+        println("        i32.eqz");
+        println("        br_if 1");
+        let bf: List[String] = wasm_emit_block(toks, p, n, env + loop_var + ":i64;", str_tab);
+        p = parse_int(list_get(bf, 0));
+        println("        local.get $" + loop_var);
+        println("        i64.const 1");
+        println("        i64.add");
+        println("        local.set $" + loop_var);
+        println("        br 0");
+        println("      )");
+        println("    )");
+        let mut outf: List[String] = list_new();
+        outf = list_push(outf, p.to_string());
+        outf = list_push(outf, env);
+        return outf;
+    }
+
+    if (k == "IDENT" && t == "break") {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+        println("    br 1");
+        let mut outbk: List[String] = list_new();
+        outbk = list_push(outbk, p.to_string());
+        outbk = list_push(outbk, env);
+        return outbk;
+    }
+
+    if (k == "IDENT" && t == "continue") {
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+        println("    br 0");
+        let mut outct: List[String] = list_new();
+        outct = list_push(outct, p.to_string());
+        outct = list_push(outct, env);
+        return outct;
     }
 
     if k == "KW_RETURN" {
@@ -144,11 +219,15 @@ pub fn wasm_emit_stmt(toks: List[String], pos: Int, n: Int, env: String, str_tab
     }
 
     if k == "IDENT" {
-        if p + 1 < n && field_at(list_get(toks, p + 1), 0) == "ASSIGN" {
+        if p + 1 < n && (field_at(list_get(toks, p + 1), 0) == "EQ" || field_at(list_get(toks, p + 1), 3) == "=") {
             let var_name = t;
+            let var_ty: String = wasm_env_lookup_ty(env, var_name);
             p = p + 2;
             let er3: List[String] = wasm_emit_expr(toks, p, n, env, str_tab);
             p = parse_int(list_get(er3, 0));
+            let ety3 = list_get(er3, 1);
+            if var_ty == "i64" && ety3 == "i32" { println("    i64.extend_i32_u"); }
+            else if var_ty == "i32" && ety3 == "i64" { println("    i32.wrap_i64"); }
             println("    local.set $" + var_name);
             if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
             let mut outa: List[String] = list_new();

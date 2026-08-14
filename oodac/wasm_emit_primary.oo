@@ -1,0 +1,220 @@
+// # Lower primary expressions to WebAssembly
+//
+// Logline: Look up local types and emit WAT instructions for literals, unary operators, methods, and function calls.
+//
+// Setup: token_fmt, tc_parse_int, and wasm_emit_mem are imported; parse_int, field_at, list_get, and list_push exist; env maps name:ty.
+//
+// Beats:
+//   1. wasm_env_lookup_ty scans env for name: and returns type or i64.
+//   2. wasm_emit_primary lowers int, float, string, and bool literals, unary bang, and unary minus.
+//   3. Handle built-in helpers, method calls, and local variable reads.
+
+import "tc_parse_int.oo";
+import "token_fmt.oo";
+import "wasm_emit_mem.oo";
+
+pub fn wasm_env_lookup_ty(env: String, name: String) -> String {
+    let target = name + ":";
+    let n = chars_len(env);
+    let tn = chars_len(target);
+    let mut i = 0;
+    while i + tn <= n {
+        let mut match_t = true;
+        let mut k = 0;
+        while k < tn {
+            if char_at(env, i + k) != char_at(target, k) { match_t = false; }
+            k = k + 1;
+        }
+        if match_t {
+            let mut j = i + tn;
+            let mut ty = "";
+            while j < n && char_at(env, j) != ";" {
+                ty = ty + char_at(env, j);
+                j = j + 1;
+            }
+            return ty;
+        }
+        i = i + 1;
+    }
+    return "i64";
+}
+
+pub fn wasm_emit_primary(toks: List[String], pos: Int, n: Int, env: String, str_tab: List[String]) -> List[String] {
+    let mut p = pos;
+    let k: String = field_at(list_get(toks, p), 0);
+    let t: String = field_at(list_get(toks, p), 3);
+    if k == "INT" || k == "NUMBER" {
+        println("    i64.const " + t);
+        let mut out: List[String] = list_new();
+        let p1 = p + 1;
+        out = list_push(out, p1.to_string());
+        out = list_push(out, "i64");
+        return out;
+    }
+    if k == "FLOAT" {
+        println("    f64.const " + t);
+        let mut outf: List[String] = list_new();
+        let p1 = p + 1;
+        outf = list_push(outf, p1.to_string());
+        outf = list_push(outf, "f64");
+        return outf;
+    }
+    if k == "STRING" {
+        let off = 0 + wasm_str_offset(str_tab, t);
+        println("    i32.const " + off.to_string());
+        let mut outs: List[String] = list_new();
+        let p1 = p + 1;
+        outs = list_push(outs, p1.to_string());
+        outs = list_push(outs, "i32");
+        return outs;
+    }
+    if k == "KW_TRUE" || t == "true" {
+        println("    i32.const 1");
+        let mut outt: List[String] = list_new();
+        let p1 = p + 1;
+        outt = list_push(outt, p1.to_string());
+        outt = list_push(outt, "i32");
+        return outt;
+    }
+    if k == "KW_FALSE" || t == "false" {
+        println("    i32.const 0");
+        let mut outb: List[String] = list_new();
+        let p1 = p + 1;
+        outb = list_push(outb, p1.to_string());
+        outb = list_push(outb, "i32");
+        return outb;
+    }
+    if k == "BANG" || t == "!" {
+        let pr: List[String] = wasm_emit_primary(toks, p + 1, n, env, str_tab);
+        p = parse_int(list_get(pr, 0));
+        println("    i32.eqz");
+        let mut outu: List[String] = list_new();
+        outu = list_push(outu, p.to_string());
+        outu = list_push(outu, "i32");
+        return outu;
+    }
+    if k == "MINUS" || t == "-" {
+        let prm: List[String] = wasm_emit_primary(toks, p + 1, n, env, str_tab);
+        p = parse_int(list_get(prm, 0));
+        println("    i64.const -1");
+        println("    i64.mul");
+        let mut outm: List[String] = list_new();
+        outm = list_push(outm, p.to_string());
+        outm = list_push(outm, "i64");
+        return outm;
+    }
+    if k == "IDENT" {
+        let id_name = t;
+        p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+            p = p + 1;
+            while p < n && field_at(list_get(toks, p), 0) != "RPAREN" {
+                if field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
+                else {
+                    let ar: List[String] = wasm_emit_primary(toks, p, n, env, str_tab);
+                    p = parse_int(list_get(ar, 0));
+                }
+            }
+            if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
+            if id_name == "str_len" || id_name == "chars_len" {
+                println("    call $str_len");
+                let mut out_sl: List[String] = list_new();
+                out_sl = list_push(out_sl, p.to_string());
+                out_sl = list_push(out_sl, "i32");
+                return out_sl;
+            }
+            if id_name == "str_concat" {
+                println("    call $str_concat");
+                let mut out_sc: List[String] = list_new();
+                out_sc = list_push(out_sc, p.to_string());
+                out_sc = list_push(out_sc, "i32");
+                return out_sc;
+            }
+            if id_name == "str_eq" {
+                println("    call $str_eq");
+                let mut out_se: List[String] = list_new();
+                out_se = list_push(out_se, p.to_string());
+                out_se = list_push(out_se, "i32");
+                return out_se;
+            }
+            if id_name == "process_exit" {
+                println("    i32.wrap_i64");
+                println("    call $proc_exit");
+                let mut out_pe: List[String] = list_new();
+                out_pe = list_push(out_pe, p.to_string());
+                out_pe = list_push(out_pe, "void");
+                return out_pe;
+            }
+            println("    call $" + id_name);
+            let mut outc: List[String] = list_new();
+            outc = list_push(outc, p.to_string());
+            outc = list_push(outc, "i64");
+            return outc;
+        }
+        if p < n && field_at(list_get(toks, p), 0) == "DOT" {
+            p = p + 1;
+            let mname: String = field_at(list_get(toks, p), 3);
+            p = p + 1;
+            if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+                p = p + 1;
+                while p < n && field_at(list_get(toks, p), 0) != "RPAREN" {
+                    if field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
+                    else {
+                        let ar2: List[String] = wasm_emit_primary(toks, p, n, env, str_tab);
+                        p = parse_int(list_get(ar2, 0));
+                    }
+                }
+                if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
+            }
+            if mname == "to_string" {
+                println("    local.get $" + id_name);
+                println("    call $i64_to_string");
+                let mut out_ts: List[String] = list_new();
+                out_ts = list_push(out_ts, p.to_string());
+                out_ts = list_push(out_ts, "i32");
+                return out_ts;
+            }
+            if mname == "len" || mname == "chars_len" {
+                println("    local.get $" + id_name);
+                println("    call $str_len");
+                let mut out_ml: List[String] = list_new();
+                out_ml = list_push(out_ml, p.to_string());
+                out_ml = list_push(out_ml, "i32");
+                return out_ml;
+            }
+            if mname == "is_ok" {
+                let mut out_ok: List[String] = list_new();
+                println("    i32.const 1");
+                out_ok = list_push(out_ok, p.to_string());
+                out_ok = list_push(out_ok, "i32");
+                return out_ok;
+            }
+            if mname == "is_err" {
+                let mut out_er: List[String] = list_new();
+                println("    i32.const 0");
+                out_er = list_push(out_er, p.to_string());
+                out_er = list_push(out_er, "i32");
+                return out_er;
+            }
+            if mname == "unwrap_or" {
+                println("    local.get $" + id_name);
+                let vty_u: String = wasm_env_lookup_ty(env, id_name);
+                let mut out_un: List[String] = list_new();
+                out_un = list_push(out_un, p.to_string());
+                out_un = list_push(out_un, vty_u);
+                return out_un;
+            }
+        }
+        println("    local.get $" + id_name);
+        let vty: String = wasm_env_lookup_ty(env, id_name);
+        let mut outv: List[String] = list_new();
+        outv = list_push(outv, p.to_string());
+        outv = list_push(outv, vty);
+        return outv;
+    }
+    let mut out_expr: List[String] = list_new();
+    let p1 = p + 1;
+    out_expr = list_push(out_expr, p1.to_string());
+    out_expr = list_push(out_expr, "i64");
+    return out_expr;
+}
