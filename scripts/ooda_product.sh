@@ -241,6 +241,16 @@ case "$MODE" in
     [[ -x "$S" ]] || { echo ERR_NO_RUN_SCRIPT >&2; exit 1; }
     exec "$S" "$@"
     ;;
+  add|install)
+    resolve_em
+    export EM
+    if [[ -x "$ROOT/bin/ooda" ]]; then
+      exec "$ROOT/bin/ooda" run "$ROOT/pm/main.oo" "$MODE" "$@"
+    else
+      echo "ERR_NO_BIN_OODA" >&2
+      exit 1
+    fi
+    ;;
   test)
     resolve_em
     S="$ROOT/scripts/ooda_test_verify.sh"

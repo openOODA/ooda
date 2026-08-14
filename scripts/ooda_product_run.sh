@@ -12,6 +12,7 @@ fi
 
 engine=native
 file=""
+echo "ooda_product_run.sh args: $@" >&2
 prog=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -69,9 +70,13 @@ case "$engine" in
     fi
     set +e
     if [[ ${#prog[@]} -gt 0 ]]; then
+      echo "ENV BEFORE OUT:" >&2
+      env | grep OODA_ >&2
       "$out" "${prog[@]}"
       rrc=$?
     else
+      echo "ENV BEFORE OUT:" >&2
+      env | grep OODA_ >&2
       "$out"
       rrc=$?
     fi
