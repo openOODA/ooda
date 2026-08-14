@@ -9,7 +9,7 @@
 //   2. Write, remove, mkdir, hardlink, and symlink take &FsWriteCap.
 //   3. Legacy &FsCap still supersedes soft-granular for one-wave check and runtime.
 //
-// residual: no ambient FS; no unrestricted dir walk / chmod product.
+// residual: no ambient FS; no unrestricted chmod product; no rmdir builtin (remove_tree residual).
 // Not claimed: OS FS isolation / landlock / seccomp on open/write (CAP-G5).
 
 // write_file(fs, path, content) → sealed write under FsWriteCap
@@ -97,4 +97,73 @@ pub fn fs_hardlink(fs: &FsWriteCap, oldpath: String, newpath: String) -> Result[
 pub fn fs_symlink(fs: &FsWriteCap, target: String, linkpath: String) -> Result[Void, String]
 {
     return oo_fs_symlink(fs, target, linkpath);
+}
+
+// mkdir every prefix. Existing dirs: fs_mkdir may Err; we continue.
+pub fn fs_mkdir_p(fw: &FsWriteCap, path: String) -> Result[Void, String]
+    requires chars_len(path) > 0
+{
+    let n: Int = chars_len(path);
+    let mut acc: String = "";
+    let mut i: Int = 0;
+    if char_at(path, 0) == "/" {
+        acc = "/";
+        i = 1;
+    }
+    while i < n {
+        let c: String = char_at(path, i);
+        if c == "/" {
+            if chars_len(acc) > 0 {
+                if acc != "/" {
+                    let _ = fs_mkdir(fw, acc);
+                }
+            }
+            if !str_ends_with(acc, "/") {
+                acc = acc + "/";
+            }
+        } else {
+            acc = acc + c;
+        }
+        i = i + 1;
+    }
+    if chars_len(acc) > 0 {
+        if acc != "/" {
+            let _ = fs_mkdir(fw, acc);
+        }
+    }
+    return Ok(void);
+}
+
+// Copy one file. Directories stay a residual (use walk + mkdir_p + copy).
+pub fn fs_copy_file(fr: &FsReadCap, fw: &FsWriteCap, src: String, dst: String) -> Result[Void, String]
+    requires chars_len(src) > 0
+    requires chars_len(dst) > 0
+{
+    let body: Result[String, String] = fs_read_file(fr, src);
+    if body.is_err() {
+        return Err("fs_copy_file: read failed");
+    }
+    let s: String = match body { Ok(v) => v, Err(_) => "" };
+    return fs_write_file(fw, dst, s);
+}
+
+pub fn fs_copy_tree(fr: &FsReadCap, fw: &FsWriteCap, src: String, dst: String) -> Result[Void, String]
+    requires chars_len(src) > 0
+    requires chars_len(dst) > 0
+{
+    if fs_is_dir(fr, src) {
+        let mk = fs_mkdir_p(fw, dst);
+        if mk.is_err() { return mk; }
+        let ents: List[String] = fs_read_dir(fr, src);
+        let n: Int = list_len(ents);
+        let mut i: Int = 0;
+        while i < n {
+            let name: String = list_get(ents, i);
+            let r = fs_copy_tree(fr, fw, src + "/" + name, dst + "/" + name);
+            if r.is_err() { return r; }
+            i = i + 1;
+        }
+        return Ok(void);
+    }
+    return fs_copy_file(fr, fw, src, dst);
 }
