@@ -100,6 +100,7 @@ long long fs_file_size(long long cap, OoStr path);
 OoSList oo_fs_read_dir(long long cap, OoStr path);
 int oo_fs_is_dir(long long cap, OoStr path);
 OoResV oo_fs_remove_file(long long cap, OoStr path);
+OoResV oo_fs_rmdir(long long cap, OoStr path);
 OoResV oo_fs_mkdir(long long cap, OoStr path);
 OoSList oo_sys_args(long long cap);
 long long oo_cap_grant_fs(void);

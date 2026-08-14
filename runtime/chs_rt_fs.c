@@ -130,6 +130,16 @@ r.err = oo_str_lit("fs_remove_file denied: path not under OODA_FS_WRITEDIR"); re
 if (unlink(cpath) == 0) { r.ok = 1; r.err = oo_str_lit(""); }
 return r;
 }
+OoResV oo_fs_rmdir(long long cap, OoStr path) {
+oo_cap_require_fswrite(cap, "fs_rmdir");
+char cpath[PATH_MAX]; to_cpath(path, cpath, PATH_MAX);
+OoResV r={0, oo_str_lit("fs_rmdir failed")};
+const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
+if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
+r.err = oo_str_lit("fs_rmdir denied: path not under OODA_FS_WRITEDIR"); return r; }
+if (rmdir(cpath) == 0) { r.ok = 1; r.err = oo_str_lit(""); }
+return r;
+}
 OoResV oo_fs_mkdir(long long cap, OoStr path) {
 oo_cap_require_fswrite(cap, "fs_mkdir");
 char cpath[PATH_MAX]; to_cpath(path, cpath, PATH_MAX);
