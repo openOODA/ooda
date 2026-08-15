@@ -5,32 +5,15 @@
 // Setup: Token list and emission environment are positioned at the start of a block.
 //
 // Beats:
-//   1. Enter the block and emit HITL gates when needed.
+//   1. Enter the block.
 //   2. Lower statements inside.
 //   3. Return [new_pos, env].
 
 pub fn c_emit_block(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
     let mut p: Int = pos;
     let mut e: String = env;
-    let mut brace_pos: Int = pos;
     if field_at(list_get(toks, p), 0) == "LBRACE" {
-        brace_pos = p;
         p = p + 1;
-    }
-    // M-CTZ-1: function-body entry — emit per-fn static const gate flag and
-    // record the caller fn name in the env so the verify_human interceptor
-    // (below) can reference it. Runs once per function (guarded by
-    // __hitl_emitted__ which is set after the first call).
-    if c_env_get(e, "__hitl_emitted__") == "" {
-        let cf: String = c_find_enclosing_fn(toks, brace_pos, n);
-        if cf != "" {
-            let hflag: String = c_env_get(e, "__hitl__" + cf);
-            let mut hval: String = "0";
-            if hflag == "1" { hval = "1"; }
-            println("  static const int __oo_hitl_" + cf + " = " + hval + ";");
-            e = c_env_put(e, "__caller_fn__", cf);
-            e = c_env_put(e, "__hitl_emitted__", "1");
-        }
     }
     e = c_env_push_scope(e);
     oo_emit_tmp_enter();
@@ -42,67 +25,13 @@ pub fn c_emit_block(toks: List[String], pos: Int, n: Int, env: String) -> List[S
             p = p + 1;
             break;
         }
-        // M-CTZ-1: intercept bare-statement verify_human(env, fs, msg) before
-        // c_emit_stmt so the gate is wired at the statement-dispatch level.
-        // Emits the call with a trailing compile-time if-gate that exits(1)
-        // when OODA_HITL_REQUIRED=1 and the caller fn is not // HITL: required.
-        let mut is_vh: Bool = false;
-        if k == "IDENT" {
-            if field_at(list_get(toks, p), 3) == "verify_human" {
-                if p + 1 < n {
-                    if field_at(list_get(toks, p + 1), 0) == "LPAREN" {
-                        is_vh = true;
-                    }
-                }
-            }
-        }
-        if is_vh {
-            let vh: List[String] = c_emit_verify_human_stmt(toks, p, n, e);
-            p = parse_int(list_get(vh, 0));
-            e = list_get(vh, 1);
-        } else {
-            let st: List[String] = c_emit_stmt(toks, p, n, e);
-            p = parse_int(list_get(st, 0));
-            e = list_get(st, 1);
-        }
+        let st: List[String] = c_emit_stmt(toks, p, n, e);
+        p = parse_int(list_get(st, 0));
+        e = list_get(st, 1);
     }
     let mut out: List[String] = list_new();
     out = list_push(out, p.to_string());
     out = list_push(out, e);
-    return out;
-}
-
-// M-CTZ-1: lower a statement-level `verify_human(env, fs, msg)` to the gated
-// call. Returns [new_pos_str, env]. Validates cap-ident args (same as
-// c_emit_libfloor_call), emits (void)oo_verify_human(args);, then the
-// compile-time if-gate using __caller_fn__ from the env.
-pub fn c_emit_verify_human_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
-    let mut p: Int = pos + 2; // skip IDENT and LPAREN
-    let ap: List[String] = c_emit_call_args(toks, p, n, env);
-    p = parse_int(list_get(ap, 0));
-    let args: String = list_get(ap, 1);
-    let a0: String = list_get(ap, 2);
-    let a1: String = list_get(ap, 3);
-    if a1 == "" || !c_arg_is_cap_ident(a0) || !c_arg_is_cap_ident(a1) {
-        println("ERR\tc_emit\tverify_human requires &EnvCap, &FsCap, msg");
-        process_exit(1);
-    }
-    let cf: String = c_env_get(env, "__caller_fn__");
-    let call_text: String = "oo_verify_human(" + args + ")";
-    println("  (void)" + call_text + ";");
-    if cf != "" {
-        println("  if (OODA_HITL_REQUIRED && !__oo_hitl_" + cf + ") { process_exit(1); }");
-    } else {
-        // No caller fn resolved (should not happen for fn-body blocks): still
-        // emit the gate so the macro is honoured at link time.
-        println("  if (OODA_HITL_REQUIRED) { process_exit(1); }");
-    }
-    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
-        p = p + 1;
-    }
-    let mut out: List[String] = list_new();
-    out = list_push(out, p.to_string());
-    out = list_push(out, env);
     return out;
 }
 
@@ -138,62 +67,8 @@ pub fn c_line_text_at(src: String, line_num: Int) -> String {
     return "";
 }
 
-// M-CTZ-1: true iff the (trimmed) line is the static HITL marker `// HITL: required`.
-pub fn c_is_hitl_required_line(s: String) -> Bool {
-    let n: Int = chars_len(s);
-    let mut i: Int = 0;
-    while i < n {
-        let c: String = char_at(s, i);
-        if c == " " || c == "\t" {
-            i = i + 1;
-        } else {
-            break;
-        }
-    }
-    if i + 1 >= n {
-        return false;
-    }
-    if char_at(s, i) != "/" || char_at(s, i + 1) != "/" {
-        return false;
-    }
-    i = i + 2;
-    while i < n {
-        let c2: String = char_at(s, i);
-        if c2 == " " || c2 == "\t" {
-            i = i + 1;
-        } else {
-            break;
-        }
-    }
-    let rest: String = str_slice(s, i, n);
-    if rest == "HITL: required" {
-        return true;
-    }
-    return false;
-}
-
-// M-CTZ-1: walk backward from brace_pos-1 to find the most recent KW_FN
-// and return the fn name (the IDENT after KW_FN). Used by c_emit_block to
-// identify the function-body block without modifying c_emit_fn.oo.
-pub fn c_find_enclosing_fn(toks: List[String], brace_pos: Int, n: Int) -> String {
-    let mut i: Int = brace_pos - 1;
-    while i >= 0 {
-        let k: String = field_at(list_get(toks, i), 0);
-        if k == "KW_FN" {
-            if i + 1 < n && field_at(list_get(toks, i + 1), 0) == "IDENT" {
-                return field_at(list_get(toks, i + 1), 3);
-            }
-            return "";
-        }
-        i = i - 1;
-    }
-    return "";
-}
-
-// DE2.1+PV2.1: true iff the (trimmed) line carries a `// SECRET:` directive
-// (mirrors c_is_hitl_required_line grammar). Used by the __fr_secret__<fn>
-// pre-pass to detect bodies that declare SECRET tags even when no tagged
-// IDENT is referenced in token form.
+// True iff the (trimmed) line carries a `// SECRET:` directive.
+// Used by the __fr_secret__<fn> pre-pass.
 pub fn c_is_secret_directive_line(s: String) -> Bool {
     let n: Int = chars_len(s);
     let mut i: Int = 0;
