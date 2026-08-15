@@ -59,7 +59,7 @@ void oo_cap_require_ffi(long long got, const char *op) {
 /* Canonical-path prefix allow: both inputs run through realpath and the
  * canonical paths are compared. Closes `..` traversal, symlink hops,
  * and case-insensitive FS games. */
-static int path_under_allowdir(const char *path, const char *dir) {
+int path_under_allowdir(const char *path, const char *dir) {
   char rp_path[PATH_MAX];
   char rp_dir[PATH_MAX];
   size_t n;
@@ -75,7 +75,7 @@ static int path_under_allowdir(const char *path, const char *dir) {
 }
 
 /* M165: safe system lib dirs when ALLOWDIR empty (not unrestricted any-path). */
-static int path_under_sys_lib(const char *path) {
+int path_under_sys_lib(const char *path) {
   return path_under_allowdir(path, "/lib")
       || path_under_allowdir(path, "/lib64")
       || path_under_allowdir(path, "/usr/lib")
@@ -92,7 +92,7 @@ static int path_under_sys_lib(const char *path) {
 
 /* Verify <path>.minisig adjacent via `minisign -V -p <pk> -m <path> -P <fp>`.
  * Returns 1 on valid signature matching expected fingerprint, 0 otherwise. */
-static int ffi_verify_signature(const char *path) {
+int ffi_verify_signature(const char *path) {
   char sig[PATH_MAX];
   const char *pub_path = OO_FFI_PUBKEY_PATH;
   pid_t pid;

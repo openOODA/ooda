@@ -242,4 +242,7 @@ OoStr str_trim(OoStr s);
 OoSList oo_fs_read_dir(long long cap, OoStr path);
 OoResV oo_fs_hardlink(long long cap, OoStr oldpath, OoStr newpath);
 OoResV oo_fs_symlink(long long cap, OoStr target, OoStr linkpath);
+int path_under_allowdir(const char *rp, const char *dir);
+int path_under_sys_lib(const char *rp);
+int ffi_verify_signature(const char *path);
 #endif
