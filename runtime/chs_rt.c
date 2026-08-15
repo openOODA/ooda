@@ -29,6 +29,7 @@
 #include "chs_rt_host.c"
 #include "chs_rt_rlimit.c"
 #include "chs_rt_landlock.c"
+#include "chs_rt_dns.c"
 
 OoSList str_split(OoStr s, OoStr delim) {
   OoSList l = oo_slist_new();
