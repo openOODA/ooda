@@ -1,0 +1,127 @@
+// # Filesystem Watcher and Event Notification
+//
+// Logline: Filesystem change detection, polling monitor, and inotify event structures under &SysCap and &FsReadCap.
+//
+// Setup: Requires &SysCap for OS notification and &FsReadCap for metadata polling.
+//
+// Beats:
+//   1. Define FsWatchEvent record with event kind, target path, and timestamp.
+//   2. Construct FsWatcher descriptor with monitored path and last known size.
+//   3. Poll filesystem path to detect create, modify, or delete events.
+//   4. Check event classification predicates.
+//
+// residual: user-space polling and inotify initialization over sealed builtins
+
+type FsWatchEvent = struct {
+    kind: String,
+    path: String,
+    prev_size: Int,
+    new_size: Int,
+    exists: Bool
+};
+
+type FsWatcher = struct {
+    target_path: String,
+    last_size: Int,
+    last_exists: Bool
+};
+
+// Create a new filesystem watcher descriptor.
+pub fn watch_new(fs: &FsReadCap, path: String) -> FsWatcher {
+    let exists: Bool = path_exists(fs, path);
+    let mut sz: Int = 0;
+    if exists {
+        sz = file_size(fs, path);
+    }
+    return FsWatcher {
+        target_path: path,
+        last_size: sz,
+        last_exists: exists
+    };
+}
+
+// Poll filesystem state and emit watch event if changed.
+pub fn watch_poll(fs: &FsReadCap, watcher: FsWatcher) -> FsWatchEvent {
+    let cur_exists: Bool = path_exists(fs, watcher.target_path);
+    let mut cur_size: Int = 0;
+    if cur_exists {
+        cur_size = file_size(fs, watcher.target_path);
+    }
+
+    let prev_ex: Bool = watcher.last_exists;
+    let prev_sz: Int = watcher.last_size;
+
+    if !prev_ex {
+        if cur_exists {
+            return FsWatchEvent {
+                kind: "CREATED",
+                path: watcher.target_path,
+                prev_size: 0,
+                new_size: cur_size,
+                exists: true
+            };
+        }
+    }
+
+    if prev_ex {
+        if !cur_exists {
+            return FsWatchEvent {
+                kind: "DELETED",
+                path: watcher.target_path,
+                prev_size: prev_sz,
+                new_size: 0,
+                exists: false
+            };
+        }
+        if cur_size != prev_sz {
+            return FsWatchEvent {
+                kind: "MODIFIED",
+                path: watcher.target_path,
+                prev_size: prev_sz,
+                new_size: cur_size,
+                exists: true
+            };
+        }
+    }
+
+    return FsWatchEvent {
+        kind: "NONE",
+        path: watcher.target_path,
+        prev_size: prev_sz,
+        new_size: cur_size,
+        exists: cur_exists
+    };
+}
+
+// Update watcher state with latest event observation.
+pub fn watch_update_state(watcher: FsWatcher, event: FsWatchEvent) -> FsWatcher {
+    return FsWatcher {
+        target_path: watcher.target_path,
+        last_size: event.new_size,
+        last_exists: event.exists
+    };
+}
+
+// True if event kind is MODIFIED.
+pub fn watch_event_is_modified(ev: FsWatchEvent) -> Bool {
+    return ev.kind == "MODIFIED";
+}
+
+// True if event kind is CREATED.
+pub fn watch_event_is_created(ev: FsWatchEvent) -> Bool {
+    return ev.kind == "CREATED";
+}
+
+// True if event kind is DELETED.
+pub fn watch_event_is_deleted(ev: FsWatchEvent) -> Bool {
+    return ev.kind == "DELETED";
+}
+
+// Initialize sealed OS inotify instance under &SysCap.
+pub fn watch_init_inotify(sys: &SysCap) -> Result[Int, String] {
+    let fd: Int = sys_inotify_init(sys);
+    if fd < 0 {
+        return Err("INOTIFY_INIT_FAILED");
+    }
+    return Ok(fd);
+}

@@ -1,0 +1,159 @@
+// # File Stream Abstractions
+//
+// Logline: Chunked streaming file reader and writer with explicit capability token gating.
+//
+// Setup: Requires &FsReadCap for reading stream chunks, &FsWriteCap for writing chunks.
+//
+// Beats:
+//   1. Open FileReadStream with specified chunk buffer size.
+//   2. Read next chunk advancing internal file offset under &FsReadCap.
+//   3. Open FileWriteStream with append or overwrite modes.
+//   4. Write buffered chunk to target file path under &FsWriteCap.
+//
+// residual: in-memory chunking simulation over sealed read_file and write_file builtins
+
+type FileReadStream = struct {
+    path: String,
+    offset: Int,
+    chunk_size: Int,
+    is_eof: Bool,
+    total_read: Int
+};
+
+type FileWriteStream = struct {
+    path: String,
+    append_mode: Bool,
+    total_written: Int,
+    chunk_count: Int
+};
+
+// Open a file read stream with designated chunk size.
+pub fn file_read_stream_open(fs: &FsReadCap, path: String, chunk_size: Int) -> Result[FileReadStream, String] {
+    if !path_exists(fs, path) {
+        return Err("FILE_NOT_FOUND");
+    }
+    let mut csize: Int = chunk_size;
+    if csize <= 0 {
+        csize = 4096;
+    }
+    let stream: FileReadStream = FileReadStream {
+        path: path,
+        offset: 0,
+        chunk_size: csize,
+        is_eof: false,
+        total_read: 0
+    };
+    return Ok(stream);
+}
+
+// Read the next chunk from the file read stream.
+pub fn file_read_stream_next(fs: &FsReadCap, stream: FileReadStream) -> Result[String, String] {
+    if stream.is_eof {
+        return Ok("");
+    }
+    let res: Result[String, String] = read_file(fs, stream.path);
+    if res.is_err() {
+        return Err("READ_FAILED");
+    }
+    let full: String = match res {
+        Ok(v) => v,
+        Err(_) => ""
+    };
+    let total_len: Int = chars_len(full);
+    let cur_off: Int = stream.offset;
+    if cur_off >= total_len {
+        return Ok("");
+    }
+    let c_size: Int = stream.chunk_size;
+    let mut end_pos: Int = cur_off + c_size;
+    if end_pos > total_len {
+        end_pos = total_len;
+    }
+    let chunk: String = str_slice(full, cur_off, end_pos);
+    return Ok(chunk);
+}
+
+// Advance file read stream state by chunk length.
+pub fn file_read_stream_advance(stream: FileReadStream, bytes_read: Int, file_total_len: Int) -> FileReadStream {
+    let cur_off: Int = stream.offset;
+    let new_offset: Int = cur_off + bytes_read;
+    let mut eof: Bool = false;
+    if new_offset >= file_total_len {
+        eof = true;
+    }
+    let cur_tot: Int = stream.total_read;
+    return FileReadStream {
+        path: stream.path,
+        offset: new_offset,
+        chunk_size: stream.chunk_size,
+        is_eof: eof,
+        total_read: cur_tot + bytes_read
+    };
+}
+
+// Check whether stream reached end of file.
+pub fn file_read_stream_is_eof(stream: FileReadStream) -> Bool {
+    return stream.is_eof;
+}
+
+// Return current read stream byte offset.
+pub fn file_read_stream_offset(stream: FileReadStream) -> Int {
+    return stream.offset;
+}
+
+// Open a file write stream with designated append or truncate mode.
+pub fn file_write_stream_open(fs: &FsWriteCap, path: String, append_mode: Bool) -> Result[FileWriteStream, String] {
+    if !append_mode {
+        let r: Result[Void, String] = write_file(fs, path, "");
+        if r.is_err() {
+            return Err("OPEN_WRITE_FAILED");
+        }
+    }
+    let stream: FileWriteStream = FileWriteStream {
+        path: path,
+        append_mode: append_mode,
+        total_written: 0,
+        chunk_count: 0
+    };
+    return Ok(stream);
+}
+
+// Write a chunk into target file under &FsWriteCap and &FsReadCap.
+pub fn file_write_stream_append_chunk(
+    fw: &FsWriteCap,
+    fr: &FsReadCap,
+    stream: FileWriteStream,
+    chunk: String
+) -> Result[FileWriteStream, String] {
+    let chunk_len: Int = chars_len(chunk);
+    if chunk_len == 0 {
+        return Ok(stream);
+    }
+    let mut existing: String = "";
+    if path_exists(fr, stream.path) {
+        let res: Result[String, String] = read_file(fr, stream.path);
+        existing = match res {
+            Ok(v) => v,
+            Err(_) => ""
+        };
+    }
+    let new_content: String = existing + chunk;
+    let wr: Result[Void, String] = write_file(fw, stream.path, new_content);
+    if wr.is_err() {
+        return Err("WRITE_CHUNK_FAILED");
+    }
+    let cur_tot: Int = stream.total_written;
+    let cur_cnt: Int = stream.chunk_count;
+    let updated: FileWriteStream = FileWriteStream {
+        path: stream.path,
+        append_mode: stream.append_mode,
+        total_written: cur_tot + chunk_len,
+        chunk_count: cur_cnt + 1
+    };
+    return Ok(updated);
+}
+
+// Return total bytes written through write stream.
+pub fn file_write_stream_total(stream: FileWriteStream) -> Int {
+    return stream.total_written;
+}

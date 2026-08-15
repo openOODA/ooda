@@ -1,0 +1,78 @@
+// # OPEN-30 LLVM match lock
+//
+// Logline: Tree oodac must emit Result match and a two-module import that clang runs to ok and 2.
+//
+// Setup: cwd is ooda/. oodac/oodac is the LLVM-match binary. clang and runtime/chs_rt.c exist.
+//
+// Beats:
+//   1. Refuse an old compiler that has no bb_match_ok string or no hoisted zeroinitializer store.
+//   2. emit-llvm + clang + run fixtures/open_llvm_match.oo and require the line ok.
+//   3. emit-llvm + clang + run fixtures/open_llvm_main.oo and require the line 2.
+// residual: LLVM self-host of oodac is not this lock.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn clang_link(p: &ProcessCap, rt: String, ll: String, bin: String) -> Result[Void, String] {
+    let cmd: String = "clang -O0 -Wno-override-module -I" + rt + " " + ll + " " + rt + "/chs_rt.c -lm -ldl -lpthread -o " + bin;
+    return check(p, cmd, within: 60);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let oodac = root + "/oodac/oodac";
+    let rt = root + "/runtime";
+    if sh_mkdir_p(fw, tmpd).is_err() { fail("mkdir"); }
+    if scenario(p, fs, "OPEN-30 LLVM match lock").is_err() { fail("scenario"); }
+    if expect_quiet(p, "test -x " + oodac).is_err() { fail("no tree oodac"); }
+    if expect_present(fs, root + "/oodac/llvm_emit_match.oo").is_err() { fail("no llvm_emit_match.oo"); }
+    if expect_present(fs, root + "/fixtures/open_llvm_match.oo").is_err() { fail("no match fixture"); }
+    if expect_present(fs, root + "/fixtures/open_llvm_main.oo").is_err() { fail("no two-module main"); }
+    if expect_present(fs, root + "/fixtures/open_llvm_lib.oo").is_err() { fail("no two-module lib"); }
+
+    if expect_clean(p, "strings " + oodac + " | grep -q bb_match_ok").is_err() {
+        fail("tree oodac is not the LLVM-match binary");
+    }
+    if expect_substring(fs, root + "/oodac/llvm_emit_match.oo", "store %OoStr zeroinitializer").is_err() {
+        fail("source lost hoisted zeroinitializer");
+    }
+    if expect_substring(fs, root + "/oodac/llvm_emit_match.oo", "bb_match_ok").is_err() {
+        fail("source lost bb_match_ok");
+    }
+
+    let mll = tmpd + "/open30_lock_match.ll";
+    let merr = tmpd + "/open30_lock_match.err";
+    let mbin = tmpd + "/open30_lock_match.bin";
+    let mout = tmpd + "/open30_lock_match.out";
+    if check(p, oodac + " emit-llvm " + root + "/fixtures/open_llvm_match.oo > " + mll + " 2>" + merr, within: 60).is_err() {
+        fail("emit-llvm match");
+    }
+    if expect_substring(fs, mll, "bb_match_ok").is_err() { fail("IR missing bb_match_ok"); }
+    if expect_substring(fs, mll, "zeroinitializer").is_err() { fail("IR missing zeroinitializer"); }
+    if expect_substring(fs, mll, "%x.slot").is_err() { fail("IR missing %x.slot"); }
+    if expect_substring(fs, mll, "%e.slot").is_err() { fail("IR missing %e.slot"); }
+    if clang_link(p, rt, mll, mbin).is_err() { fail("clang match"); }
+    if check(p, mbin + " > " + mout + " 2>&1", within: 10).is_err() { fail("run match"); }
+    if expect_clean(p, "grep -qx ok " + mout).is_err() { fail("match stdout not ok"); }
+
+    let tll = tmpd + "/open30_lock_two.ll";
+    let terr = tmpd + "/open30_lock_two.err";
+    let tbin = tmpd + "/open30_lock_two.bin";
+    let tout = tmpd + "/open30_lock_two.out";
+    if check(p, oodac + " emit-llvm " + root + "/fixtures/open_llvm_main.oo > " + tll + " 2>" + terr, within: 60).is_err() {
+        fail("emit-llvm two-module");
+    }
+    if expect_substring(fs, tll, "define i64 @two()").is_err() { fail("IR missing @two"); }
+    if expect_substring(fs, tll, "define i32 @main").is_err() { fail("IR missing @main"); }
+    if clang_link(p, rt, tll, tbin).is_err() { fail("clang two-module"); }
+    if check(p, tbin + " > " + tout + " 2>&1", within: 10).is_err() { fail("run two-module"); }
+    if expect_clean(p, "grep -qx 2 " + tout).is_err() { fail("two-module stdout not 2"); }
+
+    println("open30_llvm_lock_smoke: PASSED");
+}

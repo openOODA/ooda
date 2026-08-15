@@ -1,0 +1,139 @@
+// # Singular Value Decomposition (SVD) Module
+//
+// Logline: Singular Value Decomposition (SVD) for 2x2 matrices and dominant singular eigenspaces (A = U * Sigma * V^T), rank, and pseudo-inverse.
+//
+// Setup: Pure math module. Evaluates singular values, left singular vectors (U), and right singular vectors (V).
+//
+// Beats:
+//   1. Construct SvdDecomp data structure holding U, singular value spectrum list, and V matrices.
+//   2. Exact algebraic SVD factorization for 2x2 rectangular/square matrices.
+//   3. Numerical rank determination with configurable noise threshold tolerance.
+//   4. Moore-Penrose pseudo-inverse evaluation via reciprocal singular spectrum.
+// RULES.oot 1.4: Pure mathematical data format structure, zero ambient effects.
+// RULES.oot 1.7: Under 256 lines.
+// residual: Large-scale Golub-Kahan-Reinsch bidiagonalization lowers to LAPACK/BLAS via backend runtime.
+
+import "std/result.oo";
+import "std/math/matrix.oo";
+import "std/math/blas_level1.oo";
+import "std/math/blas_level2.oo";
+import "std/math/blas_level3.oo";
+
+type SvdDecomp = struct {
+    u: Matrix,
+    s: List[Float],
+    v: Matrix
+};
+
+// Exact 2x2 SVD via symmetric eigensystem of A^T * A.
+pub fn matrix_svd_2x2(a: Matrix) -> SvdDecomp {
+    let a11: Float = matrix_get(a, 0, 0);
+    let a12: Float = matrix_get(a, 0, 1);
+    let a21: Float = matrix_get(a, 1, 0);
+    let a22: Float = matrix_get(a, 1, 1);
+
+    let e: Float = a11 * a11 + a21 * a21;
+    let f: Float = a11 * a12 + a21 * a22;
+    let g: Float = a12 * a12 + a22 * a22;
+
+    let trace: Float = e + g;
+    let diff: Float = e - g;
+    let disc: Float = sqrt(diff * diff + 4.0 * f * f);
+    let lambda1: Float = 0.5 * (trace + disc);
+    let mut lambda2: Float = 0.5 * (trace - disc);
+    if lambda2 < 0.0 { lambda2 = 0.0; }
+
+    let s1: Float = sqrt(lambda1);
+    let s2: Float = sqrt(lambda2);
+
+    let mut v11: Float = 1.0;
+    let mut v21: Float = 0.0;
+    let mut v12: Float = 0.0;
+    let mut v22: Float = 1.0;
+
+    if f != 0.0 {
+        let v1_un: Float = lambda1 - g;
+        let v2_un: Float = f;
+        let nrm1: Float = sqrt(v1_un * v1_un + v2_un * v2_un);
+        if nrm1 > 0.0 {
+            v11 = v1_un / nrm1;
+            v21 = v2_un / nrm1;
+        }
+        v12 = 0.0 - v21;
+        v22 = v11;
+    } else if e < g {
+        v11 = 0.0;
+        v21 = 1.0;
+        v12 = 1.0;
+        v22 = 0.0;
+    }
+
+    let mut v_mat: Matrix = matrix_zeros(2, 2);
+    v_mat = matrix_set(v_mat, 0, 0, v11);
+    v_mat = matrix_set(v_mat, 1, 0, v21);
+    v_mat = matrix_set(v_mat, 0, 1, v12);
+    v_mat = matrix_set(v_mat, 1, 1, v22);
+
+    let mut u11: Float = (a11 * v11 + a12 * v21);
+    let mut u21: Float = (a21 * v11 + a22 * v21);
+    if s1 > 0.0 {
+        u11 = u11 / s1;
+        u21 = u21 / s1;
+    }
+    let mut u12: Float = (a11 * v12 + a12 * v22);
+    let mut u22: Float = (a21 * v12 + a22 * v22);
+    if s2 > 0.0 {
+        u12 = u12 / s2;
+        u22 = u22 / s2;
+    }
+
+    let mut u_mat: Matrix = matrix_zeros(2, 2);
+    u_mat = matrix_set(u_mat, 0, 0, u11);
+    u_mat = matrix_set(u_mat, 1, 0, u21);
+    u_mat = matrix_set(u_mat, 0, 1, u12);
+    u_mat = matrix_set(u_mat, 1, 1, u22);
+
+    let mut s_list: List[Float] = list_new();
+    s_list = list_push(s_list, s1);
+    s_list = list_push(s_list, s2);
+
+    return SvdDecomp {
+        u: u_mat,
+        s: s_list,
+        v: v_mat
+    };
+}
+
+// Numerical rank of matrix given tolerance.
+pub fn svd_rank(svd: SvdDecomp, tol: Float) -> Int {
+    let n: Int = list_len(svd.s);
+    let mut r: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let sv: Float = list_get(svd.s, i);
+        if sv > tol {
+            r = r + 1;
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+// Moore-Penrose pseudo-inverse: A^+ = V * Sigma^+ * U^T.
+pub fn svd_pseudo_inverse_2x2(svd: SvdDecomp, tol: Float) -> Matrix {
+    let s1: Float = list_get(svd.s, 0);
+    let s2: Float = list_get(svd.s, 1);
+    let mut inv_s1: Float = 0.0;
+    let mut inv_s2: Float = 0.0;
+    if s1 > tol { inv_s1 = 1.0 / s1; }
+    if s2 > tol { inv_s2 = 1.0 / s2; }
+
+    let mut sigma_plus: Matrix = matrix_zeros(2, 2);
+    sigma_plus = matrix_set(sigma_plus, 0, 0, inv_s1);
+    sigma_plus = matrix_set(sigma_plus, 1, 1, inv_s2);
+
+    let ut: Matrix = matrix_transpose(svd.u);
+    let zeros2: Matrix = matrix_zeros(2, 2);
+    let v_sigma: Matrix = blas_gemm(1.0, svd.v, sigma_plus, 0.0, zeros2);
+    return blas_gemm(1.0, v_sigma, ut, 0.0, zeros2);
+}

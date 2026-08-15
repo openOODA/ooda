@@ -1,0 +1,131 @@
+// # Work-Stealing Task Scheduler Pool Module
+//
+// Logline: Multi-worker work-stealing task pool with Chase-Lev deque abstractions, local LIFO popping, and FIFO victim stealing under ThreadCap.
+//
+// Setup: Coordinates load balancing across worker threads using decentralized deque stealing.
+//
+// Beats:
+//   1. Construct WorkStealPool and local StealDeque queues per worker.
+//   2. Owner worker LIFO push and pop operations (fast path).
+//   3. Victim FIFO task stealing across thread boundaries under ThreadCap.
+//   4. Global queue occupancy and drain validation.
+// RULES.oot 1.4: Default-deny for concurrency. Explicit &ThreadCap required.
+// RULES.oot 1.7: Under 256 lines.
+// residual: Hardware CAS atomic loops lower via compiler synchronization backend.
+
+import "std/result.oo";
+
+type StealDeque = struct {
+    tasks: List[Int],
+    head: Int
+};
+
+type WorkStealPool = struct {
+    deques: List[StealDeque],
+    worker_count: Int
+};
+
+type StealResult = struct {
+    deque: StealDeque,
+    task_id: Int
+};
+
+pub fn steal_deque_new() -> StealDeque {
+    let empty_tasks: List[Int] = list_new();
+    return StealDeque {
+        tasks: empty_tasks,
+        head: 0
+    };
+}
+
+pub fn steal_deque_len(d: StealDeque) -> Int {
+    let total: Int = list_len(d.tasks);
+    let h: Int = d.head;
+    return total - h;
+}
+
+pub fn steal_deque_is_empty(d: StealDeque) -> Bool {
+    let l: Int = steal_deque_len(d);
+    return l == 0;
+}
+
+pub fn work_steal_pool_new(workers: Int) -> WorkStealPool {
+    let mut num: Int = workers;
+    if num <= 0 {
+        num = 4;
+    }
+    let mut deqs: List[StealDeque] = list_new();
+    let mut i: Int = 0;
+    while i < num {
+        deqs = list_push(deqs, steal_deque_new());
+        i = i + 1;
+    }
+    return WorkStealPool {
+        deques: deqs,
+        worker_count: num
+    };
+}
+
+// Local worker pushes new task onto bottom of deque.
+pub fn work_steal_push(
+    thread: &ThreadCap,
+    d: StealDeque,
+    task_id: Int
+) -> StealDeque {
+    let new_tasks: List[Int] = list_push(d.tasks, task_id);
+    return StealDeque {
+        tasks: new_tasks,
+        head: d.head
+    };
+}
+
+// Local worker pops task from bottom of deque (LIFO order).
+pub fn work_steal_pop(
+    thread: &ThreadCap,
+    d: StealDeque
+) -> Result[StealResult, String] {
+    let l: Int = steal_deque_len(d);
+    if l == 0 {
+        return Err("deque_empty");
+    }
+    let total: Int = list_len(d.tasks);
+    let last_idx: Int = total - 1;
+    let tid: Int = list_get(d.tasks, last_idx);
+
+    let mut truncated: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < last_idx {
+        truncated = list_push(truncated, list_get(d.tasks, i));
+        i = i + 1;
+    }
+    let updated: StealDeque = StealDeque {
+        tasks: truncated,
+        head: d.head
+    };
+    return Ok(StealResult {
+        deque: updated,
+        task_id: tid
+    });
+}
+
+// Thief worker steals task from top of deque (FIFO order).
+pub fn work_steal_steal(
+    thread: &ThreadCap,
+    d: StealDeque
+) -> Result[StealResult, String] {
+    let l: Int = steal_deque_len(d);
+    if l == 0 {
+        return Err("steal_failed_empty");
+    }
+    let cur_h: Int = d.head;
+    let tid: Int = list_get(d.tasks, cur_h);
+    let next_h: Int = cur_h + 1;
+    let updated: StealDeque = StealDeque {
+        tasks: d.tasks,
+        head: next_h
+    };
+    return Ok(StealResult {
+        deque: updated,
+        task_id: tid
+    });
+}

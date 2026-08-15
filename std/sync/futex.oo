@@ -1,0 +1,120 @@
+// # Fast User-Space Locking (Futex) Module
+//
+// Logline: Fast user-space locking (futex) primitives, atomic value verification, and wake/requeue signaling under ThreadCap.
+//
+// Setup: Coordinates kernel-assisted sleep and wakeup primitives for user-space synchronization constructs.
+//
+// Beats:
+//   1. Construct FutexWord descriptor with memory address and initial state value.
+//   2. Futex wait (futex_wait) with expected value comparison under ThreadCap.
+//   3. Futex wake (futex_wake) waking N sleeping tasks under ThreadCap.
+//   4. Futex requeue and atomic CAS value transitions under ThreadCap.
+// RULES.oot 1.4: Default-deny for concurrency. Explicit &ThreadCap required.
+// RULES.oot 1.7: Under 256 lines.
+// residual: System call syscall(SYS_futex) lowers to host kernel futex subsystem via C runtime.
+
+import "std/result.oo";
+
+type FutexWord = struct {
+    addr: Int,
+    val: Int,
+    waiters: Int
+};
+
+// Create a new FutexWord with target address and initial value.
+pub fn futex_new(addr: Int, initial: Int) -> FutexWord {
+    return FutexWord {
+        addr: addr,
+        val: initial,
+        waiters: 0
+    };
+}
+
+// Read current value stored in FutexWord.
+pub fn futex_val(fw: FutexWord) -> Int {
+    return fw.val;
+}
+
+// Return memory address identifier of FutexWord.
+pub fn futex_addr(fw: FutexWord) -> Int {
+    return fw.addr;
+}
+
+// Return number of waiting threads on FutexWord.
+pub fn futex_waiters(fw: FutexWord) -> Int {
+    return fw.waiters;
+}
+
+// Wait on futex word if current value matches expected under ThreadCap.
+pub fn futex_wait(
+    thread: &ThreadCap,
+    fw: FutexWord,
+    expected: Int
+) -> Result[FutexWord, String] {
+    let cur: Int = fw.val;
+    if cur != expected {
+        return Err("E_FUTEX_EAGAIN: value mismatch, retry");
+    }
+    let cur_w: Int = fw.waiters;
+    let next_w: Int = cur_w + 1;
+    return Ok(FutexWord {
+        addr: fw.addr,
+        val: cur,
+        waiters: next_w
+    });
+}
+
+// Wake up to count waiting threads on futex word under ThreadCap.
+pub fn futex_wake(
+    thread: &ThreadCap,
+    fw: FutexWord,
+    count: Int
+) -> FutexWord {
+    let cur_w: Int = fw.waiters;
+    let mut next_w: Int = cur_w - count;
+    if next_w < 0 {
+        next_w = 0;
+    }
+    return FutexWord {
+        addr: fw.addr,
+        val: fw.val,
+        waiters: next_w
+    };
+}
+
+// Requeue waiting threads from this futex to target address under ThreadCap.
+pub fn futex_requeue(
+    thread: &ThreadCap,
+    fw: FutexWord,
+    count: Int,
+    next_addr: Int
+) -> FutexWord {
+    let cur_w: Int = fw.waiters;
+    let mut next_w: Int = cur_w - count;
+    if next_w < 0 {
+        next_w = 0;
+    }
+    return FutexWord {
+        addr: next_addr,
+        val: fw.val,
+        waiters: next_w
+    };
+}
+
+// Compare and swap value of futex word under ThreadCap.
+pub fn futex_cas(
+    thread: &ThreadCap,
+    fw: FutexWord,
+    expected: Int,
+    desired: Int
+) -> Result[FutexWord, String] {
+    let cur: Int = fw.val;
+    if cur != expected {
+        return Err("E_FUTEX_CAS_MISMATCH: expected value mismatch");
+    }
+    return Ok(FutexWord {
+        addr: fw.addr,
+        val: desired,
+        waiters: fw.waiters
+    });
+}

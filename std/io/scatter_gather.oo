@@ -1,0 +1,137 @@
+// # Vectored Scatter/Gather I/O Module
+//
+// Logline: Vectored Scatter/Gather I/O structures (iovec style) for distributing and coalescing multi-buffer transfers.
+//
+// Setup: Pure in-memory I/O module. Manages arrays of discontinuous memory chunks (IoVec) as single composite buffers.
+//
+// Beats:
+//   1. Construct individual IoVec buffers and IoVecArray collections.
+//   2. Append IoVec elements and compute aggregate byte totals.
+//   3. Scatter contiguous string data across discrete buffer segments.
+//   4. Gather multiple discrete buffer segments into contiguous memory.
+// RULES.oot 1.4: Pure data format structure, zero ambient effects.
+// RULES.oot 1.7: Under 256 lines.
+// residual: System calls readv/writev lower to POSIX scatter/gather syscalls via backend runtime.
+
+type IoVec = struct {
+    data: String,
+    len: Int
+};
+
+type IoVecArray = struct {
+    buffers: List[String],
+    total_len: Int,
+    count: Int
+};
+
+// Create a single IoVec buffer chunk.
+pub fn iovec_new(data: String) -> IoVec {
+    let l: Int = chars_len(data);
+    return IoVec {
+        data: data,
+        len: l
+    };
+}
+
+// Create an empty IoVecArray.
+pub fn iovec_array_new() -> IoVecArray {
+    let empty_bufs: List[String] = list_new();
+    return IoVecArray {
+        buffers: empty_bufs,
+        total_len: 0,
+        count: 0
+    };
+}
+
+// Return number of buffer chunks in array.
+pub fn iovec_array_count(arr: IoVecArray) -> Int {
+    return arr.count;
+}
+
+// Return total aggregate byte length of all buffers.
+pub fn iovec_array_total_bytes(arr: IoVecArray) -> Int {
+    return arr.total_len;
+}
+
+// Append a buffer chunk to the IoVecArray.
+pub fn iovec_array_add(arr: IoVecArray, data: String) -> IoVecArray {
+    let dlen: Int = chars_len(data);
+    let mut new_bufs: List[String] = list_new();
+    let n: Int = list_len(arr.buffers);
+    let mut i: Int = 0;
+    while i < n {
+        new_bufs = list_push(new_bufs, list_get(arr.buffers, i));
+        i = i + 1;
+    }
+    new_bufs = list_push(new_bufs, data);
+    let cur_tot: Int = arr.total_len;
+    let cur_cnt: Int = arr.count;
+    let next_total: Int = cur_tot + dlen;
+    let next_count: Int = cur_cnt + 1;
+    return IoVecArray {
+        buffers: new_bufs,
+        total_len: next_total,
+        count: next_count
+    };
+}
+
+// Gather all chunks into a single concatenated string up to max_bytes.
+pub fn iovec_gather(arr: IoVecArray, max_bytes: Int) -> String {
+    let n: Int = list_len(arr.buffers);
+    let mut out: String = "";
+    let mut bytes_left: Int = max_bytes;
+    let mut i: Int = 0;
+    while i < n && bytes_left > 0 {
+        let chunk: String = list_get(arr.buffers, i);
+        let clen: Int = chars_len(chunk);
+        if clen <= bytes_left {
+            out = out + chunk;
+            bytes_left = bytes_left - clen;
+        } else {
+            let mut k: Int = 0;
+            while k < bytes_left {
+                out = out + char_at(chunk, k);
+                k = k + 1;
+            }
+            bytes_left = 0;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// Flatten all chunks into a complete contiguous string.
+pub fn iovec_array_flatten(arr: IoVecArray) -> String {
+    return iovec_gather(arr, arr.total_len);
+}
+
+// Scatter source string into discrete chunks based on chunk size pattern.
+pub fn iovec_scatter(src: String, chunk_sizes: List[Int]) -> IoVecArray {
+    let slen: Int = chars_len(src);
+    let n_chunks: Int = list_len(chunk_sizes);
+    let mut arr: IoVecArray = iovec_array_new();
+    let mut offset: Int = 0;
+    let mut i: Int = 0;
+    while i < n_chunks && offset < slen {
+        let sz: Int = list_get(chunk_sizes, i);
+        let mut cur_chunk: String = "";
+        let mut k: Int = 0;
+        while k < sz && (offset + k) < slen {
+            cur_chunk = cur_chunk + char_at(src, offset + k);
+            k = k + 1;
+        }
+        arr = iovec_array_add(arr, cur_chunk);
+        offset = offset + sz;
+        i = i + 1;
+    }
+    if offset < slen {
+        let mut rem_chunk: String = "";
+        let mut r_idx: Int = offset;
+        while r_idx < slen {
+            rem_chunk = rem_chunk + char_at(src, r_idx);
+            r_idx = r_idx + 1;
+        }
+        arr = iovec_array_add(arr, rem_chunk);
+    }
+    return arr;
+}
