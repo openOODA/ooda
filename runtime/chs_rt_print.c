@@ -7,11 +7,26 @@ static int oo_je_checked = 0;
 static int oo_je_on = 0;
 static int oo_je_n = 0;
 static int oo_je_atexit = 0;
+static char oo_je_path[512];
 
 static int oo_je_armed(void) {
   if (!oo_je_checked) {
+    FILE *f;
+    size_t nrd;
     oo_je_checked = 1;
-    oo_je_on = (access(".ooda-cache/ooda-tmp/json_errors.arm", F_OK) == 0);
+    oo_je_path[0] = 0;
+    f = fopen(".ooda-cache/ooda-tmp/json_errors.arm", "rb");
+    if (!f) {
+      oo_je_on = 0;
+      return 0;
+    }
+    oo_je_on = 1;
+    nrd = fread(oo_je_path, 1, sizeof(oo_je_path) - 1, f);
+    fclose(f);
+    while (nrd > 0 && (oo_je_path[nrd - 1] == '\n' || oo_je_path[nrd - 1] == '\0')) {
+      nrd--;
+    }
+    oo_je_path[nrd] = 0;
   }
   return oo_je_on;
 }
@@ -126,7 +141,9 @@ static void oo_je_emit(OoStr s) {
   fputs(code, stdout);
   fprintf(stdout, "\",\"line\":%lld,\"col\":%lld,\"msg\":\"", line, col);
   oo_je_esc(stdout, s.data, s.len);
-  fputs("\",\"path\":\"\",\"fix_hint\":\"See openOODA/SHIPPED.oot and ROADMAP.oot.\"", stdout);
+  fputs("\",\"path\":\"", stdout);
+  oo_je_esc(stdout, oo_je_path, (long long)strlen(oo_je_path));
+  fputs("\",\"fix_hint\":\"See openOODA/SHIPPED.oot and ROADMAP.oot.\"", stdout);
   if (strcmp(code, "E_CAP") == 0) {
     fputs(",\"kind\":\"CapabilitySecurityViolation\",\"suggested_fix\":\"Add a matching &Cap parameter\"", stdout);
   }

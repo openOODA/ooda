@@ -1,9 +1,7 @@
 // # Drive ooda fix in the product CLI
 //
-// Logline: Check a file, ask a person, then apply one E_CAP, E_TC, or E_PARSE edit.
-//
+// Logline: Check a file, ask a person, then apply one E_CAP, E_TC, E_PARSE, or E_IMP edit.
 // Setup: SysCap runs oodac. FsCap reads and writes the source. No .py and no .sh file.
-//
 // Beats:
 //   1. Parse path, --yes, and --dry-run.
 //   2. Read check text. Ask unless --yes. Refuse with no TTY.
@@ -11,8 +9,8 @@
 
 import "fix_text.oo";
 import "fix_apply.oo";
+import "fix_imp.oo";
 import "host_run.oo";
-
 fn refuse_symlink(sys: &SysCap, path: String) {
     let cmd: String = "if [ -L " + sq(path) + " ]; then exit 0; else exit 1; fi";
     let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
@@ -87,22 +85,6 @@ fn parse_int_digits(s: String) -> Int {
     return v;
 }
 
-fn sq(s: String) -> String {
-    let n: Int = chars_len(s);
-    let mut i = 0;
-    let mut out: String = "'";
-    while i < n {
-        let c: String = char_at(s, i);
-        if c == "'" {
-            out = out + "'\\''";
-        } else {
-            out = out + c;
-        }
-        i = i + 1;
-    }
-    return out + "'";
-}
-
 fn ask_fix(sys: &SysCap, path: String, what: String) -> Int {
     let msg: String = "ooda fix will change " + path + " (" + what + ").\nApply? [y/N] ";
     let cmd: String = "if [ -t 0 ]; then printf %s " + sq(msg) + " >&2; read ans; case \"$ans\" in y|Y|yes|YES) exit 0;; *) exit 1;; esac; else exit 2; fi";
@@ -116,7 +98,6 @@ fn ask_fix(sys: &SysCap, path: String, what: String) -> Int {
     }
     return 2;
 }
-
 fn classify(log: String) -> String {
     if find_sub(log, "ERR\tcapability\t") >= 0 || find_sub(log, "E_CAP") >= 0 {
         return "ecap";
@@ -126,6 +107,9 @@ fn classify(log: String) -> String {
     }
     if find_sub(log, "ERR\tparse\t") >= 0 {
         return "eparse";
+    }
+    if find_sub(log, "ERR\timport\t") >= 0 {
+        return "eimp";
     }
     return "";
 }
@@ -169,7 +153,7 @@ pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
     let mut rnd = 0;
     while rnd < 8 {
         let log: String = check_text(sys, fs, oodac, path);
-        let kind: String = classify(log);
+        let mut kind: String = classify(log);
         if kind == "" {
             if find_sub(log, "OK") >= 0 || applied > 0 {
                 if applied == 0 {
@@ -179,7 +163,7 @@ pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
                 println("OK\tfix\tmulti-pass clean after " + applied.to_string() + " apply step(s)");
                 process_exit(0);
             }
-            println("ERR\tfix\tno supported diagnostic class (want E_CAP, E_TC, or E_PARSE)");
+            println("ERR\tfix\tno supported diagnostic class (want E_CAP, E_TC, E_PARSE, or E_IMP)");
             process_exit(1);
         }
         let mut what: String = "insert a missing let for an undefined name";
@@ -188,6 +172,18 @@ pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
         }
         if kind == "eparse" {
             what = "insert missing closing braces";
+        }
+        let ispec: String = infer_import_spec(fs, log);
+        if kind == "etc" {
+            if ispec != "" {
+                kind = "eimp";
+                what = "insert a missing import";
+            }
+        }
+        if kind == "eimp" {
+            if ispec != "" {
+                what = "insert a missing import";
+            }
         }
         if !dry {
             if !yes {
@@ -222,6 +218,8 @@ pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
             next = apply_ecap(text, op, cap);
         } else if kind == "eparse" {
             next = apply_eparse(text);
+        } else if kind == "eimp" {
+            next = apply_eimp(text, ispec);
         } else {
             let name: String = between(log, "undefined variable '", "'");
             if name == "" {
@@ -245,6 +243,8 @@ pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
             println("OK\tfix\tapplied E_CAP structural fix to " + path);
         } else if kind == "eparse" {
             println("OK\tfix\tapplied E_PARSE brace fix to " + path);
+        } else if kind == "eimp" {
+            println("OK\tfix\tapplied E_IMP import fix to " + path);
         } else {
             println("OK\tfix\tapplied E_TC undefined-var let to " + path);
         }

@@ -3,6 +3,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <limits.h>
 
 /* ZT path A: process-policy getenv — fail-closed for non OODA_/OO_ keys.
  * Product env_get still requires EnvCap via oo_env_get. */
@@ -134,4 +138,54 @@ OoSList oo_sys_args(long long cap) {
     }
   }
   return l;
+}
+
+#include <sys/stat.h>
+
+/* Read all stdin (stdio LSP / one-shot). Pipes have no seek. */
+OoStr oo_read_stdin(void) {
+  char *buf;
+  size_t cap = 4096;
+  size_t n = 0;
+  buf = (char *)malloc(cap);
+  if (!buf) return oo_str_lit("");
+  for (;;) {
+    size_t got;
+    if (n + 1024 >= cap) {
+      char *nb;
+      cap *= 2;
+      if (cap > (1u << 20)) {
+        free(buf);
+        return oo_str_lit("");
+      }
+      nb = (char *)realloc(buf, cap);
+      if (!nb) {
+        free(buf);
+        return oo_str_lit("");
+      }
+      buf = nb;
+    }
+    got = fread(buf + n, 1, 1024, stdin);
+    n += got;
+    if (got < 1024) break;
+  }
+  {
+    OoStr r;
+    r.data = buf;
+    r.len = (long long)n;
+    return r;
+  }
+}
+
+/* Fast cache key: size:mtime. Avoids hashing whole compiler sources. */
+OoStr oo_file_stamp(OoStr path) {
+  char cpath[PATH_MAX];
+  struct stat st;
+  char buf[64];
+  if (!path.data || path.len <= 0 || path.len >= PATH_MAX) return oo_str_lit("0:0");
+  memcpy(cpath, path.data, (size_t)path.len);
+  cpath[path.len] = 0;
+  if (stat(cpath, &st) != 0) return oo_str_lit("0:0");
+  snprintf(buf, sizeof buf, "%lld:%lld", (long long)st.st_size, (long long)st.st_mtime);
+  return oo_str_lit(buf);
 }

@@ -21,6 +21,7 @@
 #include "chs_rt_hitl.c"
 #include "chs_rt_time_rand.c"
 #include "chs_rt_alloc.c"
+#include "chs_rt_arena.c"
 #include "chs_rt_fs.c"
 #include "chs_rt_print.c"
 #include "chs_rt_math.c"
@@ -28,6 +29,7 @@
 #include "chs_rt_meta.c"
 #include "chs_rt_host.c"
 #include "chs_rt_rlimit.c"
+#include "chs_rt_wasm.c"
 #include "chs_rt_landlock.c"
 #include "chs_rt_dns.c"
 

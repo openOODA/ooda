@@ -1,0 +1,200 @@
+// # Lower a Result match to LLVM
+//
+// Logline: Lowers match r { Ok(x) => ..., Err(e) => ... } by icmp on the %OoResS ok field.
+//
+// Setup: toks sit on KW_MATCH; llvm_emit_expr, llvm_emit_block, llvm_emit_stmt, llvm_gen_reg, llvm_gen_label, and llvm_env_add_var exist.
+//
+// Beats:
+//   1. Emit the scrutinee, parse both arms, alloca payload slots, extract ok, icmp ne 0, and branch.
+//   2. Store the Ok payload and emit the Ok arm.
+//   3. Store the Err payload, emit the Err arm, merge, and pack pos plus the five-slot env.
+
+import "token_fmt.oo";
+import "llvm_emit_env.oo";
+import "llvm_emit_expr.oo";
+import "llvm_emit_block.oo";
+
+fn llvm_match_pack(p: Int, env: List[String]) -> List[String] {
+    let mut out: List[String] = list_new();
+    out = list_push(out, p.to_string());
+    out = list_push(out, list_get(env, 0));
+    out = list_push(out, list_get(env, 1));
+    out = list_push(out, list_get(env, 2));
+    out = list_push(out, list_get(env, 3));
+    out = list_push(out, list_get(env, 4));
+    return out;
+}
+
+fn llvm_match_env5(src: List[String], base: Int) -> List[String] {
+    let mut e: List[String] = list_new();
+    e = list_push(e, list_get(src, base));
+    e = list_push(e, list_get(src, base + 1));
+    e = list_push(e, list_get(src, base + 2));
+    e = list_push(e, list_get(src, base + 3));
+    e = list_push(e, list_get(src, base + 4));
+    return e;
+}
+
+fn llvm_match_fail(msg: String) {
+    println("ERR\tllvm_emit\tmatch: " + msg);
+    process_exit(1);
+}
+
+fn llvm_match_parse_arm(toks: List[String], pos: Int, n: Int, ctor: String) -> List[String] {
+    let mut p = pos;
+    if p >= n || field_at(list_get(toks, p), 0) != "IDENT" || field_at(list_get(toks, p), 3) != ctor {
+        llvm_match_fail("expected " + ctor + "(...) arm");
+    }
+    p = p + 1;
+    if p >= n || field_at(list_get(toks, p), 0) != "LPAREN" {
+        llvm_match_fail("expected " + ctor + "(bind)");
+    }
+    p = p + 1;
+    let mut bind = "_" + ctor;
+    if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+        bind = field_at(list_get(toks, p), 3);
+        p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
+    if p >= n || field_at(list_get(toks, p), 0) != "FATARROW" {
+        llvm_match_fail("expected => after " + ctor + "(...)");
+    }
+    p = p + 1;
+    let mut out: List[String] = list_new();
+    out = list_push(out, p.to_string());
+    out = list_push(out, bind);
+    return out;
+}
+
+fn llvm_match_skip_arm(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+        let mut depth = 0;
+        while p < n {
+            let k: String = field_at(list_get(toks, p), 0);
+            if k == "LBRACE" { depth = depth + 1; }
+            if k == "RBRACE" {
+                depth = depth - 1;
+                p = p + 1;
+                if depth == 0 { break; }
+            } else {
+                p = p + 1;
+            }
+        }
+    } else {
+        let mut depth = 0;
+        while p < n {
+            let k: String = field_at(list_get(toks, p), 0);
+            if k == "LPAREN" || k == "LBRACE" || k == "LBRACKET" { depth = depth + 1; }
+            if k == "RPAREN" || k == "RBRACE" || k == "RBRACKET" { depth = depth - 1; }
+            if depth <= 0 {
+                if k == "COMMA" || k == "RBRACE" { break; }
+                if k == "IDENT" {
+                    let t: String = field_at(list_get(toks, p), 3);
+                    if t == "Err" || t == "Ok" { break; }
+                }
+            }
+            p = p + 1;
+        }
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
+    return p;
+}
+
+fn llvm_match_emit_arm(toks: List[String], pos: Int, n: Int, env: List[String], bind: String, scrut: String, rty: String) -> List[String] {
+    let mut cur_env: List[String] = env;
+    let pay_res: List[String] = llvm_gen_reg(cur_env);
+    let pay: String = list_get(pay_res, 0);
+    cur_env = llvm_match_env5(pay_res, 1);
+    println("  " + pay + " = extractvalue " + rty + " " + scrut + ", 1");
+    println("  store %OoStr " + pay + ", %OoStr* %" + bind + ".slot, align 8");
+    let mut p = pos;
+    if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+        let br: List[String] = llvm_emit_block(toks, p, n, cur_env);
+        p = parse_int(list_get(br, 0));
+        cur_env = llvm_match_env5(br, 1);
+    } else {
+        let st: List[String] = llvm_emit_stmt(toks, p, n, cur_env);
+        p = parse_int(list_get(st, 0));
+        cur_env = llvm_match_env5(st, 1);
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
+    return llvm_match_pack(p, cur_env);
+}
+
+pub fn llvm_emit_match_stmt(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    let mut p = pos + 1;
+    let mut cur_env: List[String] = env;
+    let scr_res: List[String] = llvm_emit_expr(toks, p, n, cur_env);
+    let scrut: String = list_get(scr_res, 0);
+    let mut rty: String = list_get(scr_res, 1);
+    p = parse_int(list_get(scr_res, 2));
+    cur_env = llvm_match_env5(scr_res, 3);
+    if rty != "%OoResS" && rty != "%OoResV" {
+        rty = "%OoResS";
+    }
+    if p >= n || field_at(list_get(toks, p), 0) != "LBRACE" {
+        llvm_match_fail("expected { after scrutinee");
+    }
+    p = p + 1;
+
+    let ok_arm: List[String] = llvm_match_parse_arm(toks, p, n, "Ok");
+    let p_ok: Int = parse_int(list_get(ok_arm, 0));
+    let ok_bind: String = list_get(ok_arm, 1);
+    let p_err_hd: Int = llvm_match_skip_arm(toks, p_ok, n);
+    let err_arm: List[String] = llvm_match_parse_arm(toks, p_err_hd, n, "Err");
+    let p_err: Int = parse_int(list_get(err_arm, 0));
+    let err_bind: String = list_get(err_arm, 1);
+
+    let ok_lr: List[String] = llvm_gen_label("bb_match_ok", cur_env);
+    let lbl_ok: String = list_get(ok_lr, 0);
+    cur_env = llvm_match_env5(ok_lr, 1);
+    let err_lr: List[String] = llvm_gen_label("bb_match_err", cur_env);
+    let lbl_err: String = list_get(err_lr, 0);
+    cur_env = llvm_match_env5(err_lr, 1);
+    let end_lr: List[String] = llvm_gen_label("bb_match_end", cur_env);
+    let lbl_end: String = list_get(end_lr, 0);
+    cur_env = llvm_match_env5(end_lr, 1);
+
+    println("  %" + ok_bind + ".slot = alloca %OoStr, align 8");
+    println("  %" + err_bind + ".slot = alloca %OoStr, align 8");
+    println("  store %OoStr zeroinitializer, %OoStr* %" + ok_bind + ".slot, align 8");
+    println("  store %OoStr zeroinitializer, %OoStr* %" + err_bind + ".slot, align 8");
+    cur_env = llvm_env_add_var(cur_env, ok_bind, "%OoStr");
+    cur_env = llvm_env_add_var(cur_env, err_bind, "%OoStr");
+
+    let bit_r: List[String] = llvm_gen_reg(cur_env);
+    let ok_bit: String = list_get(bit_r, 0);
+    cur_env = llvm_match_env5(bit_r, 1);
+    let i1_r: List[String] = llvm_gen_reg(cur_env);
+    let ok_i1: String = list_get(i1_r, 0);
+    cur_env = llvm_match_env5(i1_r, 1);
+    println("  " + ok_bit + " = extractvalue " + rty + " " + scrut + ", 0");
+    println("  " + ok_i1 + " = icmp ne i32 " + ok_bit + ", 0");
+    println("  br i1 " + ok_i1 + ", label %" + lbl_ok + ", label %" + lbl_err);
+
+    println(lbl_ok + ":");
+    let ok_em: List[String] = llvm_match_emit_arm(toks, p_ok, n, cur_env, ok_bind, scrut, rty);
+    cur_env = llvm_match_env5(ok_em, 1);
+    let ok_ret: Bool = llvm_env_vars_has(list_get(ok_em, 4), "__did_ret__");
+    if !ok_ret {
+        println("  br label %" + lbl_end);
+    }
+
+    println(lbl_err + ":");
+    let err_em: List[String] = llvm_match_emit_arm(toks, p_err, n, cur_env, err_bind, scrut, rty);
+    p = parse_int(list_get(err_em, 0));
+    cur_env = llvm_match_env5(err_em, 1);
+    let err_ret: Bool = llvm_env_vars_has(list_get(err_em, 4), "__did_ret__");
+    if !err_ret {
+        println("  br label %" + lbl_end);
+    }
+
+    println(lbl_end + ":");
+    if ok_ret && err_ret {
+        println("  unreachable");
+        cur_env = llvm_env_add_var(cur_env, "__did_ret__", "1");
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "RBRACE" { p = p + 1; }
+    return llvm_match_pack(p, cur_env);
+}

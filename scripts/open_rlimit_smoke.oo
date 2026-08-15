@@ -1,0 +1,75 @@
+// # OPEN-35 rlimit SysCap smoke
+//
+// Logline: Seal oo_rlimit_set_mem_mb under SysCap, emit-c the fixture, and prove 0 fails closed.
+//
+// Setup: cwd is ooda/. oodac/oodac and runtime/chs_rt.c exist.
+//
+// Beats:
+//   1. Source seals and setrlimit are present.
+//   2. Bare call without SysCap is refused or still pre-rebuild known.
+//   3. Fixture emit+gcc+run prints open_rlimit: PASSED.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let oodac = root + "/oodac/oodac";
+    if sh_mkdir_p(fw, tmpd).is_err() { println("FAIL mkdir"); process_exit(1); }
+    if scenario(p, fs, "open rlimit").is_err() { println("FAIL scenario"); process_exit(1); }
+    if expect_quiet(p, "test -x " + oodac).is_err() { println("FAIL no oodac"); process_exit(1); }
+
+    if expect_clean(p, "grep -q oo_rlimit_set_mem_mb " + root + "/oodac/check_cap_util.oo").is_err() {
+        println("FAIL no seal");
+        process_exit(1);
+    }
+    if expect_clean(p, "grep -q oo_rlimit_set_mem_mb " + root + "/oodac/c_emit_sys.oo").is_err() {
+        println("FAIL no emit seal");
+        process_exit(1);
+    }
+    if expect_clean(p, "grep -q setrlimit " + root + "/runtime/chs_rt_rlimit.c").is_err() {
+        println("FAIL no setrlimit");
+        process_exit(1);
+    }
+
+    let fix = root + "/fixtures/open_rlimit.oo";
+    if expect_present(fs, fix).is_err() { println("FAIL no fixture"); process_exit(1); }
+    if expect_clean(p, oodac + " check " + fix + " 2>&1 | grep -qE '^OK'").is_err() {
+        println("FAIL check fixture");
+        process_exit(1);
+    }
+
+    let bare = tmpd + "/rlimit_bare.oo";
+    if process_exec(p, "printf 'pub fn main() { let r = oo_rlimit_set_mem_mb(0, 1); }\\n' > " + bare).is_err() {
+        println("FAIL write bare");
+        process_exit(1);
+    }
+    if process_exec(p, oodac + " check " + bare + " > " + tmpd + "/rl_bare.out 2> " + tmpd + "/rl_bare.err").is_ok() {
+        println("OK bare pre-rebuild (source seal present)");
+    } else {
+        println("OK bare refuse");
+    }
+
+    let cfile = tmpd + "/open_rlimit.c";
+    let bin = tmpd + "/open_rlimit.bin";
+    if check(p, oodac + " emit-c " + fix + " > " + cfile + " 2>" + tmpd + "/rl.err", 30).is_err() {
+        println("FAIL emit");
+        process_exit(1);
+    }
+    if expect_clean(p, "grep -qE 'oo_rlimit_set_mem_mb\\(sys' " + cfile).is_err() {
+        println("FAIL emit mem");
+        process_exit(1);
+    }
+    if expect_clean(p, "grep -qE 'oo_rlimit_set_nofile\\(sys' " + cfile).is_err() {
+        println("FAIL emit nofile");
+        process_exit(1);
+    }
+    let gcc = "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + cfile + " -o " + bin + " -lm -ldl -lpthread";
+    if check(p, gcc, 30).is_err() { println("FAIL gcc"); process_exit(1); }
+    if expect_clean(p, bin + " 2>&1 | grep -qx 'open_rlimit: PASSED'").is_err() {
+        println("FAIL run");
+        process_exit(1);
+    }
+    println("open_rlimit_smoke: PASSED");
+}

@@ -1,0 +1,138 @@
+// # Landlock Path Jail Smoke
+//
+// Logline: Prove oo_landlock_restrict exists, honor /proc/sys Landlock availability, and jail writes to a tmp dir.
+//
+// Setup: cwd is ooda/. oodac/oodac and runtime/chs_rt.c exist. Uses ProcessCap builtins only.
+//
+// Beats:
+//   1. Assert the C symbol and PATH_BENEATH rule live in the runtime.
+//   2. Read /proc/sys/kernel/lsm or /sys/kernel/security/lsm.
+//   3. Emit, gcc, and run fixtures/open_landlock.oo plus a raw open probe.
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let root = ".";
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let oodac = root + "/oodac/oodac";
+    if process_exec(p, "mkdir -p " + tmpd).is_err() {
+        println("FAIL mkdir tmp");
+        process_exit(1);
+    }
+
+    let rt = root + "/runtime/chs_rt_landlock.c";
+    if !path_exists(fs, rt) {
+        println("FAIL missing runtime");
+        process_exit(1);
+    }
+    if process_exec(p, "grep -q 'OoResS oo_landlock_restrict' " + rt).is_err() {
+        println("FAIL missing oo_landlock_restrict");
+        process_exit(1);
+    }
+    if process_exec(p, "grep -q 'LANDLOCK_RULE_PATH_BENEATH' " + rt).is_err() {
+        println("FAIL missing PATH_BENEATH");
+        process_exit(1);
+    }
+    if process_exec(p, "grep -q 'empty path allowlist' " + rt).is_err() {
+        println("FAIL missing empty-dir fail-closed");
+        process_exit(1);
+    }
+    if process_exec(p, "grep -q 'syscall ABI unavailable' " + rt).is_err() {
+        println("FAIL missing ABI fail-closed");
+        process_exit(1);
+    }
+    if process_exec(p, "! grep -q 'OK_NO_NEW_PRIVS' " + rt).is_err() {
+        println("FAIL still returns fake OK_NO_NEW_PRIVS");
+        process_exit(1);
+    }
+
+    let lsm_proc = "/proc/sys/kernel/lsm";
+    let lsm_sys = "/sys/kernel/security/lsm";
+    let mut lsm_has = 0;
+    let mut lsm_known = 0;
+    if process_exec(p, "test -r " + lsm_proc).is_ok() {
+        lsm_known = 1;
+        if process_exec(p, "grep -q landlock " + lsm_proc).is_ok() {
+            lsm_has = 1;
+        }
+    } else {
+        if process_exec(p, "test -r " + lsm_sys).is_ok() {
+            lsm_known = 1;
+            if process_exec(p, "grep -q landlock " + lsm_sys).is_ok() {
+                lsm_has = 1;
+            }
+        }
+    }
+
+    let jail_abs = "/tmp/oo_open_ll_jail";
+    let parent = "/tmp";
+    let out_abs = "/tmp/oo_open_ll_out.txt";
+    if process_exec(p, "mkdir -p " + jail_abs).is_err() {
+        println("FAIL mkdir jail");
+        process_exit(1);
+    }
+
+    let fix = root + "/fixtures/open_landlock.oo";
+    if process_exec(p, oodac + " check " + fix + " 2>&1 | grep -qE '^OK'").is_err() {
+        println("FAIL fixture check");
+        process_exit(1);
+    }
+    let cfile = tmpd + "/open_landlock.c";
+    if process_exec(p, oodac + " emit-c " + fix + " > " + cfile + " 2> " + tmpd + "/open_landlock.err").is_err() {
+        println("FAIL emit-c fixture");
+        process_exit(1);
+    }
+    if process_exec(p, "grep -q 'oo_landlock_restrict' " + cfile).is_err() {
+        println("FAIL emit missing C symbol");
+        process_exit(1);
+    }
+    let bin = tmpd + "/open_landlock.bin";
+    if process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + cfile + " -o " + bin + " -lm -ldl -lpthread 2> " + tmpd + "/open_landlock.gcc").is_err() {
+        println("FAIL gcc fixture");
+        process_exit(1);
+    }
+    let runout = tmpd + "/open_landlock.run";
+    if process_exec(p, "OODA_FS_WRITEDIR=" + parent + " OO_LL_JAIL=" + jail_abs + " OO_LL_OUT=" + out_abs + " " + bin + " > " + runout + " 2>&1 || true").is_err() {
+        println("FAIL run fixture");
+        process_exit(1);
+    }
+    if lsm_known > 0 && lsm_has <= 0 {
+        if process_exec(p, "grep -qE 'LANDLOCK_UNAVAILABLE|restrict failed|empty' " + runout).is_err() {
+            println("FAIL expected unavailable restrict");
+            process_exit(1);
+        }
+    } else {
+        if process_exec(p, "grep -qE 'OK: LANDLOCK_JAIL|OK: LANDLOCK_UNAVAILABLE' " + runout).is_err() {
+            println("FAIL fixture run");
+            process_exit(1);
+        }
+    }
+
+    let probe = tmpd + "/ll_probe.c";
+    let pbin = tmpd + "/ll_probe.bin";
+    let wr = "printf '%s\\n' '#include \"chs_rt.h\"' '#include <fcntl.h>' '#include <stdio.h>' '#include <unistd.h>' 'int main(int argc, char **argv) {' 'long long sys = oo_cap_grant_sys();' 'int avail = oo_landlock_is_available();' 'OoResS empty = oo_landlock_restrict(sys, oo_str_lit(\"\"), oo_str_lit(\"\"));' 'if (empty.ok) { printf(\"FAIL empty\\n\"); return 1; }' 'if (!avail) { OoResS r = oo_landlock_restrict(sys, oo_str_lit(argv[1]), oo_str_lit(argv[1])); printf(\"UNAVAIL restrict_ok=%d\\n\", r.ok); return r.ok ? 1 : 0; }' 'OoResS r = oo_landlock_restrict(sys, oo_str_lit(\"/\"), oo_str_lit(argv[1]));' 'if (!r.ok) { printf(\"FAIL restrict\\n\"); return 1; }' 'char ip[512]; snprintf(ip, sizeof ip, \"%s/in2.txt\", argv[1]);' 'int ifd = open(ip, O_WRONLY|O_CREAT|O_TRUNC, 0666);' 'int ofd = open(argv[2], O_WRONLY|O_CREAT|O_TRUNC, 0666);' 'if (ifd >= 0) close(ifd);' 'if (ofd >= 0) { close(ofd); printf(\"FAIL outside\\n\"); return 1; }' 'if (ifd < 0) { printf(\"FAIL inside\\n\"); return 1; }' 'printf(\"OK_LANDLOCK_JAIL\\n\"); return 0; }' > " + probe;
+    if process_exec(p, wr).is_err() {
+        println("FAIL write probe");
+        process_exit(1);
+    }
+    if process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + probe + " -o " + pbin + " -lm -ldl -lpthread 2> " + tmpd + "/ll_probe.gcc").is_err() {
+        println("FAIL gcc probe");
+        process_exit(1);
+    }
+    let poutf = tmpd + "/ll_probe.run";
+    if process_exec(p, pbin + " " + jail_abs + " " + parent + "/ll_probe_out.txt > " + poutf + " 2>&1 || true").is_err() {
+        println("FAIL run probe");
+        process_exit(1);
+    }
+    if lsm_known > 0 && lsm_has <= 0 {
+        if process_exec(p, "grep -q 'UNAVAIL' " + poutf).is_err() {
+            println("FAIL probe unavailable");
+            process_exit(1);
+        }
+    } else {
+        if process_exec(p, "grep -qE 'OK_LANDLOCK_JAIL|UNAVAIL' " + poutf).is_err() {
+            println("FAIL probe");
+            process_exit(1);
+        }
+    }
+
+    println("open_landlock_smoke: PASSED");
+}

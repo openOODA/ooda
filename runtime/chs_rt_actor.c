@@ -147,3 +147,34 @@ OoResS oo_actor_recv(long long cap, long long id) {
   pthread_mutex_unlock(&a->mu);
   return r;
 }
+
+/* OTP floor: join the noop thread and spawn a fresh one. Mailbox stays. */
+OoResS oo_actor_restart(long long cap, long long id) {
+  OoResS r;
+  int s = (int)id;
+  OoActor *a;
+  oo_cap_require_thread(cap, "actor_restart");
+  r.ok = 0;
+  r.val = oo_str_lit("actor_restart failed");
+  if (s < 0 || s >= OO_ACTOR_SLOTS) {
+    r.val = oo_str_lit("actor_restart: bad id");
+    return r;
+  }
+  a = &g_actors[s];
+  pthread_mutex_lock(&g_act_boot);
+  if (!a->live) {
+    pthread_mutex_unlock(&g_act_boot);
+    r.val = oo_str_lit("actor_restart: empty slot");
+    return r;
+  }
+  pthread_join(a->thr, NULL);
+  if (pthread_create(&a->thr, NULL, oo_actor_noop, NULL) != 0) {
+    pthread_mutex_unlock(&g_act_boot);
+    r.val = oo_str_lit("actor_restart: spawn failed");
+    return r;
+  }
+  pthread_mutex_unlock(&g_act_boot);
+  r.ok = 1;
+  r.val = oo_str_lit("restarted");
+  return r;
+}

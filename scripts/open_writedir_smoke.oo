@@ -1,0 +1,46 @@
+// # OPEN-21 write_file unset deny
+//
+// Logline: Unset OODA_FS_WRITEDIR denies write_file. The CLI names the env.
+//
+// Setup: cwd is ooda/. gcc and runtime/chs_rt.c exist.
+//
+// Beats:
+//   1. A C probe with the env unset is denied.
+//   2. fix_text names OODA_FS_WRITEDIR on deny.
+//   3. getcwd is not the default writedir.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    if sh_mkdir_p(fw, tmpd).is_err() { println("FAIL mkdir"); process_exit(1); }
+    if scenario(p, fs, "open writedir deny").is_err() { println("FAIL scenario"); process_exit(1); }
+    if expect_clean(p, "! grep -q 'if (getcwd(cwd_wd' " + root + "/runtime/chs_rt_fs.c").is_err() {
+        println("FAIL getcwd default still present");
+        process_exit(1);
+    }
+    if expect_clean(p, "grep -q OODA_FS_WRITEDIR " + root + "/cli/fix_text.oo").is_err() {
+        println("FAIL no CLI deny line");
+        process_exit(1);
+    }
+    let cfile = tmpd + "/open_wd.c";
+    let bin = tmpd + "/open_wd.bin";
+    let wr: String = "printf '%s\\n' '#include \"chs_rt.h\"' '#include <stdio.h>' '#include <stdlib.h>' 'int main(int argc, char **argv) {' 'unsetenv(\"OODA_FS_WRITEDIR\");' 'long long fs = oo_cap_grant_fswrite();' 'OoResV r = oo_write_file(fs, oo_str_lit(argv[1]), oo_str_lit(\"ok\\n\"));' 'printf(\"ok=%d\\n\", r.ok); return r.ok ? 0 : 1; }' > " + cfile;
+    if process_exec(p, wr).is_err() {
+        println("FAIL write c");
+        process_exit(1);
+    }
+    let gcc: String = "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + cfile + " -o " + bin + " -lm -ldl -lpthread";
+    if check(p, gcc, 30).is_err() {
+        println("FAIL gcc");
+        process_exit(1);
+    }
+    let inside = tmpd + "/wd_inside.txt";
+    if expect_clean(p, "! env -u OODA_FS_WRITEDIR " + bin + " " + inside).is_err() {
+        println("FAIL unset must deny");
+        process_exit(1);
+    }
+    println("open_writedir_smoke: PASSED");
+}

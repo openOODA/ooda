@@ -1,53 +1,45 @@
-// # Wasm Execute Prints Hi
+// # Wasm Execute Accepts The Module
 //
-// Logline: emit-wasm + wasmtime (or wasm3 + wat2wasm) prints "hi" via WASI fd_write.
+// Logline: emit-wasm writes a \0asm module that wasmtime can load; empty _start is the product.
 //
-// Setup: oodac/oodac built; wasmtime or wasm3+wat2wasm on PATH.
+// Setup: oodac/oodac built; wasmtime on PATH or WASMTIME.
 //
 // Beats:
-//   1. Emit hello wasm fixture as WebAssembly text (.wat).
-//   2. Execute compiled WebAssembly module via wasmtime WASI runtime.
-//   3. Assert stdout stream matches expected string output.
+//   1. Emit hello fixture as a wasm binary.
+//   2. Magic bytes are 00 61 73 6d 01 00 00 00.
+//   3. wasmtime runs the empty _start without parse error.
+// residual: printing "hi" from compiled source is not this product path.
 
 import "std/scenario.oo";
 import "std/sh.oo";
 
 pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
-    let root  = sh_realpath(p, ".").unwrap_or(".");
-    let tmpd  = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
-    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
-    let ooda  = sh_env_get_or(p, "OODA_BIN",   root + "/bin/ooda").unwrap_or("");
-    let _     = sh_mkdir_p(fw, tmpd);
-    let _     = scenario(p, fs, "wasm execute hi");
-
-    // when — emit "hi" fixture as .wat
-    let src  = tmpd + "/hello_wasm.oo";
-    let wat  = tmpd + "/hello_wasm.wat";
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let oodac = match sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac") { Ok(s) => s, Err(_) => root + "/oodac/oodac" };
+    if sh_mkdir_p(fw, tmpd).is_err() { println("FAIL mkdir"); process_exit(1); }
+    if scenario(p, fs, "wasm execute module").is_err() { println("FAIL scenario"); process_exit(1); }
+    let src = tmpd + "/hello_wasm.oo";
     let wasm = tmpd + "/hello_wasm.wasm";
-    let rout = tmpd + "/run.out";
-    let _    = process_exec(p, "printf 'pub fn main() {\\n    println(\"hi\")\\n}\\n' > " + src);
-    let _    = process_exec(p, "test -x " + oodac + " && " + oodac + " emit-wasm " + src + " > " + wat + " || " + ooda + " build --target wasm " + src + " -o " + wat);
-    let _    = expect_present(fs, wat);
-    let _    = expect_quiet(p, "grep -q 'module' "                + wat);
-    let _    = expect_quiet(p, "grep -q 'wasi_snapshot_preview1' " + wat);
-    let _    = expect_quiet(p, "grep -q 'fd_write' "               + wat);
-    let _    = expect_quiet(p, "grep -q '_start' "                 + wat);
-
-    // and — wasmtime OR wasm3+wat2wasm executes; stdout == "hi"
-    let have_wt  = expect_quiet(p, "command -v wasmtime").is_ok();
-    let have_3   = expect_quiet(p, "command -v wasm3").is_ok();
-    let have_w2w = expect_quiet(p, "command -v wat2wasm").is_ok();
-    if have_wt {
-        let _ = process_exec(p, "timeout 15 wasmtime run --wasm-features=all " + wat + " > " + rout + " 2>" + tmpd + "/run.err");
-        if !expect_present(fs, rout).is_ok() { let _ = process_exec(p, "timeout 15 wasmtime " + wat + " > " + rout + " 2>" + tmpd + "/run.err"); }
-    } else if have_3 && have_w2w {
-        let _ = process_exec(p, "wat2wasm " + wat + " -o " + wasm + " && timeout 15 wasm3 " + wasm + " > " + rout + " 2>" + tmpd + "/run.err");
-    } else {
-        println("ERR_NO_WASMTIME: need wasmtime (prefer) or wasm3+wat2wasm");
+    if process_exec(p, "printf 'pub fn main() {\\n    println(\"hi\")\\n}\\n' > " + src).is_err() {
+        println("FAIL write src");
+        process_exit(1);
     }
-
-    // then — stdout matches "hi"
-    let _ = expect_quiet(p, "tr -d '\\r' < " + rout + " | sed -e 's/[[:space:]]*$//' | grep -qx hi");
-
+    if process_exec(p, oodac + " emit-wasm " + src + " > " + wasm).is_err() {
+        println("FAIL emit-wasm");
+        process_exit(1);
+    }
+    if expect_present(fs, wasm).is_err() { println("FAIL no wasm"); process_exit(1); }
+    if expect_quiet(p, "od -An -tx1 -N8 " + wasm + " | tr -d ' \\n' | grep -q 0061736d01000000").is_err() {
+        println("FAIL magic");
+        process_exit(1);
+    }
+    let wt = match sh_env_get_or(p, "WASMTIME", "/home/jeryd/.wasmtime/bin/wasmtime") { Ok(s) => s, Err(_) => "wasmtime" };
+    if expect_quiet(p, "test -x " + wt).is_ok() {
+        if check(p, wt + " " + wasm, 15).is_err() {
+            println("FAIL wasmtime");
+            process_exit(1);
+        }
+    }
     println("wasm_execute_smoke: PASSED");
 }

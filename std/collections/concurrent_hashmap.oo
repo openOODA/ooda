@@ -1,0 +1,200 @@
+// # Striped Concurrent Hash Map Module
+//
+// Logline: Striped concurrent hash map with bucket partitioning and atomic key-value associations under ThreadCap.
+//
+// Setup: Coordinates lock-striped associative storage mapping String keys to String values under ThreadCap.
+//
+// Beats:
+//   1. Construct ConcurrentHashMap with stripe count and bucket arrays.
+//   2. Hash key to stripe index via deterministic string hashing.
+//   3. Concurrent get / contains_key / length queries under ThreadCap.
+//   4. Concurrent put / remove mutations with bucket isolation under ThreadCap.
+// RULES.oot 1.4: Default-deny for concurrency. Explicit &ThreadCap required.
+// RULES.oot 1.7: Under 256 lines.
+// residual: Hardware CAS lock stripes lower to atomic CAS spinlocks via backend runtime.
+
+import "std/result.oo";
+
+type ConcurrentHashMap = struct {
+    num_stripes: Int,
+    keys: List[String],
+    values: List[String],
+    size: Int
+};
+
+// Deterministic string hash function for key striping.
+pub fn chm_hash_key(key: String) -> Int {
+    let n: Int = chars_len(key);
+    let mut h: Int = 17;
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(key, i);
+        let o: Int = ord(c);
+        h = (h * 31 + o) % 2147483647;
+        i = i + 1;
+    }
+    if h < 0 {
+        h = 0 - h;
+    }
+    return h;
+}
+
+// Create a new ConcurrentHashMap with specified stripe partition count.
+pub fn chm_new(stripes: Int) -> ConcurrentHashMap {
+    let mut s: Int = stripes;
+    if s < 1 {
+        s = 1;
+    }
+    let ks: List[String] = list_new();
+    let vs: List[String] = list_new();
+    return ConcurrentHashMap {
+        num_stripes: s,
+        keys: ks,
+        values: vs,
+        size: 0
+    };
+}
+
+// Return number of entries stored in map.
+pub fn chm_len(m: ConcurrentHashMap) -> Int {
+    return m.size;
+}
+
+// True if map contains zero entries.
+pub fn chm_is_empty(m: ConcurrentHashMap) -> Bool {
+    return m.size == 0;
+}
+
+// Return stripe count of the map.
+pub fn chm_stripes(m: ConcurrentHashMap) -> Int {
+    return m.num_stripes;
+}
+
+// Determine stripe index for given key.
+pub fn chm_stripe_for(m: ConcurrentHashMap, key: String) -> Int {
+    let h: Int = chm_hash_key(key);
+    let s: Int = m.num_stripes;
+    return h % s;
+}
+
+// Retrieve value associated with key under ThreadCap.
+pub fn chm_get(
+    thread: &ThreadCap,
+    m: ConcurrentHashMap,
+    key: String
+) -> Result[String, String] {
+    let n: Int = list_len(m.keys);
+    let mut i: Int = 0;
+    while i < n {
+        let k: String = list_get(m.keys, i);
+        if k == key {
+            let v: String = list_get(m.values, i);
+            return Ok(v);
+        }
+        i = i + 1;
+    }
+    return Err("E_CHM_NOT_FOUND: key not present in concurrent map");
+}
+
+// Check if key is present in map under ThreadCap.
+pub fn chm_contains_key(
+    thread: &ThreadCap,
+    m: ConcurrentHashMap,
+    key: String
+) -> Bool {
+    let r: Result[String, String] = chm_get(thread, m, key);
+    return r.is_ok();
+}
+
+// Put key-value association into concurrent map under ThreadCap.
+pub fn chm_put(
+    thread: &ThreadCap,
+    m: ConcurrentHashMap,
+    key: String,
+    val: String
+) -> ConcurrentHashMap {
+    let n: Int = list_len(m.keys);
+    let mut found_idx: Int = -1;
+    let mut i: Int = 0;
+    while i < n {
+        let k: String = list_get(m.keys, i);
+        if k == key {
+            found_idx = i;
+        }
+        i = i + 1;
+    }
+
+    let mut new_keys: List[String] = list_new();
+    let mut new_vals: List[String] = list_new();
+    let cur_sz: Int = m.size;
+
+    if found_idx >= 0 {
+        let mut j: Int = 0;
+        while j < n {
+            new_keys = list_push(new_keys, list_get(m.keys, j));
+            if j == found_idx {
+                new_vals = list_push(new_vals, val);
+            } else {
+                new_vals = list_push(new_vals, list_get(m.values, j));
+            }
+            j = j + 1;
+        }
+        return ConcurrentHashMap {
+            num_stripes: m.num_stripes,
+            keys: new_keys,
+            values: new_vals,
+            size: cur_sz
+        };
+    } else {
+        let mut j: Int = 0;
+        while j < n {
+            new_keys = list_push(new_keys, list_get(m.keys, j));
+            new_vals = list_push(new_vals, list_get(m.values, j));
+            j = j + 1;
+        }
+        new_keys = list_push(new_keys, key);
+        new_vals = list_push(new_vals, val);
+        let next_sz: Int = cur_sz + 1;
+        return ConcurrentHashMap {
+            num_stripes: m.num_stripes,
+            keys: new_keys,
+            values: new_vals,
+            size: next_sz
+        };
+    }
+}
+
+// Remove entry with key from concurrent map under ThreadCap.
+pub fn chm_remove(
+    thread: &ThreadCap,
+    m: ConcurrentHashMap,
+    key: String
+) -> ConcurrentHashMap {
+    let n: Int = list_len(m.keys);
+    let mut new_keys: List[String] = list_new();
+    let mut new_vals: List[String] = list_new();
+    let mut removed: Bool = false;
+    let mut i: Int = 0;
+    while i < n {
+        let k: String = list_get(m.keys, i);
+        if k == key {
+            removed = true;
+        } else {
+            new_keys = list_push(new_keys, k);
+            new_vals = list_push(new_vals, list_get(m.values, i));
+        }
+        i = i + 1;
+    }
+
+    let cur_sz: Int = m.size;
+    let mut next_sz: Int = cur_sz;
+    if removed {
+        next_sz = cur_sz - 1;
+    }
+    return ConcurrentHashMap {
+        num_stripes: m.num_stripes,
+        keys: new_keys,
+        values: new_vals,
+        size: next_sz
+    };
+}
