@@ -1,0 +1,200 @@
+// # Thread Channel Concurrency & Stress Verification Proof
+//
+// Logline: Hostile red-team verification of thread-safe bounded channels under &ThreadCap, testing ring buffer exhaustion, empty queue refusal, bad handle rejection, and cross-channel isolation.
+//
+// Setup: Requires explicit &ThreadCap capability token.
+//
+// Beats:
+//   1. Channel capacity exhaustion: push 8 messages to fill ring buffer (QDEPTH=8), verify 9th push fails closed with Err("channel_send: full").
+//   2. Pop drained channel: drain 8 messages verifying FIFO ordering, verify 9th pop fails closed with Err("channel_recv: empty").
+//   3. Bad handle handling: verify push and pop on invalid handle "ch:99" fail closed with Err.
+//   4. Multiple independent channels: allocate 2 separate channels, verify messages do not bleed across channels.
+//
+// RULES.oot 1.4: Default-deny for concurrency effects. Explicit &ThreadCap required.
+// RULES.oot 1.6: Dual-evidence for edge-case saturation and failure modes.
+// RULES.oot 1.7: Under 256 lines.
+
+import "std/sync/channel.oo";
+import "std/result.oo";
+
+fn get_err(r: Result[String, String]) -> String {
+    if r.is_err() {
+        let e = match r {
+            Ok(x) => x,
+            Err(y) => y,
+        };
+        return e;
+    }
+    return "";
+}
+
+pub fn main(tc: &ThreadCap) {
+    println("PV2_RED_TEAM: Starting channel concurrency stress proof...");
+
+    // =========================================================================
+    // BEAT 1: Channel capacity exhaustion (Ring buffer QDEPTH = 8)
+    // =========================================================================
+    let r_ch1: Result[String, String] = channel_create(tc);
+    if !r_ch1.is_ok() {
+        println("FAIL: Beat 1 channel_create failed");
+        process_exit(1);
+    }
+    let ch1: String = res_unwrap_or(r_ch1, "");
+    if !ch1.contains("ch:") {
+        println("FAIL: Beat 1 invalid channel handle: " + ch1);
+        process_exit(1);
+    }
+
+    // Push 8 messages to fill ring buffer to exact capacity
+    let mut i = 0;
+    while i < 8 {
+        let msg: String = "stress_msg_" + i.to_string();
+        let r_push: Result[String, String] = channel_push(tc, ch1, msg);
+        if !r_push.is_ok() {
+            println("FAIL: Beat 1 push failed at index " + i.to_string());
+            process_exit(1);
+        }
+        i = i + 1;
+    }
+
+    // Verify 9th push fails closed with Err("channel_send: full")
+    let r_overflow: Result[String, String] = channel_push(tc, ch1, "overflow_msg");
+    if !r_overflow.is_err() {
+        println("FAIL: Beat 1 9th push succeeded but expected channel full error");
+        process_exit(1);
+    }
+    let err_full: String = get_err(r_overflow);
+    if err_full != "channel_send: full" {
+        println("FAIL: Beat 1 unexpected error string: " + err_full);
+        process_exit(1);
+    }
+    println("BEAT_1_EXHAUSTION_PASSED: 9th push failed closed with Err('channel_send: full')");
+
+    // =========================================================================
+    // BEAT 2: Pop drained channel (Drain 8 messages and verify 9th pop fails)
+    // =========================================================================
+    let mut j = 0;
+    while j < 8 {
+        let expected: String = "stress_msg_" + j.to_string();
+        let r_pop: Result[String, String] = channel_pop(tc, ch1);
+        if !r_pop.is_ok() {
+            println("FAIL: Beat 2 pop failed at index " + j.to_string());
+            process_exit(1);
+        }
+        let val: String = res_unwrap_or(r_pop, "");
+        if val != expected {
+            println("FAIL: Beat 2 FIFO order mismatch: got " + val + " expected " + expected);
+            process_exit(1);
+        }
+        j = j + 1;
+    }
+
+    // Verify 9th pop fails closed with Err("channel_recv: empty")
+    let r_empty: Result[String, String] = channel_pop(tc, ch1);
+    if !r_empty.is_err() {
+        println("FAIL: Beat 2 9th pop succeeded on drained channel");
+        process_exit(1);
+    }
+    let err_empty: String = get_err(r_empty);
+    if err_empty != "channel_recv: empty" {
+        println("FAIL: Beat 2 unexpected error string: " + err_empty);
+        process_exit(1);
+    }
+    println("BEAT_2_DRAINED_PASSED: 9th pop on drained channel failed closed with Err('channel_recv: empty')");
+
+    // =========================================================================
+    // BEAT 3: Bad handle handling (Invalid slot "ch:99")
+    // =========================================================================
+    let bad_handle: String = "ch:99";
+
+    // Verify push on invalid handle fails closed
+    let r_bad_push: Result[String, String] = channel_push(tc, bad_handle, "test_payload");
+    if !r_bad_push.is_err() {
+        println("FAIL: Beat 3 push on invalid handle succeeded");
+        process_exit(1);
+    }
+    let err_bad_push: String = get_err(r_bad_push);
+    if !err_bad_push.contains("bad slot") && !err_bad_push.contains("invalid") {
+        println("FAIL: Beat 3 unexpected bad push error: " + err_bad_push);
+        process_exit(1);
+    }
+
+    // Verify pop on invalid handle fails closed
+    let r_bad_pop: Result[String, String] = channel_pop(tc, bad_handle);
+    if !r_bad_pop.is_err() {
+        println("FAIL: Beat 3 pop on invalid handle succeeded");
+        process_exit(1);
+    }
+    let err_bad_pop: String = get_err(r_bad_pop);
+    if !err_bad_pop.contains("bad slot") && !err_bad_pop.contains("invalid") {
+        println("FAIL: Beat 3 unexpected bad pop error: " + err_bad_pop);
+        process_exit(1);
+    }
+    println("BEAT_3_BAD_HANDLE_PASSED: push and pop on 'ch:99' failed closed with Err");
+
+    // =========================================================================
+    // BEAT 4: Multiple independent channels (Cross-channel isolation)
+    // =========================================================================
+    let r_iso1: Result[String, String] = channel_create(tc);
+    let r_iso2: Result[String, String] = channel_create(tc);
+    if !r_iso1.is_ok() || !r_iso2.is_ok() {
+        println("FAIL: Beat 4 channel creation failed");
+        process_exit(1);
+    }
+    let ch_a: String = res_unwrap_or(r_iso1, "");
+    let ch_b: String = res_unwrap_or(r_iso2, "");
+
+    if ch_a == ch_b {
+        println("FAIL: Beat 4 allocated identical handles for distinct channels");
+        process_exit(1);
+    }
+
+    // Push distinct payloads into channel A and channel B
+    let r_pa1: Result[String, String] = channel_push(tc, ch_a, "alpha:msg1");
+    let r_pa2: Result[String, String] = channel_push(tc, ch_a, "alpha:msg2");
+    let r_pb1: Result[String, String] = channel_push(tc, ch_b, "beta:msg1");
+    let r_pb2: Result[String, String] = channel_push(tc, ch_b, "beta:msg2");
+
+    if !r_pa1.is_ok() || !r_pa2.is_ok() || !r_pb1.is_ok() || !r_pb2.is_ok() {
+        println("FAIL: Beat 4 push to independent channels failed");
+        process_exit(1);
+    }
+
+    // Pop from channel A: must only contain alpha messages
+    let r_va1: Result[String, String] = channel_pop(tc, ch_a);
+    let r_va2: Result[String, String] = channel_pop(tc, ch_a);
+    let r_va_empty: Result[String, String] = channel_pop(tc, ch_a);
+
+    let va1: String = res_unwrap_or(r_va1, "");
+    let va2: String = res_unwrap_or(r_va2, "");
+
+    if va1 != "alpha:msg1" || va2 != "alpha:msg2" {
+        println("FAIL: Beat 4 channel A data corrupted or bled: " + va1 + ", " + va2);
+        process_exit(1);
+    }
+    if !r_va_empty.is_err() {
+        println("FAIL: Beat 4 channel A not drained");
+        process_exit(1);
+    }
+
+    // Pop from channel B: must only contain beta messages
+    let r_vb1: Result[String, String] = channel_pop(tc, ch_b);
+    let r_vb2: Result[String, String] = channel_pop(tc, ch_b);
+    let r_vb_empty: Result[String, String] = channel_pop(tc, ch_b);
+
+    let vb1: String = res_unwrap_or(r_vb1, "");
+    let vb2: String = res_unwrap_or(r_vb2, "");
+
+    if vb1 != "beta:msg1" || vb2 != "beta:msg2" {
+        println("FAIL: Beat 4 channel B data corrupted or bled: " + vb1 + ", " + vb2);
+        process_exit(1);
+    }
+    if !r_vb_empty.is_err() {
+        println("FAIL: Beat 4 channel B not drained");
+        process_exit(1);
+    }
+
+    println("BEAT_4_ISOLATION_PASSED: multiple channels operate independently without data bleed");
+
+    println("OK: PV2_CHANNEL_STRESS_PROOF_PASSED");
+}

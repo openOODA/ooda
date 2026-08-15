@@ -29,20 +29,12 @@ void oo_str_retain(OoStr s) {
   hdr->ref_count++;
 }
 
-static char *cached_str_data = NULL;
-static long long cached_str_len = 0;
-static long long cached_char_idx = -1;
-static long long cached_byte_idx = -1;
-
 void oo_str_release(OoStr s) {
   if (!oo_str_hdr_ok(s)) return;
   OoStrHeader *hdr = ((OoStrHeader *)s.data) - 1;
   if (hdr->ref_count > 0) {
     hdr->ref_count--;
     if (hdr->ref_count == 0) {
-      if (s.data == cached_str_data) {
-        cached_str_data = NULL;
-      }
       hdr->flags = 0xFFFFFFFFu;
       free(hdr);
     }
@@ -167,20 +159,11 @@ long long oo_chars_len(OoStr s) {
 }
 
 static long long utf8_byte_index(OoStr s, long long char_idx) {
+  if (!s.data || char_idx < 0) return -1;
   long long n = 0;
   long long i = 0;
-  if (s.data == cached_str_data && s.len == cached_str_len && char_idx >= cached_char_idx && cached_char_idx >= 0) {
-    n = cached_char_idx;
-    i = cached_byte_idx;
-  }
-  for (; i < s.len;) {
-    if (n == char_idx) {
-      cached_str_data = s.data;
-      cached_str_len = s.len;
-      cached_char_idx = n;
-      cached_byte_idx = i;
-      return i;
-    }
+  while (i < s.len) {
+    if (n == char_idx) return i;
     unsigned char c = (unsigned char)s.data[i];
     if (c < 0x80) i += 1;
     else if ((c & 0xE0) == 0xC0) i += 2;
@@ -188,6 +171,7 @@ static long long utf8_byte_index(OoStr s, long long char_idx) {
     else i += 4;
     n++;
   }
+  if (n == char_idx) return i;
   return -1;
 }
 
@@ -216,9 +200,18 @@ OoStr oo_str_slice(OoStr s, long long start, long long end) {
   long long bs = utf8_byte_index(s, start);
   long long be = (end == oo_chars_len(s)) ? s.len : utf8_byte_index(s, end);
   if (bs < 0 || be < 0 || be < bs) {
-    return oo_str_intern_bytes("", 0);
+    OoStr empty;
+    empty.len = 0;
+    empty.data = oo_str_alloc_payload(0);
+    return empty;
   }
-  return oo_str_intern_bytes(s.data + bs, be - bs);
+  OoStr r;
+  r.len = be - bs;
+  r.data = oo_str_alloc_payload((size_t)r.len);
+  if (r.len > 0) {
+    memcpy(r.data, s.data + bs, (size_t)r.len);
+  }
+  return r;
 }
 
 int oo_char_is_digit(OoStr s) {

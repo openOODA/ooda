@@ -1,0 +1,254 @@
+// # Collections & Formats Red-Team Fuzz Proof Fixture
+//
+// Logline: Hostile adversarial input verification across std/hash/map and std/markup/json.
+//
+// Setup: Pure red-team test harness subjecting HashMap and JSON parser to adversarial edge cases.
+//
+// Beats:
+//   1. HashMap: Rapid insert/remove sequences & lifecycle integrity.
+//   2. HashMap: Overwriting identical keys 5 times & size stability.
+//   3. HashMap: Keys with spaces, tabs, colons, unicode & boundary chars.
+//   4. HashMap: Non-existent key removals & map_is_empty on cleared maps.
+//   5. JSON: Malformed JSON strings & fail-closed error results.
+//   6. JSON: Unclosed quotes & unterminated string detection.
+//   7. JSON: Keys with spaces, colons, and special symbols.
+//   8. JSON: Escaped backslashes & quotes handling.
+//   9. JSON: Empty string values, empty objects, and raw values.
+// RULES.oot 1.4: Pure computation test harness.
+// RULES.oot 1.6: Dual-evidence adversarial attacks and fail-closed validation.
+// RULES.oot 1.7: Under 256 lines.
+
+import "std/hash/map.oo";
+import "std/markup/json.oo";
+import "std/result.oo";
+
+pub fn main() {
+    println("--- PV1 RED-TEAM: COLLECTIONS & FORMATS FUZZ PROOF ---");
+
+    // ---------------------------------------------------------------
+    // Beat 1: HashMap rapid insert/remove sequences
+    // ---------------------------------------------------------------
+    let mut m: HashMap = map_new();
+    m = map_insert(m, "alpha_1", "val_1");
+    m = map_insert(m, "beta_22", "val_2");
+    m = map_insert(m, "gamma_333", "val_3");
+    m = map_insert(m, "delta_4444", "val_4");
+    m = map_insert(m, "epsilon_55555", "val_5");
+
+    if map_len(m) != 5 {
+        println("FAIL: rapid insert len mismatch");
+        process_exit(1);
+    }
+
+    // Interleaved removal
+    m = map_remove(m, "beta_22");
+    m = map_remove(m, "delta_4444");
+
+    if map_len(m) != 3 {
+        println("FAIL: map_len after removes should be 3");
+        process_exit(1);
+    }
+    if map_has(m, "beta_22") || map_has(m, "delta_4444") {
+        println("FAIL: removed keys still present");
+        process_exit(1);
+    }
+    if !map_has(m, "alpha_1") || !map_has(m, "gamma_333") || !map_has(m, "epsilon_55555") {
+        println("FAIL: remaining keys missing");
+        process_exit(1);
+    }
+    if map_get_or(m, "alpha_1", "") != "val_1" || map_get_or(m, "gamma_333", "") != "val_3" || map_get_or(m, "epsilon_55555", "") != "val_5" {
+        println("FAIL: remaining key values mismatch");
+        process_exit(1);
+    }
+    println("BEAT 1 OK: HashMap rapid insert/remove lifecycle preserved");
+
+    // ---------------------------------------------------------------
+    // Beat 2: Overwriting identical keys 5 times
+    // ---------------------------------------------------------------
+    let mut m_ov: HashMap = map_new();
+    m_ov = map_insert(m_ov, "cycle_key", "val_1");
+    m_ov = map_insert(m_ov, "cycle_key", "val_2");
+    m_ov = map_insert(m_ov, "cycle_key", "val_3");
+    m_ov = map_insert(m_ov, "cycle_key", "val_4");
+    m_ov = map_insert(m_ov, "cycle_key", "val_5");
+
+    if map_len(m_ov) != 1 {
+        println("FAIL: overwriting key 5 times changed map_len: " + map_len(m_ov).to_string());
+        process_exit(1);
+    }
+    let ov_val: String = map_get_or(m_ov, "cycle_key", "");
+    if ov_val != "val_5" {
+        println("FAIL: expected val_5, got: " + ov_val);
+        process_exit(1);
+    }
+    println("BEAT 2 OK: HashMap 5x key overwrite maintains single entry and latest value");
+
+    // ---------------------------------------------------------------
+    // Beat 3: Special characters in HashMap keys
+    // ---------------------------------------------------------------
+    let mut m_spec: HashMap = map_new();
+    m_spec = map_insert(m_spec, "key with multiple spaces", "val_spaces");
+    m_spec = map_insert(m_spec, "tab_key_\t_embedded", "val_tab");
+    m_spec = map_insert(m_spec, "urn:resource:sub:item:id:1234", "val_colons");
+    m_spec = map_insert(m_spec, "unicode_αβγ_✨_日本語_äöü", "val_unicode");
+
+    if !map_has(m_spec, "key with multiple spaces") || map_get_or(m_spec, "key with multiple spaces", "") != "val_spaces" {
+        println("FAIL: special char space key lookup failed");
+        process_exit(1);
+    }
+    if !map_has(m_spec, "tab_key_\t_embedded") || map_get_or(m_spec, "tab_key_\t_embedded", "") != "val_tab" {
+        println("FAIL: special char tab key lookup failed");
+        process_exit(1);
+    }
+    if !map_has(m_spec, "urn:resource:sub:item:id:1234") || map_get_or(m_spec, "urn:resource:sub:item:id:1234", "") != "val_colons" {
+        println("FAIL: special char colon key lookup failed");
+        process_exit(1);
+    }
+    let uni_key: String = "unicode_αβγ_✨_日本語_äöü";
+    if !map_has(m_spec, uni_key) || map_get_or(m_spec, uni_key, "") != "val_unicode" {
+        println("FAIL: special char unicode key lookup failed");
+        process_exit(1);
+    }
+    println("BEAT 3 OK: HashMap keys with spaces, colons, unicode, and tabs roundtrip");
+
+    // ---------------------------------------------------------------
+    // Beat 4: Removing non-existent keys & map_is_empty on cleared maps
+    // ---------------------------------------------------------------
+    let mut m_clr: HashMap = map_new();
+    m_clr = map_remove(m_clr, "non_existent_empty");
+    if map_len(m_clr) != 0 || !map_is_empty(m_clr) {
+        println("FAIL: removing non-existent key on empty map altered state");
+        process_exit(1);
+    }
+
+    m_clr = map_insert(m_clr, "item_alpha", "alpha_val");
+    m_clr = map_insert(m_clr, "item_beta", "beta_val");
+    m_clr = map_remove(m_clr, "non_existent_populated");
+    if map_len(m_clr) != 2 {
+        println("FAIL: removing non-existent key on populated map altered size");
+        process_exit(1);
+    }
+
+    m_clr = map_remove(m_clr, "item_alpha");
+    m_clr = map_remove(m_clr, "item_beta");
+    if map_len(m_clr) != 0 {
+        println("FAIL: map_len != 0 on cleared map");
+        process_exit(1);
+    }
+    if !map_is_empty(m_clr) {
+        println("FAIL: map_is_empty returned false on cleared map");
+        process_exit(1);
+    }
+    let clr_get: Result[String, String] = map_get(m_clr, "item_alpha");
+    if !clr_get.is_err() {
+        println("FAIL: map_get on cleared map returned Ok");
+        process_exit(1);
+    }
+    println("BEAT 4 OK: Non-existent key removal safe and map_is_empty true on cleared map");
+
+    // ---------------------------------------------------------------
+    // Beat 5: Malformed JSON strings (fail-closed)
+    // ---------------------------------------------------------------
+    let bad_json_1: String = "{ \"bad_key\" \"no_colon\" }";
+    let bad_json_2: String = "CRITICAL_ERROR: SYSTEM_HALTED [code 0xdead]";
+    let bad_json_3: String = "{\"key\":";
+
+    let r_bad1: Result[String, String] = json_get_string(bad_json_1, "bad_key");
+    if !r_bad1.is_err() {
+        println("FAIL: missing colon JSON should return Err");
+        process_exit(1);
+    }
+    let r_bad2: Result[String, String] = json_get_string(bad_json_2, "CRITICAL_ERROR");
+    if !r_bad2.is_err() {
+        println("FAIL: non-JSON text should return Err");
+        process_exit(1);
+    }
+    let r_bad3: Result[String, String] = json_get_value(bad_json_3, "key");
+    if !r_bad3.is_err() {
+        println("FAIL: truncated JSON key without value should return Err");
+        process_exit(1);
+    }
+    println("BEAT 5 OK: Malformed JSON strings reject with fail-closed Err");
+
+    // ---------------------------------------------------------------
+    // Beat 6: Unclosed quotes (unterminated string detection)
+    // ---------------------------------------------------------------
+    let unclosed_1: String = "{\"title\": \"Unfinished string without closing quote";
+    let r_unc1: Result[String, String] = json_get_string(unclosed_1, "title");
+    if !r_unc1.is_err() {
+        println("FAIL: unclosed quote must return Err");
+        process_exit(1);
+    }
+    let unclosed_err: String = match r_unc1 {
+        Ok(_) => "",
+        Err(e) => e,
+    };
+    if unclosed_err != "UNTERMINATED_STRING" {
+        println("FAIL: expected UNTERMINATED_STRING error, got: " + unclosed_err);
+        process_exit(1);
+    }
+    println("BEAT 6 OK: Unclosed string quotes produce UNTERMINATED_STRING Err");
+
+    // ---------------------------------------------------------------
+    // Beat 7: Keys with spaces and symbols
+    // ---------------------------------------------------------------
+    let complex_key: String = "api:service/v1.0 #query?flag=true&limit=100!";
+    let mut b_sym: String = json_builder_new();
+    b_sym = json_builder_add_string(b_sym, complex_key, "sym_ok_payload");
+    b_sym = json_builder_finish(b_sym);
+
+    let r_sym: Result[String, String] = json_get_string(b_sym, complex_key);
+    if !r_sym.is_ok() || res_unwrap_or(r_sym, "") != "sym_ok_payload" {
+        println("FAIL: JSON key with spaces and symbols failed extraction");
+        process_exit(1);
+    }
+    println("BEAT 7 OK: JSON keys with spaces, colons, and URI symbols roundtrip");
+
+    // ---------------------------------------------------------------
+    // Beat 8: Escaped backslashes & quotes
+    // ---------------------------------------------------------------
+    let raw_path: String = "C:\\openOODA\\data\\test.txt";
+    let esc_path: String = json_escape(raw_path);
+    let json_esc_doc: String = "{\"fs_path\": \"" + esc_path + "\"}";
+    let r_esc: Result[String, String] = json_get_string(json_esc_doc, "fs_path");
+    if !r_esc.is_ok() {
+        println("FAIL: escaped backslash JSON retrieval failed");
+        process_exit(1);
+    }
+    let parsed_path: String = res_unwrap_or(r_esc, "");
+    if !parsed_path.contains("openOODA") {
+        println("FAIL: parsed path corrupted: " + parsed_path);
+        process_exit(1);
+    }
+
+    let raw_quote_doc: String = "{\"dialog\": \"Say: \\\"openOODA\\\" now\"}";
+    let r_diag: Result[String, String] = json_get_string(raw_quote_doc, "dialog");
+    if !r_diag.is_ok() {
+        println("FAIL: escaped quote in string retrieval failed");
+        process_exit(1);
+    }
+    println("BEAT 8 OK: Escaped backslashes and escaped quotes parse cleanly");
+
+    // ---------------------------------------------------------------
+    // Beat 9: Empty values and boundary states
+    // ---------------------------------------------------------------
+    let empty_doc: String = "{\"empty_str\": \"\", \"zero\": 0}";
+    let r_emp_str: Result[String, String] = json_get_string(empty_doc, "empty_str");
+    if !r_emp_str.is_ok() || res_unwrap_or(r_emp_str, "FAIL") != "" {
+        println("FAIL: empty string value should be Ok(\"\")");
+        process_exit(1);
+    }
+    let r_zero: Result[String, String] = json_get_value(empty_doc, "zero");
+    if !r_zero.is_ok() || res_unwrap_or(r_zero, "") != "0" {
+        println("FAIL: zero value extraction failed");
+        process_exit(1);
+    }
+    let r_missing_emp: Result[String, String] = json_get_string("{}", "any_key");
+    if !r_missing_emp.is_err() {
+        println("FAIL: lookup in empty object {} should return Err");
+        process_exit(1);
+    }
+    println("BEAT 9 OK: Empty string values and empty object queries handled safely");
+
+    println("OK: PV1_COLLECTIONS_FUZZ_PROOF_PASSED");
+}

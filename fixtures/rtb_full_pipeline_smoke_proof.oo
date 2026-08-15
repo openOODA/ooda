@@ -1,0 +1,215 @@
+// # RTB Full Pipeline Integration Smoke Proof Fixture
+//
+// Logline: Proves end-to-end integration of the unified RTB stack: JSON construction and parsing, HashMap state indexing, Chrono monotonic timing, ThreadCap inter-channel messaging, and Visual compiler diagnostic formatting.
+//
+// Setup: Requires explicit capability tokens (&TimeCap, &ThreadCap).
+//
+// Beats:
+//   1. Construct structured JSON payload using json_builder_*.
+//   2. Parse JSON fields and populate HashMap via map_insert.
+//   3. Query HashMap under chrono_now_ms elapsed timing measurement.
+//   4. Route processed token through channel_push and receive via channel_pop under ThreadCap.
+//   5. Format high-precision visual diagnostic on simulated schema error.
+// RULES.oot 1.4: Pure data structures and explicit capability tokens.
+// RULES.oot 1.6: Dual-evidence happy path and simulated failure diagnostic.
+// RULES.oot 1.7: Under 256 lines.
+
+import "std/markup/json.oo";
+import "std/hash/map.oo";
+import "std/time/chrono.oo";
+import "std/sync/channel.oo";
+import "cli/diag_fmt.oo";
+import "std/result.oo";
+
+pub fn main(time_cap: &TimeCap, tc: &ThreadCap) {
+    // -------------------------------------------------------------
+    // Beat 1: Construct JSON payload using json_builder_*
+    // -------------------------------------------------------------
+    let mut b: String = json_builder_new();
+    b = json_builder_add_string(b, "pipeline_id", "rtb-pipe-001");
+    b = json_builder_add_string(b, "target_topic", "telemetry.metrics");
+    b = json_builder_add_int(b, "batch_size", 128);
+    b = json_builder_add_bool(b, "active", true);
+    b = json_builder_finish(b);
+
+    println("BUILT JSON: " + b);
+
+    // Verify JSON field extraction
+    let id_r: Result[String, String] = json_get_string(b, "pipeline_id");
+    if !id_r.is_ok() {
+        println("FAIL: json_get_string pipeline_id");
+        process_exit(1);
+    }
+    let id_val: String = res_unwrap_or(id_r, "");
+    if id_val != "rtb-pipe-001" {
+        println("FAIL: pipeline_id mismatch: " + id_val);
+        process_exit(1);
+    }
+
+    let topic_r: Result[String, String] = json_get_string(b, "target_topic");
+    if !topic_r.is_ok() {
+        println("FAIL: json_get_string target_topic");
+        process_exit(1);
+    }
+    let topic_val: String = res_unwrap_or(topic_r, "");
+    if topic_val != "telemetry.metrics" {
+        println("FAIL: target_topic mismatch: " + topic_val);
+        process_exit(1);
+    }
+
+    let batch_r: Result[String, String] = json_get_value(b, "batch_size");
+    if !batch_r.is_ok() {
+        println("FAIL: json_get_value batch_size");
+        process_exit(1);
+    }
+    let batch_val: String = res_unwrap_or(batch_r, "");
+    if batch_val != "128" {
+        println("FAIL: batch_size mismatch: " + batch_val);
+        process_exit(1);
+    }
+
+    let active_r: Result[String, String] = json_get_value(b, "active");
+    if !active_r.is_ok() {
+        println("FAIL: json_get_value active");
+        process_exit(1);
+    }
+    let active_val: String = res_unwrap_or(active_r, "");
+    if active_val != "true" {
+        println("FAIL: active mismatch: " + active_val);
+        process_exit(1);
+    }
+
+    // -------------------------------------------------------------
+    // Beat 2: Parse and populate HashMap using map_insert
+    // -------------------------------------------------------------
+    let mut map: HashMap = map_new();
+    if !map_is_empty(map) {
+        println("FAIL: initial map should be empty");
+        process_exit(1);
+    }
+
+    map = map_insert(map, "id", id_val);
+    map = map_insert(map, "topic", topic_val);
+    map = map_insert(map, "batch_size", batch_val);
+    map = map_insert(map, "status", "INITIALIZED");
+
+    if map_len(map) != 4 {
+        println("FAIL: map_len should be 4");
+        process_exit(1);
+    }
+
+    if !map_has(map, "id") || !map_has(map, "topic") || !map_has(map, "status") {
+        println("FAIL: missing keys in populated map");
+        process_exit(1);
+    }
+
+    // -------------------------------------------------------------
+    // Beat 3: Query HashMap under chrono_now_ms timing
+    // -------------------------------------------------------------
+    let t0: Int = chrono_now_ms(time_cap);
+    if t0 <= 0 {
+        println("FAIL: chrono_now_ms should return positive timestamp");
+        process_exit(1);
+    }
+
+    let q_id: String = map_get_or(map, "id", "");
+    let q_topic: String = map_get_or(map, "topic", "");
+    let q_status: String = map_get_or(map, "status", "");
+
+    if q_id != "rtb-pipe-001" || q_topic != "telemetry.metrics" || q_status != "INITIALIZED" {
+        println("FAIL: queried values mismatch in map");
+        process_exit(1);
+    }
+
+    chrono_sleep_ms(time_cap, 5);
+    let elapsed: Int = chrono_elapsed_ms(time_cap, t0);
+    if elapsed < 0 {
+        println("FAIL: chrono_elapsed_ms returned negative duration");
+        process_exit(1);
+    }
+    println("ELAPSED QUERY TIME: " + chrono_format_ms(elapsed));
+
+    // -------------------------------------------------------------
+    // Beat 4: Send result token through channel_push & channel_pop
+    // -------------------------------------------------------------
+    let ch_res: Result[String, String] = channel_create(tc);
+    if !ch_res.is_ok() {
+        println("FAIL: channel_create failed");
+        process_exit(1);
+    }
+    let ch_handle: String = res_unwrap_or(ch_res, "");
+    if !ch_handle.contains("ch:") {
+        println("FAIL: invalid channel handle: " + ch_handle);
+        process_exit(1);
+    }
+
+    let token_msg: String = "token:" + q_id + ":" + q_topic + ":ready";
+    let push_r: Result[String, String] = channel_push(tc, ch_handle, token_msg);
+    if !push_r.is_ok() {
+        println("FAIL: channel_push failed");
+        process_exit(1);
+    }
+
+    let pop_r: Result[String, String] = channel_pop(tc, ch_handle);
+    if !pop_r.is_ok() {
+        println("FAIL: channel_pop failed");
+        process_exit(1);
+    }
+    let received_token: String = res_unwrap_or(pop_r, "");
+    if received_token != token_msg {
+        println("FAIL: channel message mismatch: " + received_token);
+        process_exit(1);
+    }
+
+    // Verify empty channel pop refusal (fail-closed)
+    let empty_pop_r: Result[String, String] = channel_pop(tc, ch_handle);
+    if !empty_pop_r.is_err() {
+        println("FAIL: empty channel pop must return Err");
+        process_exit(1);
+    }
+
+    // -------------------------------------------------------------
+    // Beat 5: Format visual diagnostic on simulated error
+    // -------------------------------------------------------------
+    let sample_source: String = "pub fn execute_pipeline() -> Int {\n    let token: Int = \"invalid_token\";\n    return token;\n}\n";
+    let l2: String = extract_source_line(sample_source, 2);
+    if l2 != "    let token: Int = \"invalid_token\";" {
+        println("FAIL: extract_source_line mismatch: " + l2);
+        process_exit(1);
+    }
+
+    let caret: String = make_caret_line(22, 15, "type mismatch: expected Int, found String");
+    if !caret.contains("^^^^^^^^^^^^^^^ type mismatch") {
+        println("FAIL: make_caret_line mismatch: " + caret);
+        process_exit(1);
+    }
+
+    let diag: String = format_visual_diagnostic(
+        sample_source,
+        "src/pipeline.oo",
+        2,
+        22,
+        "E_TYPE_MISMATCH",
+        "expected Int, found String"
+    );
+
+    if !diag.contains("error[E_TYPE_MISMATCH]: expected Int, found String") {
+        println("FAIL: diag missing error header");
+        process_exit(1);
+    }
+    if !diag.contains("--> src/pipeline.oo:2:22") {
+        println("FAIL: diag missing location arrow");
+        process_exit(1);
+    }
+    if !diag.contains(" 2 |     let token: Int = \"invalid_token\";") {
+        println("FAIL: diag missing source context");
+        process_exit(1);
+    }
+
+    println("RENDERED DIAGNOSTIC:\n" + diag);
+
+    // -------------------------------------------------------------
+    // All Beats Passed
+    // -------------------------------------------------------------
+    println("OK: RTB_FULL_PIPELINE_SMOKE_PROOF_PASSED");
+}

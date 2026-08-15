@@ -1,8 +1,14 @@
-/* One-char intern. oo_char_at used to heap-allocate every character.
- * check of oodac/main.oo leaked those payloads across 174 modules (~12 GiB).
+/* One-char and multi-byte string interning pool.
  * STATIC flag makes retain/release no-ops (oo_str_hdr_ok rejects STATIC). */
+#include "chs_rt.h"
+#include <pthread.h>
 
-static char g_ascii[256][sizeof(OoStrHeader) + 2];
+typedef struct {
+    OoStrHeader hdr;
+    char data[8];
+} OoAsciiEntry;
+
+static OoAsciiEntry g_ascii[256];
 static int g_ascii_ok = 0;
 
 static void g_ascii_init(void) {
@@ -11,11 +17,10 @@ static void g_ascii_init(void) {
         return;
     }
     for (i = 0; i < 256; i++) {
-        OoStrHeader *h = (OoStrHeader *)g_ascii[i];
-        h->ref_count = 1;
-        h->flags = OO_FLAG_STATIC;
-        g_ascii[i][sizeof(OoStrHeader)] = (char)i;
-        g_ascii[i][sizeof(OoStrHeader) + 1] = 0;
+        g_ascii[i].hdr.ref_count = 1;
+        g_ascii[i].hdr.flags = OO_FLAG_STATIC;
+        g_ascii[i].data[0] = (char)i;
+        g_ascii[i].data[1] = 0;
     }
     g_ascii_ok = 1;
 }
@@ -24,15 +29,21 @@ OoStr oo_str_ascii_intern(unsigned char c) {
     OoStr r;
     g_ascii_init();
     r.len = 1;
-    r.data = g_ascii[c] + sizeof(OoStrHeader);
+    r.data = g_ascii[c].data;
     return r;
 }
 
-#define OO_SLICE_SLOTS 4096
-#define OO_SLICE_MAX 16
-static char g_slice[OO_SLICE_SLOTS][sizeof(OoStrHeader) + OO_SLICE_MAX + 1];
-static unsigned char g_slice_len[OO_SLICE_SLOTS];
-static unsigned char g_slice_full[OO_SLICE_SLOTS];
+typedef struct OoInternNode {
+    struct OoInternNode *next;
+    long long len;
+    OoStrHeader hdr;
+} OoInternNode;
+
+#define OO_INTERN_BUCKETS 4096
+static OoInternNode *g_intern_table[OO_INTERN_BUCKETS];
+static pthread_mutex_t g_intern_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static OoAsciiEntry g_empty_intern = { .hdr = { 1, OO_FLAG_STATIC }, .data = "" };
 
 OoStr oo_str_intern_bytes(const char *p, long long n) {
     unsigned h = 2166136261u;
@@ -40,55 +51,41 @@ OoStr oo_str_intern_bytes(const char *p, long long n) {
     unsigned slot;
     OoStr r;
     if (n <= 0) {
-        static char empty[sizeof(OoStrHeader) + 1];
-        static int empty_ok = 0;
-        OoStrHeader *eh;
-        if (!empty_ok) {
-            eh = (OoStrHeader *)empty;
-            eh->ref_count = 1;
-            eh->flags = OO_FLAG_STATIC;
-            empty[sizeof(OoStrHeader)] = 0;
-            empty_ok = 1;
-        }
         r.len = 0;
-        r.data = empty + sizeof(OoStrHeader);
+        r.data = g_empty_intern.data;
         return r;
     }
     if (n == 1) {
         return oo_str_ascii_intern((unsigned char)p[0]);
     }
-    if (n > OO_SLICE_MAX) {
-        r.len = n;
-        r.data = oo_str_alloc_payload((size_t)n);
-        memcpy(r.data, p, (size_t)n);
-        return r;
-    }
     for (i = 0; i < n; i++) {
         h ^= (unsigned char)p[i];
         h *= 16777619u;
     }
-    slot = h % OO_SLICE_SLOTS;
-    if (g_slice_full[slot]
-        && g_slice_len[slot] == (unsigned char)n
-        && memcmp(g_slice[slot] + sizeof(OoStrHeader), p, (size_t)n) == 0) {
-        r.len = n;
-        r.data = g_slice[slot] + sizeof(OoStrHeader);
-        return r;
+    slot = h % OO_INTERN_BUCKETS;
+    pthread_mutex_lock(&g_intern_mu);
+    for (OoInternNode *node = g_intern_table[slot]; node != NULL; node = node->next) {
+        if (node->len == n && memcmp((char *)(node + 1), p, (size_t)n) == 0) {
+            char *data = (char *)(node + 1);
+            pthread_mutex_unlock(&g_intern_mu);
+            r.len = n;
+            r.data = data;
+            return r;
+        }
     }
-    if (!g_slice_full[slot]) {
-        OoStrHeader *hdr = (OoStrHeader *)g_slice[slot];
-        hdr->ref_count = 1;
-        hdr->flags = OO_FLAG_STATIC;
-        memcpy(g_slice[slot] + sizeof(OoStrHeader), p, (size_t)n);
-        g_slice[slot][sizeof(OoStrHeader) + (size_t)n] = 0;
-        g_slice_len[slot] = (unsigned char)n;
-        g_slice_full[slot] = 1;
-        r.len = n;
-        r.data = g_slice[slot] + sizeof(OoStrHeader);
-        return r;
-    }
+    OoInternNode *node = (OoInternNode *)malloc(sizeof(OoInternNode) + (size_t)n + 1);
+    if (!node) abort();
+    node->next = g_intern_table[slot];
+    node->len = n;
+    node->hdr.ref_count = 1;
+    node->hdr.flags = OO_FLAG_STATIC;
+    char *data = (char *)(node + 1);
+    memcpy(data, p, (size_t)n);
+    data[n] = 0;
+    g_intern_table[slot] = node;
+    pthread_mutex_unlock(&g_intern_mu);
     r.len = n;
-    r.data = oo_str_alloc_payload((size_t)n);
-    memcpy(r.data, p, (size_t)n);
+    r.data = data;
     return r;
 }
+
