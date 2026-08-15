@@ -1,0 +1,144 @@
+// # Object-Capability, Landlock Sandboxing, and Resource Limit Proof Fixture
+//
+// Logline: Prove first-class Object Capabilities, rights diminution, Landlock process confinement, and OS heap quotas.
+//
+// Setup: Tests cryptographic object capability lifecycle, attenuation boundaries, and kernel-level resource restrictions.
+//
+// Beats:
+//   1. Verify capability rights masks and diminution logic (child rights cannot exceed parent).
+//   2. Verify object capability creation, attenuation, URI prefix bounds, and expiration checks.
+//   3. Verify delegation rejection when allow_delegate is missing.
+//   4. Verify OS resource limit enforcement (heap memory quota, fd count, cpu timeout).
+//   5. Verify Landlock filesystem sandboxing / PR_SET_NO_NEW_PRIVS confinement.
+//   6. Output success confirmation marker.
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.6: Prove happy path works and unauthorized escalation fails safely.
+// RULES.oot 1.7: Under 256 lines.
+
+import "std/sec/objcap.oo";
+import "std/sec/rlimit.oo";
+import "std/sec/landlock.oo";
+
+pub fn main(sys: &SysCap) {
+    // ---------------------------------------------------------------
+    // Beat 1: Capability Rights and Diminution
+    // ---------------------------------------------------------------
+    // Parent holds read(1) + write(2) + exec(4) + delegate(8) = 15
+    let parent_mask: Int = 15;
+    // Child requests read(1) + exec(4) = 5
+    let req_mask: Int = 5;
+    let diminished: Int = capability_rights_diminish(parent_mask, req_mask);
+    if diminished != 5 {
+        println("FAIL: 15 diminished with 5 should equal 5");
+        process_exit(1);
+    }
+
+    // Unauthorized escalation attempt: caller with read(1) requests write(2)
+    let bad_diminish: Int = capability_rights_diminish(1, 2);
+    if bad_diminish != 0 {
+        println("FAIL: read-only capability must not escalate to write");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 2: Object Capability Creation and Attenuation
+    // ---------------------------------------------------------------
+    let root_cap: ObjectCapability = objcap_create("cap_001", "/app/data", "admin", 15, 1000, 3600);
+    if !root_cap.is_valid {
+        println("FAIL: root capability creation failed");
+        process_exit(1);
+    }
+
+    let child_cap: ObjectCapability = objcap_attenuate(
+        root_cap,
+        "cap_002",
+        "/app/data/logs",
+        5, // read + exec only
+        1100,
+        600
+    );
+    if !child_cap.is_valid {
+        println("FAIL: capability attenuation failed");
+        process_exit(1);
+    }
+    if child_cap.rights != 5 {
+        println("FAIL: child capability rights mismatch");
+        process_exit(1);
+    }
+
+    // Verify valid child access
+    let verify_ok: Bool = objcap_verify(child_cap, 1, "/app/data/logs/app.log", 1200);
+    if !verify_ok {
+        println("FAIL: valid child capability verification rejected");
+        process_exit(1);
+    }
+
+    // Verify out-of-bounds path access rejected
+    let verify_escape: Bool = objcap_verify(child_cap, 1, "/etc/passwd", 1200);
+    if verify_escape {
+        println("FAIL: out-of-bounds path was not rejected");
+        process_exit(1);
+    }
+
+    // Verify expired capability rejected
+    let verify_expired: Bool = objcap_verify(child_cap, 1, "/app/data/logs", 2000);
+    if verify_expired {
+        println("FAIL: expired capability was not rejected");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 3: Delegation rejection when allow_delegate is missing
+    // ---------------------------------------------------------------
+    // child_cap holds rights 5 (read+exec, no delegate). It cannot attenuate further.
+    let sub_child_cap: ObjectCapability = objcap_attenuate(
+        child_cap,
+        "cap_003",
+        "/app/data/logs/sub",
+        1,
+        1300,
+        300
+    );
+    if sub_child_cap.is_valid {
+        println("FAIL: non-delegatable capability was permitted to attenuate");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 4: OS Resource Limits & Heap Quota
+    // ---------------------------------------------------------------
+    // Enforce 1024 MB heap memory ceiling
+    let rlim_mem: Result[Bool, String] = rlimit_set_memory_quota(sys, 1024);
+    if rlim_mem.is_err() {
+        println("FAIL: rlimit_set_memory_quota failed");
+        process_exit(1);
+    }
+
+    // Enforce 1024 max open file descriptors
+    let rlim_fds: Result[Bool, String] = rlimit_set_max_fds(sys, 1024);
+    if rlim_fds.is_err() {
+        println("FAIL: rlimit_set_max_fds failed");
+        process_exit(1);
+    }
+
+    // Enforce 300 second CPU time quota
+    let rlim_cpu: Result[Bool, String] = rlimit_set_cpu_timeout(sys, 300);
+    if rlim_cpu.is_err() {
+        println("FAIL: rlimit_set_cpu_timeout failed");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 5: Landlock Filesystem Sandboxing Confinement
+    // ---------------------------------------------------------------
+    let ll_res: Result[Bool, String] = landlock_restrict_process(sys, "/usr:/lib:/tmp", "/tmp");
+    if ll_res.is_err() {
+        println("FAIL: landlock_restrict_process failed");
+        process_exit(1);
+    }
+
+    // ---------------------------------------------------------------
+    // Beat 6: Confirmation Marker
+    // ---------------------------------------------------------------
+    println("OK: OBJCAP_LANDLOCK_RLIMIT_PROOF_SUCCESS");
+}

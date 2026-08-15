@@ -27,6 +27,8 @@
 #include "chs_rt_crypto.c"
 #include "chs_rt_meta.c"
 #include "chs_rt_host.c"
+#include "chs_rt_rlimit.c"
+#include "chs_rt_landlock.c"
 
 OoSList str_split(OoStr s, OoStr delim) {
   OoSList l = oo_slist_new();

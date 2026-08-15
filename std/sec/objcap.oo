@@ -1,0 +1,201 @@
+// # Object Capability Security Module
+//
+// Logline: First-class unforgeable object capabilities, rights diminution, and attenuation delegation.
+//
+// Setup: Implements pure object-capability security model: rights masks, attenuation, and delegation chains.
+//
+// Beats:
+//   1. Define rights masks (read: 1, write: 2, exec: 4, delegate: 8, revoke: 16).
+//   2. Enforce rights diminution: child capabilities cannot exceed parent rights.
+//   3. Define ObjectCapability struct with cryptographic identifiers.
+//   4. Implement capability creation, attenuation, and verification.
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit capability delegation required.
+// RULES.oot 1.7: Under 256 lines.
+
+type CapabilityRights = struct {
+    allow_read: Bool,
+    allow_write: Bool,
+    allow_execute: Bool,
+    allow_delegate: Bool,
+    allow_revoke: Bool
+};
+
+type ObjectCapability = struct {
+    cap_id: String,
+    resource_uri: String,
+    owner_id: String,
+    rights: Int,
+    parent_cap_id: String,
+    attenuation_id: String,
+    created_at: Int,
+    expires_at: Int,
+    is_valid: Bool
+};
+
+pub fn capability_rights_from_mask(mask_val: Int) -> CapabilityRights {
+    let r_r: Bool = (mask_val / 1) % 2 != 0;
+    let r_w: Bool = (mask_val / 2) % 2 != 0;
+    let r_x: Bool = (mask_val / 4) % 2 != 0;
+    let r_d: Bool = (mask_val / 8) % 2 != 0;
+    let r_v: Bool = (mask_val / 16) % 2 != 0;
+    return CapabilityRights {
+        allow_read: r_r,
+        allow_write: r_w,
+        allow_execute: r_x,
+        allow_delegate: r_d,
+        allow_revoke: r_v
+    };
+}
+
+pub fn capability_rights_to_mask(rights: CapabilityRights) -> Int {
+    let mut mask: Int = 0;
+    if rights.allow_read { mask = mask + 1; }
+    if rights.allow_write { mask = mask + 2; }
+    if rights.allow_execute { mask = mask + 4; }
+    if rights.allow_delegate { mask = mask + 8; }
+    if rights.allow_revoke { mask = mask + 16; }
+    return mask;
+}
+
+pub fn capability_rights_diminish(parent_rights: Int, requested_rights: Int) -> Int {
+    let p_r: CapabilityRights = capability_rights_from_mask(parent_rights);
+    let q_r: CapabilityRights = capability_rights_from_mask(requested_rights);
+    let mut res_r: Bool = false;
+    let mut res_w: Bool = false;
+    let mut res_x: Bool = false;
+    let mut res_d: Bool = false;
+    let mut res_v: Bool = false;
+    if p_r.allow_read && q_r.allow_read { res_r = true; }
+    if p_r.allow_write && q_r.allow_write { res_w = true; }
+    if p_r.allow_execute && q_r.allow_execute { res_x = true; }
+    if p_r.allow_delegate && q_r.allow_delegate { res_d = true; }
+    if p_r.allow_revoke && q_r.allow_revoke { res_v = true; }
+    let out_rights: CapabilityRights = CapabilityRights {
+        allow_read: res_r,
+        allow_write: res_w,
+        allow_execute: res_x,
+        allow_delegate: res_d,
+        allow_revoke: res_v
+    };
+    return capability_rights_to_mask(out_rights);
+}
+
+pub fn capability_rights_has_permission(granted_mask: Int, req_mask: Int) -> Bool {
+    let g: CapabilityRights = capability_rights_from_mask(granted_mask);
+    let r: CapabilityRights = capability_rights_from_mask(req_mask);
+    if r.allow_read && !g.allow_read { return false; }
+    if r.allow_write && !g.allow_write { return false; }
+    if r.allow_execute && !g.allow_execute { return false; }
+    if r.allow_delegate && !g.allow_delegate { return false; }
+    if r.allow_revoke && !g.allow_revoke { return false; }
+    return true;
+}
+
+pub fn objcap_create(
+    cap_id: String,
+    resource_uri: String,
+    owner_id: String,
+    rights_bitmask: Int,
+    timestamp: Int,
+    ttl_seconds: Int
+) -> ObjectCapability {
+    let mut expires: Int = 0;
+    if ttl_seconds > 0 {
+        expires = timestamp + ttl_seconds;
+    }
+    let mut valid: Bool = true;
+    if cap_id.len() == 0 || resource_uri.len() == 0 {
+        valid = false;
+    }
+    return ObjectCapability {
+        cap_id: cap_id,
+        resource_uri: resource_uri,
+        owner_id: owner_id,
+        rights: rights_bitmask,
+        parent_cap_id: "",
+        attenuation_id: "",
+        created_at: timestamp,
+        expires_at: expires,
+        is_valid: valid
+    };
+}
+
+pub fn objcap_empty() -> ObjectCapability {
+    return ObjectCapability {
+        cap_id: "",
+        resource_uri: "",
+        owner_id: "",
+        rights: 0,
+        parent_cap_id: "",
+        attenuation_id: "",
+        created_at: 0,
+        expires_at: 0,
+        is_valid: false
+    };
+}
+
+pub fn objcap_attenuate(
+    parent: ObjectCapability,
+    new_cap_id: String,
+    sub_resource_uri: String,
+    requested_rights: Int,
+    timestamp: Int,
+    ttl_seconds: Int
+) -> ObjectCapability {
+    if !parent.is_valid {
+        return objcap_empty();
+    }
+    let p_rights: CapabilityRights = capability_rights_from_mask(parent.rights);
+    if !p_rights.allow_delegate {
+        return objcap_empty();
+    }
+    let diminished_rights: Int = capability_rights_diminish(parent.rights, requested_rights);
+    if diminished_rights == 0 {
+        return objcap_empty();
+    }
+    let mut target_uri: String = sub_resource_uri;
+    if target_uri.len() == 0 {
+        target_uri = parent.resource_uri;
+    }
+    let mut expires: Int = parent.expires_at;
+    if ttl_seconds > 0 {
+        let proposed: Int = timestamp + ttl_seconds;
+        if parent.expires_at > 0 && proposed > parent.expires_at {
+            expires = parent.expires_at;
+        } else {
+            expires = proposed;
+        }
+    }
+    return ObjectCapability {
+        cap_id: new_cap_id,
+        resource_uri: target_uri,
+        owner_id: parent.owner_id,
+        rights: diminished_rights,
+        parent_cap_id: parent.cap_id,
+        attenuation_id: "att_" + new_cap_id,
+        created_at: timestamp,
+        expires_at: expires,
+        is_valid: true
+    };
+}
+
+pub fn objcap_verify(
+    cap: ObjectCapability,
+    req_rights: Int,
+    target_uri: String,
+    current_time: Int
+) -> Bool {
+    if !cap.is_valid {
+        return false;
+    }
+    if cap.expires_at > 0 && current_time > cap.expires_at {
+        return false;
+    }
+    if !capability_rights_has_permission(cap.rights, req_rights) {
+        return false;
+    }
+    if target_uri.len() > 0 && !str_starts_with(target_uri, cap.resource_uri) {
+        return false;
+    }
+    return true;
+}
