@@ -1,0 +1,235 @@
+// # Structural E_CAP and E_TC edits
+//
+// Logline: Insert a missing cap token or a missing let from a check error line.
+//
+// Setup: fix_text helpers are imported. Edits are string inserts only.
+//
+// Beats:
+//   1. apply_ecap adds pname to a bare sealed call and a &Cap param.
+//   2. apply_etc inserts let name = 0; at the start of the enclosing fn body.
+//   3. Both refuse when the pattern is not found.
+
+import "fix_text.oo";
+
+fn cap_param_name(cap: String) -> String {
+    if cap == "NetCap" { return "net"; }
+    if cap == "HttpCap" { return "http"; }
+    if cap == "TcpCap" { return "tcp"; }
+    if cap == "UdpCap" { return "udp"; }
+    if cap == "BindCap" { return "bind"; }
+    if cap == "FsCap" { return "fs"; }
+    if cap == "FsReadCap" { return "fsr"; }
+    if cap == "FsWriteCap" { return "fsw"; }
+    if cap == "SysCap" { return "sys"; }
+    if cap == "EnvCap" { return "env"; }
+    if cap == "TimeCap" { return "time"; }
+    if cap == "RandCap" { return "rand"; }
+    if cap == "AllocCap" { return "alloc"; }
+    return "";
+}
+
+fn find_bare_call(text: String, op: String) -> Int {
+    let mut from = 0;
+    let n = chars_len(text);
+    let opl = chars_len(op);
+    if chars_len(op) == 0 {
+        return -1;
+    }
+    while from < n {
+        let at: Int = find_sub_from(text, op, from);
+        if at < 0 {
+            return -1;
+        }
+        let after = at + opl;
+        if at > 0 {
+            if is_ident_char(char_at(text, at - 1)) {
+                from = after;
+                continue;
+            }
+        }
+        let p: Int = skip_ws(text, after);
+        if p >= n {
+            return -1;
+        }
+        if char_at(text, p) != "(" {
+            from = after;
+            continue;
+        }
+        let q: Int = skip_ws(text, p + 1);
+        let id: String = read_ident(text, q);
+        if id != "" {
+            let r: Int = skip_ws(text, q + chars_len(id));
+            if r < n {
+                if char_at(text, r) == "," {
+                    from = after;
+                    continue;
+                }
+            }
+        }
+        return p + 1;
+    }
+    return -1;
+}
+
+fn find_fn_from(text: String, pos: Int) -> Int {
+    let mut i = pos;
+    if i >= chars_len(text) {
+        i = chars_len(text) - 1;
+    }
+    while i >= 0 {
+        if i + 2 < chars_len(text) {
+            if str_slice(text, i, i + 2) == "fn" {
+                if i > 0 {
+                    if is_ident_char(char_at(text, i - 1)) {
+                        i = i - 1;
+                        continue;
+                    }
+                }
+                return i;
+            }
+        }
+        if i == 0 {
+            return -1;
+        }
+        i = i - 1;
+    }
+    return -1;
+}
+
+fn skip_params(text: String, fn_pos: Int) -> Int {
+    let lp: Int = find_sub_from(text, "(", fn_pos);
+    if lp < 0 {
+        return -1;
+    }
+    let n = chars_len(text);
+    let mut depth = 0;
+    let mut k = lp;
+    while k < n {
+        let c: String = char_at(text, k);
+        if c == "(" {
+            depth = depth + 1;
+        } else if c == ")" {
+            depth = depth - 1;
+            if depth == 0 {
+                return k;
+            }
+        }
+        k = k + 1;
+    }
+    return -1;
+}
+
+pub fn apply_ecap(text: String, op: String, cap: String) -> String {
+    let pname: String = cap_param_name(cap);
+    if pname == "" {
+        println("ERR\tfix\tunknown cap " + cap);
+        process_exit(1);
+    }
+    let ins: Int = find_bare_call(text, op);
+    if ins < 0 {
+        println("ERR\tfix\tno bare " + op + "( call");
+        process_exit(1);
+    }
+    let text2: String = str_slice(text, 0, ins) + pname + ", " + str_slice(text, ins, chars_len(text));
+    let fnp: Int = find_fn_from(text2, ins);
+    if fnp < 0 {
+        println("ERR\tfix\tno enclosing fn");
+        process_exit(1);
+    }
+    let rp: Int = skip_params(text2, fnp);
+    if rp < 0 {
+        println("ERR\tfix\tno fn params");
+        process_exit(1);
+    }
+    let header: String = str_slice(text2, fnp, rp + 1);
+    if find_sub(header, cap) >= 0 {
+        return text2;
+    }
+    let inner: String = str_slice(text2, fnp, rp);
+    let lp: Int = find_sub_from(inner, "(", 0);
+    let params: String = str_slice(inner, lp + 1, chars_len(inner));
+    let mut newp: String = pname + ": &" + cap;
+    let pt: Int = skip_ws(params, 0);
+    if pt < chars_len(params) {
+        newp = params + ", " + newp;
+    }
+    let new_header: String = str_slice(inner, 0, lp + 1) + newp + ")";
+    return str_slice(text2, 0, fnp) + new_header + str_slice(text2, rp + 1, chars_len(text2));
+}
+
+pub fn apply_etc(text: String, name: String, line_no: Int) -> String {
+    if find_sub(text, "let " + name + " ") >= 0 {
+        println("ERR\tfix\tlet " + name + " already present");
+        process_exit(1);
+    }
+    let at: Int = line_start_at(text, line_no);
+    let fnp: Int = find_fn_from(text, at);
+    if fnp < 0 {
+        println("ERR\tfix\tno enclosing fn");
+        process_exit(1);
+    }
+    let rp: Int = skip_params(text, fnp);
+    if rp < 0 {
+        println("ERR\tfix\tno fn params");
+        process_exit(1);
+    }
+    let brace: Int = find_sub_from(text, "{", rp);
+    if brace < 0 {
+        println("ERR\tfix\tno fn body");
+        process_exit(1);
+    }
+    let ins: String = "\n    let " + name + " = 0;";
+    return str_slice(text, 0, brace + 1) + ins + str_slice(text, brace + 1, chars_len(text));
+}
+
+pub fn apply_eparse(text: String) -> String {
+    let n = chars_len(text);
+    let mut i = 0;
+    let mut opens = 0;
+    let mut closes = 0;
+    let mut in_str = false;
+    while i < n {
+        let c: String = char_at(text, i);
+        if in_str {
+            if c == "\\" {
+                i = i + 2;
+                continue;
+            }
+            if c == "\"" {
+                in_str = false;
+            }
+            i = i + 1;
+            continue;
+        }
+        if c == "\"" {
+            in_str = true;
+            i = i + 1;
+            continue;
+        }
+        if c == "/" {
+            if i + 1 < n {
+                if char_at(text, i + 1) == "/" {
+                    while i < n {
+                        if char_at(text, i) == "\n" { break; }
+                        i = i + 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        if c == "{" { opens = opens + 1; }
+        if c == "}" { closes = closes + 1; }
+        i = i + 1;
+    }
+    if opens <= closes {
+        println("ERR\tfix\tcannot balance braces");
+        process_exit(1);
+    }
+    let mut out: String = text;
+    let mut k = closes;
+    while k < opens {
+        out = out + "}";
+        k = k + 1;
+    }
+    return out;
+}

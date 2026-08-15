@@ -1,0 +1,64 @@
+// # Fix Ask Smoke Proof
+//
+// Logline: ooda fix refuses to write without a person or --yes, and --yes applies E_CAP.
+//
+// Setup: Process and filesystem caps; live ooda fix via OODA, bin/ooda, ../bin, or /tmp/ooda_fixcli.
+//
+// Beats:
+//   1. No --yes and no TTY leaves the file unchanged and exits nonzero.
+//   2. --yes writes HttpCap and fetch(http, and succeeds.
+//   3. Re-checking with oodac confirms E_CAP is resolved.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+fn must(r: Result[Void, String], tag: String) {
+    if r.is_err() {
+        println("FAIL " + tag);
+        process_exit(1);
+    }
+}
+
+// Prefer OODA, then bin/ooda; use /tmp/ooda_fixcli when bin/ooda is older.
+fn pick_ooda(p: &ProcessCap, root: String) -> String {
+    let envb = match sh_env_get_or(p, "OODA", "") { Ok(s) => s, Err(_) => "" };
+    if envb != "" {
+        if expect_quiet(p, "test -x " + envb).is_ok() { return envb; }
+    }
+    if expect_quiet(p, "test -x /tmp/ooda_cli_native").is_ok() { return "/tmp/ooda_cli_native"; }
+    if expect_quiet(p, "test -x /tmp/ooda_cli").is_ok() { return "/tmp/ooda_cli"; }
+    return root + "/bin/ooda";
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let oodac = match sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac") { Ok(s) => s, Err(_) => root + "/oodac/oodac" };
+    let ooda = pick_ooda(p, root);
+    let _mk: Result[Void, String] = sh_mkdir_p(fw, tmpd);
+    let _sc: Result[Void, String] = scenario(p, fs, "ooda fix ask then --yes");
+
+    must(expect_quiet(p, "test -x " + ooda), "ooda fix binary");
+    must(expect_present(fs, root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo"), "no_cap_fetch");
+
+    let work = tmpd + "/fix_ask_work";
+    let _cl: Result[Void, String] = sh_clean(fw, fs, work);
+    must(sh_mkdir_p(fw, work), "work dir");
+    must(check(p, "cp " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo " + work + "/a.oo", within: 5), "copy fetch");
+
+    must(expect_clean(p, "! " + ooda + " fix " + work + "/a.oo < /dev/null > " + work + "/deny.out 2> " + work + "/deny.err"), "no-TTY refuse");
+    must(expect_clean(p, "grep -q 'need a person or --yes' " + work + "/deny.out " + work + "/deny.err"), "refuse text");
+    must(expect_clean(p, "! grep -qE 'HttpCap|NetCap' " + work + "/a.oo"), "unchanged without --yes");
+
+    must(check(p, ooda + " fix " + work + "/a.oo --yes > " + work + "/yes.out 2> " + work + "/yes.err", within: 60), "ooda fix --yes");
+    must(expect_substring(fs, work + "/a.oo", "HttpCap"), "HttpCap");
+    must(expect_substring(fs, work + "/a.oo", "fetch(http,"), "fetch(http,");
+
+    must(expect_quiet(p, "test -x " + oodac), "oodac");
+    must(check(p, oodac + " check " + work + "/a.oo > " + work + "/after.out 2> " + work + "/after.err", within: 30), "recheck");
+    must(expect_clean(p, "grep -q '^OK' " + work + "/after.out"), "check OK");
+    must(expect_clean(p, "! grep -qE 'E_CAP|ERR.capability' " + work + "/after.out " + work + "/after.err"), "E_CAP gone");
+
+    let _done: Result[Void, String] = sh_clean(fw, fs, work);
+    println("OK: FIX_ASK_SMOKE_PASSED");
+}

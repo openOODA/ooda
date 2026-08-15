@@ -1,3 +1,4 @@
+/* Leftover residual: runtime verify_human is not a product feature. */
 /* M165/ZT path A: verify_human — EnvCap + FsCap required; policy env allowlisted.
  * OODA_HITL_ALLOW set → try TTY Enter or OODA_HITL_AUTO_APPROVE=1;
  * else fail-closed Err (E_HITL). Returns Ok("approved") on accept. */

@@ -1,10 +1,171 @@
 #include "chs_rt.h"
+#include <unistd.h>
 
-void oo_print_str(OoStr s) { fwrite(s.data, 1, (size_t)s.len, stdout); }
+/* OPEN-8: in-process oodac --json-errors. Armed by a cwd flag file so the
+ * first rebuild can use this runtime without a new .oo builtin. */
+static int oo_je_checked = 0;
+static int oo_je_on = 0;
+static int oo_je_n = 0;
+static int oo_je_atexit = 0;
+
+static int oo_je_armed(void) {
+  if (!oo_je_checked) {
+    oo_je_checked = 1;
+    oo_je_on = (access(".ooda-cache/ooda-tmp/json_errors.arm", F_OK) == 0);
+  }
+  return oo_je_on;
+}
+
+static void oo_je_esc(FILE *f, const char *p, long long n) {
+  long long i;
+  for (i = 0; i < n; i++) {
+    char c = p[i];
+    if (c == '\\' || c == '"') {
+      fputc('\\', f);
+      fputc(c, f);
+    } else if (c == '\n') {
+      fputs("\\n", f);
+    } else if (c == '\t') {
+      fputs("\\t", f);
+    } else {
+      fputc(c, f);
+    }
+  }
+}
+
+static const char *oo_je_code(const char *p, long long n) {
+  long long i;
+  for (i = 0; i + 10 < n; i++) {
+    if (memcmp(p + i, "capability", 10) == 0) return "E_CAP";
+  }
+  for (i = 0; i + 4 < n; i++) {
+    if (memcmp(p + i, "type", 4) == 0 && (i == 0 || p[i - 1] == '\t')) return "E_TC";
+  }
+  for (i = 0; i + 5 < n; i++) {
+    if (memcmp(p + i, "parse", 5) == 0) return "E_PARSE";
+  }
+  for (i = 0; i + 6 < n; i++) {
+    if (memcmp(p + i, "secret", 6) == 0) return "E_SECRET";
+  }
+  return "E_OTHER";
+}
+
+static void oo_je_flush(void) {
+  if (!oo_je_on) return;
+  if (oo_je_n == 0) {
+    fputs("[]\n", stdout);
+  } else {
+    fputs("]\n", stdout);
+  }
+  oo_je_on = 0;
+  unlink(".ooda-cache/ooda-tmp/json_errors.arm");
+}
+
+static void oo_je_loc(const char *p, long long n, long long *line, long long *col) {
+  const char *a;
+  const char *b;
+  long long i;
+  *line = 0;
+  *col = 0;
+  if (!p || n <= 0) return;
+  a = NULL;
+  for (i = 0; i + 14 <= n; i++) {
+    if (memcmp(p + i, "Type error at ", 14) == 0) {
+      a = p + i + 14;
+      break;
+    }
+  }
+  if (a) {
+    *line = 0;
+    while (a < p + n && *a >= '0' && *a <= '9') {
+      *line = *line * 10 + (*a - '0');
+      a++;
+    }
+    if (a < p + n && *a == ':') {
+      a++;
+      *col = 0;
+      while (a < p + n && *a >= '0' && *a <= '9') {
+        *col = *col * 10 + (*a - '0');
+        a++;
+      }
+    }
+    return;
+  }
+  for (i = 0; i + 9 <= n; i++) {
+    if (memcmp(p + i, " at line ", 9) == 0) {
+      a = p + i + 9;
+      *line = 0;
+      while (a < p + n && *a >= '0' && *a <= '9') {
+        *line = *line * 10 + (*a - '0');
+        a++;
+      }
+      b = a;
+      while (b + 6 <= p + n && memcmp(b, ", col ", 6) != 0) b++;
+      if (b + 6 <= p + n) {
+        b += 6;
+        *col = 0;
+        while (b < p + n && *b >= '0' && *b <= '9') {
+          *col = *col * 10 + (*b - '0');
+          b++;
+        }
+      }
+      return;
+    }
+  }
+}
+
+static void oo_je_emit(OoStr s) {
+  const char *code;
+  long long line = 0;
+  long long col = 0;
+  if (oo_je_n == 0) fputc('[', stdout);
+  else fputc(',', stdout);
+  code = oo_je_code(s.data, s.len);
+  oo_je_loc(s.data, s.len, &line, &col);
+  fputs("{\"code\":\"", stdout);
+  fputs(code, stdout);
+  fprintf(stdout, "\",\"line\":%lld,\"col\":%lld,\"msg\":\"", line, col);
+  oo_je_esc(stdout, s.data, s.len);
+  fputs("\",\"path\":\"\",\"fix_hint\":\"See openOODA/SHIPPED.oot and ROADMAP.oot.\"", stdout);
+  if (strcmp(code, "E_CAP") == 0) {
+    fputs(",\"kind\":\"CapabilitySecurityViolation\",\"suggested_fix\":\"Add a matching &Cap parameter\"", stdout);
+  }
+  fputc('}', stdout);
+  oo_je_n++;
+}
+
+void oo_print_str(OoStr s) {
+  int armed = oo_je_armed();
+  if (s.data && s.len >= 4 && armed && memcmp(s.data, "ERR\t", 4) == 0) {
+    if (!oo_je_atexit) {
+      atexit(oo_je_flush);
+      oo_je_atexit = 1;
+    }
+    oo_je_emit(s);
+    return;
+  }
+  if (s.data && s.len >= 2 && armed && s.data[0] == 'O' && s.data[1] == 'K') {
+    if (!oo_je_atexit) {
+      atexit(oo_je_flush);
+      oo_je_atexit = 1;
+    }
+    return;
+  }
+  fwrite(s.data, 1, (size_t)s.len, stdout);
+}
 void oo_eprint_str(OoStr s) { fwrite(s.data, 1, (size_t)s.len, stderr); }
 void oo_print_int(long long n) { printf("%lld", n); }
 void oo_print_bool(int b) { fputs(b ? "true" : "false", stdout); }
-void oo_println(void) { fputc('\n', stdout); }
+void oo_println(void) {
+  if (oo_je_armed()) {
+    if (!oo_je_atexit) {
+      atexit(oo_je_flush);
+      oo_je_atexit = 1;
+    }
+    return;
+  }
+  fputc('\n', stdout);
+}
 void oo_eprintln(void) { fputc('\n', stderr); }
 
 int oo_str_eq(OoStr a, OoStr b) {

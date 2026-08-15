@@ -1,49 +1,84 @@
 // # ETC Auto-Fix Smoke
 //
-// Logline: E_TC undefined-var bounded auto-fix inserts `let no_such_var = 0` and clears E_TC on re-check; E_CAP-only is not touched.
-// Setup: oodac/oodac prebuilt; ooda_apply_etc_fix.py; corpus/typecheck/fail/undefined_var.oo.
+// Logline: Live ooda fix --yes inserts let no_such_var = 0 and clears that E_TC.
 //
-// Beats: before E_TC | apply inserts structural let | after no E_TC for no_such_var | etc-only on E_CAP fail-closed | product CLI inserts let.
+// Setup: oodac/oodac and a product ooda binary. No .py apply path.
+//
+// Beats:
+//   1. undefined_var is E_TC. ooda fix --yes inserts the let.
+//   2. Re-check is OK.
+//   3. An E_CAP-only file is fixed as E_CAP, not as a fake let.
 
 import "std/scenario.oo";
 import "std/sh.oo";
 
+fn pick_ooda(p: &ProcessCap, root: String) -> String {
+    let envb = match sh_env_get_or(p, "OODA", "") { Ok(s) => s, Err(_) => "" };
+    if envb != "" {
+        if expect_quiet(p, "test -x " + envb).is_ok() { return envb; }
+    }
+    let n1 = "/tmp/ooda_cli_native";
+    if expect_quiet(p, "test -x " + n1).is_ok() { return n1; }
+    let n2 = "/tmp/ooda_cli";
+    if expect_quiet(p, "test -x " + n2).is_ok() { return n2; }
+    return root + "/bin/ooda";
+}
+
 pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
-    let root = sh_realpath(p, ".").unwrap_or(".");
-    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
-    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
-    let ooda = sh_env_get_or(p, "OODA", root + "/bin/ooda").unwrap_or("");
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let oodac = match sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac") { Ok(s) => s, Err(_) => root + "/oodac/oodac" };
+    let ooda = pick_ooda(p, root);
     let _ = sh_mkdir_p(fw, tmpd);
-    let _ = scenario(p, fs, "E_TC undefined-var bounded auto-fix");
+    let _ = scenario(p, fs, "E_TC live ooda fix");
 
-    expect_quiet(p, "test -x " + oodac);
-    expect_present(fs, root + "/bootstrap/corpus/typecheck/fail/undefined_var.oo");
-    expect_present(fs, root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo");
+    if expect_quiet(p, "test -x " + oodac).is_err() { println("FAIL no oodac"); process_exit(1); }
+    if expect_quiet(p, "test -x " + ooda).is_err() { println("FAIL no ooda"); process_exit(1); }
+    if expect_present(fs, root + "/bootstrap/corpus/typecheck/fail/undefined_var.oo").is_err() {
+        println("FAIL missing undefined_var"); process_exit(1);
+    }
+    if expect_present(fs, root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo").is_err() {
+        println("FAIL missing no_cap_fetch"); process_exit(1);
+    }
 
-    // when "undefined_var.oo triggers E_TC" {
-    // and  "apply inserts `let no_such_var = 0`" {
-    // and  "after no E_TC for no_such_var" {
-    // and  "etc-only on E_CAP-only fail-closed" {
-    // and  "product CLI fixes E_TC" {
-    // then "E_TC auto-fix path green" {
-
-    let work: String = match sh_tempfile(p, "-d " + tmpd + " -t etc_XXXXXX") { Ok(s) => s, Err(_) => tmpd + "/etc_work" };
+    let work = tmpd + "/etc_work";
     let _ = sh_clean(fw, fs, work);
-    let _ = sh_mkdir_p(fw, work);
-    check(p, "cp " + root + "/bootstrap/corpus/typecheck/fail/undefined_var.oo " + work + "/u.oo", within: 5);
-    check(p, "!" + oodac + " check " + work + "/u.oo --json-errors > " + work + "/before.json 2> " + work + "/before.err", within: 30);
+    if sh_mkdir_p(fw, work).is_err() { println("FAIL mkdir"); process_exit(1); }
 
-    check(p, "bash " + root + "/scripts/ooda_apply_ecap_fix.sh " + work + "/u.oo > " + work + "/apply.out 2> " + work + "/apply.err", within: 30);
-    expect_substring(fs, work + "/u.oo", "let no_such_var = 0");
+    if check(p, "cp " + root + "/bootstrap/corpus/typecheck/fail/undefined_var.oo " + work + "/u.oo", within: 5).is_err() {
+        println("FAIL copy u"); process_exit(1);
+    }
+    if expect_clean(p, "! " + oodac + " check " + work + "/u.oo > " + work + "/before.out 2> " + work + "/before.err").is_err() {
+        println("FAIL u should not check clean"); process_exit(1);
+    }
+    if expect_clean(p, "grep -q no_such_var " + work + "/before.out " + work + "/before.err").is_err() {
+        println("FAIL u not E_TC"); process_exit(1);
+    }
+    if check(p, "OODA_FS_WRITEDIR=" + root + " " + ooda + " fix " + work + "/u.oo --yes > " + work + "/apply.out 2> " + work + "/apply.err", within: 60).is_err() {
+        println("FAIL ooda fix u"); process_exit(1);
+    }
+    if expect_substring(fs, work + "/u.oo", "let no_such_var = 0").is_err() {
+        println("FAIL let missing"); process_exit(1);
+    }
+    if check(p, oodac + " check " + work + "/u.oo > " + work + "/after.out 2> " + work + "/after.err", within: 30).is_err() {
+        println("FAIL u recheck"); process_exit(1);
+    }
+    if expect_clean(p, "grep -q '^OK' " + work + "/after.out").is_err() {
+        println("FAIL u not OK after fix"); process_exit(1);
+    }
 
-    check(p, oodac + " check " + work + "/u.oo --json-errors > " + work + "/after.json 2> " + work + "/after.err", within: 30);
-    expect_clean(p, "! grep -q '\"code\": \"E_TC\".*no_such_var\\|\"no_such_var\".*E_TC' " + work + "/after.json");
-
-    check(p, "cp " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo " + work + "/cap.oo && ! python3 " + root + "/scripts/ooda_apply_etc_fix.py " + work + "/cap.oo > " + work + "/na.out 2> " + work + "/na.err", within: 30);
-
-    expect_quiet(p, "test -x " + ooda);
-    check(p, "cp " + root + "/bootstrap/corpus/typecheck/fail/undefined_var.oo " + work + "/cli.oo && " + ooda + " fix " + work + "/cli.oo > " + work + "/cli.out 2> " + work + "/cli.err", within: 60);
-    expect_substring(fs, work + "/cli.oo", "let no_such_var = 0");
+    if check(p, "cp " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo " + work + "/cap.oo", within: 5).is_err() {
+        println("FAIL copy cap"); process_exit(1);
+    }
+    if check(p, "OODA_FS_WRITEDIR=" + root + " " + ooda + " fix " + work + "/cap.oo --yes > " + work + "/cap.out 2> " + work + "/cap.err", within: 60).is_err() {
+        println("FAIL ooda fix cap"); process_exit(1);
+    }
+    if expect_substring(fs, work + "/cap.oo", "HttpCap").is_err() {
+        println("FAIL cap not E_CAP-fixed"); process_exit(1);
+    }
+    if expect_clean(p, "! grep -q 'let no_such_var' " + work + "/cap.oo").is_err() {
+        println("FAIL E_CAP file got fake E_TC let"); process_exit(1);
+    }
 
     let _ = sh_clean(fw, fs, work);
     println("etc_autofix_smoke: PASSED");

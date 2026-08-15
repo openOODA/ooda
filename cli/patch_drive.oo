@@ -1,0 +1,242 @@
+// # Drive ooda patch in the product CLI
+//
+// Logline: Replace one named function body from a body file without shell-eval.
+//
+// Setup: FsCap reads the target and body. write_src writes through write_file. No scripts import.
+//
+// Beats:
+//   1. Parse path, --replace-fn NAME, and --with BODYFILE.
+//   2. Reject empty, absolute, or `..` paths. Require both files.
+//   3. Find a unique fn NAME, splice the trimmed body, and write.
+
+import "fix_text.oo";
+
+fn fail(msg: String, code: Int) {
+    println("ERR\tpatch\t" + msg);
+    process_exit(code);
+}
+
+fn sq(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    let mut out: String = "'";
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "'" {
+            out = out + "'\\''";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out + "'";
+}
+
+fn has_word(s: String, pos: Int, word: String) -> Bool {
+    if pos > 0 {
+        if is_ident_char(char_at(s, pos - 1)) { return false; }
+    }
+    let got: String = read_ident(s, pos);
+    return got == word;
+}
+
+fn skip_str(t: String, start: Int) -> Int {
+    let n: Int = chars_len(t);
+    let mut j: Int = start + 1;
+    while j < n {
+        let c: String = char_at(t, j);
+        if c == "\\" { j = j + 2; continue; }
+        if c == "\"" { return j + 1; }
+        j = j + 1;
+    }
+    return n;
+}
+
+fn skip_bal(t: String, start: Int, oc: String, cc: String) -> Int {
+    let n: Int = chars_len(t);
+    if start >= n { return -1; }
+    if char_at(t, start) != oc { return -1; }
+    let mut depth: Int = 0;
+    let mut j: Int = start;
+    while j < n {
+        let c: String = char_at(t, j);
+        if c == "\"" { j = skip_str(t, j); continue; }
+        if c == oc {
+            depth = depth + 1;
+        } else if c == cc {
+            depth = depth - 1;
+            if depth == 0 { return j + 1; }
+        }
+        j = j + 1;
+    }
+    return -1;
+}
+
+fn path_bad(p: String) -> Bool {
+    if p == "" { return true; }
+    if str_slice(p, 0, 1) == "/" { return true; }
+    if find_sub(p, "..") >= 0 { return true; }
+    return false;
+}
+
+fn is_ws(c: String) -> Bool {
+    // Emit treats "\r" as the letter r, so do not list CR here.
+    return c == " " || c == "\t" || c == "\n";
+}
+
+fn skip_sp(s: String, pos: Int) -> Int {
+    let n: Int = chars_len(s);
+    let mut i: Int = pos;
+    while i < n {
+        if is_ws(char_at(s, i)) { i = i + 1; } else { break; }
+    }
+    return i;
+}
+
+fn trim_s(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut a: Int = 0;
+    let mut b: Int = n;
+    while a < n {
+        if is_ws(char_at(s, a)) { a = a + 1; } else { break; }
+    }
+    while b > a {
+        if is_ws(char_at(s, b - 1)) { b = b - 1; } else { break; }
+    }
+    return str_slice(s, a, b);
+}
+
+fn indent_line(line: String) -> String {
+    let ln: Int = chars_len(line);
+    if ln == 0 { return line; }
+    if ln >= 4 {
+        if str_slice(line, 0, 4) == "    " { return line; }
+    }
+    return "    " + line;
+}
+
+fn format_body(body: String) -> String {
+    let mut b: String = trim_s(body);
+    let bn: Int = chars_len(b);
+    if bn >= 2 {
+        if char_at(b, 0) == "{" {
+            if char_at(b, bn - 1) == "}" { b = trim_s(str_slice(b, 1, bn - 1)); }
+        }
+    }
+    let mut out: String = "\n";
+    let blen: Int = chars_len(b);
+    let mut ls: Int = 0;
+    let mut i: Int = 0;
+    while i < blen {
+        if char_at(b, i) == "\n" {
+            let line: String = str_slice(b, ls, i);
+            out = out + indent_line(line) + "\n";
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    if ls < blen {
+        let last: String = str_slice(b, ls, blen);
+        out = out + indent_line(last) + "\n";
+    }
+    return out;
+}
+
+fn next_brace(text: String, start: Int, n: Int) -> Int {
+    let mut k: Int = start;
+    while k < n {
+        if char_at(text, k) == "\"" { k = skip_str(text, k); continue; }
+        if char_at(text, k) == "{" { return k; }
+        k = k + 1;
+    }
+    return -1;
+}
+
+fn replace_named(text: String, name: String, body: String) -> String {
+    let n: Int = chars_len(text);
+    let mut i: Int = 0;
+    let mut hits: Int = 0;
+    let mut open_b: Int = -1;
+    let mut close_b: Int = -1;
+    while i < n {
+        if char_at(text, i) == "\"" { i = skip_str(text, i); continue; }
+        if char_at(text, i) == "/" {
+            if i + 1 < n {
+                if char_at(text, i + 1) == "/" {
+                    while i < n {
+                        if char_at(text, i) == "\n" { break; }
+                        i = i + 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        let mut p: Int = i;
+        if has_word(text, i, "pub") { p = skip_sp(text, i + 3); }
+        if !has_word(text, p, "fn") { i = i + 1; continue; }
+        let q: Int = skip_sp(text, p + 2);
+        let id: String = read_ident(text, q);
+        if id != name { i = i + 1; continue; }
+        let rp: Int = skip_sp(text, q + chars_len(name));
+        if rp >= n { i = i + 1; continue; }
+        if char_at(text, rp) != "(" { i = i + 1; continue; }
+        let afterp: Int = skip_bal(text, rp, "(", ")");
+        if afterp < 0 { i = i + 1; continue; }
+        let k: Int = next_brace(text, afterp, n);
+        if k < 0 { i = i + 1; continue; }
+        let afterb: Int = skip_bal(text, k, "{", "}");
+        if afterb < 0 { i = i + 1; continue; }
+        hits = hits + 1;
+        open_b = k;
+        close_b = afterb - 1;
+        i = afterb;
+    }
+    if hits == 0 { fail("function not found: " + name, 1); return ""; }
+    if hits > 1 { fail("ambiguous function: " + name, 1); return ""; }
+    let inner: String = format_body(body);
+    return str_slice(text, 0, open_b + 1) + inner + str_slice(text, close_b, n);
+}
+
+pub fn run_ooda_patch(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let mut path: String = "";
+    let mut name: String = "";
+    let mut withf: String = "";
+    let mut i: Int = 0;
+    let alen: Int = list_len(args);
+    while i < alen {
+        let a: String = list_get(args, i);
+        if a == "--replace-fn" {
+            i = i + 1;
+            if i >= alen { fail("--replace-fn needs name", 2); }
+            name = list_get(args, i);
+        } else if a == "--with" {
+            i = i + 1;
+            if i >= alen { fail("--with needs body file", 2); }
+            withf = list_get(args, i);
+        } else if chars_len(a) > 0 {
+            if str_slice(a, 0, 1) != "-" {
+                if path == "" { path = a; }
+            }
+        }
+        i = i + 1;
+    }
+    if path == "" { fail("missing file", 2); }
+    if name == "" || withf == "" { fail("need --replace-fn NAME --with BODYFILE", 2); }
+    if path_bad(path) { fail("bad path", 2); }
+    if path_bad(withf) { fail("bad body path", 2); }
+    let sl: String = "if [ -L " + sq(path) + " ] || [ -L " + sq(withf) + " ]; then exit 0; else exit 1; fi";
+    let sr: Result[String, String] = sys_exec(sys, "sh", "-c", sl);
+    if sr.is_ok() { fail("symlink refused", 2); }
+    if !path_exists(fs, path) { fail("file not found: " + path, 2); }
+    if !path_exists(fs, withf) { fail("file not found: " + withf, 2); }
+    let tr: Result[String, String] = read_file(fs, path);
+    if !tr.is_ok() { fail("cannot read " + path, 2); }
+    let text: String = match tr { Ok(s) => s, Err(m) => m };
+    let br: Result[String, String] = read_file(fs, withf);
+    if !br.is_ok() { fail("cannot read " + withf, 2); }
+    let body: String = match br { Ok(s) => s, Err(m) => m };
+    let next: String = replace_named(text, name, body);
+    write_src(fs, sys, path, next);
+    println("OK\tpatch\treplaced " + name + " in " + path);
+    process_exit(0);
+}

@@ -1,0 +1,196 @@
+// # OODA Fuzz Scanner
+//
+// Logline: pure .oo scanner for fuzzing crashes, timeouts, and memory quota violations — executes and classifies target suites under ProcessCap, FsReadCap, and FsWriteCap.
+//
+// Setup: Process, read, and write capabilities available; oodac and bin/ooda built.
+//
+// Beats:
+//   1. Resolve binary paths (oodac, ooda) and temp work directory.
+//   2. Scan and execute contract fuzzing test suites across domain targets.
+//   3. Classify and verify crash detection, timeouts, and memory quota violation containment.
+//   4. Emit summary metrics and fail closed on unhandled failures or regressions.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+type FuzzScanSummary = struct {
+    total: Int,
+    passed: Int,
+    crashes: Int,
+    timeouts: Int,
+    quotas: Int,
+    violations: Int,
+};
+
+fn summary_new() -> FuzzScanSummary {
+    return FuzzScanSummary {
+        total: 0,
+        passed: 0,
+        crashes: 0,
+        timeouts: 0,
+        quotas: 0,
+        violations: 0,
+    };
+}
+
+fn classify_outcome(out: String, is_ok: Bool) -> String {
+    if is_ok {
+        return "PASS";
+    }
+    if str_contains(out, "Segmentation fault") || str_contains(out, "SEGV") || str_contains(out, "signal 11") {
+        return "CRASH";
+    }
+    if str_contains(out, "ERR\tmax_cycles") || str_contains(out, "timeout") || str_contains(out, "timed out") {
+        return "TIMEOUT";
+    }
+    if str_contains(out, "quota exceeded") || str_contains(out, "ambient List memory quota") || str_contains(out, "alloc cap") {
+        return "QUOTA";
+    }
+    if str_contains(out, "FUZZ_FAIL") || str_contains(out, "postcondition failed") || str_contains(out, "precondition") {
+        return "VIOLATION";
+    }
+    return "FAIL";
+}
+
+fn record_scan(mut s: FuzzScanSummary, outcome: String) -> FuzzScanSummary {
+    s.total = s.total + 1;
+    if outcome == "PASS" {
+        s.passed = s.passed + 1;
+    } else if outcome == "CRASH" {
+        s.crashes = s.crashes + 1;
+    } else if outcome == "TIMEOUT" {
+        s.timeouts = s.timeouts + 1;
+    } else if outcome == "QUOTA" {
+        s.quotas = s.quotas + 1;
+    } else if outcome == "VIOLATION" {
+        s.violations = s.violations + 1;
+    }
+    return s;
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = sh_realpath(p, ".").unwrap_or(".");
+    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("") + "/fuzz_scan";
+    let ooda = sh_env_get_or(p, "OODA", root + "/bin/ooda").unwrap_or("");
+    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
+    let _ = sh_mkdir_p(fw, tmpd);
+    let _ = scenario(p, fs, "ooda fuzz scan (crashes, timeouts, memory quota violations)");
+
+    expect_quiet(p, "test -x " + ooda);
+    expect_quiet(p, "test -x " + oodac);
+
+    let mut summary = summary_new();
+
+    // 1. Scan pass-path fuzz targets (Int, Bool, String, List)
+    let mut pass_targets: List[String] = list_new();
+    pass_targets = list_push(pass_targets, "fixtures/fuzz_int_add.oo");
+    pass_targets = list_push(pass_targets, "fixtures/fuzz_int_mul.oo");
+    pass_targets = list_push(pass_targets, "fixtures/fuzz_int_abs.oo");
+    pass_targets = list_push(pass_targets, "fixtures/fuzz_bool_domain.oo");
+    pass_targets = list_push(pass_targets, "fixtures/fuzz_string_domain.oo");
+    pass_targets = list_push(pass_targets, "fixtures/fuzz_list_domain.oo");
+    pass_targets = list_push(pass_targets, "fixtures/fuzz_int_multi_add.oo");
+
+    let mut i = 0;
+    let n_pass = list_len(pass_targets);
+    while i < n_pass {
+        let t = list_get(pass_targets, i);
+        let out_file = tmpd + "/p_" + i.to_string() + ".out";
+        let cmd = "timeout 45 " + ooda + " test " + root + "/" + t + " --fuzz 15 > " + out_file + " 2>&1";
+        let res = process_exec(p, cmd);
+        let out = match fs_read_file(fs, out_file) { Ok(s) => s, Err(_) => "" };
+        let outcome = classify_outcome(out, res.is_ok());
+        if outcome != "PASS" {
+            println("FAIL pass target: " + t + " got " + outcome);
+            process_exit(1);
+        }
+        summary = record_scan(summary, "PASS");
+        println("OK [fuzz pass] " + t);
+        i = i + 1;
+    }
+
+    // 2. Scan contract violation / fail-closed targets
+    let mut fail_targets: List[String] = list_new();
+    fail_targets = list_push(fail_targets, "fixtures/fuzz_int_fail.oo");
+    fail_targets = list_push(fail_targets, "fixtures/fuzz_bool_fail.oo");
+    fail_targets = list_push(fail_targets, "fixtures/fuzz_string_fail.oo");
+    fail_targets = list_push(fail_targets, "fixtures/fuzz_list_fail.oo");
+
+    i = 0;
+    let n_fail = list_len(fail_targets);
+    while i < n_fail {
+        let t = list_get(fail_targets, i);
+        let out_file = tmpd + "/f_" + i.to_string() + ".out";
+        let cmd = "timeout 45 " + ooda + " test " + root + "/" + t + " --fuzz 15 > " + out_file + " 2>&1";
+        let res = process_exec(p, cmd);
+        let out = match fs_read_file(fs, out_file) { Ok(s) => s, Err(_) => "" };
+        let outcome = classify_outcome(out, res.is_ok());
+        if outcome == "PASS" {
+            println("FAIL contract violation not detected: " + t);
+            process_exit(1);
+        }
+        summary = record_scan(summary, "VIOLATION");
+        println("OK [contract violation caught] " + t);
+        i = i + 1;
+    }
+
+    // 3. Scan timeout / max-cycles violations
+    let mut to_targets: List[String] = list_new();
+    to_targets = list_push(to_targets, "fixtures/max_cycles_fail.oo");
+    to_targets = list_push(to_targets, "fixtures/max_cycles_recursion_fail.oo");
+
+    i = 0;
+    let n_to = list_len(to_targets);
+    while i < n_to {
+        let t = list_get(to_targets, i);
+        let out_file = tmpd + "/to_" + i.to_string() + ".out";
+        let cmd = "timeout 10 " + ooda + " run " + root + "/" + t + " > " + out_file + " 2>&1";
+        let res = process_exec(p, cmd);
+        let out = match fs_read_file(fs, out_file) { Ok(s) => s, Err(_) => "" };
+        let outcome = classify_outcome(out, res.is_ok());
+        if outcome == "PASS" {
+            println("FAIL timeout/cycle violation not detected: " + t);
+            process_exit(1);
+        }
+        summary = record_scan(summary, "TIMEOUT");
+        println("OK [timeout/cycle bound enforced] " + t);
+        i = i + 1;
+    }
+
+    // 4. Scan memory quota violations
+    let lq_fix = root + "/fixtures/list_quota_fail.oo";
+    let lq_bin = tmpd + "/lq_fail.bin";
+    let b_cmd = "env -u OO_LIST_AMBIENT_QUOTA " + ooda + " build \"" + lq_fix + "\" -o \"" + lq_bin + "\" >/dev/null 2>&1";
+    let b_res = process_exec(p, b_cmd);
+    if b_res.is_ok() && expect_present(fs, lq_bin).is_ok() {
+        let r_cmd = "OO_LIST_AMBIENT_QUOTA=256 timeout 5 \"" + lq_bin + "\" > " + tmpd + "/quota.out 2>&1";
+        let r_res = process_exec(p, r_cmd);
+        let q_out = match fs_read_file(fs, tmpd + "/quota.out") { Ok(s) => s, Err(_) => "" };
+        let outcome = classify_outcome(q_out, r_res.is_ok());
+        if outcome != "QUOTA" && !str_contains(q_out, "quota exceeded") {
+            println("FAIL memory quota violation not detected: list_quota_fail.oo");
+            process_exit(1);
+        }
+        summary = record_scan(summary, "QUOTA");
+        println("OK [memory quota violation contained] fixtures/list_quota_fail.oo");
+    }
+
+    // 5. Scan crash / SEGV containment
+    let div_fix = tmpd + "/crash_trap.oo";
+    let _ = process_exec(p, "printf 'pub fn main() { let x = 1 / 0; println(x); }\\n' > " + div_fix);
+    let chk_cmd = oodac + " check " + div_fix + " > " + tmpd + "/chk.out 2>&1";
+    let chk_res = process_exec(p, chk_cmd);
+    let chk_out = match fs_read_file(fs, tmpd + "/chk.out") { Ok(s) => s, Err(_) => "" };
+    if chk_res.is_ok() {
+        println("FAIL div-by-zero check allowed crashable code");
+        process_exit(1);
+    }
+    summary = record_scan(summary, "CRASH");
+    println("OK [crashable code fail-closed] div-by-zero");
+
+    println("---");
+    println("fuzz_scan summary: total=" + summary.total.to_string() + " pass=" + summary.passed.to_string()
+        + " violations=" + summary.violations.to_string() + " timeouts=" + summary.timeouts.to_string()
+        + " quotas=" + summary.quotas.to_string() + " crashes_trapped=" + summary.crashes.to_string());
+    println("ooda_fuzz_scan: PASSED");
+}

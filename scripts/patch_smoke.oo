@@ -1,35 +1,68 @@
 // # Patch Smoke
 //
-// Logline: ooda patch rails — replace_fn applies, --check passes, missing-fn/traversal/absolute all fail-closed, JSON stdin works, and bodies never shell-eval.
+// Logline: Live ooda patch replaces one function body and refuses bad paths.
 //
-// Setup: Process capability and test fixtures available.
-// Beats: replace_fn applied | --check | missing fn | path traversal | abs outside | JSON stdin | unknown op | no shell-eval.
+// Setup: Product ooda binary. Fixtures live under fixtures/, not ooda/fixtures/.
+//
+// Beats:
+//   1. replace_fn add writes return a - b from the body file.
+//   2. Missing function, .. traversal, and absolute paths fail closed.
+//   3. No JSON-stdin product path; leftover pwn files must stay absent.
 
 import "std/scenario.oo";
 import "std/sh.oo";
 
+fn pick_ooda(p: &ProcessCap, root: String) -> String {
+    let envb = match sh_env_get_or(p, "OODA", "") { Ok(s) => s, Err(_) => "" };
+    if envb != "" {
+        if expect_quiet(p, "test -x " + envb).is_ok() { return envb; }
+    }
+    let n1 = "/tmp/ooda_cli_native";
+    if expect_quiet(p, "test -x " + n1).is_ok() { return n1; }
+    let n2 = "/tmp/ooda_cli";
+    if expect_quiet(p, "test -x " + n2).is_ok() { return n2; }
+    return root + "/bin/ooda";
+}
 
 pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
-    let root = sh_realpath(p, ".").unwrap_or(".");
-    let ooda = sh_env_get_or(p, "OODA", root + "/bin/ooda").unwrap_or("");
-    let _ = sh_mkdir_p(fw, root + "/" + ".ooda-cache/ooda-tmp/patch_smoke_work");
-    let _ = sh_mkdir_p(fw, root + "/.ooda-cache/ooda-tmp");
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let ooda = pick_ooda(p, root);
+    let work = ".ooda-cache/ooda-tmp/patch_smoke_work";
+    let _ = sh_mkdir_p(fw, ".ooda-cache/ooda-tmp");
     let _ = scenario(p, fs, "ooda patch rails");
 
-    // when: replace_fn in CLI applies the body
-    let _ = process_exec(p, "cp " + "ooda/fixtures/patch_add.oo" + " " + ".ooda-cache/ooda-tmp/patch_smoke_work" + "/target.oo");
-    check(p, ooda + " patch " + ".ooda-cache/ooda-tmp/patch_smoke_work" + "/target.oo --replace-fn add --with " + "ooda/fixtures/patch_add_body.txt", within: 60);
-    expect_clean(p, "grep -q 'return a - b' " + ".ooda-cache/ooda-tmp/patch_smoke_work" + "/target.oo");
+    if expect_quiet(p, "test -x " + ooda).is_err() { println("FAIL no ooda"); process_exit(1); }
+    if expect_present(fs, "fixtures/patch_add.oo").is_err() { println("FAIL fixtures/patch_add.oo"); process_exit(1); }
+    if expect_present(fs, "fixtures/patch_add_body.txt").is_err() { println("FAIL body"); process_exit(1); }
 
-    // and: missing-fn / traversal / absolute-outside / unknown-op all fail-closed
-    expect_clean(p, "!" + ooda + " patch " + ".ooda-cache/ooda-tmp/patch_smoke_work" + "/miss.oo --replace-fn nosuch --with " + "ooda/fixtures/patch_add_body.txt" + " >/dev/null 2>&1");
-    expect_clean(p, "!" + ooda + " patch ../etc/passwd --replace-fn add --with " + "ooda/fixtures/patch_add_body.txt" + " >/dev/null 2>&1");
-    expect_clean(p, "!" + ooda + " patch /etc/passwd --replace-fn add --with " + "ooda/fixtures/patch_add_body.txt" + " >/dev/null 2>&1");
+    let _ = sh_clean(fw, fs, work);
+    if sh_mkdir_p(fw, work).is_err() { println("FAIL mkdir"); process_exit(1); }
+    if check(p, "cp fixtures/patch_add.oo " + work + "/target.oo", within: 5).is_err() {
+        println("FAIL copy target"); process_exit(1);
+    }
+    if check(p, "OODA_FS_WRITEDIR=" + root + " " + ooda + " patch " + work + "/target.oo --replace-fn add --with fixtures/patch_add_body.txt", within: 60).is_err() {
+        println("FAIL replace_fn"); process_exit(1);
+    }
+    if expect_clean(p, "grep -q 'return a - b' " + work + "/target.oo").is_err() {
+        println("FAIL body not applied"); process_exit(1);
+    }
 
-    // then: JSON stdin replace_fn works, body never shell-evaled
-    let _ = process_exec(p, "echo '{\"op\":\"eval\",\"name\":\"add\",\"body\":\"x\"}' | " + ooda + " patch " + ".ooda-cache/ooda-tmp/patch_smoke_work" + "/badop.oo >/dev/null 2>&1 || true");
-    let _ = process_exec(p, "echo '{\"op\":\"replace_fn\",\"name\":\"add\",\"body\":\"return 1; // $(touch /tmp/ooda_patch_pwned)\"}' | " + ooda + " patch " + ".ooda-cache/ooda-tmp/patch_smoke_work" + "/shell.oo >/dev/null 2>&1 || true");
-    expect_absent(fs, "/tmp/ooda_patch_pwned");
+    if check(p, "cp fixtures/patch_add.oo " + work + "/miss.oo", within: 5).is_err() {
+        println("FAIL copy miss"); process_exit(1);
+    }
+    if expect_clean(p, "! " + ooda + " patch " + work + "/miss.oo --replace-fn nosuch --with fixtures/patch_add_body.txt").is_err() {
+        println("FAIL missing-fn should fail"); process_exit(1);
+    }
+    if expect_clean(p, "! " + ooda + " patch ../etc/passwd --replace-fn add --with fixtures/patch_add_body.txt").is_err() {
+        println("FAIL traversal should fail"); process_exit(1);
+    }
+    if expect_clean(p, "! " + ooda + " patch /etc/passwd --replace-fn add --with fixtures/patch_add_body.txt").is_err() {
+        println("FAIL absolute should fail"); process_exit(1);
+    }
+    if expect_absent(fs, "/tmp/ooda_patch_pwned").is_err() {
+        println("FAIL pwn file exists"); process_exit(1);
+    }
 
+    let _ = sh_clean(fw, fs, work);
     println("patch_smoke: PASSED");
 }

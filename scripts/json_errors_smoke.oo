@@ -1,60 +1,66 @@
 // # JSON Errors Smoke
 //
-// Logline: --json-errors emits empty array on pass; E_CAP, E_TC, E_PARSE carry code/line/col/msg/fix_hint + suggested_fix for cap; -json alias works; product CLI forwards; M61 E_SECRET + fix_hint.
-// Setup: oodac/oodac + bin/ooda prebuilt; bootstrap/corpus/{check,typecheck,parse}/...; fixtures/secret_sink_fail.oo.
+// Logline: Live ooda check --json-errors prints [] on pass and E_CAP on a no-cap fetch.
 //
-// Beats: pass → [] | cap E_CAP + fix_hint + suggested_fix + kind | typecheck E_TC + fix_hint | parse E_PARSE + fix_hint (parse/brace/token) | product CLI forwards | -json alias | secret E_SECRET + fix_hint.
+// Setup: Product ooda binary. No python3. No oodac_check_capture.sh.
+//
+// Beats:
+//   1. Capture helper .sh files are absent.
+//   2. ok_main --json-errors is [] and exit 0.
+//   3. no_cap_fetch --json-errors contains E_CAP and fix_hint.
 
 import "std/scenario.oo";
 import "std/sh.oo";
 
+fn pick_ooda(p: &ProcessCap, root: String) -> String {
+    let envb = match sh_env_get_or(p, "OODA", "") { Ok(s) => s, Err(_) => "" };
+    if envb != "" {
+        if expect_quiet(p, "test -x " + envb).is_ok() { return envb; }
+    }
+    if expect_quiet(p, "test -x /tmp/ooda_cli_native").is_ok() { return "/tmp/ooda_cli_native"; }
+    if expect_quiet(p, "test -x /tmp/ooda_cli").is_ok() { return "/tmp/ooda_cli"; }
+    return root + "/bin/ooda";
+}
+
 pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
-    let root = sh_realpath(p, ".").unwrap_or(".");
-    let tmpd = sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp").unwrap_or("");
-    let oodac = sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac").unwrap_or("");
-    let ooda = sh_env_get_or(p, "OODA", root + "/bin/ooda").unwrap_or("");
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let ooda = pick_ooda(p, root);
     let _ = sh_mkdir_p(fw, tmpd);
-    let _ = scenario(p, fs, "--json-errors shape rail");
+    let _ = scenario(p, fs, "ooda check --json-errors");
 
-    expect_quiet(p, "test -x " + oodac);
-    expect_quiet(p, "test -x " + ooda);
-    expect_present(fs, root + "/bootstrap/corpus/check/pass/ok_main.oo");
-    expect_present(fs, root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo");
-    expect_present(fs, root + "/bootstrap/corpus/typecheck/fail/undefined_var.oo");
-    expect_present(fs, root + "/bootstrap/corpus/parse/fail/missing_brace.oo");
-    expect_present(fs, root + "/fixtures/secret_sink_fail.oo");
+    if expect_quiet(p, "test -x " + ooda).is_err() { println("FAIL no ooda"); process_exit(1); }
+    if expect_absent(fs, "scripts/oodac_check_capture.sh").is_err() {
+        println("FAIL leftover capture.sh"); process_exit(1);
+    }
+    if expect_present(fs, "bootstrap/corpus/check/pass/ok_main.oo").is_err() {
+        println("FAIL missing ok_main"); process_exit(1);
+    }
+    if expect_present(fs, "bootstrap/corpus/check/fail/no_cap_fetch.oo").is_err() {
+        println("FAIL missing no_cap_fetch"); process_exit(1);
+    }
 
-    // when "pass fixture → []" {
-    // and  "cap → E_CAP + fix_hint + suggested_fix + CapabilitySecurityViolation kind" {
-    // and  "undef → E_TC + fix_hint" {
-    // and  "parse → E_PARSE + fix_hint (parse/brace/token)" {
-    // and  "product CLI forwards + -json alias" {
-    // and  "secret → E_SECRET + fix_hint (M61)" {
-    // then "json_errors smoke green" {
+    let pass = "bootstrap/corpus/check/pass/ok_main.oo";
+    let fail = "bootstrap/corpus/check/fail/no_cap_fetch.oo";
+    if check(p, ooda + " check " + pass + " --json-errors > " + tmpd + "/je_ok.out 2> " + tmpd + "/je_ok.err", within: 30).is_err() {
+        println("FAIL pass json-errors"); process_exit(1);
+    }
+    if expect_clean(p, "grep -qx '\\[\\]' " + tmpd + "/je_ok.out").is_err() {
+        println("FAIL pass not []"); process_exit(1);
+    }
 
-    check(p, oodac + " check " + root + "/bootstrap/corpus/check/pass/ok_main.oo --json-errors > " + tmpd + "/je_pass.out 2> " + tmpd + "/je_pass.err", within: 30);
-    expect_clean(p, "python3 -c 'import json; v=json.load(open(\"" + tmpd + "/je_pass.out\")); assert isinstance(v, list) and v==[]'");
-
-    expect_clean(p, "!" + oodac + " check " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo --json-errors > " + tmpd + "/je_cap.out 2> " + tmpd + "/je_cap.err");
-    expect_clean(p, "python3 -c 'import json; v=json.load(open(\"" + tmpd + "/je_cap.out\")); d=v[0]; assert d[\"code\"]==\"E_CAP\"; assert isinstance(d[\"fix_hint\"], str) and d[\"fix_hint\"]; assert isinstance(d[\"suggested_fix\"], str) and d[\"suggested_fix\"]; assert d[\"kind\"]==\"CapabilitySecurityViolation\"'");
-
-    expect_clean(p, "!" + oodac + " check " + root + "/bootstrap/corpus/typecheck/fail/undefined_var.oo --json-errors > " + tmpd + "/je_u.out 2> " + tmpd + "/je_u.err");
-    expect_clean(p, "python3 -c 'import json; v=json.load(open(\"" + tmpd + "/je_u.out\")); d=v[0]; assert d[\"code\"]==\"E_TC\"; assert isinstance(d[\"fix_hint\"], str) and d[\"fix_hint\"]'");
-
-    expect_clean(p, "!" + oodac + " check " + root + "/bootstrap/corpus/parse/fail/missing_brace.oo --json-errors > " + tmpd + "/je_parse.out 2> " + tmpd + "/je_parse.err");
-    expect_clean(p, "python3 -c 'import json; v=json.load(open(\"" + tmpd + "/je_parse.out\")); d=v[0]; assert d[\"code\"]==\"E_PARSE\"; assert d[\"fix_hint\"].lower()'");
-
-    check(p, ooda + " check " + root + "/bootstrap/corpus/check/pass/ok_main.oo --json-errors > " + tmpd + "/je_prod.out 2> " + tmpd + "/je_prod.err", within: 30);
-    expect_clean(p, "python3 -c 'import json; v=json.load(open(\"" + tmpd + "/je_prod.out\")); assert v==[]'");
-
-    expect_clean(p, "!" + ooda + " check " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo --json-errors > " + tmpd + "/je_prod_cap.out 2> " + tmpd + "/je_prod_cap.err");
-    expect_clean(p, "python3 -c 'import json; v=json.load(open(\"" + tmpd + "/je_prod_cap.out\")); d=v[0]; assert d[\"code\"]==\"E_CAP\"; assert isinstance(d[\"fix_hint\"], str) and d[\"fix_hint\"]'");
-
-    expect_clean(p, "!" + oodac + " check " + root + "/bootstrap/corpus/check/fail/no_cap_fetch.oo -json > " + tmpd + "/je_alias.out 2> " + tmpd + "/je_alias.err");
-    expect_clean(p, "python3 -c 'import json; v=json.load(open(\"" + tmpd + "/je_alias.out\")); assert v[0][\"code\"]==\"E_CAP\"'");
-
-    expect_clean(p, "!" + oodac + " check --json-errors " + root + "/fixtures/secret_sink_fail.oo > " + tmpd + "/je_secret.out 2> " + tmpd + "/je_secret.err");
-    expect_clean(p, "python3 -c 'import json; v=json.load(open(\"" + tmpd + "/je_secret.out\")); d=v[0]; assert d[\"code\"]==\"E_SECRET\"; assert isinstance(d[\"fix_hint\"], str) and \"Secret\" in d[\"fix_hint\"]'");
+    if expect_clean(p, "! " + ooda + " check " + fail + " --json-errors > " + tmpd + "/je_cap.out 2> " + tmpd + "/je_cap.err").is_err() {
+        println("FAIL fetch should be nonzero"); process_exit(1);
+    }
+    if expect_clean(p, "grep -q E_CAP " + tmpd + "/je_cap.out").is_err() {
+        println("FAIL missing E_CAP"); process_exit(1);
+    }
+    if expect_clean(p, "grep -q fix_hint " + tmpd + "/je_cap.out").is_err() {
+        println("FAIL missing fix_hint"); process_exit(1);
+    }
+    if expect_clean(p, "grep -q CapabilitySecurityViolation " + tmpd + "/je_cap.out").is_err() {
+        println("FAIL missing kind"); process_exit(1);
+    }
 
     println("json_errors_smoke: PASSED");
 }

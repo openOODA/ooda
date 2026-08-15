@@ -1,31 +1,34 @@
 // # Dispatch the product ooda CLI
 //
-// Logline: Route argv under FsCap and SysCap into scripts/ooda_product.sh with quoted args.
+// Logline: Route argv under FsCap and SysCap. Product commands are native .oo.
 //
-// Setup: Pure .oo CLI; every user arg is single-quote escaped before sh -c.
+// Setup: Check, build, run, test, dump, outline, reflect, patch, and fix call oodac or in-process drivers.
 //
 // Beats:
-//   1. Print help/version and reject beta-out commands.
-//   2. Forward token-min, check, dump, test, build, run, outline, reflect, patch, and fix.
+//   1. Print help and reject beta-out and residual commands.
+//   2. Forward product cmds to host_run, patch_drive, or fix_drive.
 //   3. Exit 2 on unknown command.
 
-import "product_sh.oo";
 import "build_args.oo";
+import "fix_drive.oo";
+import "host_run.oo";
+import "json_check.oo";
+import "patch_drive.oo";
 
 fn print_help() {
     println("ooda 0.199.0-alpha — pure .oo product CLI");
     println("usage: ooda <cmd> …");
-    println("build/check:  check|build|run|test|dump|patch|fix");
-    println("token-min:    outline|reflect|context|digest|health|err-digest");
-    println("  ooda outline <file.oo>              # pub sigs only (~1% source)");
-    println("  ooda reflect <file.oo> [sym]        # JSON caps+sig");
-    println("  ooda context <file.oo[#sym]|file sym>  # outline+symbol slice JSON");
-    println("  ooda digest [--emit-sample]         # session orient pack");
-    println("  ooda health [mod…]                  # emit OK/SEGV matrix (no C)");
-    println("  ooda err-digest [log|-]             # compress gcc/ERR logs");
-    println("  ooda run [--engine bc|native] <file.oo>");
     println("  ooda check <file.oo> [--json-errors]");
-    println("residual: --fuzz; wasm floor");
+    println("  ooda build <file.oo> [-o out] [--target c|native|llvm]");
+    println("  ooda run <file.oo>");
+    println("  ooda test <file.oo>                 # run verify/assert (OODA_TEST)");
+    println("beta-out: lsp pkg bench");
+    println("  ooda dump tokens|ast|check <file.oo>");
+    println("  ooda outline <file.oo> [--json]");
+    println("  ooda reflect <file.oo> [sym]");
+    println("  ooda patch <file.oo> --replace-fn <n> --with <body>");
+    println("  ooda fix <file.oo> [--yes]");
+    println("residual: context digest health err-digest pkg add --fuzz --engine bc wasm");
 }
 
 pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
@@ -47,30 +50,12 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
         println("ERR\tcli\tbeta-out command: " + cmd);
         process_exit(2);
     }
-
-    // Product token-minimization (SPEC §12): context/outline/reflect/digest/health
     if cmd == "em" || cmd == "context" || cmd == "migrate"
         || cmd == "digest" || cmd == "health" || cmd == "err-digest"
-        || cmd == "pack" || cmd == "context-pack" || cmd == "emit-health" || cmd == "errdigest" {
-        let mut subargs: List[String] = list_new();
-        let mut k = 1;
-        while k < list_len(args) {
-            subargs = list_push(subargs, list_get(args, k));
-            k = k + 1;
-        }
-        product_sh(sys, cmd, subargs);
-        return;
-    }
-
-    if cmd == "add" || cmd == "install" {
-        let mut subargs: List[String] = list_new();
-        let mut k = 1;
-        while k < list_len(args) {
-            subargs = list_push(subargs, list_get(args, k));
-            k = k + 1;
-        }
-        product_sh(sys, cmd, subargs);
-        return;
+        || cmd == "pack" || cmd == "context-pack" || cmd == "emit-health" || cmd == "errdigest"
+        || cmd == "add" || cmd == "install" {
+        println("ERR\tcli\tresidual command: " + cmd);
+        process_exit(2);
     }
 
     if cmd == "check" {
@@ -80,17 +65,17 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
         let mut i = 1;
         while i < list_len(args) {
             let a = list_get(args, i);
-            if a == "--json-errors" || a == "-json" { json = true; }
+            if a == "--json-errors" || a == "-json" || a == "--json" { json = true; }
             else if str_slice(a, 0, 1) != "-" { if path == "" { path = a; } }
             i = i + 1;
         }
         if path == "" { println("ooda check: missing file"); process_exit(2); }
         if !path_exists(fs, path) { println("ERR\tcheck\tunreadable file: " + path); process_exit(2); }
-        let mut fwd: List[String] = list_new();
-        fwd = list_push(fwd, "check");
-        fwd = list_push(fwd, path);
-        if json { fwd = list_push(fwd, "--json-errors"); }
-        product_sh(sys, "forward", fwd);
+        if json {
+            run_check_json(fs, sys, path);
+            return;
+        }
+        run_oodac_check(fs, sys, path, false);
         return;
     }
 
@@ -98,41 +83,62 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
         if list_len(args) < 3 { println("ooda dump: usage: dump tokens|ast|check <file>"); process_exit(2); }
         let kind = list_get(args, 1);
         if kind != "tokens" && kind != "ast" && kind != "check" { println("ooda dump: unknown kind (tokens|ast|check)"); process_exit(2); }
-        let mut fwd: List[String] = list_new();
-        fwd = list_push(fwd, kind);
-        fwd = list_push(fwd, list_get(args, 2));
-        product_sh(sys, "forward", fwd);
+        let dpath: String = list_get(args, 2);
+        if !path_exists(fs, dpath) {
+            println("ERR\tdump\tunreadable file: " + dpath);
+            process_exit(2);
+        }
+        let mut dargv: List[String] = list_new();
+        dargv = list_push(dargv, kind);
+        dargv = list_push(dargv, dpath);
+        run_oodac(fs, sys, dargv);
         return;
     }
 
     if cmd == "test" {
         if list_len(args) < 2 { println("ooda test: missing file"); process_exit(2); }
-        let mut targs: List[String] = list_new();
-        let mut j = 1;
-        while j < list_len(args) {
-            let a = list_get(args, j);
-            targs = list_push(targs, a);
-            j = j + 1;
+        let mut tpath = "";
+        let mut ti = 1;
+        while ti < list_len(args) {
+            let ta: String = list_get(args, ti);
+            if ta == "--fuzz" || (chars_len(ta) >= 6 && str_slice(ta, 0, 6) == "--fuzz") {
+                println("ERR\tcli\t--fuzz residual");
+                process_exit(2);
+            }
+            if ta == "--engine" || (chars_len(ta) >= 8 && str_slice(ta, 0, 8) == "--engine") {
+                println("ERR\tcli\t--engine on test residual");
+                process_exit(2);
+            }
+            if str_slice(ta, 0, 1) != "-" {
+                if tpath == "" { tpath = ta; }
+            }
+            ti = ti + 1;
         }
-        product_sh(sys, "test", targs);
+        if tpath == "" {
+            println("ooda test: missing file");
+            process_exit(2);
+        }
+        if !path_exists(fs, tpath) {
+            println("ERR\ttest\tunreadable file: " + tpath);
+            process_exit(2);
+        }
+        run_oodac_test(fs, sys, tpath);
         return;
     }
 
     if cmd == "build" {
         let bargs: List[String] = cli_build_args(args);
-        product_sh(sys, "build", bargs);
+        run_oodac_build(fs, sys, bargs);
         return;
     }
 
     if cmd == "run" {
         let fwd: List[String] = cli_run_args(args);
-        product_sh(sys, "run", fwd);
+        run_oodac_run(fs, sys, fwd);
         return;
     }
 
     if cmd == "outline" || cmd == "reflect" {
-        // Mirror check path (extras as explicit flags — avoid generic
-        // arg-copy loops that SEGV under current list/string ARC residual).
         if list_len(args) < 2 {
             println("ooda " + cmd + ": missing file");
             process_exit(2);
@@ -160,16 +166,16 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
             println("ERR\t" + cmd + "\tunreadable file: " + path);
             process_exit(2);
         }
-        let mut fwd: List[String] = list_new();
-        fwd = list_push(fwd, cmd);
-        fwd = list_push(fwd, path);
+        let mut oargv: List[String] = list_new();
         if json {
-            fwd = list_push(fwd, "--json");
+            oargv = list_push(oargv, "--json");
         }
+        oargv = list_push(oargv, cmd);
+        oargv = list_push(oargv, path);
         if sym != "" {
-            fwd = list_push(fwd, sym);
+            oargv = list_push(oargv, sym);
         }
-        product_sh(sys, "forward", fwd);
+        run_oodac(fs, sys, oargv);
         return;
     }
     if cmd == "patch" {
@@ -183,10 +189,9 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
             pargs = list_push(pargs, list_get(args, k));
             k = k + 1;
         }
-        product_sh(sys, "patch", pargs);
+        run_ooda_patch(fs, sys, pargs);
         return;
     }
-    // M155/M158/M165: bounded E_CAP + E_TC + E_HITL structural auto-fix (not free-form suggested_fix)
     if cmd == "fix" {
         if list_len(args) < 2 {
             println("ooda fix: missing file");
@@ -198,7 +203,7 @@ pub fn main(fs: &FsCap, sys: &SysCap, args: List[String]) {
             fargs = list_push(fargs, list_get(args, fk));
             fk = fk + 1;
         }
-        product_sh(sys, "fix", fargs);
+        run_ooda_fix(fs, sys, fargs);
         return;
     }
 

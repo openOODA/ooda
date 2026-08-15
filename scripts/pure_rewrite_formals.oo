@@ -1,0 +1,246 @@
+// # Pure Rewrite Formals
+//
+// Logline: Seed softener: strip formal parameter ARC releases and reassign __tmp releases (caller owns formals).
+//
+// Setup: Pure AST/C rewriter; callable as a library function or standalone script with Process/Fs capabilities.
+//
+// Beats:
+//   1. Match C function definitions and extract formal parameter names.
+//   2. Scan function bodies respecting nested braces, strings, and character literals.
+//   3. Strip oo_*_release calls on formal parameters.
+//   4. Rewrite formal parameter reassign blocks to eliminate __tmp release.
+//   5. Verify transformations with built-in scenario test cases.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+import "std/str.oo";
+
+pub fn scan_c_braces(t: String, start: Int) -> Int {
+    let n = chars_len(t);
+    let mut brace_count = 1;
+    let mut curr = start;
+    let mut in_str = false;
+    let mut in_chr = false;
+    let mut escape = false;
+    while curr < n && brace_count > 0 {
+        let ch = char_at(t, curr);
+        if escape {
+            escape = false;
+            curr = curr + 1;
+        } else if in_str {
+            if ch == "\\" { escape = true; }
+            else if ch == "\"" { in_str = false; }
+            curr = curr + 1;
+        } else if in_chr {
+            if ch == "\\" { escape = true; }
+            else if ch == "'" { in_chr = false; }
+            curr = curr + 1;
+        } else if ch == "\"" {
+            in_str = true;
+            curr = curr + 1;
+        } else if ch == "'" {
+            in_chr = true;
+            curr = curr + 1;
+        } else {
+            if ch == "{" { brace_count = brace_count + 1; }
+            else if ch == "}" { brace_count = brace_count - 1; }
+            curr = curr + 1;
+        }
+    }
+    return curr;
+}
+
+pub fn parse_formals(raw: String) -> List[String] {
+    let mut formals: List[String] = list_new();
+    let n = chars_len(raw);
+    let mut start = 0;
+    while start < n {
+        let mut end = start;
+        while end < n && char_at(raw, end) != "," { end = end + 1; }
+        let part = str_slice(raw, start, end);
+        let name = extract_param_name(part);
+        if chars_len(name) > 0 && name != "void" {
+            formals = list_push(formals, name);
+        }
+        start = end + 1;
+    }
+    return formals;
+}
+
+fn extract_param_name(part: String) -> String {
+    let n = chars_len(part);
+    let mut i = n - 1;
+    while i >= 0 && (char_at(part, i) == " " || char_at(part, i) == "\t" || char_at(part, i) == "\r" || char_at(part, i) == "\n") {
+        i = i - 1;
+    }
+    if i < 0 { return ""; }
+    let end_ident = i + 1;
+    while i >= 0 {
+        let c = char_at(part, i);
+        if char_is_alpha(c) || char_is_digit(c) || c == "_" { i = i - 1; } else { break; }
+    }
+    let name = str_slice(part, i + 1, end_ident);
+    if chars_len(name) > 0 {
+        let c0 = char_at(name, 0);
+        if char_is_alpha(c0) || c0 == "_" { return name; }
+    }
+    return "";
+}
+
+pub fn is_formal(formals: List[String], name: String) -> Bool {
+    let n = list_len(formals);
+    let mut i = 0;
+    while i < n {
+        if list_get(formals, i) == name { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn is_ret_type(t: String) -> Bool {
+    return t == "void" || t == "int" || t == "long long" || t == "double" || t == "float" || t == "bool" || t == "OoStr" || t == "OoSList" || t == "OoIList" || t == "OoResS" || t == "OoResV" || t == "Token";
+}
+
+fn find_fn_header(t: String, start_pos: Int) -> List[Int] {
+    let n = chars_len(t);
+    let mut i = start_pos;
+    while i < n {
+        let mut line_start = i;
+        while line_start < n && (char_at(t, line_start) == " " || char_at(t, line_start) == "\t") { line_start = line_start + 1; }
+        let mut p = line_start;
+        while p < n && (char_is_alpha(char_at(t, p)) || char_at(t, p) == "_") { p = p + 1; }
+        let mut w1 = str_slice(t, line_start, p);
+        if w1 == "static" || w1 == "inline" {
+            while p < n && (char_at(t, p) == " " || char_at(t, p) == "\t") { p = p + 1; }
+            let p2 = p;
+            while p < n && (char_is_alpha(char_at(t, p)) || char_at(t, p) == "_") { p = p + 1; }
+            w1 = str_slice(t, p2, p);
+        }
+        if w1 == "long" {
+            let p_save = p;
+            while p < n && (char_at(t, p) == " " || char_at(t, p) == "\t") { p = p + 1; }
+            let p3 = p;
+            while p < n && (char_is_alpha(char_at(t, p)) || char_at(t, p) == "_") { p = p + 1; }
+            if str_slice(t, p3, p) == "long" { w1 = "long long"; } else { p = p_save; }
+        }
+        if is_ret_type(w1) {
+            while p < n && (char_at(t, p) == " " || char_at(t, p) == "\t") { p = p + 1; }
+            let fn_name_start = p;
+            while p < n && (char_is_alpha(char_at(t, p)) || char_is_digit(char_at(t, p)) || char_at(t, p) == "_") { p = p + 1; }
+            if p > fn_name_start {
+                while p < n && (char_at(t, p) == " " || char_at(t, p) == "\t") { p = p + 1; }
+                if p < n && char_at(t, p) == "(" {
+                    let open_paren = p;
+                    let mut close_paren = open_paren + 1;
+                    while close_paren < n && char_at(t, close_paren) != ")" { close_paren = close_paren + 1; }
+                    if close_paren < n {
+                        let mut brace = close_paren + 1;
+                        while brace < n && (char_at(t, brace) == " " || char_at(t, brace) == "\t" || char_at(t, brace) == "\n" || char_at(t, brace) == "\r") { brace = brace + 1; }
+                        if brace < n && char_at(t, brace) == "{" {
+                            let mut res: List[Int] = list_new();
+                            res = list_push(list_push(list_push(list_push(res, i), open_paren + 1), close_paren), brace);
+                            return res;
+                        }
+                    }
+                }
+            }
+        }
+        while i < n && char_at(t, i) != "\n" { i = i + 1; }
+        if i < n { i = i + 1; }
+    }
+    return list_new();
+}
+
+pub fn strip_formal_param_releases(t: String) -> String {
+    let mut out = "";
+    let mut pos = 0;
+    let n = chars_len(t);
+    while pos < n {
+        let match_info = find_fn_header(t, pos);
+        if list_len(match_info) == 0 {
+            out = out + str_slice(t, pos, n);
+            break;
+        }
+        let fn_start = list_get(match_info, 0);
+        let formals_start = list_get(match_info, 1);
+        let formals_end = list_get(match_info, 2);
+        let brace_pos = list_get(match_info, 3);
+        let formals = parse_formals(str_slice(t, formals_start, formals_end));
+        let body_end = scan_c_braces(t, brace_pos + 1);
+
+        if fn_start > pos { out = out + str_slice(t, pos, fn_start); }
+        let fn_text = str_slice(t, fn_start, body_end);
+        out = out + if list_len(formals) > 0 { rewrite_fn_body(fn_text, formals) } else { fn_text };
+        pos = body_end;
+    }
+    return out;
+}
+
+fn rewrite_fn_body(fn_text: String, formals: List[String]) -> String {
+    let mut s = fn_text;
+    let n_formals = list_len(formals);
+    let mut fi = 0;
+    while fi < n_formals {
+        let f = list_get(formals, fi);
+        s = strip_reassign_for_var(s, f);
+        s = str_replace(s, "oo_str_release(" + f + ");", "/* no release formal " + f + " */");
+        s = str_replace(s, "oo_slist_release(" + f + ");", "/* no release formal " + f + " */");
+        s = str_replace(s, "oo_ilist_release(" + f + ");", "/* no release formal " + f + " */");
+        s = str_replace(s, "oo_str_release (" + f + ");", "/* no release formal " + f + " */");
+        s = str_replace(s, "oo_slist_release (" + f + ");", "/* no release formal " + f + " */");
+        s = str_replace(s, "oo_ilist_release (" + f + ");", "/* no release formal " + f + " */");
+        fi = fi + 1;
+    }
+    return s;
+}
+
+fn strip_reassign_for_var(s: String, var: String) -> String {
+    let mut res = s;
+    let tys: List[String] = list_new();
+    let tys2 = list_push(list_push(list_push(tys, "OoStr"), "OoSList"), "OoIList");
+    let rels: List[String] = list_new();
+    let rels2 = list_push(list_push(list_push(rels, "oo_str_release"), "oo_slist_release"), "oo_ilist_release");
+    let mut ti = 0;
+    while ti < 3 {
+        let ty = list_get(tys2, ti);
+        let rel = list_get(rels2, ti);
+        let prefix = "{ " + ty + " __tmp = " + var + "; " + var + " = ";
+        res = replace_pattern_block(res, prefix, "; " + rel + "(__tmp); }", "/* no release formal reassign " + var + " */ " + var + " = ");
+        res = replace_pattern_block(res, prefix, "; " + rel + " (__tmp); }", "/* no release formal reassign " + var + " */ " + var + " = ");
+        ti = ti + 1;
+    }
+    return res;
+}
+
+fn replace_pattern_block(s: String, prefix: String, suffix: String, repl_prefix: String) -> String {
+    let mut current = s;
+    let mut out = "";
+    let plen = chars_len(prefix);
+    let slen = chars_len(suffix);
+    while true {
+        let idx = str_index_of(current, prefix);
+        if idx < 0 { out = out + current; break; }
+        let after_prefix = idx + plen;
+        let s_idx = str_index_of(str_slice(current, after_prefix, chars_len(current)), suffix);
+        if s_idx < 0 { out = out + current; break; }
+        let rhs = str_slice(current, after_prefix, after_prefix + s_idx);
+        out = out + str_slice(current, 0, idx) + repl_prefix + rhs + ";";
+        current = str_slice(current, after_prefix + s_idx + slen, chars_len(current));
+    }
+    return out;
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let _ = scenario(p, fs, "pure_rewrite_formals smoke and unit verification");
+
+    let fn_src = "OoStr test_fn(OoStr formal_a, int x) {\n    OoStr local_b = formal_a;\n    oo_str_release(formal_a);\n    oo_str_release(local_b);\n    return local_b;\n}\n";
+    let res = strip_formal_param_releases(fn_src);
+    assert_eq!(str_contains(res, "/* no release formal formal_a */"), true);
+    assert_eq!(str_contains(res, "oo_str_release(local_b);"), true);
+
+    let reassign_src = "void mutate_fn(OoStr formal_s) {\n    { OoStr __tmp = formal_s; formal_s = other; oo_str_release(__tmp); }\n}\n";
+    let res2 = strip_formal_param_releases(reassign_src);
+    assert_eq!(str_contains(res2, "/* no release formal reassign formal_s */ formal_s = other;"), true);
+
+    println("pure_rewrite_formals: PASSED");
+}

@@ -2,12 +2,12 @@
 //
 // Logline: Escapes diagnostic text, maps ERR kinds to stable codes, and reprints a check run as a JSON array.
 //
-// Setup: FsCap and SysCap are required; codes live in bootstrap/DIAG_CODES.oot; path and msg are JSON-escaped; re-run uses sys_exec and /tmp capture files.
+// Setup: FsCap and SysCap are required. --json-errors arms the runtime printer and checks in-process.
 //
 // Beats:
 //   1. Escape backslash, quote, newline, and tab; map kind to E_* and attach a token-cheap fix_hint.
 //   2. Pack one object with code, line, col, msg, path, and fix_hint; E_CAP and E_TC add extra kind fields.
-//   3. Find oodac_check_capture.sh, re-run check, convert ERR lines to JSON, print it, and exit 1 when the capture is bad.
+//   3. run_check_json_errors arms the printer, runs check in this process, and prints JSON. No capture .sh.
 
 pub fn diag_json_escape(s: String) -> String {
     let n = chars_len(s);
@@ -99,7 +99,7 @@ pub fn diag_fix_hint(code: String) -> String {
     if code == "E_HITL" {
         return "HITL deny-mode: remove // HITL: pause for CI/check, or use interactive harness residual (HITL.oot).";
     }
-    return "See bootstrap/DIAG_CODES.oot for code " + code + ".";
+    return "See openOODA/SHIPPED.oot and ROADMAP.oot for code " + code + ".";
 }
 
 pub fn diag_obj_json(code: String, line: String, col: String, msg: String, path: String) -> String {
@@ -132,9 +132,6 @@ pub fn diag_emit_load_err(path: String, msg: String) {
     println("[" + obj + "]");
 }
 
-// residual (bootstrap shell composition): --json-errors re-runs plain check via
-// sys_exec(sh -c) + fixed /tmp capture files. Not in-process; product CLI path
-// is shell_sq-safe separately. Path here single-quote escaped (not " glue).
 // Shared by main.oo build path (pub — multi-module link, one def).
 pub fn shell_sq(s: String) -> String {
     let n: Int = chars_len(s);
@@ -152,51 +149,14 @@ pub fn shell_sq(s: String) -> String {
     return out + "'";
 }
 
-// Re-run plain check; convert ERR lines → JSON (all error sites).
-// Use let-match (decl=1), never mut match-assign — M23 UAF zeroed first 8 msg bytes.
+// OPEN-8: in-process check. Arm the runtime JSON printer, then run check
+// in this process. No capture .sh and no second oodac exec.
 pub fn run_check_json_errors(fs: &FsCap, sys: &SysCap, path: String) {
-    let outp: String = "/tmp/oodac_json_errors_out.txt";
-    let ecp: String = "/tmp/oodac_json_errors_ec.txt";
-    // Helper: argv only (no sh -c quote bugs). Prefer tree path via path_exists.
-    let h1: String = "scripts/oodac_check_capture.sh";
-    let h2: String = "./scripts/oodac_check_capture.sh";
-    let h3: String = "/home/jeryd/Projects/openOODA/ooda/scripts/oodac_check_capture.sh";
-    let mut helper: String = h3;
-    if path_exists(fs, h1) {
-        helper = h1;
-    } else if path_exists(fs, h2) {
-        helper = h2;
-    }
-    let _r = sys_exec(sys, "sh", helper, path, outp, ecp);
-    let out_r = read_file(fs, outp);
-    let out: String = match out_r {
-        Ok(s) => s,
-        Err(_e) => "ERR\tload\tcapture missing",
-    };
-    let ec_r = read_file(fs, ecp);
-    let ec_s: String = match ec_r {
-        Ok(s) => s,
-        Err(_e) => "1",
-    };
-    let json: String = diag_check_output_to_json(out, path);
-    // stdout only — do not re-shell-echo JSON (quotes/nulls break sh -c).
-    println(json);
-    let mut ec_trim: String = ec_s;
-    if chars_len(ec_trim) > 0 {
-        if char_at(ec_trim, chars_len(ec_trim) - 1) == "\n" {
-            ec_trim = str_slice(ec_trim, 0, chars_len(ec_trim) - 1);
-        }
-    }
-    let mut bad = false;
-    if parse_int(ec_trim) != 0 {
-        bad = true;
-    }
-    if json != "[]" {
-        if diag_find(json, "E_") >= 0 {
-            bad = true;
-        }
-    }
-    if bad {
+    let arm: String = "mkdir -p .ooda-cache/ooda-tmp && : > .ooda-cache/ooda-tmp/json_errors.arm";
+    let ar: Result[String, String] = sys_exec(sys, "sh", "-c", arm);
+    if ar.is_err() {
+        println("ERR\tcheck\tcannot arm json-errors");
         process_exit(1);
     }
+    run_check_path(fs, sys, path);
 }

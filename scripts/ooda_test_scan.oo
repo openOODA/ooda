@@ -1,0 +1,202 @@
+// # OODA Test Scan
+//
+// Logline: Scan .oo verify and assert blocks to emit a standalone test harness without Python execution.
+//
+// Setup: Imports parse utilities and operates purely on source text to construct assert statements and harness functions.
+//
+// Beats:
+//   1. Import parse utilities and scan types.
+//   2. Provide string search, identifier scanners, and newline trimmers.
+//   3. collect_verifies scans top-level items, functions, verify blocks, and assert macros.
+
+import "ooda_test_parse_util.oo";
+import "ooda_test_scan_types.oo";
+
+pub fn find_sub(text: String, sub: String, start_pos: Int) -> Int {
+    let sub_len = chars_len(sub);
+    let n = chars_len(text);
+    if sub_len == 0 {
+        return start_pos;
+    }
+    let mut i = start_pos;
+    while i + sub_len <= n {
+        if str_slice(text, i, i + sub_len) == sub {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+pub fn scan_ident(text: String, i0: Int, n: Int) -> String {
+    if i0 >= n {
+        return "";
+    }
+    let c0 = char_at(text, i0);
+    if !(char_is_alpha(c0) || c0 == "_") {
+        return "";
+    }
+    let mut i = i0 + 1;
+    while i < n {
+        let c = char_at(text, i);
+        if char_is_alpha(c) || char_is_digit(c) || c == "_" {
+            i = i + 1;
+        } else {
+            return str_slice(text, i0, i);
+        }
+    }
+    return str_slice(text, i0, i);
+}
+
+pub fn trim_right_newlines(s: String) -> String {
+    let mut n = chars_len(s);
+    while n > 0 {
+        let c = char_at(s, n - 1);
+        if c == " " || c == "\t" || c == "\r" || c == "\n" {
+            n = n - 1;
+        } else {
+            break;
+        }
+    }
+    return str_slice(s, 0, n);
+}
+
+pub fn collect_verifies(text: String) -> VerifyScan {
+    let n = chars_len(text);
+    let mut asserts: List[AssertItem] = list_new();
+    let mut fns: List[String] = list_new();
+    let mut verify_count = 0;
+    let mut i = 0;
+    while i < n {
+        i = skip_ws(text, i, n);
+        if i >= n {
+            break;
+        }
+        if i + 2 <= n && str_slice(text, i, i + 2) == "//" {
+            while i < n && char_at(text, i) != "\n" {
+                i = i + 1;
+            }
+            continue;
+        }
+        if i + 2 <= n && str_slice(text, i, i + 2) == "/*" {
+            let end_comment = find_sub(text, "*/", i + 2);
+            if end_comment < 0 {
+                println("ERR\ttest_scan\tunclosed block comment");
+                process_exit(1);
+            }
+            i = end_comment + 2;
+            continue;
+        }
+        let start_item = i;
+        let mut cur = i;
+        let j_pub = match_kw(text, cur, n, "pub");
+        if j_pub >= 0 {
+            cur = skip_ws(text, j_pub, n);
+        }
+
+        let j_fn = match_kw(text, cur, n, "fn");
+        if j_fn >= 0 {
+            cur = skip_ws(text, j_fn, n);
+            let fname = scan_ident(text, cur, n);
+            if chars_len(fname) == 0 {
+                println("ERR\ttest_scan\tfn without name");
+                process_exit(1);
+            }
+            cur = cur + chars_len(fname);
+            cur = skip_ws(text, cur, n);
+            if cur >= n || char_at(text, cur) != "(" {
+                println("ERR\ttest_scan\tfn " + fname + ": expected (");
+                process_exit(1);
+            }
+            cur = skip_paren_group(text, cur, n);
+            if cur < 0 {
+                println("ERR\ttest_scan\tfn " + fname + ": unbalanced paren");
+                process_exit(1);
+            }
+            cur = skip_ws(text, cur, n);
+            if cur + 2 <= n && str_slice(text, cur, cur + 2) == "->" {
+                cur = skip_ws(text, cur + 2, n);
+                while cur < n && char_at(text, cur) != "{" {
+                    cur = cur + 1;
+                }
+            }
+            cur = skip_ws(text, cur, n);
+            if cur >= n || char_at(text, cur) != "{" {
+                println("ERR\ttest_scan\tfn " + fname + ": expected body {");
+                process_exit(1);
+            }
+            let end_body = skip_balanced(text, cur, n, "{", "}");
+            if end_body < 0 {
+                println("ERR\ttest_scan\tfn " + fname + ": unbalanced body {");
+                process_exit(1);
+            }
+            let chunk = str_slice(text, start_item, end_body);
+            if fname != "main" {
+                fns = list_push(fns, trim_right_newlines(chunk) + "\n");
+            }
+            i = end_body;
+            continue;
+        }
+
+        let j_ver = match_kw(text, start_item, n, "verify");
+        if j_ver >= 0 {
+            cur = skip_ws(text, j_ver, n);
+            let vname = scan_ident(text, cur, n);
+            if chars_len(vname) == 0 {
+                println("ERR\ttest_scan\tverify without name");
+                process_exit(1);
+            }
+            cur = cur + chars_len(vname);
+            cur = skip_ws(text, cur, n);
+            if cur >= n || char_at(text, cur) != "{" {
+                println("ERR\ttest_scan\tverify " + vname + ": expected {");
+                process_exit(1);
+            }
+            let body_start = cur + 1;
+            let end_ver = skip_balanced(text, cur, n, "{", "}");
+            if end_ver < 0 {
+                println("ERR\ttest_scan\tverify " + vname + ": unbalanced {");
+                process_exit(1);
+            }
+            let b = str_slice(text, body_start, end_ver - 1);
+            verify_count = verify_count + 1;
+            asserts = scan_verify_block(b, vname, asserts);
+            i = end_ver;
+            continue;
+        }
+
+        let mut i_type = start_item;
+        let j_pub2 = match_kw(text, start_item, n, "pub");
+        if j_pub2 >= 0 {
+            i_type = skip_ws(text, j_pub2, n);
+        }
+        let mut j_match = match_kw(text, i_type, n, "type");
+        if j_match < 0 {
+            j_match = match_kw(text, start_item, n, "import");
+        }
+        if j_match >= 0 {
+            let start_i = start_item;
+            while i < n && char_at(text, i) != ";" {
+                i = i + 1;
+            }
+            if i < n {
+                i = i + 1;
+            }
+            if match_kw(text, start_i, n, "import") >= 0 {
+                fns = list_push(fns, str_slice(text, start_i, i));
+            }
+            continue;
+        }
+
+        let snip_len = if start_item + 40 <= n { 40 } else { n - start_item };
+        let snippet = str_slice(text, start_item, start_item + snip_len);
+        println("ERR\ttest_scan\tunsupported top-level near: " + snippet);
+        process_exit(1);
+    }
+
+    return VerifyScan {
+        fns: fns,
+        asserts: asserts,
+        verify_count: verify_count,
+    };
+}

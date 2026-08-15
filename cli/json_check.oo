@@ -1,0 +1,161 @@
+// # Convert oodac check text to JSON
+//
+// Logline: Run a plain check and reprint ERR lines as a JSON array.
+//
+// Setup: find_oodac and sq live in host_run.oo. Product oodac --json-errors is in-process.
+//
+// Beats:
+//   1. Capture check stdout and stderr without a helper .sh file.
+//   2. Map capability, type, and parse lines to stable codes.
+//   3. Print the array and exit 1 when any object was found.
+
+import "host_run.oo";
+
+fn je_has(s: String, sub: String) -> Bool {
+    let n = chars_len(s);
+    let m = chars_len(sub);
+    if m > n { return false; }
+    let mut i = 0;
+    while i + m <= n {
+        if str_slice(s, i, i + m) == sub { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn je_esc(s: String) -> String {
+    let n = chars_len(s);
+    let mut out = "";
+    let mut i = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "\\" { out = out + "\\\\"; }
+        else if c == "\"" { out = out + "\\\""; }
+        else if c == "\n" { out = out + "\\n"; }
+        else { out = out + c; }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn je_code(line: String) -> String {
+    if je_has(line, "capability") { return "E_CAP"; }
+    if je_has(line, "undefined variable") { return "E_TC"; }
+    if je_has(line, "ERR\ttype\t") { return "E_TC"; }
+    if je_has(line, "ERR\tparse\t") { return "E_PARSE"; }
+    if je_has(line, "ERR\t") { return "E_OTHER"; }
+    return "";
+}
+
+fn je_digits(s: String, start: Int) -> String {
+    let n = chars_len(s);
+    let mut i = start;
+    let mut out = "";
+    while i < n {
+        let c: String = char_at(s, i);
+        if char_is_digit(c) {
+            out = out + c;
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    if out == "" {
+        return "0";
+    }
+    return out;
+}
+
+fn je_loc(line: String) -> String {
+    let a: Int = je_has_at(line, "Type error at ");
+    if a >= 0 {
+        let ls: Int = a + 14;
+        let ln: String = je_digits(line, ls);
+        let p: Int = ls + chars_len(ln);
+        let mut col = "0";
+        if p < chars_len(line) {
+            if char_at(line, p) == ":" {
+                col = je_digits(line, p + 1);
+            }
+        }
+        return ln + "\t" + col;
+    }
+    let b: Int = je_has_at(line, " at line ");
+    if b >= 0 {
+        let ls2: Int = b + 9;
+        let ln2: String = je_digits(line, ls2);
+        let cpos: Int = je_has_at(line, ", col ");
+        let mut col2 = "0";
+        if cpos >= 0 {
+            col2 = je_digits(line, cpos + 6);
+        }
+        return ln2 + "\t" + col2;
+    }
+    return "0\t0";
+}
+
+fn je_has_at(s: String, sub: String) -> Int {
+    let n = chars_len(s);
+    let m = chars_len(sub);
+    if m > n { return 0 - 1; }
+    let mut i = 0;
+    while i + m <= n {
+        if str_slice(s, i, i + m) == sub { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+pub fn run_check_json(fs: &FsCap, sys: &SysCap, path: String) {
+    let oodac: String = find_oodac(fs);
+    let outp = ".ooda-cache/ooda-tmp/je.out";
+    let errp = ".ooda-cache/ooda-tmp/je.err";
+    let cmd: String = "mkdir -p .ooda-cache/ooda-tmp; " + sq(oodac) + " check " + sq(path)
+        + " > " + sq(outp) + " 2> " + sq(errp) + "; exit 0";
+    let ign: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    if ign.is_ok() {
+        let hold = 0;
+        if hold != 0 { println(""); }
+    }
+    let mut acc = "";
+    let ro: Result[String, String] = read_file(fs, outp);
+    match ro { Ok(s) => { acc = acc + s; } Err(m) => {} }
+    let re: Result[String, String] = read_file(fs, errp);
+    match re { Ok(s2) => { acc = acc + "\n" + s2; } Err(m2) => {} }
+    let mut json = "[";
+    let mut nobj = 0;
+    let mut ls = 0;
+    let n = chars_len(acc);
+    let mut i = 0;
+    while i <= n {
+        if i == n || char_at(acc, i) == "\n" {
+            let line: String = str_slice(acc, ls, i);
+            let code: String = je_code(line);
+            if code != "" {
+                if nobj > 0 { json = json + ","; }
+                let hint = "See openOODA/SHIPPED.oot and ROADMAP.oot.";
+                let mut extra = "";
+                if code == "E_CAP" {
+                    extra = ",\"kind\":\"CapabilitySecurityViolation\",\"suggested_fix\":\"Add a matching &Cap parameter\"";
+                }
+                let loc: String = je_loc(line);
+                let tab: Int = je_has_at(loc, "\t");
+                let mut ln: String = loc;
+                let mut col: String = "0";
+                if tab >= 0 {
+                    ln = str_slice(loc, 0, tab);
+                    col = str_slice(loc, tab + 1, chars_len(loc));
+                }
+                json = json + "{\"code\":\"" + code + "\",\"line\":" + ln + ",\"col\":" + col + ",\"msg\":\""
+                    + je_esc(line) + "\",\"path\":\"" + je_esc(path)
+                    + "\",\"fix_hint\":\"" + hint + "\"" + extra + "}";
+                nobj = nobj + 1;
+            }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    json = json + "]";
+    println(json);
+    if nobj > 0 { process_exit(1); }
+}
