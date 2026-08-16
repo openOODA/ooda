@@ -1,0 +1,192 @@
+// # Product add from a file-backed vendor
+//
+// Logline: Resolve named or manifest deps, write CAS/lock/vendor, and print text or --json.
+//
+// Setup: Default vendor ../registry. --from DIR is offline. No HTTP.
+//
+// Beats:
+//   1. Refuse network, traversal names, missing rows, extra caps, and sha/sig miss.
+//   2. Install each resolved node into CAS, copy vendor/<payload>, write the lock.
+//   3. Structured ERR on failure. --json prints a machine object.
+
+import "cmd_pm_cat.oo";
+import "cmd_pm_io.oo";
+import "pm_resolve.oo";
+import "pm_sign.oo";
+import "pm_store.oo";
+
+fn pm_check_pkg(fs: &FsCap, dir: String, name: String, live: String) -> String {
+    let man: String = pm_slurp(fs, dir + "/manifest");
+    let want: String = pm_kv(man, "sha256");
+    if want != "" {
+        if want != live {
+            return "sha256 mismatch " + name;
+        }
+    }
+    let sig: String = pm_kv(man, "sig");
+    if sig != "" {
+        if !pm_sign_ok("ooda-local-pm", name, pm_kv(man, "version"), live, sig) {
+            return "sig mismatch " + name;
+        }
+    }
+    return "";
+}
+
+fn pm_add_body(fs: &FsCap, sys: &SysCap, vendor: String, name: String, from: String) -> String {
+    let cat: String = pm_load_work_catalog(fs, sys, vendor);
+    if name != "" {
+        return pm_resolve(cat, name, 1);
+    }
+    if from != "" {
+        let nm: String = pm_kv(pm_slurp(fs, from + "/manifest"), "name");
+        return pm_resolve(cat, nm, 1);
+    }
+    let roots: String = pm_dep_names(pm_kv(pm_slurp(fs, "ooda.pkg"), "deps"));
+    if roots == "" {
+        return "err missing";
+    }
+    return pm_resolve_names(cat, roots, 1);
+}
+
+pub fn run_ooda_pm_add(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    if pm_flag(args, "--registry") || pm_is_http(pm_opt(args, "--vendor")) {
+        println("ERR\tpm\tfile vendor required");
+        println("ooda add: file vendor required");
+        process_exit(2);
+    }
+    let mut vendor: String = pm_pick_vendor(args);
+    if pm_is_http(vendor) {
+        println("ERR\tpm\tfile vendor required");
+        println("ooda add: file vendor required");
+        process_exit(2);
+    }
+    let mut name: String = pm_arg_name(args);
+    let from: String = pm_opt(args, "--from");
+    if from != "" {
+        vendor = from;
+        if path_exists(fs, from + "/manifest") {
+            name = pm_kv(pm_slurp(fs, from + "/manifest"), "name");
+        }
+    }
+    if name == "" {
+        let roots: String = pm_dep_names(pm_kv(pm_slurp(fs, "ooda.pkg"), "deps"));
+        if roots == "" {
+            println("ERR\tpm\tmissing package name");
+            println("usage: ooda add <name> [--vendor path]");
+            process_exit(2);
+        }
+    } else {
+        if !pm_name_ok(name) {
+            println("ERR\tpm\trefuse name");
+            println("ooda add: refuse name");
+            process_exit(2);
+        }
+    }
+    if !path_exists(fs, vendor) {
+        println("ERR\tpm\tmissing vendor");
+        println("ooda add: missing vendor");
+        process_exit(2);
+    }
+    let res: String = pm_add_body(fs, sys, vendor, name, from);
+    if chars_len(res) < 3 {
+        println("ERR\tpm\t" + res);
+        println("ooda add: " + res);
+        process_exit(2);
+    }
+    if str_slice(res, 0, 3) != "ok " {
+        println("ERR\tpm\t" + res);
+        println("ooda add: " + res);
+        process_exit(2);
+    }
+    let body: String = str_slice(res, 3, chars_len(res));
+    let root: String = pm_root_abs(fs, sys);
+    let n: Int = chars_len(body);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    let mut acc: String = "";
+    let js: Bool = pm_flag(args, "--json");
+    while i <= n {
+        let mut sep: Bool = false;
+        if i == n {
+            sep = true;
+        } else {
+            let c: String = char_at(body, i);
+            if c == "\n" {
+                sep = true;
+            }
+        }
+        if sep {
+            if i > start {
+                let tok: String = str_slice(body, start, i);
+                let pname: String = pm_tok_name(tok);
+                if pname != "" {
+                    if !pm_name_ok(pname) {
+                        println("ERR\tpm\trefuse name");
+                        println("ooda add: refuse name");
+                        process_exit(2);
+                    }
+                    let base: String = pm_pkg_dir(fs, vendor, pname);
+                    let man: String = pm_slurp(fs, base + "/manifest");
+                    let pay: String = pm_kv(man, "payload");
+                    let mut pn: String = pay;
+                    if pn == "" { pn = pname + ".oo"; }
+                    let src: String = pm_slurp(fs, base + "/" + pn);
+                    let live: String = pm_cas_id(src);
+                    let bad: String = pm_check_pkg(fs, base, pname, live);
+                    if bad != "" {
+                        println("ERR\tpm\t" + bad);
+                        process_exit(2);
+                    }
+                    if !pm_put_cas(fs, root, live, pn, src) {
+                        println("ERR\tpm\tinstall failed " + pname);
+                        println("ooda add: install failed " + pname);
+                        process_exit(2);
+                    }
+                    let oname: String = pm_kv(man, "outline");
+                    if oname != "" {
+                        let ot: String = pm_slurp(fs, base + "/" + oname);
+                        if ot != "" {
+                            let _o: Bool = pm_put_cas(fs, root, live, oname, ot);
+                        }
+                    }
+                    let _v: Bool = pm_put_vendor(fs, root, pn, src);
+                    acc = acc + tok + "\n";
+                    if js == false {
+                        println("ooda add: installed " + pname + " cas=" + live);
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    let prev: String = pm_first_nonempty(pm_slurp(fs, root + "/.ooda_modules/lock"), pm_slurp(fs, ".ooda_modules/lock"));
+    let pn2: Int = chars_len(prev);
+    let mut kept: String = "";
+    let mut ps: Int = 0;
+    let mut pi: Int = 0;
+    while pi <= pn2 {
+        if pi == pn2 || char_at(prev, pi) == "\n" {
+            if pi > ps {
+                let pline: String = str_slice(prev, ps, pi);
+                let pnm: String = pm_tok_name(pline);
+                if pnm != "" {
+                    if str_index_of(acc, pnm + "@") < 0 {
+                        kept = kept + pline + "\n";
+                    }
+                }
+            }
+            ps = pi + 1;
+        }
+        pi = pi + 1;
+    }
+    acc = kept + acc;
+    if !pm_put_lock(fs, root, acc) {
+        println("ERR\tpm\tlock write failed");
+        println("ooda add: lock write failed");
+        process_exit(2);
+    }
+    if js {
+        println("{\"ok\":true,\"cmd\":\"add\",\"packages\":" + pm_lock_json(acc) + "}");
+    }
+}

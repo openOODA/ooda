@@ -1,0 +1,177 @@
+// # Product PM remove, update, outdated, and why
+//
+// Logline: Edit or query the lock without residual exit 2.
+//
+// Setup: File-backed vendor and .ooda_modules/lock. No HTTP.
+//
+// Beats:
+//   1. remove drops a name from the lock.
+//   2. update re-resolves from the vendor.
+//   3. outdated and why compare lock lines to the catalog.
+
+import "cmd_pm_cat.oo";
+import "cmd_pm_io.oo";
+import "cmd_pm_add.oo";
+import "pm_resolve.oo";
+import "pm_store.oo";
+
+fn pm_lock_text(fs: &FsCap, sys: &SysCap) -> String {
+    let root: String = pm_root_abs(fs, sys);
+    let a: String = pm_slurp(fs, root + "/.ooda_modules/lock");
+    let b: String = pm_slurp(fs, ".ooda_modules/lock");
+    return pm_first_nonempty(a, b);
+}
+
+fn pm_write_lock(fs: &FsCap, sys: &SysCap, lock: String) -> Bool {
+    let root: String = pm_root_abs(fs, sys);
+    return pm_put_lock(fs, root, lock);
+}
+
+fn pm_deps_has(deps: String, name: String) -> Bool {
+    let n: Int = chars_len(deps);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(deps, i) == "," {
+            if i > start {
+                let tok: String = str_slice(deps, start, i);
+                let mut nm: String = tok;
+                if chars_len(tok) >= 5 {
+                    if str_slice(tok, 0, 5) == "path:" {
+                        nm = str_slice(tok, 5, chars_len(tok));
+                    }
+                }
+                if pm_tok_name(nm) == name {
+                    return true;
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn run_ooda_pm_remove(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let name: String = pm_arg_name(args);
+    if name == "" {
+        pm_die("remove", "missing package name");
+    }
+    if !pm_name_ok(name) {
+        pm_die("remove", "refuse name");
+    }
+    let lock: String = pm_lock_text(fs, sys);
+    let n: Int = chars_len(lock);
+    let mut out: String = "";
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    let mut hit: Bool = false;
+    while i <= n {
+        if i == n || char_at(lock, i) == "\n" {
+            if i > start {
+                let line: String = str_slice(lock, start, i);
+                if pm_tok_name(line) == name {
+                    hit = true;
+                } else {
+                    out = out + line + "\n";
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if hit == false {
+        pm_die("remove", "not installed");
+    }
+    if !pm_write_lock(fs, sys, out) {
+        pm_die("remove", "lock write failed");
+    }
+    println("ooda remove: " + name);
+}
+
+pub fn run_ooda_pm_update(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let mut name: String = pm_arg_name(args);
+    let mut fwd: List[String] = args;
+    if name == "" {
+        name = pm_first_lock_name(pm_lock_text(fs, sys));
+        if name == "" {
+            pm_die("update", "empty lock");
+        }
+        fwd = list_push(args, name);
+    }
+    run_ooda_pm_add(fs, sys, fwd);
+    println("ooda update: " + name);
+}
+
+pub fn run_ooda_pm_outdated(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let vendor: String = pm_pick_vendor(args);
+    let cat: String = pm_load_catalog(fs, sys, vendor);
+    let lock: String = pm_lock_text(fs, sys);
+    let n: Int = chars_len(lock);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    let mut found: Bool = false;
+    while i <= n {
+        if i == n || char_at(lock, i) == "\n" {
+            if i > start {
+                let line: String = str_slice(lock, start, i);
+                let nm: String = pm_tok_name(line);
+                let have: String = pm_tok_ver(line);
+                let row: String = pm_cat_line(cat, nm);
+                if row != "" {
+                    let best: String = pm_line_field(row, 1);
+                    if pm_semver_cmp(best, have) == 1 {
+                        println("ooda outdated: " + nm + " " + have + " -> " + best);
+                        found = true;
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if found == false {
+        println("ooda outdated: none");
+    }
+}
+
+pub fn run_ooda_pm_why(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let name: String = pm_arg_name(args);
+    if name == "" {
+        pm_die("why", "missing package name");
+    }
+    let vendor: String = pm_pick_vendor(args);
+    let cat: String = pm_load_catalog(fs, sys, vendor);
+    let lock: String = pm_lock_text(fs, sys);
+    if str_index_of(lock, name) < 0 {
+        println("ooda why: " + name + " not in lock");
+        return;
+    }
+    let n: Int = chars_len(cat);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    let mut parents: String = "";
+    while i <= n {
+        if i == n || char_at(cat, i) == "\n" {
+            if i > start {
+                let row: String = str_slice(cat, start, i);
+                let other: String = pm_line_field(row, 0);
+                if other != name {
+                    if pm_deps_has(pm_line_field(row, 3), name) {
+                        if parents != "" {
+                            parents = parents + " ";
+                        }
+                        parents = parents + other;
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if parents == "" {
+        println("ooda why: " + name + " root");
+    } else {
+        println("ooda why: " + name + " dep of " + parents);
+    }
+}

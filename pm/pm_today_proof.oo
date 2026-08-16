@@ -1,0 +1,170 @@
+// # Today PM shipped-function proofs
+//
+// Logline: Drive shipped resolve, lock, path deps, SHA-256, HMAC, names, and caps.
+//
+// Setup: In-memory catalog. Live crypto_sha256_internal. No baked digest hex.
+//
+// Beats:
+//   1. Transitive three-node and diamond resolve; second resolve is byte-identical.
+//   2. path:name deps join the catalog. Traversal names refuse.
+//   3. Extra caps, SHA-256 mismatch, and HMAC tamper refuse.
+
+import "archive_unpack.oo";
+import "pm_core.oo";
+import "pm_resolve.oo";
+import "pm_sign.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn okp(s: String) -> Bool {
+    if chars_len(s) < 3 {
+        return false;
+    }
+    return str_slice(s, 0, 3) == "ok ";
+}
+
+fn has(s: String, n: String) -> Bool {
+    return str_index_of(s, n) >= 0;
+}
+
+fn once(s: String, n: String) -> Bool {
+    let i: Int = str_index_of(s, n);
+    if i < 0 {
+        return false;
+    }
+    let rest: String = str_slice(s, i + chars_len(n), chars_len(s));
+    return str_index_of(rest, n) < 0;
+}
+
+fn body(s: String) -> String {
+    return str_slice(s, 3, chars_len(s));
+}
+
+pub fn main() {
+    let g: Int = pm_cap_parse("FsRead");
+    let hw: String = pm_cas_id("world-body");
+    let hm: String = pm_cas_id("mid-body");
+    let hs: String = pm_cas_id("side-body");
+    let hh: String = pm_cas_id("hello-body");
+    let he: String = pm_cas_id("evil-body");
+    let cat: String = "world|1.0.0|FsRead||" + hw + "\nmid|1.0.0|FsRead|world@^1.0.0|" + hm + "\nside|1.0.0|FsRead|path:world|" + hs + "\nhello|1.0.0|FsRead|mid@^1.0.0,path:side|" + hh + "\nevil|1.0.0|Net||" + he + "\n";
+
+    let r: String = pm_resolve(cat, "hello", g);
+    if !okp(r) {
+        fail("resolve " + r);
+    }
+    if !has(r, "hello@1.0.0") {
+        fail("hello " + r);
+    }
+    if !has(r, "mid@1.0.0") {
+        fail("mid " + r);
+    }
+    if !has(r, "side@1.0.0") {
+        fail("side " + r);
+    }
+    if !has(r, "world@1.0.0") {
+        fail("world " + r);
+    }
+    if !once(r, "world@") {
+        fail("diamond " + r);
+    }
+    if !has(r, "#" + hw + "#") {
+        fail("world sha " + r);
+    }
+    println("resolve transitive/diamond/path");
+
+    let r2: String = pm_resolve(cat, "hello", g);
+    if r != r2 {
+        fail("reresolve bytes");
+    }
+    if !pm_lock_same(body(r), body(r2)) {
+        fail("reresolve lock");
+    }
+    if chars_len(pm_lock_hash(body(r))) != 64 {
+        fail("lock len");
+    }
+    if pm_lock_same(body(r), body(r) + "tamper") {
+        fail("lock tamper");
+    }
+    println("lock byte-identical re-resolve");
+
+    let rp: String = pm_resolve(cat, "side", g);
+    if !okp(rp) {
+        fail("path " + rp);
+    }
+    if !has(rp, "side@1.0.0") {
+        fail("path side");
+    }
+    if !has(rp, "world@1.0.0") {
+        fail("path world");
+    }
+    println("path dep");
+
+    if pm_name_ok("..") {
+        fail("name ..");
+    }
+    if pm_name_ok("a/b") {
+        fail("name slash");
+    }
+    if pm_name_ok("/abs") {
+        fail("name abs");
+    }
+    if !pm_name_ok("hello") {
+        fail("name hello");
+    }
+    if pm_resolve(cat, "..", g) != "err name" {
+        fail("resolve ..");
+    }
+    if pm_resolve(cat, "a/b", g) != "err name" {
+        fail("resolve slash");
+    }
+    if pm_archive_validate_path("../evil") {
+        fail("dest ..");
+    }
+    println("traversal refuse");
+
+    if pm_caps_ok(g, pm_cap_parse("Net")) {
+        fail("caps subset");
+    }
+    let ev: String = pm_resolve(cat, "evil", g);
+    if !has(ev, "err caps") {
+        fail("evil " + ev);
+    }
+    println("extra caps refuse");
+
+    let pay: String = "payload-bytes";
+    let good: String = pm_archive_checksum(pay);
+    if chars_len(good) != 64 {
+        fail("sha len");
+    }
+    if good != pm_cas_id(pay) {
+        fail("sha live");
+    }
+    if !pm_archive_verify_checksum(pay, good) {
+        fail("sha match");
+    }
+    if pm_archive_verify_checksum(pay, pm_archive_checksum("other-bytes")) {
+        fail("sha mismatch");
+    }
+    println("sha mismatch refuse");
+
+    let sig: String = pm_sign("ooda-local-pm", "hello", "1.0.0", hh);
+    if chars_len(sig) != 64 {
+        fail("sig len");
+    }
+    if !pm_sign_ok("ooda-local-pm", "hello", "1.0.0", hh, sig) {
+        fail("sig match");
+    }
+    if pm_sign_ok("ooda-local-pm", "hello", "1.0.0", hh, "TAMPER") {
+        fail("sig tamper");
+    }
+    if pm_sign_ok("ooda-local-pm", "hello", "1.0.0", pm_cas_id("other-bytes"), sig) {
+        fail("sig sha tamper");
+    }
+    println("sig tamper refuse");
+
+    println("pm_today_proof: PASSED");
+}

@@ -1,0 +1,167 @@
+// # Product PM tree, vendor list, and clean
+//
+// Logline: Print a dep tree, list the file vendor, and drop unused CAS dirs.
+//
+// Setup: Catalog from --vendor. Lock at .ooda_modules/lock. No HTTP.
+//
+// Beats:
+//   1. tree walks catalog deps with indent. --json emits nodes.
+//   2. vendor lists name and version from the file vendor.
+//   3. clean removes CAS dirs whose sha is not in the lock.
+
+import "cmd_pm_cat.oo";
+import "cmd_pm_io.oo";
+import "pm_resolve.oo";
+import "pm_store.oo";
+
+fn pm_lock_text2(fs: &FsCap, sys: &SysCap) -> String {
+    let root: String = pm_root_abs(fs, sys);
+    let a: String = pm_slurp(fs, root + "/.ooda_modules/lock");
+    let b: String = pm_slurp(fs, ".ooda_modules/lock");
+    return pm_first_nonempty(a, b);
+}
+
+fn pm_seen(seen: String, name: String) -> Bool {
+    return str_index_of(seen, name + "\n") >= 0;
+}
+
+fn pm_indent(depth: Int) -> String {
+    let mut s: String = "";
+    let mut i: Int = 0;
+    while i < depth {
+        s = s + "  ";
+        i = i + 1;
+    }
+    return s;
+}
+
+fn pm_tree_walk(cat: String, name: String, depth: Int, seen: String, js: Bool) -> String {
+    if name == "" {
+        return seen;
+    }
+    if pm_seen(seen, name) {
+        return seen;
+    }
+    let row: String = pm_cat_line(cat, name);
+    let ver: String = pm_line_field(row, 1);
+    if js {
+        if seen != "" {
+            println(",");
+        }
+        println("{\"name\":\"" + pm_jesc(name) + "\",\"version\":\"" + pm_jesc(ver) + "\",\"depth\":" + depth.to_string() + "}");
+    } else {
+        println(pm_indent(depth) + name + "@" + ver);
+    }
+    let mut next: String = seen + name + "\n";
+    let deps: String = pm_line_field(row, 3);
+    let n: Int = chars_len(deps);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(deps, i) == "," {
+            if i > start {
+                let tok: String = str_slice(deps, start, i);
+                let mut nm: String = tok;
+                if chars_len(tok) >= 5 {
+                    if str_slice(tok, 0, 5) == "path:" {
+                        nm = str_slice(tok, 5, chars_len(tok));
+                    }
+                }
+                next = pm_tree_walk(cat, pm_tok_name(nm), depth + 1, next, js);
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return next;
+}
+
+pub fn run_ooda_pm_tree(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let vendor: String = pm_pick_vendor(args);
+    let cat: String = pm_load_catalog(fs, sys, vendor);
+    let lock: String = pm_lock_text2(fs, sys);
+    let mut name: String = pm_arg_name(args);
+    if name == "" {
+        name = pm_first_lock_name(lock);
+    }
+    let js: Bool = pm_flag(args, "--json") || pm_flag(args, "-json");
+    if js {
+        println("{\"ok\":true,\"cmd\":\"tree\",\"nodes\":[");
+        let _s: String = pm_tree_walk(cat, name, 0, "", true);
+        println("]}");
+        return;
+    }
+    println("ooda tree:");
+    if name == "" {
+        println(lock);
+        return;
+    }
+    let _t: String = pm_tree_walk(cat, name, 0, "", false);
+}
+
+pub fn run_ooda_pm_vendor(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let vendor: String = pm_pick_vendor(args);
+    if pm_is_http(vendor) {
+        pm_die("vendor", "file vendor required");
+    }
+    let cat: String = pm_load_catalog(fs, sys, vendor);
+    println("ooda vendor: " + vendor);
+    let root: String = pm_root_abs(fs, sys);
+    let n: Int = chars_len(cat);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(cat, i) == "\n" {
+            if i > start {
+                let row: String = str_slice(cat, start, i);
+                let nm: String = pm_line_field(row, 0);
+                let ver: String = pm_line_field(row, 1);
+                if nm != "" {
+                    println(nm + " " + ver);
+                    let body: String = pm_slurp(fs, root + "/.ooda_modules/cas/" + pm_line_field(row, 4) + "/" + nm + ".oo");
+                    if body != "" {
+                        if pm_put_vendor(fs, root, nm + ".oo", body) {
+                            println("ooda vendor: " + nm);
+                        }
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    println("ooda vendor: ok");
+}
+
+pub fn run_ooda_pm_clean(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let root: String = pm_root_abs(fs, sys);
+    let lock: String = pm_lock_text2(fs, sys);
+    let mut cas: String = ".ooda_modules/cas";
+    if root != "" {
+        cas = root + "/.ooda_modules/cas";
+    }
+    let names: String = pm_list_dir(fs, sys, cas);
+    let n: Int = chars_len(names);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    let mut dropped: Int = 0;
+    while i <= n {
+        if i == n || char_at(names, i) == "\n" {
+            if i > start {
+                let sha: String = str_slice(names, start, i);
+                if pm_name_ok(sha) {
+                    if str_index_of(lock, sha) < 0 {
+                        let gone: Result[Void, String] = oo_fs_rmdir(fs, cas + "/" + sha);
+                        if gone.is_ok() {
+                            dropped = dropped + 1;
+                        }
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    println("ooda clean: ok " + dropped.to_string());
+    let _a: Int = list_len(args);
+}
