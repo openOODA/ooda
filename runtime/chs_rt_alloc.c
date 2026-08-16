@@ -58,6 +58,11 @@ void oo_cap_require_alloc(long long got, const char *op) {
   }
 }
 
+int oo_cap_is_alloc(long long got) {
+  oo_alloc_init();
+  return got == g_tok_alloc;
+}
+
 /* CHANGE B: quota counter is shared process state. Wrap the read-modify-
  * write of oo_list_ambient_quota in a mutex so concurrent alloc_bytes /
  * free_bytes callers cannot lose updates. The mutex lives in chs_rt_list.c

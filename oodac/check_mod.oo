@@ -2,105 +2,88 @@
 //
 // Logline: Checks a path per module or as one cached tree and prints OK, skipping unchanged sources via .ooda-cache/check.
 //
-// Setup: Needs FsCap and SysCap; collect_module_paths, tokenize_lines, check_function, run_check_core, and the check_cache_* helpers are in scope.
+// Setup: Needs FsCap and SysCap; collect_module_paths, scan_fn_names, run_check_core_binds, oo_file_stamp, and the check_cache_* helpers are in scope.
 //
 // Beats:
-//   1. run_check_module_body tokenizes a body, walks functions and type/import skips, then runs run_check_core if it saw a function.
-//   2. More than one module: check each body with import lines kept as blanks.
+//   1. A g_ listing whose path stamps still match prints OK without collect or typecheck.
+//   2. More than one module: scan names once, then check only stamp-plus-binds misses.
 //   3. One module: load the import tree, hit the content-hash cache, or run_check_core, put the tree key, and print OK.
+//
+// residual: RAM-cold typecheck stays ~523s; disk-warm new-process uses g_ stamp snapshot.
 
-fn run_check_module_body(sys: &SysCap, body: String) {
-    if chars_len(body) == 0 {
-        return;
-    }
-    if chars_len(body) > 1048576 {
-        println("ERR\tcheck\tsource exceeds 1MiB expanded limit");
-        process_exit(1);
-    }
-    // tokenize_lines already fail-closed on lex errors
-    let toks: List[String] = tokenize_lines(body);
-    let n = list_len(toks);
-    if n <= 1 {
-        return;
-    }
-    let mut pos = 0;
-    let mut saw_fn = false;
-    while pos < n {
-        let k: String = field_at(list_get(toks, pos), 0);
-        if k == "EOF" {
-            pos = n;
-        } else if k == "KW_PUB" || k == "KW_FN" {
-            saw_fn = true;
-            pos = check_function(toks, pos);
-        } else if k == "KW_TYPE" || k == "KW_IMPORT" {
-            pos = skip_until_semi(toks, pos);
-        } else {
-            println("ERR\tparse\tunexpected " + k);
-            process_exit(1);
+fn persist_graph(fs: &FsCap, sys: &SysCap, root: String, listing: String) {
+    let tk: String = check_cache_tree_key(content_hash("dw1\n" + listing));
+    check_cache_put(fs, sys, tk);
+    check_cache_put_body(fs, sys, check_cache_graph_key(root), listing);
+}
+
+fn check_modules(fs: &FsCap, sys: &SysCap, paths: List[String]) {
+    let np = list_len(paths);
+    let mut names = "\t";
+    let mut raws: List[String] = list_new();
+    let mut i = 0;
+    while i < np {
+        let pth: String = list_get(paths, i);
+        let rr = read_file(fs, pth);
+        let mut raw: String = "";
+        if !rr.is_err() {
+            raw = match rr {
+                Ok(s) => s,
+                Err(msg) => msg,
+            };
+            names = names + scan_fn_names(raw);
         }
+        raws = list_push(raws, raw);
+        i = i + 1;
     }
-    if !saw_fn {
-        return;
+    let binds: String = names_to_depth0_binds(names);
+    let bh: String = content_hash(binds);
+    i = 0;
+    while i < np {
+        let pth2: String = list_get(paths, i);
+        let stamp: String = oo_file_stamp(pth2);
+        let mk: String = check_cache_mod_key(content_hash(stamp + bh));
+        if !check_cache_hit(fs, mk) {
+            let raw2: String = list_get(raws, i);
+            let body: String = strip_import_lines(raw2);
+            if chars_len(body) > 0 {
+                run_check_core_binds(sys, body, binds);
+                check_cache_put(fs, sys, mk);
+            }
+        }
+        i = i + 1;
     }
-    run_check_core(sys, body);
 }
 
 pub fn run_check_path(fs: &FsCap, sys: &SysCap, path: String) {
     check_cache_ensure(fs, sys);
-    // P7: large import graphs — per-module check (no 150-file concat hang).
+    let listing: String = check_cache_read(fs, check_cache_graph_key(path));
+    if check_listing_fresh(listing) {
+        println("OK");
+        return;
+    }
     let paths: List[String] = collect_module_paths(fs, path);
     let np = list_len(paths);
+    let roll: String = check_paths_listing(paths);
     if np > 1 {
-        let mut names = "\t";
-        let mut i = 0;
-        while i < np {
-            let pth: String = list_get(paths, i);
-            let rr = read_file(fs, pth);
-            if !rr.is_err() {
-                let raw: String = match rr {
-                    Ok(s) => s,
-                    Err(msg) => msg,
-                };
-                names = names + scan_fn_names(strip_import_lines(raw));
-            }
-            i = i + 1;
+        let tk: String = check_cache_tree_key(content_hash("dw1\n" + roll));
+        if !check_cache_hit(fs, tk) {
+            check_modules(fs, sys, paths);
         }
-        let binds: String = names_to_depth0_binds(names);
-        i = 0;
-        while i < np {
-            let pth2: String = list_get(paths, i);
-            let rr2 = read_file(fs, pth2);
-            if !rr2.is_err() {
-                let raw2: String = match rr2 {
-                    Ok(s) => s,
-                    Err(msg) => msg,
-                };
-                let body: String = strip_import_lines(raw2);
-                if chars_len(body) > 0 {
-                    let stc: String = "stat -c %s:%Y " + pth2;
-                    let str: Result[String, String] = sys_exec(sys, "sh", "-c", stc);
-                    let stamp: String = match str { Ok(s) => s, Err(_) => body };
-                    let hk: String = content_hash(stamp + binds);
-                    let mk: String = check_cache_mod_key(hk);
-                    if !check_cache_hit(fs, mk) {
-                        run_check_core_binds(sys, body, binds);
-                        check_cache_put(fs, sys, mk);
-                    }
-                }
-            }
-            i = i + 1;
-        }
+        persist_graph(fs, sys, path, roll);
         println("OK");
         return;
     }
     let src: String = load_source_with_imports(fs, path);
     let h: String = content_hash(src);
-    let tk: String = check_cache_tree_key(h);
-    if check_cache_hit(fs, tk) {
+    let tk2: String = check_cache_tree_key(h);
+    if check_cache_hit(fs, tk2) {
+        persist_graph(fs, sys, path, roll);
         println("OK");
         return;
     }
     run_check_core(sys, src);
-    check_cache_put(fs, sys, tk);
+    check_cache_put(fs, sys, tk2);
+    persist_graph(fs, sys, path, roll);
     println("OK");
 }

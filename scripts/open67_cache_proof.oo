@@ -1,0 +1,79 @@
+// # OPEN-67 disk-warm check under 10s
+//
+// Logline: Time two process-separated oodac check oodac/main.oo runs; second must OK under 10s.
+//
+// Setup: cwd is ooda/. oodac/oodac is a compiler (oodac: usage:); not the product CLI.
+//
+// Beats:
+//   1. Refuse CLI bytes; require oodac: usage: in oodac/oodac.
+//   2. First process check fills .ooda-cache/check (g_ listing / t_ts3_ keys).
+//   3. Second process must print OK and finish under 10s (disk-warm g_ hit).
+// residual: first run may be RAM-cold ~523s; do not set PURE_SKIP_CHECK.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+import "scripts/oodac_identity.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let oodac = root + "/oodac/oodac";
+    let src = "oodac/main.oo";
+    if sh_mkdir_p(fw, tmpd).is_err() { println("FAIL mkdir"); process_exit(1); }
+    if scenario(p, fs, "open67 disk-warm check cache").is_err() {
+        println("FAIL scenario");
+        process_exit(1);
+    }
+    if expect_quiet(p, "test -x " + oodac).is_err() {
+        println("FAIL no oodac");
+        process_exit(1);
+    }
+    refuse_oodac_cli(p, oodac);
+    if expect_present(fs, root + "/" + src).is_err() {
+        println("FAIL missing " + src);
+        process_exit(1);
+    }
+
+    let t1f = tmpd + "/open67_t1.txt";
+    let t2f = tmpd + "/open67_t2.txt";
+    let o1 = tmpd + "/open67_1.out";
+    let o2 = tmpd + "/open67_2.out";
+    let e1 = tmpd + "/open67_1.err";
+    let e2 = tmpd + "/open67_2.err";
+
+    // Separate process 1: populate .ooda-cache/check (may be long when RAM-cold).
+    let c1 = "cd " + root + " && /usr/bin/time -f %e -o " + t1f
+        + " env -u PURE_SKIP_CHECK " + oodac + " check " + src
+        + " > " + o1 + " 2> " + e1;
+    if check(p, c1, within: 900).is_err() {
+        println("FAIL first check rc");
+        process_exit(1);
+    }
+    if expect_clean(p, "grep -q '^OK' " + o1).is_err() {
+        println("FAIL first check not OK");
+        process_exit(1);
+    }
+
+    // Separate process 2: disk-warm g_ listing hit must finish under 10s.
+    let c2 = "cd " + root + " && /usr/bin/time -f %e -o " + t2f
+        + " env -u PURE_SKIP_CHECK timeout 10 " + oodac + " check " + src
+        + " > " + o2 + " 2> " + e2;
+    if check(p, c2, within: 30).is_err() {
+        println("FAIL second check rc or over 10s");
+        process_exit(1);
+    }
+    if expect_clean(p, "grep -q '^OK' " + o2).is_err() {
+        println("FAIL second check not OK");
+        process_exit(1);
+    }
+    if expect_clean(p, "awk '{exit !($1 + 0 < 10)}' " + t2f).is_err() {
+        println("FAIL second elapsed not under 10s");
+        process_exit(1);
+    }
+
+    let t1 = match process_exec(p, "tr -d '\\n' < " + t1f) { Ok(s) => s, Err(_) => "?" };
+    let t2 = match process_exec(p, "tr -d '\\n' < " + t2f) { Ok(s) => s, Err(_) => "?" };
+    println("open67 first_s=" + t1);
+    println("open67 second_s=" + t2);
+    println("open67_cache_proof: PASSED");
+}

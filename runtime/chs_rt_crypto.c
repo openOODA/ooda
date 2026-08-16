@@ -126,6 +126,36 @@ OoStr crypto_hmac_sha256_internal(OoStr key, OoStr msg) {
   OoStr r; r.data = hex; r.len = 64; return r;
 }
 
+/* OPEN-72: child seal = HMAC-SHA256(parent_hmac, child_rights). Empty inputs fail closed. */
+static OoStr cap_empty_str(void) {
+  OoStr z; z.data = oo_str_alloc_payload(0); z.len = 0; return z;
+}
+
+OoStr cap_attenuate(OoStr parent_hmac, OoStr child_rights) {
+  if (parent_hmac.len <= 0 || !parent_hmac.data || child_rights.len <= 0 || !child_rights.data)
+    return cap_empty_str();
+  return crypto_hmac_sha256_internal(parent_hmac, child_rights);
+}
+
+int cap_attenuate_ok(OoStr parent_hmac, OoStr child_rights) {
+  OoStr h;
+  int ok;
+  if (parent_hmac.len <= 0 || !parent_hmac.data || child_rights.len <= 0 || !child_rights.data)
+    return 0;
+  h = crypto_hmac_sha256_internal(parent_hmac, child_rights);
+  ok = (h.len == 64);
+  oo_str_release(h);
+  return ok;
+}
+
+OoStr oo_cap_attenuate(OoStr parent_hmac, OoStr child_rights) {
+  return cap_attenuate(parent_hmac, child_rights);
+}
+
+int oo_cap_attenuate_ok(OoStr parent_hmac, OoStr child_rights) {
+  return cap_attenuate_ok(parent_hmac, child_rights);
+}
+
 /* Genuine JSON Formatters and Parsers */
 
 OoStr json_format_string_internal(OoStr s) {

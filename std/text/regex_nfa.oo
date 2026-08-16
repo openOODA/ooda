@@ -1,13 +1,13 @@
 // # Pattern-string regex matcher
 //
-// Logline: Recursive scan for literals, concatenation, *, +, ?, and | alternation.
+// Logline: Recursive scan for literals, [ab] classes, concatenation, *, +, ?, and | alternation.
 //
 // Setup: Walks the pattern string against text. Not a compiled Thompson state graph.
 //
 // Beats:
 //   1. Keep NfaState/NfaGraph records for later graph work.
-//   2. Match literals and *, +, ? on the pattern string.
-//   3. Split on | and try each alternative.
+//   2. Match literals, [class], and *, +, ? on the pattern string.
+//   3. Split on | outside classes and try each alternative.
 // RULES.oot 1.4: Pure data module, zero ambient effects.
 // RULES.oot 1.7: Under 256 lines.
 
@@ -61,78 +61,111 @@ fn nfa_char_matches(pattern_char: String, text_char: String) -> Bool {
     return pattern_char == text_char;
 }
 
+fn nfa_class_end(pattern: String, open_idx: Int) -> Int {
+    let n: Int = chars_len(pattern);
+    let mut i: Int = open_idx + 1;
+    while i < n {
+        if char_at(pattern, i) == "]" {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn nfa_in_class(class: String, ch: String) -> Bool {
+    let n: Int = chars_len(class);
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(class, i) == ch {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn nfa_atom_end(pattern: String, p_idx: Int) -> Int {
+    if char_at(pattern, p_idx) == "[" {
+        let cl: Int = nfa_class_end(pattern, p_idx);
+        if cl >= 0 {
+            return cl + 1;
+        }
+    }
+    return p_idx + 1;
+}
+
+fn nfa_atom_matches(pattern: String, p_idx: Int, atom_end: Int, ch: String) -> Bool {
+    if char_at(pattern, p_idx) == "[" {
+        if atom_end > p_idx + 1 {
+            return nfa_in_class(str_slice(pattern, p_idx + 1, atom_end - 1), ch);
+        }
+    }
+    return nfa_char_matches(char_at(pattern, p_idx), ch);
+}
+
 fn nfa_match_here(pattern: String, p_idx: Int, text: String, t_idx: Int) -> Bool {
     let p_len: Int = chars_len(pattern);
     let t_len: Int = chars_len(text);
-
     if p_idx >= p_len {
         return true;
     }
-
-    let p_curr: String = char_at(pattern, p_idx);
-    let mut p_next: String = "";
-    if p_idx + 1 < p_len {
-        p_next = char_at(pattern, p_idx + 1);
-    }
-
-    if p_curr == "$" && p_idx + 1 == p_len {
+    if char_at(pattern, p_idx) == "$" && p_idx + 1 == p_len {
         return t_idx >= t_len;
     }
-
-    if p_next == "*" {
-        let mut cur_t: Int = t_idx;
-        while cur_t <= t_len {
-            if nfa_match_here(pattern, p_idx + 2, text, cur_t) {
+    let atom_end: Int = nfa_atom_end(pattern, p_idx);
+    let mut q: String = "";
+    if atom_end < p_len {
+        q = char_at(pattern, atom_end);
+    }
+    let mut rest: Int = atom_end;
+    let mut min_n: Int = 1;
+    let mut max_n: Int = 1;
+    if q == "*" || q == "+" || q == "?" {
+        rest = atom_end + 1;
+        if q == "*" {
+            min_n = 0;
+            max_n = t_len - t_idx + 1;
+        } else if q == "+" {
+            max_n = t_len - t_idx + 1;
+        } else {
+            min_n = 0;
+        }
+    }
+    let mut taken: Int = 0;
+    let mut cur: Int = t_idx;
+    while taken < max_n {
+        if taken >= min_n {
+            if nfa_match_here(pattern, rest, text, cur) {
                 return true;
             }
-            if cur_t < t_len && nfa_char_matches(p_curr, char_at(text, cur_t)) {
-                cur_t = cur_t + 1;
-            } else {
-                break;
-            }
         }
-        return false;
-    }
-
-    if p_next == "+" {
-        if t_idx < t_len && nfa_char_matches(p_curr, char_at(text, t_idx)) {
-            let mut cur_t: Int = t_idx + 1;
-            while cur_t <= t_len {
-                if nfa_match_here(pattern, p_idx + 2, text, cur_t) {
-                    return true;
-                }
-                if cur_t < t_len && nfa_char_matches(p_curr, char_at(text, cur_t)) {
-                    cur_t = cur_t + 1;
-                } else {
-                    break;
-                }
-            }
+        if cur >= t_len {
+            break;
         }
-        return false;
-    }
-
-    if p_next == "?" {
-        if nfa_match_here(pattern, p_idx + 2, text, t_idx) {
-            return true;
+        if !nfa_atom_matches(pattern, p_idx, atom_end, char_at(text, cur)) {
+            break;
         }
-        if t_idx < t_len && nfa_char_matches(p_curr, char_at(text, t_idx)) {
-            return nfa_match_here(pattern, p_idx + 2, text, t_idx + 1);
-        }
-        return false;
+        cur = cur + 1;
+        taken = taken + 1;
     }
-
-    if t_idx < t_len && nfa_char_matches(p_curr, char_at(text, t_idx)) {
-        return nfa_match_here(pattern, p_idx + 1, text, t_idx + 1);
+    if taken >= min_n {
+        return nfa_match_here(pattern, rest, text, cur);
     }
-
     return false;
 }
 
 fn nfa_find_alt(pattern: String, from: Int) -> Int {
     let n: Int = chars_len(pattern);
     let mut i: Int = from;
+    let mut in_class: Bool = false;
     while i < n {
-        if char_at(pattern, i) == "|" {
+        let c: String = char_at(pattern, i);
+        if c == "[" {
+            in_class = true;
+        } else if c == "]" {
+            in_class = false;
+        } else if c == "|" && !in_class {
             return i;
         }
         i = i + 1;
@@ -143,11 +176,9 @@ fn nfa_find_alt(pattern: String, from: Int) -> Int {
 pub fn nfa_simulate(pattern: String, text: String) -> Bool {
     let p_len: Int = chars_len(pattern);
     let t_len: Int = chars_len(text);
-
     if p_len == 0 {
         return true;
     }
-
     let bar: Int = nfa_find_alt(pattern, 0);
     if bar >= 0 {
         if nfa_simulate(str_slice(pattern, 0, bar), text) {
@@ -155,11 +186,9 @@ pub fn nfa_simulate(pattern: String, text: String) -> Bool {
         }
         return nfa_simulate(str_slice(pattern, bar + 1, p_len), text);
     }
-
     if char_at(pattern, 0) == "^" {
         return nfa_match_here(pattern, 1, text, 0);
     }
-
     let mut i: Int = 0;
     while i <= t_len {
         if nfa_match_here(pattern, 0, text, i) {
@@ -167,6 +196,5 @@ pub fn nfa_simulate(pattern: String, text: String) -> Bool {
         }
         i = i + 1;
     }
-
     return false;
 }

@@ -178,3 +178,70 @@ OoResS oo_actor_restart(long long cap, long long id) {
   r.val = oo_str_lit("restarted");
   return r;
 }
+
+static unsigned char g_otp_once[OO_ACTOR_SLOTS];
+
+OoResS oo_otp_supervise(long long cap, long long id) {
+  OoResS r;
+  int s = (int)id;
+  oo_cap_require_thread(cap, "otp_supervise");
+  r.ok = 0;
+  r.val = oo_str_lit("otp_supervise: bad id");
+  if (s < 0 || s >= OO_ACTOR_SLOTS) return r;
+  if (g_otp_once[s]) {
+    r.val = oo_str_lit("otp_supervise: already");
+    return r;
+  }
+  if (!g_actors[s].live) {
+    r.val = oo_str_lit("otp_supervise: empty");
+    return r;
+  }
+  g_otp_once[s] = 1;
+  return oo_actor_restart(cap, id);
+}
+
+static OoStr oo_rpc_mac(long long cap, OoStr payload) {
+  char key[32];
+  snprintf(key, sizeof key, "%llx", (unsigned long long)cap);
+  return crypto_hmac_sha256_internal(oo_str_lit(key), payload);
+}
+
+OoResS oo_cap_rpc_send(long long cap, OoStr payload) {
+  OoResS r;
+  OoStr mac;
+  char *out;
+  oo_cap_require_thread(cap, "cap_rpc_send");
+  r.ok = 0;
+  r.val = oo_str_lit("cap_rpc_send: bad payload");
+  if (payload.len < 0 || payload.len > 192) return r;
+  mac = oo_rpc_mac(cap, payload);
+  if (!mac.data || mac.len != 64) return r;
+  out = oo_str_alloc_payload((size_t)(64 + payload.len));
+  memcpy(out, mac.data, 64);
+  if (payload.len > 0 && payload.data)
+    memcpy(out + 64, payload.data, (size_t)payload.len);
+  r.ok = 1;
+  r.val.data = out;
+  r.val.len = 64 + payload.len;
+  return r;
+}
+
+OoResS oo_cap_rpc_recv(long long cap, OoStr sealed) {
+  OoResS r;
+  OoStr pay, mac;
+  char *out;
+  oo_cap_require_thread(cap, "cap_rpc_recv");
+  r.ok = 0;
+  r.val = oo_str_lit("cap_rpc_recv: hmac");
+  if (!sealed.data || sealed.len < 64) return r;
+  pay.data = sealed.data + 64;
+  pay.len = sealed.len - 64;
+  mac = oo_rpc_mac(cap, pay);
+  if (mac.len != 64 || memcmp(mac.data, sealed.data, 64) != 0) return r;
+  out = oo_str_alloc_payload((size_t)pay.len);
+  if (pay.len > 0) memcpy(out, pay.data, (size_t)pay.len);
+  r.ok = 1;
+  r.val.data = out;
+  r.val.len = pay.len;
+  return r;
+}

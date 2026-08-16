@@ -8,14 +8,34 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MAIN="${1:?main.oo}"
 OUT="${2:?out_bin}"
 OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
-TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/oodac_pure_$$"
-mkdir -p "$TMP"
 if [[ ! -x "$OODAC_BIN" ]]; then
-  if [[ -x "$ROOT/oodac/oodac" ]]; then OODAC_BIN="$ROOT/oodac/oodac"
+  if [[ -x "$ROOT/oodac_bin" ]]; then OODAC_BIN="$ROOT/oodac_bin"
   elif [[ -x "$ROOT/bootstrap/seed/oodac" ]]; then OODAC_BIN="$ROOT/bootstrap/seed/oodac"
+  elif [[ -x "$ROOT/oodac/oodac" ]]; then OODAC_BIN="$ROOT/oodac/oodac"
   elif [[ -x "$ROOT/oodac/main" ]]; then OODAC_BIN="$ROOT/oodac/main"
   else echo "ERR_NO_OODAC" >&2; exit 1; fi
 fi
+oodac_abs() {
+  local p="$1"
+  if [[ -e "$p" ]]; then
+    echo "$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
+  else
+    echo "$p"
+  fi
+}
+oodac_is_cli() {
+  grep -a -q 'pure .oo product CLI' "$1" 2>/dev/null
+}
+oodac_is_compiler() {
+  grep -a -q 'oodac: usage:' "$1" 2>/dev/null
+}
+# bin/ooda copied onto oodac/oodac execs itself on check (fork bomb).
+if oodac_is_cli "$OODAC_BIN"; then
+  echo "ERR_OODAC_IS_CLI $OODAC_BIN" >&2
+  exit 1
+fi
+TMP="${TMPDIR:-.ooda-cache/ooda-tmp}/oodac_pure_$$"
+mkdir -p "$TMP"
 if [[ ! -f "$MAIN" && -f "$ROOT/$MAIN" ]]; then MAIN="$ROOT/$MAIN"; fi
 if [[ ! -f "$MAIN" ]]; then echo "ERR_MISSING $MAIN" >&2; exit 1; fi
 DIR="$(cd "$(dirname "$MAIN")" && pwd)"
@@ -78,15 +98,39 @@ if [[ -n "${PURE_BUILD_FP_OUT:-}" ]]; then
   printf '%s\n' "$PURE_INPUT_FP" >"$PURE_BUILD_FP_OUT"
 fi
 
-# Check gate unless PURE_SKIP_CHECK=1.
+# Check gate unless PURE_SKIP_CHECK=1. Official path leaves that unset.
 if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
   nmods=${#MODS[@]}
+  # Small trees: 60+2*nmods, cap 180s. Large nmods (oodac/main.oo ~174):
+  # cold check is ~523s on this host; 180s cannot finish.
   ck_to=$((60 + nmods * 2))
-  if [[ $ck_to -gt 180 ]]; then ck_to=180; fi
-  set +e
-  timeout "$ck_to" "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
-  main_ck=$?
-  set -e
+  if [[ $nmods -gt 80 ]]; then
+    ck_to=900
+  elif [[ $ck_to -gt 180 ]]; then
+    ck_to=180
+  fi
+  run_main_check() {
+    echo "pure_build: check host=$OODAC_BIN nmods=$nmods timeout=${ck_to}s"
+    set +e
+    timeout "$ck_to" "$OODAC_BIN" check "$MAIN_ABS" >"$TMP/main_check.out" 2>"$TMP/main_check.err"
+    main_ck=$?
+    set -e
+  }
+  run_main_check
+  TREE_HOST="$ROOT/oodac/oodac"
+  if { [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; } \
+     && [[ -x "$TREE_HOST" ]] \
+     && [[ "$(oodac_abs "$OODAC_BIN")" != "$(oodac_abs "$TREE_HOST")" ]]; then
+    if oodac_is_cli "$TREE_HOST"; then
+      echo "ERR_OODAC_IS_CLI $TREE_HOST" >&2
+      exit 1
+    fi
+    if oodac_is_compiler "$TREE_HOST"; then
+      echo "pure_build: host-fallback $TREE_HOST (prior host could not check)"
+      OODAC_BIN="$TREE_HOST"
+      run_main_check
+    fi
+  fi
   if [[ $main_ck -eq 124 ]]; then
     echo "ERR_CHECK_TIMEOUT $MAIN_ABS (nmods=$nmods timeout=${ck_to}s)" >&2
     exit 1
@@ -173,17 +217,84 @@ if chunk:
 print(f"pure_build: unique_fns={len(seen)} from_modules={len(mcs)}", flush=True)
 PY
 
+# Extra runtime decls: seed/old emit-c preamble can omit names current c_emit_*.oo lowers to.
+# Mirror oodac/c_emit_preamble.oo println prototypes (skip python_embed_internal).
 echo "long long oo_cap_grant_fs(void); long long oo_cap_grant_sys(void); long long oo_cap_grant_env(void); long long oo_cap_grant_net(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_time(void); long long oo_cap_grant_rand(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_alloc(void); long long oo_cap_grant_ffi(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_thread(void); long long oo_cap_grant_gpu(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_http(void); long long oo_cap_grant_tcp(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_udp(void); long long oo_cap_grant_bind(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_fsread(void); long long oo_cap_grant_fswrite(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_process(void); long long oo_cap_grant_sync(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_mem(void); long long oo_cap_grant_sign(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_audio(void); long long oo_cap_grant_camera(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_usb(void); long long oo_cap_grant_hid(void);" >> "$TMP/preamble.c"
+echo "long long oo_cap_grant_window(void); long long oo_cap_grant_frame(void);" >> "$TMP/preamble.c"
 echo "int oo_path_exists(long long,OoStr); long long oo_file_size(long long,OoStr); OoResS oo_env_get(long long,OoStr);" >> "$TMP/preamble.c"
 echo "OoResS oo_read_file(long long,OoStr); OoResV oo_write_file(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
-echo "OoResV oo_fs_remove_file(long long,OoStr); OoResV oo_fs_mkdir(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResV oo_fs_remove_file(long long,OoStr); OoResV oo_fs_rmdir(long long,OoStr); OoResV oo_fs_mkdir(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoSList oo_fs_read_dir(long long,OoStr); int oo_fs_is_dir(long long,OoStr);" >> "$TMP/preamble.c"
 echo "OoResV oo_fs_hardlink(long long,OoStr,OoStr); OoResV oo_fs_symlink(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
 echo "OoResS oo_sys_exec(long long,int,OoStr*); OoResS oo_sys_exec1(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoSList oo_sys_args(long long); OoSList sys_args(long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_sys_spawn(long long,OoStr); OoResS oo_sys_wait(long long,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_sys_kill(long long,long long,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_sys_epoll_create(long long,long long); OoResS oo_sys_inotify_init(long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_sys_prctl(long long,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_rlimit_set_mem_mb(long long,long long); OoResS oo_rlimit_set_nofile(long long,long long); OoResS oo_rlimit_set_cpu_sec(long long,long long);" >> "$TMP/preamble.c"
 echo "OoSList str_split(OoStr,OoStr);" >> "$TMP/preamble.c"
 echo "void oo_emit_tmp_reset(void); void oo_emit_tmp_enter(void);" >> "$TMP/preamble.c"
 echo "void oo_emit_tmp_leave(void); void oo_emit_tmp_release_print(void);" >> "$TMP/preamble.c"
 echo "void oo_emit_tmp_own(OoStr); void oo_emit_tmp_release_all_print(void);" >> "$TMP/preamble.c"
 echo "OoStr oo_emit_tmp_bind(OoStr);" >> "$TMP/preamble.c"
+echo "void oo_wasm_write_empty_module(void);" >> "$TMP/preamble.c"
+echo "void oo_wasm_note_fn(OoStr);" >> "$TMP/preamble.c"
+echo "void oo_wasm_write_source_module(long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_actor_restart(long long,long long); OoStr oo_read_stdin(void); OoStr oo_file_stamp(OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_arena_create(long long,long long); OoResS oo_arena_alloc(long long,long long,long long); OoResS oo_arena_reset(long long,long long);" >> "$TMP/preamble.c"
+echo "int oo_landlock_is_available(void); OoResS oo_landlock_restrict(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_dns_resolve(long long,OoStr); OoResS oo_dns_resolve_ipv4(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_fetch(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_dlopen(long long,OoStr); OoResS oo_dlsym(long long,OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_dlclose(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoStr crypto_md5_internal(OoStr); OoStr crypto_sha1_internal(OoStr);" >> "$TMP/preamble.c"
+echo "OoStr crypto_aes_encrypt_internal(OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoStr crypto_sha256_internal(OoStr); OoStr crypto_hmac_sha256_internal(OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS json_parse_internal(OoStr); OoStr json_stringify_internal(OoStr);" >> "$TMP/preamble.c"
+echo "OoStr async_spawn_internal(long long,OoStr); OoResS async_join_internal(long long,OoStr);" >> "$TMP/preamble.c"
+echo "long long oo_byte_at(OoStr,long long); long long oo_bytes_len(OoStr);" >> "$TMP/preamble.c"
+echo "OoStr oo_byte_slice(OoStr,long long,long long); int oo_bytes_eq(OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoStr oo_bytes_from_str(OoStr); OoStr oo_bytes_concat(OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoIList oo_bytes_new(void); OoIList oo_bytes_push(OoIList,long long);" >> "$TMP/preamble.c"
+echo "long long oo_bytes_get(OoIList,long long); OoStr oo_bytes_to_str(OoIList);" >> "$TMP/preamble.c"
+echo "OoResS oo_tcp_bind(long long,long long); OoResS oo_tcp_connect(long long,OoStr,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_bind_udp(long long,long long); OoResS oo_tls_connect(long long,OoStr,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_tcp_write(long long,long long,OoStr); OoResS oo_tcp_read(long long,long long,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_udp_recv(long long,long long,long long); OoResS oo_tcp_close(long long,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_sock_raw(long long,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_mutex_lock(long long,long long); OoResS oo_mutex_unlock(long long,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_thread_spawn(long long,OoStr); OoResS oo_thread_join(long long,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_thread_join_s(long long,OoStr); OoResS oo_gpu_launch(long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_channel_new(long long); OoResS oo_channel_send(long long,long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_channel_recv(long long,long long);" >> "$TMP/preamble.c"
+echo "OoResS oo_actor_spawn(long long,OoStr); OoResS oo_actor_send(long long,long long,OoStr);" >> "$TMP/preamble.c"
+echo "OoResS oo_actor_recv(long long,long long);" >> "$TMP/preamble.c"
+echo "const char *oo_process_policy_getenv(const char*);" >> "$TMP/preamble.c"
+echo "long long oo_now_ms(long long); void oo_sleep_ms(long long,long long);" >> "$TMP/preamble.c"
+echo "long long oo_random(long long); void oo_seed(long long,long long);" >> "$TMP/preamble.c"
+echo "long long oo_alloc_bytes(long long,long long); void oo_free_bytes(long long,long long);" >> "$TMP/preamble.c"
+echo "long long oo_meta_epoch(void); long long oo_meta_mix(long long);" >> "$TMP/preamble.c"
+echo "int oo_meta_is_path_a(void); void oo_meta_decoy_touch(void);" >> "$TMP/preamble.c"
+echo "void oo_cap_require(long long,long long,const char*);" >> "$TMP/preamble.c"
+echo "void oo_print_str(OoStr); void oo_eprint_str(OoStr); void oo_print_int(long long); void oo_print_bool(int); void oo_print_double(double); void oo_println(void); void oo_eprintln(void);" >> "$TMP/preamble.c"
+echo "double oo_sin(double); double oo_cos(double); double oo_ln(double);" >> "$TMP/preamble.c"
+echo "double oo_exp(double); double oo_sqrt(double); double oo_pow(double,double);" >> "$TMP/preamble.c"
+echo "int oo_str_eq(OoStr,OoStr); int oo_str_contains(OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "OoStr oo_int_to_str(long long); OoStr str_trim(OoStr); OoStr oo_str_to_lowercase(OoStr);" >> "$TMP/preamble.c"
+echo "OoStr oo_str_to_uppercase(OoStr); int oo_str_starts_with(OoStr,OoStr); int oo_str_ends_with(OoStr,OoStr);" >> "$TMP/preamble.c"
+echo "long long oo_str_index_of(OoStr,OoStr); OoStr oo_str_repeat(OoStr,long long);" >> "$TMP/preamble.c"
+echo "void x86_emit_stream(OoStr); void x86_emit_linux64(OoSList);" >> "$TMP/preamble.c"
 sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/preamble.c"
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
 sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/all.c"
@@ -222,6 +333,30 @@ fi
 gcc -O2 -I"$ROOT/runtime" "${OO_SSL_CFLAGS[@]}" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" \
   -lm -ldl -lpthread "${OO_SSL_LIBS[@]}" -o "$OUT"
 test -x "$OUT"
+OUT_BASE="$(basename "$OUT")"
+oodac_named=0
+if [[ "$OUT_BASE" == "oodac" || "$OUT_BASE" == "oodac_bin" \
+   || "$OUT_BASE" == "oodac_official" || "$OUT_BASE" == "oodac_official.gen2" ]]; then
+  oodac_named=1
+fi
+if grep -a -q 'pure .oo product CLI' "$OUT" 2>/dev/null; then
+  if [[ $oodac_named -eq 1 ]]; then
+    echo "ERR_OODAC_IS_CLI $OUT" >&2
+    rm -f "$OUT"
+    exit 1
+  fi
+elif [[ $oodac_named -eq 1 ]]; then
+  if ! grep -a -q 'oodac: usage:' "$OUT" 2>/dev/null; then
+    echo "ERR_OODAC_NOT_COMPILER $OUT" >&2
+    rm -f "$OUT"
+    exit 1
+  fi
+  if ! timeout 60 "$OUT" check "$ROOT/fixtures/hello.oo" | grep -q '^OK$'; then
+    echo "ERR_OODAC_HELLO $OUT" >&2
+    rm -f "$OUT"
+    exit 1
+  fi
+fi
 echo "pure_build: input_fp=$PURE_INPUT_FP"
 echo OK_PURE_MULTI
 rm -rf "$TMP"

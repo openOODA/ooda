@@ -1,159 +1,233 @@
-// # File Stream Abstractions
+// # Buffered FD stream
 //
-// Logline: Chunked streaming file reader and writer with explicit capability token gating.
+// Logline: Read and write through a fixed-size buffer over an integer fd and an owned store.
 //
-// Setup: Requires &FsReadCap for reading stream chunks, &FsWriteCap for writing chunks.
+// Setup: Packed string state so emit ARC cannot drop store or wbuf on struct return.
 //
 // Beats:
-//   1. Open FileReadStream with specified chunk buffer size.
-//   2. Read next chunk advancing internal file offset under &FsReadCap.
-//   3. Open FileWriteStream with append or overwrite modes.
-//   4. Write buffered chunk to target file path under &FsWriteCap.
+//   1. Open a stream on an fd with a write-buffer cap.
+//   2. Write flushes full buffer blocks into the store.
+//   3. Flush, rewind, and read slices of the store.
 //
-// residual: in-memory chunking simulation over sealed read_file and write_file builtins
+// residual: virtual fd + owned store, not a kernel file descriptor.
 
-type FileReadStream = struct {
-    path: String,
-    offset: Int,
-    chunk_size: Int,
-    is_eof: Bool,
-    total_read: Int
-};
+type FdStream = String;
+type FdRead = String;
 
-type FileWriteStream = struct {
-    path: String,
-    append_mode: Bool,
-    total_written: Int,
-    chunk_count: Int
-};
-
-// Open a file read stream with designated chunk size.
-pub fn file_read_stream_open(fs: &FsReadCap, path: String, chunk_size: Int) -> Result[FileReadStream, String] {
-    if !path_exists(fs, path) {
-        return Err("FILE_NOT_FOUND");
+fn fd_cap(cap: Int) -> Int {
+    if cap <= 0 {
+        return 4096;
     }
-    let mut csize: Int = chunk_size;
-    if csize <= 0 {
-        csize = 4096;
-    }
-    let stream: FileReadStream = FileReadStream {
-        path: path,
-        offset: 0,
-        chunk_size: csize,
-        is_eof: false,
-        total_read: 0
-    };
-    return Ok(stream);
+    return cap;
 }
 
-// Read the next chunk from the file read stream.
-pub fn file_read_stream_next(fs: &FsReadCap, stream: FileReadStream) -> Result[String, String] {
-    if stream.is_eof {
-        return Ok("");
+fn fd_i2s(val: Int) -> String {
+    if val == 0 {
+        return "0";
     }
-    let res: Result[String, String] = read_file(fs, stream.path);
-    if res.is_err() {
-        return Err("READ_FAILED");
+    let mut v: Int = val;
+    let mut neg: Bool = false;
+    if v < 0 {
+        neg = true;
+        v = 0 - v;
     }
-    let full: String = match res {
-        Ok(v) => v,
-        Err(_) => ""
-    };
-    let total_len: Int = chars_len(full);
-    let cur_off: Int = stream.offset;
-    if cur_off >= total_len {
-        return Ok("");
+    let digits: String = "0123456789";
+    let mut rev: String = "";
+    while v > 0 {
+        rev = rev + char_at(digits, v % 10);
+        v = v / 10;
     }
-    let c_size: Int = stream.chunk_size;
-    let mut end_pos: Int = cur_off + c_size;
-    if end_pos > total_len {
-        end_pos = total_len;
+    let mut out: String = "";
+    if neg {
+        out = "-";
     }
-    let chunk: String = str_slice(full, cur_off, end_pos);
-    return Ok(chunk);
+    let mut k: Int = chars_len(rev) - 1;
+    while k >= 0 {
+        out = out + char_at(rev, k);
+        k = k - 1;
+    }
+    return out;
 }
 
-// Advance file read stream state by chunk length.
-pub fn file_read_stream_advance(stream: FileReadStream, bytes_read: Int, file_total_len: Int) -> FileReadStream {
-    let cur_off: Int = stream.offset;
-    let new_offset: Int = cur_off + bytes_read;
-    let mut eof: Bool = false;
-    if new_offset >= file_total_len {
-        eof = true;
-    }
-    let cur_tot: Int = stream.total_read;
-    return FileReadStream {
-        path: stream.path,
-        offset: new_offset,
-        chunk_size: stream.chunk_size,
-        is_eof: eof,
-        total_read: cur_tot + bytes_read
-    };
-}
-
-// Check whether stream reached end of file.
-pub fn file_read_stream_is_eof(stream: FileReadStream) -> Bool {
-    return stream.is_eof;
-}
-
-// Return current read stream byte offset.
-pub fn file_read_stream_offset(stream: FileReadStream) -> Int {
-    return stream.offset;
-}
-
-// Open a file write stream with designated append or truncate mode.
-pub fn file_write_stream_open(fs: &FsWriteCap, path: String, append_mode: Bool) -> Result[FileWriteStream, String] {
-    if !append_mode {
-        let r: Result[Void, String] = write_file(fs, path, "");
-        if r.is_err() {
-            return Err("OPEN_WRITE_FAILED");
+fn fd_s2i(s: String) -> Int {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    let mut sign: Int = 1;
+    if n > 0 {
+        if char_at(s, 0) == "-" {
+            sign = 0 - 1;
+            i = 1;
         }
     }
-    let stream: FileWriteStream = FileWriteStream {
-        path: path,
-        append_mode: append_mode,
-        total_written: 0,
-        chunk_count: 0
-    };
-    return Ok(stream);
+    let digits: String = "0123456789";
+    let mut v: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        let mut k: Int = 0;
+        let mut found: Int = 0 - 1;
+        while k < 10 {
+            if char_at(digits, k) == c {
+                found = k;
+            }
+            k = k + 1;
+        }
+        if found < 0 {
+            return sign * v;
+        }
+        v = v * 10 + found;
+        i = i + 1;
+    }
+    return sign * v;
 }
 
-// Write a chunk into target file under &FsWriteCap and &FsReadCap.
-pub fn file_write_stream_append_chunk(
-    fw: &FsWriteCap,
-    fr: &FsReadCap,
-    stream: FileWriteStream,
-    chunk: String
-) -> Result[FileWriteStream, String] {
-    let chunk_len: Int = chars_len(chunk);
-    if chunk_len == 0 {
-        return Ok(stream);
+fn fd_find(hay: String, needle: String) -> Int {
+    let hn: Int = chars_len(hay);
+    let nn: Int = chars_len(needle);
+    if nn <= 0 {
+        return 0;
     }
-    let mut existing: String = "";
-    if path_exists(fr, stream.path) {
-        let res: Result[String, String] = read_file(fr, stream.path);
-        existing = match res {
-            Ok(v) => v,
-            Err(_) => ""
-        };
+    if nn > hn {
+        return -1;
     }
-    let new_content: String = existing + chunk;
-    let wr: Result[Void, String] = write_file(fw, stream.path, new_content);
-    if wr.is_err() {
-        return Err("WRITE_CHUNK_FAILED");
+    let mut i: Int = 0;
+    while i + nn <= hn {
+        if str_slice(hay, i, i + nn) == needle {
+            return i;
+        }
+        i = i + 1;
     }
-    let cur_tot: Int = stream.total_written;
-    let cur_cnt: Int = stream.chunk_count;
-    let updated: FileWriteStream = FileWriteStream {
-        path: stream.path,
-        append_mode: stream.append_mode,
-        total_written: cur_tot + chunk_len,
-        chunk_count: cur_cnt + 1
-    };
-    return Ok(updated);
+    return -1;
 }
 
-// Return total bytes written through write stream.
-pub fn file_write_stream_total(stream: FileWriteStream) -> Int {
-    return stream.total_written;
+fn fd_pack(fd: Int, store: String, wbuf: String, rpos: Int, cap: Int) -> FdStream {
+    return fd_i2s(fd) + "\t" + fd_i2s(chars_len(store)) + "\t" + store + fd_i2s(chars_len(wbuf)) + "\t" + wbuf + fd_i2s(rpos) + "\t" + fd_i2s(cap);
+}
+
+fn fd_get_fd(s: FdStream) -> Int {
+    let t: Int = fd_find(s, "\t");
+    if t < 0 {
+        return 0;
+    }
+    return fd_s2i(str_slice(s, 0, t));
+}
+
+fn fd_after_fd(s: FdStream) -> String {
+    let t: Int = fd_find(s, "\t");
+    return str_slice(s, t + 1, chars_len(s));
+}
+
+fn fd_get_store(s: FdStream) -> String {
+    let rest: String = fd_after_fd(s);
+    let t: Int = fd_find(rest, "\t");
+    let ln: Int = fd_s2i(str_slice(rest, 0, t));
+    return str_slice(rest, t + 1, t + 1 + ln);
+}
+
+fn fd_after_store(s: FdStream) -> String {
+    let rest: String = fd_after_fd(s);
+    let t: Int = fd_find(rest, "\t");
+    let ln: Int = fd_s2i(str_slice(rest, 0, t));
+    return str_slice(rest, t + 1 + ln, chars_len(rest));
+}
+
+fn fd_get_wbuf(s: FdStream) -> String {
+    let rest: String = fd_after_store(s);
+    let t: Int = fd_find(rest, "\t");
+    let ln: Int = fd_s2i(str_slice(rest, 0, t));
+    return str_slice(rest, t + 1, t + 1 + ln);
+}
+
+fn fd_after_wbuf(s: FdStream) -> String {
+    let rest: String = fd_after_store(s);
+    let t: Int = fd_find(rest, "\t");
+    let ln: Int = fd_s2i(str_slice(rest, 0, t));
+    return str_slice(rest, t + 1 + ln, chars_len(rest));
+}
+
+fn fd_get_rpos(s: FdStream) -> Int {
+    let rest: String = fd_after_wbuf(s);
+    let t: Int = fd_find(rest, "\t");
+    return fd_s2i(str_slice(rest, 0, t));
+}
+
+fn fd_get_cap(s: FdStream) -> Int {
+    let rest: String = fd_after_wbuf(s);
+    let t: Int = fd_find(rest, "\t");
+    return fd_s2i(str_slice(rest, t + 1, chars_len(rest)));
+}
+
+fn fd_read_pack(stream: FdStream, data: String) -> FdRead {
+    return fd_i2s(chars_len(stream)) + "\t" + stream + data;
+}
+
+pub fn fd_read_stream(r: FdRead) -> FdStream {
+    let t: Int = fd_find(r, "\t");
+    let ln: Int = fd_s2i(str_slice(r, 0, t));
+    return str_slice(r, t + 1, t + 1 + ln);
+}
+
+pub fn fd_read_data(r: FdRead) -> String {
+    let t: Int = fd_find(r, "\t");
+    let ln: Int = fd_s2i(str_slice(r, 0, t));
+    return str_slice(r, t + 1 + ln, chars_len(r));
+}
+
+pub fn fd_stream_open(fd: Int, cap: Int) -> FdStream {
+    return fd_pack(fd, "", "", 0, fd_cap(cap));
+}
+
+pub fn fd_stream_from_store(fd: Int, store: String, cap: Int) -> FdStream {
+    return fd_pack(fd, store, "", 0, fd_cap(cap));
+}
+
+pub fn fd_stream_write(s: FdStream, data: String) -> FdStream {
+    let mut w: String = fd_get_wbuf(s) + data;
+    let mut store: String = fd_get_store(s);
+    let cap: Int = fd_cap(fd_get_cap(s));
+    while chars_len(w) >= cap {
+        store = store + str_slice(w, 0, cap);
+        w = str_slice(w, cap, chars_len(w));
+    }
+    return fd_pack(fd_get_fd(s), store, w, fd_get_rpos(s), cap);
+}
+
+pub fn fd_stream_flush(s: FdStream) -> FdStream {
+    let w: String = fd_get_wbuf(s);
+    if chars_len(w) == 0 {
+        return s;
+    }
+    return fd_pack(fd_get_fd(s), fd_get_store(s) + w, "", fd_get_rpos(s), fd_get_cap(s));
+}
+
+pub fn fd_stream_rewind(s: FdStream) -> FdStream {
+    let f: FdStream = fd_stream_flush(s);
+    return fd_pack(fd_get_fd(f), fd_get_store(f), "", 0, fd_get_cap(f));
+}
+
+pub fn fd_stream_read(s: FdStream, n: Int) -> FdRead {
+    let f: FdStream = fd_stream_flush(s);
+    let slen: Int = chars_len(fd_get_store(f));
+    let rp: Int = fd_get_rpos(f);
+    if rp >= slen || n <= 0 {
+        return fd_read_pack(f, "");
+    }
+    let mut end: Int = rp + n;
+    if end > slen {
+        end = slen;
+    }
+    let chunk: String = str_slice(fd_get_store(f), rp, end);
+    let next: FdStream = fd_pack(fd_get_fd(f), fd_get_store(f), "", end, fd_get_cap(f));
+    return fd_read_pack(next, chunk);
+}
+
+pub fn fd_stream_store(s: FdStream) -> String {
+    return fd_get_store(s);
+}
+
+pub fn fd_stream_pending(s: FdStream) -> Int {
+    return chars_len(fd_get_wbuf(s));
+}
+
+pub fn fd_stream_fd(s: FdStream) -> Int {
+    return fd_get_fd(s);
 }

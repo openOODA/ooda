@@ -11,10 +11,11 @@
  * Time/Rand tokens live in chs_rt_time_rand.c (M12). */
 static pthread_once_t g_caps_once = PTHREAD_ONCE_INIT;
 static long long g_tok_fs, g_tok_sys, g_tok_env, g_tok_net;
-static long long g_tok_sign, g_tok_process, g_tok_sync, g_tok_mem, g_tok_http, g_tok_tcp, g_tok_udp, g_tok_bind, g_tok_audio, g_tok_camera, g_tok_usb, g_tok_hid, g_tok_window, g_tok_frame, g_tok_fsread, g_tok_fswrite;
+static long long g_tok_sign, g_tok_process, g_tok_sync, g_tok_mem, g_tok_http, g_tok_tcp, g_tok_udp, g_tok_bind, g_tok_audio, g_tok_camera, g_tok_usb, g_tok_hid, g_tok_window, g_tok_frame, g_tok_fsread, g_tok_fswrite, g_tok_arena;
+static unsigned char g_kernel_hmac_key[32];
 
 static void caps_once_init(void) {
-  unsigned char b[160];
+  unsigned char b[168];
   size_t i;
   unsigned long long acc;
 #if defined(__linux__) || defined(__APPLE__)
@@ -50,11 +51,22 @@ static void caps_once_init(void) {
   g_tok_frame = ((long long)18ULL << 56) | (long long)((((unsigned long long)b[136]) << 56) | (((unsigned long long)b[137]) << 48) | (((unsigned long long)b[138]) << 40) | (((unsigned long long)b[139]) << 32) | (((unsigned long long)b[140]) << 24) | (((unsigned long long)b[141]) << 16) | (((unsigned long long)b[142]) << 8) | ((unsigned long long)b[143]));
   g_tok_fsread = ((long long)19ULL << 56) | (long long)((((unsigned long long)b[144]) << 56) | (((unsigned long long)b[145]) << 48) | (((unsigned long long)b[146]) << 40) | (((unsigned long long)b[147]) << 32) | (((unsigned long long)b[148]) << 24) | (((unsigned long long)b[149]) << 16) | (((unsigned long long)b[150]) << 8) | ((unsigned long long)b[151]));
   g_tok_fswrite = ((long long)20ULL << 56) | (long long)((((unsigned long long)b[152]) << 56) | (((unsigned long long)b[153]) << 48) | (((unsigned long long)b[154]) << 40) | (((unsigned long long)b[155]) << 32) | (((unsigned long long)b[156]) << 24) | (((unsigned long long)b[157]) << 16) | (((unsigned long long)b[158]) << 8) | ((unsigned long long)b[159]));
+  g_tok_arena = ((long long)21ULL << 56) | (long long)((((unsigned long long)b[160]) << 56) | (((unsigned long long)b[161]) << 48) | (((unsigned long long)b[162]) << 40) | (((unsigned long long)b[163]) << 32) | (((unsigned long long)b[164]) << 24) | (((unsigned long long)b[165]) << 16) | (((unsigned long long)b[166]) << 8) | ((unsigned long long)b[167]));
   /* Never equal classic forgeable magics */
   if (g_tok_fs == 0x4F4F4653LL) g_tok_fs ^= 0x11111111LL;
   if (g_tok_sys == 0x4F4F5359LL) g_tok_sys ^= 0x11111111LL;
   if (g_tok_env == 0x4F4F454ELL) g_tok_env ^= 0x11111111LL;
   if (g_tok_net == 0x4F4F4E54LL) g_tok_net ^= 0x11111111LL;
+#if defined(__linux__) || defined(__APPLE__)
+  if (getentropy(g_kernel_hmac_key, sizeof g_kernel_hmac_key) != 0)
+#endif
+  {
+    acc = (unsigned long long)g_tok_sys ^ (unsigned long long)g_tok_fs ^ (unsigned long long)getpid();
+    for (i = 0; i < sizeof g_kernel_hmac_key; i++) {
+      acc = acc * 0x9E3779B97F4A7C15ULL + (unsigned long long)i;
+      g_kernel_hmac_key[i] = (unsigned char)(acc >> 16);
+    }
+  }
 }
 
 static void oo_caps_init(void) {
@@ -81,6 +93,14 @@ long long oo_cap_grant_window(void) { oo_caps_init(); return g_tok_window; }
 long long oo_cap_grant_frame(void) { oo_caps_init(); return g_tok_frame; }
 long long oo_cap_grant_fsread(void) { oo_caps_init(); return g_tok_fsread; }
 long long oo_cap_grant_fswrite(void) { oo_caps_init(); return g_tok_fswrite; }
+long long oo_cap_grant_arena(void) { oo_caps_init(); return g_tok_arena; }
+int oo_cap_is_arena(long long got) { oo_caps_init(); return got == g_tok_arena; }
+void oo_cap_require_arena(long long got, const char *op) {
+  if (!oo_cap_is_arena(got)) {
+    fprintf(stderr, "ERR\tcap\t%s: missing or forged capability\n", op ? op : "arena");
+    exit(1);
+  }
+}
 
 void oo_cap_require(long long got, long long want, const char *op) {
   oo_caps_init();
@@ -195,4 +215,29 @@ void oo_cap_require_window(long long got, const char *op) {
 }
 void oo_cap_require_frame(long long got, const char *op) {
   oo_cap_require(got, g_tok_frame, op ? op : "frame");
+}
+
+/* OPEN-73: process-local HMAC seal of a cap id. Not a published magic. */
+OoStr oo_cap_kernel_seal(long long sys, OoStr cap_id) {
+  OoStr key;
+  oo_caps_init();
+  oo_cap_require_sys(sys, "oo_cap_kernel_seal");
+  if (cap_id.len <= 0 || !cap_id.data) {
+    OoStr z; z.data = oo_str_alloc_payload(0); z.len = 0; return z;
+  }
+  key.data = (char *)g_kernel_hmac_key;
+  key.len = (long long)sizeof g_kernel_hmac_key;
+  return crypto_hmac_sha256_internal(key, cap_id);
+}
+
+/* OPEN-74: honest enclave floor — measure sealed identity, print hash, return. Not SGX/SEV. */
+OoStr oo_enclave_enter(long long sys, OoStr sealed) {
+  OoStr meas;
+  oo_caps_init();
+  oo_cap_require_sys(sys, "oo_enclave_enter");
+  meas = crypto_sha256_internal(sealed);
+  fputs("enclave_measurement ", stdout);
+  if (meas.data && meas.len > 0) fwrite(meas.data, 1, (size_t)meas.len, stdout);
+  fputc('\n', stdout);
+  return meas;
 }

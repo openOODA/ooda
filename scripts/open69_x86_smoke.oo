@@ -1,0 +1,64 @@
+// # OPEN-69 standalone x86_64 smoke
+//
+// Logline: emit-x86 writes a real .s for open69_hello.oo; as and ld run it to Hello without emit-c.
+//
+// Setup: cwd is ooda/. Tree oodac has emit-x86. GNU as and ld are on PATH. Host is x86_64.
+//
+// Beats:
+//   1. emit-x86 of open69_hello.oo has _start/main and Hello, and is not C.
+//   2. as --64 and ld produce a binary whose stdout is Hello.
+//   3. emit-x86 of fixtures/hello.oo refuses (no println string). AArch64 is residual.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let oodac = root + "/oodac/oodac";
+    if sh_mkdir_p(fw, tmpd).is_err() { fail("mkdir"); }
+    if scenario(p, fs, "OPEN-69 standalone x86_64").is_err() { fail("scenario"); }
+    if expect_quiet(p, "test -x " + oodac).is_err() { fail("no tree oodac"); }
+    if expect_present(fs, root + "/oodac/x86_emit.oo").is_err() { fail("no x86_emit.oo"); }
+    if expect_present(fs, root + "/fixtures/open69_hello.oo").is_err() { fail("no open69_hello.oo"); }
+    if expect_clean(p, "uname -m | grep -qx x86_64").is_err() { fail("host is not x86_64"); }
+
+    let sfile = tmpd + "/open69_hello.s";
+    let serr = tmpd + "/open69_hello.err";
+    // Product path: emit-x86 (optional --backend x86). Not emit-c + gcc.
+    if check(p, oodac + " emit-x86 " + root + "/fixtures/open69_hello.oo > " + sfile + " 2>" + serr, within: 30).is_err() {
+        fail("emit-x86");
+    }
+    if expect_clean(p, "! grep -qE '^ERR' " + sfile + " " + serr).is_err() { fail("ERR in .s"); }
+    if expect_substring(fs, sfile, "_start").is_err() { fail(".s missing _start"); }
+    if expect_substring(fs, sfile, "main:").is_err() { fail(".s missing main"); }
+    if expect_substring(fs, sfile, "Hello").is_err() { fail(".s missing Hello"); }
+    if expect_substring(fs, sfile, "syscall").is_err() { fail(".s missing syscall"); }
+    if expect_clean(p, "! grep -qE '#include|int main\\(|chs_rt|OoStr ' " + sfile).is_err() { fail(".s looks like emit-c"); }
+    if expect_clean(p, "! grep -qi residual " + sfile + " " + serr).is_err() { fail("residual on open69_hello"); }
+
+    let obj = tmpd + "/open69_hello.o";
+    let bin = tmpd + "/open69_hello.bin";
+    let out = tmpd + "/open69_hello.out";
+    if check(p, "as --64 -o " + obj + " " + sfile, within: 10).is_err() { fail("as"); }
+    if check(p, "ld -o " + bin + " " + obj, within: 10).is_err() { fail("ld"); }
+    if check(p, bin + " > " + out + " 2>&1", within: 5).is_err() { fail("run"); }
+    if expect_clean(p, "grep -qx Hello " + out).is_err() { fail("stdout not Hello"); }
+
+    // hello.oo uses println(message) / concat — residual refuse, not emit-c.
+    let full_s = tmpd + "/open69_full_hello.s";
+    let herr = tmpd + "/open69_hello_oo.err";
+    if expect_clean(p, "! " + oodac + " emit-x86 " + root + "/fixtures/hello.oo > " + full_s + " 2>" + herr).is_err() {
+        fail("hello.oo emit-x86 should residual-refuse");
+    }
+    if expect_clean(p, "grep -q residual " + herr + " " + full_s).is_err() {
+        fail("hello.oo emit-x86 missing residual");
+    }
+
+    println("open69_x86_smoke: PASSED");
+}

@@ -1,0 +1,117 @@
+// # Emit Linux x86_64 AT&T assembly
+//
+// Logline: Walks tokens and writes a freestanding x86_64 .s whose _start/main prints each println string via write(1).
+//
+// Setup: tokenize_lines and check_secret_println_sinks exist. Product floor is println("...") plus main.
+//
+// Beats:
+//   1. Tokenize, refuse secret sinks, and require a main plus at least one println string.
+//   2. Write .rodata bytes for each string plus a newline.
+//   3. Write _start/main that issues SYS_write then SYS_exit.
+//
+// residual: concat, calls, and AArch64 are not lowered. Use as+ld, not emit-c.
+
+import "token_fmt.oo";
+import "c_emit_secret_check.oo";
+
+fn x86_ascii_esc(s: String) -> String {
+    let n = chars_len(s);
+    let mut o = "";
+    let mut i = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "\\" {
+            o = o + "\\\\";
+        } else if c == "\"" {
+            o = o + "\\\"";
+        } else if c == "\n" {
+            o = o + "\\n";
+        } else if c == "\t" {
+            o = o + "\\t";
+        } else {
+            o = o + c;
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+fn x86_collect_prints(toks: List[String]) -> List[String] {
+    let n = list_len(toks);
+    let mut msgs: List[String] = list_new();
+    let mut saw_main = false;
+    let mut i = 0;
+    while i < n {
+        let k: String = field_at(list_get(toks, i), 0);
+        let t: String = field_at(list_get(toks, i), 3);
+        if k == "IDENT" && t == "main" {
+            if i > 0 && field_at(list_get(toks, i - 1), 0) == "KW_FN" {
+                saw_main = true;
+            }
+        }
+        if k == "IDENT" && t == "println" {
+            let mut j = i + 1;
+            if j < n && field_at(list_get(toks, j), 0) == "LPAREN" {
+                j = j + 1;
+            }
+            if j < n && field_at(list_get(toks, j), 0) == "STRING" {
+                msgs = list_push(msgs, field_at(list_get(toks, j), 3));
+            }
+        }
+        i = i + 1;
+    }
+    if !saw_main {
+        println("ERR\tx86_emit\tresidual: need fn main");
+        process_exit(1);
+    }
+    if list_len(msgs) < 1 {
+        println("ERR\tx86_emit\tresidual: need println(\"...\") (not emit-c)");
+        process_exit(1);
+    }
+    return msgs;
+}
+
+fn x86_emit_linux64(msgs: List[String]) {
+    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
+    println("    .section .rodata");
+    let n = list_len(msgs);
+    let mut i = 0;
+    while i < n {
+        let s: String = list_get(msgs, i);
+        println(".Lstr" + i.to_string() + ":");
+        println("    .ascii \"" + x86_ascii_esc(s) + "\\n\"");
+        i = i + 1;
+    }
+    println("    .section .text");
+    println("    .globl _start");
+    println("    .globl main");
+    println("    .p2align 4");
+    println("main:");
+    println("_start:");
+    i = 0;
+    while i < n {
+        let s: String = list_get(msgs, i);
+        let ln = chars_len(s) + 1;
+        let tag: String = i.to_string();
+        println("    mov $1, %rax");
+        println("    mov $1, %rdi");
+        println("    lea .Lstr" + tag + "(%rip), %rsi");
+        println("    mov $" + ln.to_string() + ", %rdx");
+        println("    syscall");
+        i = i + 1;
+    }
+    println("    mov $60, %rax");
+    println("    xor %rdi, %rdi");
+    println("    syscall");
+}
+
+pub fn x86_emit_stream(src: String) {
+    if chars_len(src) == 0 {
+        println("ERR\tx86_emit\tempty");
+        process_exit(1);
+    }
+    let toks: List[String] = tokenize_lines(src);
+    check_secret_println_sinks(src, toks);
+    let msgs: List[String] = x86_collect_prints(toks);
+    x86_emit_linux64(msgs);
+}

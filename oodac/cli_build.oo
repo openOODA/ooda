@@ -1,12 +1,12 @@
 // # Build a source file to a native or LLVM binary
 //
-// Logline: Emits C or LLVM for the source and its imports, then links runtime C into the output binary.
+// Logline: Emits C, LLVM, or standalone x86_64 .s for the source, then links with gcc, clang, or as+ld.
 //
-// Setup: load_expand, shell_sq, sys_exec, and process_exit exist; backend is llvm or native; out_arg may be empty.
+// Setup: load_expand, shell_sq, sys_exec, and process_exit exist; backend is x86, llvm, or native; out_arg may be empty; emit uses ${OODAC_BIN:-${OODA_COMPILER:-./oodac_bin}}, never the product CLI.
 //
 // Beats:
 //   1. When out_arg is empty, the binary path is path.bin.
-//   2. On llvm, emit-llvm to a temp .ll and clang it with runtime/chs_rt.c, or exit 1.
+//   2. On x86, emit-x86 to a temp .s and as+ld it (no emit-c). On llvm, emit-llvm + clang + chs_rt.c.
 //   3. On native, expand imports, emit preamble then protos then bodies, gcc-link chs_rt.c, or exit 1.
 
 import "load_import.oo";
@@ -14,13 +14,35 @@ import "diag_json.oo";
 import "c_emit_helpers.oo";
 import "c_emit.oo";
 
+// OPEN-71: deterministic gcc flags for bit-identical rebuilds.
+pub fn gcc_repro_flags() -> String {
+    return "-frandom-seed=0 -Wl,--build-id=none";
+}
+
 pub fn run_build_cmd(fs: &FsCap, sys: &SysCap, path: String, out_arg: String, backend: String, quiet: Bool) {
     let mut out = path + ".bin";
     if out_arg != "" { out = out_arg; }
 
+    if backend == "x86" {
+        let tmp_s = out + ".tmp.s";
+        let tmp_o = out + ".tmp.o";
+        let r_emit: Result[String, String] = sys_exec(sys, "sh", "-c", "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac_bin}}\" && $OODAC_BIN emit-x86 " + shell_sq(path) + " > " + shell_sq(tmp_s));
+        if !r_emit.is_ok() { println("ERR\tbuild\temit-x86 failed"); process_exit(1); }
+        let r_as: Result[String, String] = sys_exec(sys, "sh", "-c", "as --64 -o " + shell_sq(tmp_o) + " " + shell_sq(tmp_s));
+        if !r_as.is_ok() { println("ERR\tbuild\tas failed"); process_exit(1); }
+        let r_ld: Result[String, String] = sys_exec(sys, "sh", "-c", "ld -o " + shell_sq(out) + " " + shell_sq(tmp_o));
+        if r_ld.is_ok() {
+            println("OK\tbuild\t" + out);
+            return;
+        } else {
+            println("ERR\tbuild\tld failed");
+            process_exit(1);
+        }
+    }
+
     if backend == "llvm" {
         let tmp_ll = out + ".tmp.ll";
-        let r_emit: Result[String, String] = sys_exec(sys, "sh", "-c", "OODAC_BIN=\"${OODAC_BIN:-./oodac/oodac}\" && $OODAC_BIN emit-llvm " + shell_sq(path) + " > " + shell_sq(tmp_ll));
+        let r_emit: Result[String, String] = sys_exec(sys, "sh", "-c", "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac_bin}}\" && $OODAC_BIN emit-llvm " + shell_sq(path) + " > " + shell_sq(tmp_ll));
         if !r_emit.is_ok() { println("ERR\tbuild\temit-llvm failed"); process_exit(1); }
         let clang_cmd = "OO_SSL_C=\"\"; OO_SSL_L=\"\"; if [ \"${OO_HAVE_OPENSSL:-0}\" = 1 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"-lssl -lcrypto\"; fi; clang -O0 -Wno-override-module -Wno-unused-command-line-argument -Iruntime $OO_SSL_C " + shell_sq(tmp_ll) + " runtime/chs_rt.c -lm -ldl -lpthread $OO_SSL_L -o " + shell_sq(out);
         let r_clang: Result[String, String] = sys_exec(sys, "sh", "-c", clang_cmd);
@@ -47,7 +69,7 @@ pub fn run_build_cmd(fs: &FsCap, sys: &SysCap, path: String, out_arg: String, ba
 
     let tmp_all_c = out + ".tmp.c";
     
-    let r_pre: Result[String, String] = sys_exec(sys, "sh", "-c", "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac/oodac}}\" && OODA_EMIT_NO_CONCAT=1 OODA_EMIT_NO_PREAMBLE=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 $OODAC_BIN emit-preamble " + shell_sq(path) + " > " + shell_sq(tmp_all_c));
+    let r_pre: Result[String, String] = sys_exec(sys, "sh", "-c", "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac_bin}}\" && OODA_EMIT_NO_CONCAT=1 OODA_EMIT_NO_PREAMBLE=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 $OODAC_BIN emit-preamble " + shell_sq(path) + " > " + shell_sq(tmp_all_c));
     if !r_pre.is_ok() { println("ERR\tbuild\tpreamble failed"); process_exit(1); }
 
     let mut j = 0;
@@ -57,7 +79,7 @@ pub fn run_build_cmd(fs: &FsCap, sys: &SysCap, path: String, out_arg: String, ba
         if q != "" {
             println("BUILD MOD: " + m);
         }
-        let r_pro: Result[String, String] = sys_exec(sys, "sh", "-c", "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac/oodac}}\" && env -u PURE_NO_ARC -u OODA_PURE_NO_ARC OODA_EMIT_NO_CONCAT=1 OODA_EMIT_NO_PREAMBLE=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 $OODAC_BIN emit-protos " + shell_sq(m) + " >> " + shell_sq(tmp_all_c));
+        let r_pro: Result[String, String] = sys_exec(sys, "sh", "-c", "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac_bin}}\" && env -u PURE_NO_ARC -u OODA_PURE_NO_ARC OODA_EMIT_NO_CONCAT=1 OODA_EMIT_NO_PREAMBLE=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 $OODAC_BIN emit-protos " + shell_sq(m) + " >> " + shell_sq(tmp_all_c));
         if !r_pro.is_ok() { println("ERR\tbuild\tprotos failed on " + m); process_exit(1); }
         j = j + 1;
     }
@@ -65,14 +87,14 @@ pub fn run_build_cmd(fs: &FsCap, sys: &SysCap, path: String, out_arg: String, ba
     j = 0;
     while j < list_len(mods) {
         let m = list_get(mods, j);
-        let r_bod: Result[String, String] = sys_exec(sys, "sh", "-c", "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac/oodac}}\" && OODA_EMIT_NO_CONCAT=1 OODA_EMIT_NO_PREAMBLE=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 $OODAC_BIN emit-bodies " + shell_sq(m) + " >> " + shell_sq(tmp_all_c));
+        let r_bod: Result[String, String] = sys_exec(sys, "sh", "-c", "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac_bin}}\" && OODA_EMIT_NO_CONCAT=1 OODA_EMIT_NO_PREAMBLE=1 EMIT_NO_CONCAT=1 EMIT_NO_PREAMBLE=1 $OODAC_BIN emit-bodies " + shell_sq(m) + " >> " + shell_sq(tmp_all_c));
         if !r_bod.is_ok() { println("ERR\tbuild\tbodies failed on " + m); process_exit(1); }
         j = j + 1;
     }
 
     // chs_rt.c is the unity TU (#include of str/list/sys/fs/…); do not also link pieces
     // TLS: auto-link libssl.so.3 when present (headers optional; local decls in chs_rt_tls.c)
-    let gcc_cmd = "OO_SSL_C=\"\"; OO_SSL_L=\"\"; if [ \"${OO_HAVE_OPENSSL:-}\" = \"0\" ]; then true; elif [ -e /usr/lib64/libssl.so.3 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"/usr/lib64/libssl.so.3 /usr/lib64/libcrypto.so.3\"; elif [ -e /lib64/libssl.so.3 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"/lib64/libssl.so.3 /lib64/libcrypto.so.3\"; elif [ -e /usr/lib/x86_64-linux-gnu/libssl.so.3 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"/usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3\"; elif [ \"${OO_HAVE_OPENSSL:-}\" = \"1\" ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"-lssl -lcrypto\"; fi; OODA_SRC_ROOT=\"${OODA_SRC_ROOT:-.}\"; gcc -O2 -I\"$OODA_SRC_ROOT/runtime\" $OO_SSL_C " + shell_sq(tmp_all_c) + " \"$OODA_SRC_ROOT/runtime/chs_rt.c\" -lm -ldl -lpthread $OO_SSL_L -o " + shell_sq(out);
+    let gcc_cmd = "OO_SSL_C=\"\"; OO_SSL_L=\"\"; if [ \"${OO_HAVE_OPENSSL:-}\" = \"0\" ]; then true; elif [ -e /usr/lib64/libssl.so.3 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"/usr/lib64/libssl.so.3 /usr/lib64/libcrypto.so.3\"; elif [ -e /lib64/libssl.so.3 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"/lib64/libssl.so.3 /lib64/libcrypto.so.3\"; elif [ -e /usr/lib/x86_64-linux-gnu/libssl.so.3 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"/usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3\"; elif [ \"${OO_HAVE_OPENSSL:-}\" = \"1\" ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"-lssl -lcrypto\"; fi; OODA_SRC_ROOT=\"${OODA_SRC_ROOT:-.}\"; SOURCE_DATE_EPOCH=\"${SOURCE_DATE_EPOCH:-0}\" gcc -O2 " + gcc_repro_flags() + " -I\"$OODA_SRC_ROOT/runtime\" $OO_SSL_C " + shell_sq(tmp_all_c) + " \"$OODA_SRC_ROOT/runtime/chs_rt.c\" -lm -ldl -lpthread $OO_SSL_L -o " + shell_sq(out);
     let r_gcc: Result[String, String] = sys_exec(sys, "sh", "-c", gcc_cmd);
     if r_gcc.is_ok() {
         if !quiet {

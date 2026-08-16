@@ -2,12 +2,12 @@
 //
 // Logline: Maps a content key to a hit or a write under .ooda-cache/check so later checks skip work.
 //
-// Setup: path_exists, read_file, and write_file take fs: &FsCap; sys_exec takes sys: &SysCap; mkdir is not native so ensure shells mkdir -p; empty keys never hit or write.
+// Setup: path_exists and read_file take fs: &FsCap; sys_exec takes sys: &SysCap; mkdir is not native so ensure shells mkdir -p; empty keys never hit or write; write_file needs OODA_FS_WRITEDIR so puts stay on sh.
 //
 // Beats:
 //   1. Root is .ooda-cache/check; a key path is that root plus slash plus key.
 //   2. Ensure creates the root via sys_exec mkdir -p and returns quietly if the path exists or mkdir fails.
-//   3. Hit reads OK from the file; put writes OK newline; module keys use m_ and tree keys use t_ts3_.
+//   3. Hit is path_exists only (put writes OK); put_body writes a listing; module keys use m_, tree keys use t_ts3_, graph keys use g_.
 
 pub fn check_cache_root() -> String {
     return ".ooda-cache/check";
@@ -23,10 +23,8 @@ pub fn check_cache_ensure(fs: &FsCap, sys: &SysCap) {
     if path_exists(fs, root) {
         return;
     }
-    // mkdir -p via sys (no native mkdir in CHS yet)
     let r = sys_exec(sys, "mkdir", "-p", root);
     if r.is_err() {
-        // non-fatal: cache disabled if mkdir fails
         return;
     }
 }
@@ -35,18 +33,22 @@ pub fn check_cache_hit(fs: &FsCap, key: String) -> Bool {
     if chars_len(key) == 0 {
         return false;
     }
+    return path_exists(fs, check_cache_path(key));
+}
+
+pub fn check_cache_read(fs: &FsCap, key: String) -> String {
+    if chars_len(key) == 0 {
+        return "";
+    }
     let p: String = check_cache_path(key);
     if !path_exists(fs, p) {
-        return false;
+        return "";
     }
     let rr = read_file(fs, p);
     if rr.is_err() {
-        return false;
+        return "";
     }
-    // Prefer unwrap over match — multi-module emit types match arms poorly.
-    let body: String = rr.unwrap();
-    let ok: Bool = body.contains("OK");
-    return ok;
+    return rr.unwrap();
 }
 
 pub fn check_cache_put(fs: &FsCap, sys: &SysCap, key: String) {
@@ -60,18 +62,35 @@ pub fn check_cache_put(fs: &FsCap, sys: &SysCap, key: String) {
     if wr.is_err() {
         return;
     }
-    if !path_exists(fs, p) {
+}
+
+pub fn check_cache_put_body(fs: &FsCap, sys: &SysCap, key: String, body: String) {
+    if chars_len(key) == 0 {
+        return;
+    }
+    if chars_len(body) == 0 {
+        return;
+    }
+    if body.contains("'") {
+        return;
+    }
+    let p: String = check_cache_path(key);
+    let root: String = check_cache_root();
+    let cmd: String = "mkdir -p " + root + " && printf '%s' '" + body + "' > " + p;
+    let wr: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    if wr.is_err() {
         return;
     }
 }
 
-// Module key: m_<hash>. Tree key: t_<hash>.
 pub fn check_cache_mod_key(h: String) -> String {
-    let pref: String = "m_";
-    return pref + h;
+    return "m_" + h;
 }
 
 pub fn check_cache_tree_key(h: String) -> String {
-    let pref: String = "t_ts3_";
-    return pref + h;
+    return "t_ts3_" + h;
+}
+
+pub fn check_cache_graph_key(root: String) -> String {
+    return "g_" + content_hash(root);
 }

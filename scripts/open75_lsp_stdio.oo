@@ -1,0 +1,77 @@
+// # OPEN-75 multi-message LSP stdio proof
+//
+// Logline: Feed initialize then shutdown on stdin to product lsp_serve and require two framed replies.
+//
+// Setup: cwd is ooda/. Tree oodac emit-c, gcc, and fixtures/open75_lsp_stdio.oo.
+//
+// Beats:
+//   1. Emit and gcc the stdin serve fixture.
+//   2. Pipe initialize then shutdown as newline-framed JSON-RPC.
+//   3. Require two Content-Length replies, capabilities, and shutdown null.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let oodac = root + "/oodac/oodac";
+    if sh_mkdir_p(fw, tmpd).is_err() {
+        fail("mkdir");
+    }
+    if scenario(p, fs, "OPEN-75 lsp stdio").is_err() {
+        fail("scenario");
+    }
+    if expect_quiet(p, "test -x " + oodac).is_err() {
+        fail("no oodac");
+    }
+    if expect_clean(p, "grep -a -q 'oodac: usage:' " + oodac).is_err() {
+        fail("oodac is not compiler");
+    }
+    if expect_clean(p, "! grep -q 'name == \"lsp_serve\"' " + root + "/oodac/check_residual.oo").is_err() {
+        fail("lsp_serve still residual");
+    }
+    if expect_clean(p, "grep -q 'pub fn lsp_serve' " + root + "/lsp/lsp_stdio.oo").is_err() {
+        fail("no lsp_serve");
+    }
+
+    let src = root + "/fixtures/open75_lsp_stdio.oo";
+    let cfile = tmpd + "/open75_lsp_stdio.c";
+    let bin = tmpd + "/open75_lsp_stdio.bin";
+    let inpath = tmpd + "/open75_lsp_stdio.in";
+    let outpath = tmpd + "/open75_lsp_stdio.out";
+    if expect_present(fs, src).is_err() {
+        fail("no fixture");
+    }
+    if check(p, oodac + " emit-c " + src + " > " + cfile + " 2> " + tmpd + "/open75_emit.err", within: 60).is_err() {
+        fail("emit-c");
+    }
+    let gcc = "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + cfile + " -lm -ldl -lpthread -o " + bin;
+    if check(p, gcc, within: 30).is_err() {
+        fail("gcc");
+    }
+
+    let init = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file:///tmp\"}}";
+    let shut = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\",\"params\":null}";
+    if check(p, "printf '%s\\n%s\\n' '" + init + "' '" + shut + "' > " + inpath, within: 5).is_err() {
+        fail("write stdin");
+    }
+    if check(p, bin + " < " + inpath + " > " + outpath + " 2> " + tmpd + "/open75_run.err", within: 10).is_err() {
+        fail("run stdin");
+    }
+    if expect_clean(p, "grep -c 'Content-Length:' " + outpath + " | grep -qx 2").is_err() {
+        fail("want 2 replies");
+    }
+    if expect_clean(p, "grep -q capabilities " + outpath).is_err() {
+        fail("initialize");
+    }
+    if expect_clean(p, "grep -q '\"result\":null' " + outpath).is_err() {
+        fail("shutdown");
+    }
+    println("open75_lsp_stdio: PASSED");
+}

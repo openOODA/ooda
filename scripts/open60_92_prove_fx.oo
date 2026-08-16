@@ -1,0 +1,202 @@
+// # OPEN-60..92 prove helpers and named-backend rows
+//
+// Logline: Shared check/emit/gcc/run and backend proofs for open60_92_prove.
+//
+// Setup: Imported by scripts/open60_92_prove.oo. Tree oodac and gcc.
+//
+// Beats:
+//   1. chk and run_c are check + emit-c + gcc + run with residual refuse.
+//   2. Named backends: wasm, llvm, x86, bit-identical gcc, lsp stdio, smt ok+bad.
+//   3. PURE_SKIP_CHECK is never used as proof.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn need(p: &ProcessCap, cmd: String, msg: String) -> Int {
+    if expect_clean(p, cmd).is_err() { println("FAIL " + msg); return 1; }
+    return 0;
+}
+
+pub fn chk(p: &ProcessCap, oodac: String, tmpd: String, src: String, msg: String) -> Int {
+    let out: String = tmpd + "/chk.out";
+    if check(p, "timeout 60 " + oodac + " check " + src + " > " + out + " 2>&1", within: 70).is_err() {
+        println("FAIL " + msg + " rc");
+        return 1;
+    }
+    if need(p, "grep -q '^OK' " + out, msg + " OK") != 0 { return 1; }
+    return need(p, "! grep -qE 'residual|beta-out' " + out, msg + " residual");
+}
+
+pub fn run_c(p: &ProcessCap, root: String, tmpd: String, oodac: String, src: String, needle: String, ban: String, to: String, msg: String) -> Int {
+    let c: String = tmpd + "/p.c";
+    let bin: String = tmpd + "/p.bin";
+    let out: String = tmpd + "/p.out";
+    if chk(p, oodac, tmpd, src, msg) != 0 { return 1; }
+    if check(p, "timeout 60 " + oodac + " emit-c " + src + " > " + c + " 2> " + tmpd + "/p.err", within: 70).is_err() {
+        println("FAIL " + msg + " emit");
+        return 1;
+    }
+    if need(p, "grep -q 'main(' " + c, msg + " main") != 0 { return 1; }
+    if need(p, "! grep -qE '^ERR\\tc_emit' " + c, msg + " emit ERR") != 0 { return 1; }
+    if ban != "" {
+        if need(p, "! grep -qE '" + ban + "' " + c, msg + " not floor") != 0 { return 1; }
+    }
+    let gcc: String = "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + c + " -o " + bin + " -lm -ldl -lpthread";
+    if check(p, gcc, within: 30).is_err() { println("FAIL " + msg + " gcc"); return 1; }
+    if check(p, "timeout " + to + " " + bin + " > " + out + " 2>&1", within: 30).is_err() {
+        println("FAIL " + msg + " run");
+        return 1;
+    }
+    if needle != "" {
+        if need(p, "grep -q " + needle + " " + out, msg + " out") != 0 { return 1; }
+    }
+    println("OK " + msg);
+    return 0;
+}
+
+pub fn fx_row(p: &ProcessCap, fs: &FsReadCap, root: String, tmpd: String, oodac: String, rel: String, has: String, needle: String, msg: String) -> Int {
+    let src: String = root + "/" + rel;
+    if expect_present(fs, src).is_err() { println("FAIL " + msg + " missing " + rel); return 1; }
+    if need(p, "grep -qE '" + has + "' " + src, msg + " name") != 0 { return 1; }
+    return run_c(p, root, tmpd, oodac, src, needle, "", "30", msg);
+}
+
+pub fn cli_ok(p: &ProcessCap, ooda: String, tmpd: String, args: String, needle: String, msg: String) -> Int {
+    let out: String = tmpd + "/cli.out";
+    if check(p, "timeout 30 " + ooda + " " + args + " > " + out + " 2>&1", within: 40).is_err() {
+        println("FAIL " + msg + " rc");
+        return 1;
+    }
+    if need(p, "! grep -qE 'residual|beta-out' " + out, msg + " residual") != 0 { return 1; }
+    if need(p, "grep -q " + needle + " " + out, msg + " out") != 0 { return 1; }
+    println("OK " + msg);
+    return 0;
+}
+
+pub fn row66(p: &ProcessCap, root: String, tmpd: String, oodac: String) -> Int {
+    let h: String = tmpd + "/h.wasm";
+    let w: String = tmpd + "/w.wasm";
+    let src: String = root + "/fixtures/open66_wasm.oo";
+    if check(p, "timeout 30 " + oodac + " emit-wasm " + root + "/fixtures/hello.oo > " + h + " 2>" + tmpd + "/h.err", within: 40).is_err() {
+        println("FAIL OPEN-66 emit hello");
+        return 1;
+    }
+    if check(p, "timeout 30 " + oodac + " emit-wasm " + src + " > " + w + " 2>" + tmpd + "/w.err", within: 40).is_err() {
+        println("FAIL OPEN-66 emit src");
+        return 1;
+    }
+    if need(p, "od -An -tx1 -N4 " + w + " | tr -d ' \\n' | grep -q 0061736d", "OPEN-66 magic") != 0 { return 1; }
+    if need(p, "! cmp -s " + h + " " + w, "OPEN-66 not empty twin") != 0 { return 1; }
+    if need(p, "test $(wc -c < " + w + ") -gt 16", "OPEN-66 compiled size") != 0 { return 1; }
+    println("OK OPEN-66");
+    return 0;
+}
+
+pub fn row68(p: &ProcessCap, fs: &FsReadCap, root: String, tmpd: String, oodac: String) -> Int {
+    if expect_present(fs, root + "/fixtures/open68_selfhost.oo").is_err() {
+        println("FAIL OPEN-68 missing fixtures/open68_selfhost.oo");
+        return 1;
+    }
+    let ll: String = tmpd + "/o68.ll";
+    if check(p, "timeout 120 " + oodac + " --backend llvm emit-llvm " + root + "/oodac/main.oo > " + ll + " 2>" + tmpd + "/o68.err", within: 130).is_err() {
+        println("FAIL OPEN-68 emit-llvm");
+        return 1;
+    }
+    if need(p, "grep -q 'define i32 @main' " + ll, "OPEN-68 main") != 0 { return 1; }
+    if need(p, "grep -q parse_cli_argv " + ll, "OPEN-68 not hello") != 0 { return 1; }
+    if need(p, "grep -q llvm_emit_stream " + ll, "OPEN-68 llvm_emit_stream") != 0 { return 1; }
+    if need(p, "! grep -q residual " + tmpd + "/o68.err", "OPEN-68 residual") != 0 { return 1; }
+    println("OK OPEN-68");
+    return 0;
+}
+
+pub fn row69(p: &ProcessCap, root: String, tmpd: String, oodac: String) -> Int {
+    let src: String = root + "/fixtures/open69_hello.oo";
+    let out: String = tmpd + "/nat.s";
+    let err: String = tmpd + "/nat.err";
+    let obj: String = tmpd + "/nat.o";
+    let bin: String = tmpd + "/nat.bin";
+    let run: String = tmpd + "/nat.out";
+    if check(p, "timeout 30 " + oodac + " emit-x86 " + src + " > " + out + " 2>" + err, within: 40).is_err() {
+        println("FAIL OPEN-69 emit-x86");
+        return 1;
+    }
+    if need(p, "test -s " + out, "OPEN-69 bytes") != 0 { return 1; }
+    if need(p, "grep -qE '_start|main:' " + out, "OPEN-69 entry") != 0 { return 1; }
+    if need(p, "grep -q Hello " + out, "OPEN-69 Hello") != 0 { return 1; }
+    if need(p, "! grep -qiE 'residual|unknown command|#include|OoStr ' " + err + " " + out, "OPEN-69 not C emit") != 0 { return 1; }
+    if check(p, "as --64 -o " + obj + " " + out, within: 10).is_err() { println("FAIL OPEN-69 as"); return 1; }
+    if check(p, "ld -o " + bin + " " + obj, within: 10).is_err() { println("FAIL OPEN-69 ld"); return 1; }
+    if check(p, "timeout 5 " + bin + " > " + run + " 2>&1", within: 10).is_err() { println("FAIL OPEN-69 run"); return 1; }
+    if need(p, "grep -qx Hello " + run, "OPEN-69 stdout") != 0 { return 1; }
+    println("OK OPEN-69");
+    return 0;
+}
+
+pub fn row71(p: &ProcessCap, fs: &FsReadCap, root: String, tmpd: String, oodac: String) -> Int {
+    if need(p, "grep -q gcc_repro_flags " + root + "/oodac/cli_build.oo", "OPEN-71 repro") != 0 { return 1; }
+    let src: String = root + "/fixtures/hello.oo";
+    if expect_present(fs, src).is_err() { println("FAIL OPEN-71 missing hello.oo"); return 1; }
+    let c: String = tmpd + "/t71.c";
+    let a: String = tmpd + "/t71a.bin";
+    let b: String = tmpd + "/t71b.bin";
+    if check(p, "timeout 60 " + oodac + " emit-c " + src + " > " + c + " 2>" + tmpd + "/t71.err", within: 70).is_err() {
+        println("FAIL OPEN-71 emit");
+        return 1;
+    }
+    let gcc: String = "SOURCE_DATE_EPOCH=0 gcc -O2 -frandom-seed=0 -Wl,--build-id=none -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + c + " -lm -ldl -lpthread";
+    if check(p, gcc + " -o " + a, within: 30).is_err() { println("FAIL OPEN-71 gcc a"); return 1; }
+    if check(p, gcc + " -o " + b, within: 30).is_err() { println("FAIL OPEN-71 gcc b"); return 1; }
+    if check(p, "strip " + a + " " + b, within: 10).is_err() { println("FAIL OPEN-71 strip"); return 1; }
+    if need(p, "cmp -s " + a + " " + b, "OPEN-71 cmp") != 0 { return 1; }
+    println("OK OPEN-71");
+    return 0;
+}
+
+pub fn row75(p: &ProcessCap, fs: &FsReadCap, root: String, tmpd: String, oodac: String) -> Int {
+    let src: String = root + "/fixtures/open75_lsp_stdio.oo";
+    if expect_present(fs, src).is_err() { println("FAIL OPEN-75 missing fixtures/open75_lsp_stdio.oo"); return 1; }
+    if need(p, "grep -q lsp_serve " + src, "OPEN-75 name") != 0 { return 1; }
+    let c: String = tmpd + "/lsp.c";
+    let bin: String = tmpd + "/lsp.bin";
+    let out: String = tmpd + "/lsp.out";
+    let inp: String = tmpd + "/lsp.in";
+    if chk(p, oodac, tmpd, src, "OPEN-75") != 0 { return 1; }
+    if check(p, "timeout 60 " + oodac + " emit-c " + src + " > " + c + " 2>" + tmpd + "/lsp.err", within: 70).is_err() {
+        println("FAIL OPEN-75 emit");
+        return 1;
+    }
+    if check(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + c + " -lm -ldl -lpthread -o " + bin, within: 30).is_err() {
+        println("FAIL OPEN-75 gcc");
+        return 1;
+    }
+    let init: String = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}";
+    let shut: String = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\",\"params\":null}";
+    if check(p, "printf '%s\\n%s\\n' '" + init + "' '" + shut + "' > " + inp, within: 5).is_err() {
+        println("FAIL OPEN-75 stdin");
+        return 1;
+    }
+    if check(p, "timeout 20 " + bin + " < " + inp + " > " + out + " 2>&1", within: 30).is_err() {
+        println("FAIL OPEN-75 run");
+        return 1;
+    }
+    if need(p, "test $(grep -c Content-Length " + out + ") -ge 2", "OPEN-75 two frames") != 0 { return 1; }
+    if need(p, "grep -q capabilities " + out, "OPEN-75 init") != 0 { return 1; }
+    println("OK OPEN-75");
+    return 0;
+}
+
+pub fn row81(p: &ProcessCap, fs: &FsReadCap, root: String, tmpd: String, oodac: String) -> Int {
+    let ok: String = root + "/fixtures/open81_smt_ok.oo";
+    let bad: String = root + "/fixtures/open81_smt_bad.oo";
+    if expect_present(fs, ok).is_err() { println("FAIL OPEN-81 missing open81_smt_ok.oo"); return 1; }
+    if expect_present(fs, bad).is_err() { println("FAIL OPEN-81 missing open81_smt_bad.oo"); return 1; }
+    if chk(p, oodac, tmpd, ok, "OPEN-81 ok") != 0 { return 1; }
+    if need(p, "grep -qi smt " + tmpd + "/chk.out " + ok, "OPEN-81 smt rail") != 0 { return 1; }
+    if check(p, "timeout 30 " + oodac + " check " + bad + " > " + tmpd + "/smt.bad 2>&1", within: 40).is_ok() {
+        println("FAIL OPEN-81 bad sat");
+        return 1;
+    }
+    if need(p, "grep -qi smt " + tmpd + "/smt.bad", "OPEN-81 unsat") != 0 { return 1; }
+    return run_c(p, root, tmpd, oodac, ok, "3", "", "30", "OPEN-81");
+}

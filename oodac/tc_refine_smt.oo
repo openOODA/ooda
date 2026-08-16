@@ -1,0 +1,228 @@
+// # SMT-check constant requires/ensures/spec
+//
+// Logline: At check time, fold constant contract clauses and refuse unsat ones as smt.
+//
+// Setup: parse_int, field_at, list_get, list_len, println, and process_exit exist.
+//
+// Beats:
+//   1. Walk KW_REQUIRES, KW_ENSURES, and header spec clauses.
+//   2. Evaluate INT/Bool ops; IDENT or other tokens mean not-const (runtime if+exit).
+//   3. Const false prints ERR smt and exits.
+
+fn smt_tok_k(toks: List[String], i: Int) -> String {
+    return field_at(list_get(toks, i), 0);
+}
+
+fn smt_tok_v(toks: List[String], i: Int) -> String {
+    return field_at(list_get(toks, i), 3);
+}
+
+fn smt_is_stop(k: String) -> Bool {
+    if k == "KW_REQUIRES" || k == "KW_ENSURES" || k == "LBRACE" { return true; }
+    if k == "SEMI" || k == "KW_FN" || k == "KW_PUB" || k == "KW_VERIFY" { return true; }
+    if k == "KW_TYPE" || k == "KW_RETURN" || k == "KW_LET" || k == "EOF" { return true; }
+    return false;
+}
+
+fn smt_clause_end(toks: List[String], start: Int, n: Int) -> Int {
+    let mut p = start;
+    while p < n {
+        let k: String = smt_tok_k(toks, p);
+        if smt_is_stop(k) { return p; }
+        if k == "IDENT" {
+            if smt_tok_v(toks, p) == "spec" { return p; }
+            if smt_tok_v(toks, p) == "caps" { return p; }
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+fn smt_clause_const(toks: List[String], start: Int, end: Int) -> Bool {
+    if start >= end { return false; }
+    let mut i = start;
+    while i < end {
+        let k: String = smt_tok_k(toks, i);
+        if k == "INT" || k == "KW_TRUE" || k == "KW_FALSE" { }
+        else if k == "LPAREN" || k == "RPAREN" || k == "BANG" { }
+        else if k == "ANDAND" || k == "PIPEPIPE" || k == "OROR" { }
+        else if k == "EQEQ" || k == "NEQ" || k == "GT" || k == "LT" || k == "GTE" || k == "LTE" { }
+        else if k == "PLUS" || k == "MINUS" || k == "STAR" || k == "SLASH" || k == "PERCENT" { }
+        else { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn smt_pack(pos: Int, val: Int) -> List[String] {
+    let mut r: List[String] = list_new();
+    r = list_push(r, pos.to_string());
+    r = list_push(r, val.to_string());
+    return r;
+}
+
+fn smt_eval_prim(toks: List[String], pos: Int, end: Int) -> List[String] {
+    if pos >= end { return smt_pack(pos, 0); }
+    let k: String = smt_tok_k(toks, pos);
+    if k == "INT" {
+        return smt_pack(pos + 1, parse_int(smt_tok_v(toks, pos)));
+    }
+    if k == "KW_TRUE" { return smt_pack(pos + 1, 1); }
+    if k == "KW_FALSE" { return smt_pack(pos + 1, 0); }
+    if k == "LPAREN" {
+        let inner: List[String] = smt_eval_or(toks, pos + 1, end);
+        let mut p = parse_int(list_get(inner, 0));
+        if p < end {
+            if smt_tok_k(toks, p) == "RPAREN" { p = p + 1; }
+        }
+        return smt_pack(p, parse_int(list_get(inner, 1)));
+    }
+    return smt_pack(pos, 0);
+}
+
+fn smt_eval_un(toks: List[String], pos: Int, end: Int) -> List[String] {
+    if pos >= end { return smt_pack(pos, 0); }
+    let k: String = smt_tok_k(toks, pos);
+    if k == "BANG" {
+        let r: List[String] = smt_eval_un(toks, pos + 1, end);
+        let v = parse_int(list_get(r, 1));
+        let mut nv = 1;
+        if v != 0 { nv = 0; }
+        return smt_pack(parse_int(list_get(r, 0)), nv);
+    }
+    if k == "MINUS" {
+        let r2: List[String] = smt_eval_un(toks, pos + 1, end);
+        return smt_pack(parse_int(list_get(r2, 0)), 0 - parse_int(list_get(r2, 1)));
+    }
+    return smt_eval_prim(toks, pos, end);
+}
+
+fn smt_eval_mul(toks: List[String], pos: Int, end: Int) -> List[String] {
+    let mut r: List[String] = smt_eval_un(toks, pos, end);
+    let mut p = parse_int(list_get(r, 0));
+    let mut v = parse_int(list_get(r, 1));
+    let mut more = true;
+    while more {
+        if p >= end { more = false; }
+        else {
+            let k: String = smt_tok_k(toks, p);
+            if k == "STAR" || k == "SLASH" || k == "PERCENT" {
+                let r2: List[String] = smt_eval_un(toks, p + 1, end);
+                p = parse_int(list_get(r2, 0));
+                let v2 = parse_int(list_get(r2, 1));
+                if k == "STAR" { v = v * v2; }
+                else if v2 == 0 { v = 0; }
+                else if k == "SLASH" { v = v / v2; }
+                else { v = v % v2; }
+            } else { more = false; }
+        }
+    }
+    return smt_pack(p, v);
+}
+
+fn smt_eval_add(toks: List[String], pos: Int, end: Int) -> List[String] {
+    let mut r: List[String] = smt_eval_mul(toks, pos, end);
+    let mut p = parse_int(list_get(r, 0));
+    let mut v = parse_int(list_get(r, 1));
+    let mut more = true;
+    while more {
+        if p >= end { more = false; }
+        else {
+            let k: String = smt_tok_k(toks, p);
+            if k == "PLUS" || k == "MINUS" {
+                let r2: List[String] = smt_eval_mul(toks, p + 1, end);
+                p = parse_int(list_get(r2, 0));
+                let v2 = parse_int(list_get(r2, 1));
+                if k == "PLUS" { v = v + v2; } else { v = v - v2; }
+            } else { more = false; }
+        }
+    }
+    return smt_pack(p, v);
+}
+
+fn smt_eval_cmp(toks: List[String], pos: Int, end: Int) -> List[String] {
+    let mut r: List[String] = smt_eval_add(toks, pos, end);
+    let mut p = parse_int(list_get(r, 0));
+    let mut v = parse_int(list_get(r, 1));
+    if p >= end { return smt_pack(p, v); }
+    let k: String = smt_tok_k(toks, p);
+    if k == "EQEQ" || k == "NEQ" || k == "GT" || k == "LT" || k == "GTE" || k == "LTE" {
+        let r2: List[String] = smt_eval_add(toks, p + 1, end);
+        p = parse_int(list_get(r2, 0));
+        let v2 = parse_int(list_get(r2, 1));
+        let mut ok = 0;
+        if k == "EQEQ" { if v == v2 { ok = 1; } }
+        else if k == "NEQ" { if v != v2 { ok = 1; } }
+        else if k == "GT" { if v > v2 { ok = 1; } }
+        else if k == "LT" { if v < v2 { ok = 1; } }
+        else if k == "GTE" { if v >= v2 { ok = 1; } }
+        else { if v <= v2 { ok = 1; } }
+        return smt_pack(p, ok);
+    }
+    return smt_pack(p, v);
+}
+
+fn smt_eval_and(toks: List[String], pos: Int, end: Int) -> List[String] {
+    let mut r: List[String] = smt_eval_cmp(toks, pos, end);
+    let mut p = parse_int(list_get(r, 0));
+    let mut v = parse_int(list_get(r, 1));
+    let mut more = true;
+    while more {
+        if p >= end { more = false; }
+        else if smt_tok_k(toks, p) == "ANDAND" {
+            let r2: List[String] = smt_eval_cmp(toks, p + 1, end);
+            p = parse_int(list_get(r2, 0));
+            if v != 0 { if parse_int(list_get(r2, 1)) != 0 { v = 1; } else { v = 0; } } else { v = 0; }
+        } else { more = false; }
+    }
+    return smt_pack(p, v);
+}
+
+fn smt_eval_or(toks: List[String], pos: Int, end: Int) -> List[String] {
+    let mut r: List[String] = smt_eval_and(toks, pos, end);
+    let mut p = parse_int(list_get(r, 0));
+    let mut v = parse_int(list_get(r, 1));
+    let mut more = true;
+    while more {
+        if p >= end { more = false; }
+        else {
+            let k: String = smt_tok_k(toks, p);
+            if k == "PIPEPIPE" || k == "OROR" {
+                let r2: List[String] = smt_eval_and(toks, p + 1, end);
+                p = parse_int(list_get(r2, 0));
+                if v != 0 { v = 1; } else if parse_int(list_get(r2, 1)) != 0 { v = 1; } else { v = 0; }
+            } else { more = false; }
+        }
+    }
+    return smt_pack(p, v);
+}
+
+fn smt_refuse(kind: String, toks: List[String], at: Int) {
+    let line: String = field_at(list_get(toks, at), 1);
+    let col: String = field_at(list_get(toks, at), 2);
+    println("ERR\tsmt\tunsat " + kind + " at " + line + ":" + col);
+    process_exit(1);
+}
+
+fn smt_check_span(kind: String, toks: List[String], start: Int, at: Int, n: Int) {
+    let end = 0 + smt_clause_end(toks, start, n);
+    if !smt_clause_const(toks, start, end) { return; }
+    let ev: List[String] = smt_eval_or(toks, start, end);
+    if parse_int(list_get(ev, 1)) == 0 {
+        smt_refuse(kind, toks, at);
+    }
+}
+
+pub fn refine_check_smt(toks: List[String]) {
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        let k: String = smt_tok_k(toks, i);
+        if k == "KW_REQUIRES" {
+            smt_check_span("requires", toks, i + 1, i, n);
+        } else if k == "KW_ENSURES" {
+            smt_check_span("ensures", toks, i + 1, i, n);
+        }
+        i = i + 1;
+    }
+}

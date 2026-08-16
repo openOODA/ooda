@@ -1,0 +1,75 @@
+// # OPEN-68 LLVM self-host IR lock
+//
+// Logline: Tree oodac --backend llvm emit-llvm oodac/main.oo writes IR with oodac symbols, not hello.
+//
+// Setup: cwd is ooda/. oodac/oodac is the rebuilt compiler. Caps are injected.
+//
+// Beats:
+//   1. emit-llvm of oodac/main.oo has @main and @parse_cli_argv (call sites / define), not hello.
+//   2. emit-llvm of oodac/llvm_emit.oo has @llvm_emit_stream (single-file self-host IR floor).
+//   3. emit-llvm of fixtures/hello.oo still has @greet and does not have parse_cli_argv.
+//
+// residual: clang + chs_rt of every oodac module is not this product floor.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => ".ooda-cache/ooda-tmp" };
+    let oodac = root + "/oodac/oodac";
+    if sh_mkdir_p(fw, tmpd).is_err() { fail("mkdir"); }
+    if scenario(p, fs, "OPEN-68 LLVM self-host IR").is_err() { fail("scenario"); }
+    if expect_quiet(p, "test -x " + oodac).is_err() { fail("no tree oodac"); }
+    if expect_present(fs, root + "/oodac/main.oo").is_err() { fail("no oodac/main.oo"); }
+    if expect_present(fs, root + "/oodac/llvm_emit.oo").is_err() { fail("no llvm_emit.oo"); }
+    if expect_present(fs, root + "/fixtures/hello.oo").is_err() { fail("no hello.oo"); }
+    if expect_present(fs, root + "/fixtures/open68_selfhost.oo").is_err() { fail("no open68 fixture"); }
+
+    // Product path: --backend llvm reads one file (no import concat). main.oo is not hello.
+    let mll = tmpd + "/open68_oodac_main.ll";
+    let merr = tmpd + "/open68_oodac_main.err";
+    if check(p, oodac + " --backend llvm emit-llvm " + root + "/oodac/main.oo > " + mll + " 2>" + merr, within: 60).is_err() {
+        fail("emit-llvm oodac/main.oo");
+    }
+    if expect_clean(p, "! grep -qE '^ERR' " + mll + " " + merr).is_err() { fail("ERR in oodac IR"); }
+    if expect_substring(fs, mll, "define i32 @main").is_err() { fail("IR missing @main"); }
+    if expect_substring(fs, mll, "@parse_cli_argv").is_err() { fail("IR missing @parse_cli_argv"); }
+    if expect_substring(fs, mll, "@run_build_cmd").is_err() { fail("IR missing @run_build_cmd"); }
+    if expect_substring(fs, mll, "@run_emit_llvm").is_err() { fail("IR missing @run_emit_llvm"); }
+    if expect_substring(fs, mll, "oodac: unknown command").is_err() { fail("IR missing oodac unknown-command string"); }
+    if expect_clean(p, "! grep -q '@greet' " + mll).is_err() { fail("oodac IR looks like hello"); }
+    if expect_clean(p, "! grep -q residual " + merr).is_err() { fail("residual on oodac/main.oo emit"); }
+
+    // Same single-file floor for the module that defines llvm_emit_stream.
+    let lll = tmpd + "/open68_llvm_emit.ll";
+    let lerr = tmpd + "/open68_llvm_emit.err";
+    if check(p, oodac + " --backend llvm emit-llvm " + root + "/oodac/llvm_emit.oo > " + lll + " 2>" + lerr, within: 60).is_err() {
+        fail("emit-llvm oodac/llvm_emit.oo");
+    }
+    if expect_clean(p, "! grep -qE '^ERR' " + lll + " " + lerr).is_err() { fail("ERR in llvm_emit IR"); }
+    if expect_substring(fs, lll, "@llvm_emit_stream").is_err() { fail("IR missing @llvm_emit_stream"); }
+    if expect_clean(p, "! grep -q '@greet' " + lll).is_err() { fail("llvm_emit IR looks like hello"); }
+
+    // Combined surface matches ROADMAP symbol set for self-host IR (not one hello twin).
+    if expect_clean(p, "grep -q 'define i32 @main' " + mll + " && grep -q parse_cli_argv " + mll + " && grep -q llvm_emit_stream " + lll).is_err() {
+        fail("self-host IR surface missing main/parse_cli_argv/llvm_emit_stream");
+    }
+
+    let hll = tmpd + "/open68_hello.ll";
+    let herr = tmpd + "/open68_hello.err";
+    if check(p, oodac + " --backend llvm emit-llvm " + root + "/fixtures/hello.oo > " + hll + " 2>" + herr, within: 30).is_err() {
+        fail("emit-llvm hello");
+    }
+    if expect_substring(fs, hll, "@greet").is_err() { fail("hello IR missing @greet"); }
+    if expect_clean(p, "! grep -q parse_cli_argv " + hll).is_err() { fail("hello IR has oodac symbols"); }
+    if expect_clean(p, "! grep -q llvm_emit_stream " + hll).is_err() { fail("hello IR has llvm_emit_stream"); }
+
+    println("open68_llvm_lock: clang link of full oodac is next");
+    println("open68_llvm_lock: PASSED");
+}
