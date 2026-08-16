@@ -1,0 +1,106 @@
+// # Air-gap vendor pack
+//
+// Logline: Write lock, index, and each locked package as a directory tree.
+//
+// Setup: Default dir .ooda_pack. Bytes via write_file. No tar. No HTTP.
+//
+// Beats:
+//   1. Copy each lock package from CAS or vendor/ into out/name/.
+//   2. Write a signed index and the lock.
+//   3. --json prints the output dir.
+
+import "cmd_pm_cat.oo";
+import "cmd_pm_io.oo";
+import "pm_index.oo";
+import "pm_pin.oo";
+import "pm_store.oo";
+
+fn pm_pack_one(fs: &FsCap, root: String, out: String, line: String) -> Bool {
+    let nm: String = pm_tok_name(line);
+    let ver: String = pm_tok_ver(line);
+    let sha: String = pm_tok_sha(line);
+    let cap: String = pm_tok_cap(line);
+    if nm == "" {
+        return false;
+    }
+    let pn: String = nm + ".oo";
+    let casb: String = pm_slurp(fs, root + "/.ooda_modules/cas/" + sha + "/" + pn);
+    let venb: String = pm_slurp(fs, root + "/vendor/" + pn);
+    let payb: String = pm_first_nonempty(casb, venb);
+    if payb == "" {
+        return false;
+    }
+    let dir: String = out + "/" + nm;
+    let mk1: Result[Void, String] = oo_fs_mkdir(fs, out);
+    if mk1.is_err() {
+        if !path_exists(fs, out) {
+            return false;
+        }
+    }
+    let mk2: Result[Void, String] = oo_fs_mkdir(fs, dir);
+    if mk2.is_err() {
+        if !path_exists(fs, dir) {
+            return false;
+        }
+    }
+    if !pm_put(fs, dir + "/" + pn, payb) {
+        return false;
+    }
+    let man: String = "name=" + nm + "\nversion=" + ver + "\ndeps=\ncaps=" + cap + "\npayload=" + pn + "\nsha256=" + sha + "\nlicense=MIT\n";
+    return pm_put(fs, dir + "/manifest", man);
+}
+
+pub fn run_ooda_pm_pack(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let root: String = pm_root_abs(fs, sys);
+    let acc: String = pm_first_nonempty(pm_slurp(fs, root + "/.ooda_modules/lock"), pm_slurp(fs, ".ooda_modules/lock"));
+    let mut out: String = pm_arg_name(args);
+    if out == "" {
+        out = pm_opt(args, "--out");
+    }
+    if out == "" {
+        out = root + "/.ooda_pack";
+    }
+    if pm_is_http(out) {
+        pm_die("pack", "file vendor required");
+    }
+    let mk: Result[Void, String] = oo_fs_mkdir(fs, out);
+    if mk.is_err() {
+        if !path_exists(fs, out) {
+            pm_die("pack", "mkdir failed");
+        }
+    }
+    let n: Int = chars_len(acc);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    let mut idx: String = "";
+    let mut packed: Int = 0;
+    while i <= n {
+        if i == n || char_at(acc, i) == "\n" {
+            if i > start {
+                let line: String = str_slice(acc, start, i);
+                if pm_is_pkg_line(line) {
+                    if pm_pack_one(fs, root, out, line) {
+                        packed = packed + 1;
+                        idx = idx + pm_index_line(pm_tok_name(line), pm_tok_ver(line), pm_tok_cap(line), "", pm_tok_sha(line)) + "\n";
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if !pm_put(fs, out + "/lock", acc) {
+        pm_die("pack", "lock write failed");
+    }
+    if !pm_put(fs, out + "/index", idx) {
+        pm_die("pack", "index write failed");
+    }
+    if !pm_put(fs, out + "/index.sig", pm_index_sig(idx)) {
+        pm_die("pack", "sig write failed");
+    }
+    if pm_flag(args, "--json") || pm_flag(args, "-json") {
+        println("{\"ok\":true,\"cmd\":\"pack\",\"dir\":\"" + pm_jesc(out) + "\",\"packages\":" + packed.to_string() + "}");
+        return;
+    }
+    println("ooda pack: " + out);
+}

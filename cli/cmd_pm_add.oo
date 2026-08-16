@@ -5,21 +5,27 @@
 // Setup: Default vendor ../registry. --from DIR is offline. No HTTP.
 //
 // Beats:
-//   1. Refuse network, traversal names, missing rows, extra caps, and sha/sig miss.
-//   2. Install each resolved node into CAS, copy vendor/<payload>, write the lock.
+//   1. Refuse network, yank, license, pin, traversal, extra caps, and sha/sig miss.
+//   2. Install each resolved node into CAS, copy vendor/<payload>, write a v2 lock.
 //   3. Structured ERR on failure. --json prints a machine object.
 
 import "cmd_pm_cat.oo";
 import "cmd_pm_io.oo";
+import "pm_index.oo";
+import "pm_pin.oo";
+import "pm_policy.oo";
 import "pm_resolve.oo";
 import "pm_sign.oo";
 import "pm_store.oo";
+import "pm_v2.oo";
 
 fn pm_check_pkg(fs: &FsCap, dir: String, name: String, live: String) -> String {
     let man: String = pm_slurp(fs, dir + "/manifest");
     let want: String = pm_kv(man, "sha256");
     if want != "" {
-        if want != live {
+        if want == live {
+            let _w: String = want;
+        } else {
             return "sha256 mismatch " + name;
         }
     }
@@ -34,14 +40,15 @@ fn pm_check_pkg(fs: &FsCap, dir: String, name: String, live: String) -> String {
 
 fn pm_add_body(fs: &FsCap, sys: &SysCap, vendor: String, name: String, from: String) -> String {
     let cat: String = pm_load_work_catalog(fs, sys, vendor);
+    let pkg: String = pm_slurp(fs, "ooda.pkg");
     if name != "" {
-        return pm_resolve(cat, name, 1);
+        return pm_resolve(cat, pm_replace_name(name, pm_kv(pkg, "replaces")), 1);
     }
     if from != "" {
         let nm: String = pm_kv(pm_slurp(fs, from + "/manifest"), "name");
-        return pm_resolve(cat, nm, 1);
+        return pm_resolve(cat, pm_replace_name(nm, pm_kv(pkg, "replaces")), 1);
     }
-    let roots: String = pm_dep_names(pm_kv(pm_slurp(fs, "ooda.pkg"), "deps"));
+    let roots: String = pm_dep_names(pm_kv(pkg, "deps"));
     if roots == "" {
         return "err missing";
     }
@@ -68,14 +75,16 @@ pub fn run_ooda_pm_add(fs: &FsCap, sys: &SysCap, args: List[String]) {
             name = pm_kv(pm_slurp(fs, from + "/manifest"), "name");
         }
     }
+    let pkg: String = pm_slurp(fs, "ooda.pkg");
     if name == "" {
-        let roots: String = pm_dep_names(pm_kv(pm_slurp(fs, "ooda.pkg"), "deps"));
+        let roots: String = pm_dep_names(pm_kv(pkg, "deps"));
         if roots == "" {
             println("ERR\tpm\tmissing package name");
             println("usage: ooda add <name> [--vendor path]");
             process_exit(2);
         }
     } else {
+        name = pm_replace_name(name, pm_kv(pkg, "replaces"));
         if !pm_name_ok(name) {
             println("ERR\tpm\trefuse name");
             println("ooda add: refuse name");
@@ -87,19 +96,46 @@ pub fn run_ooda_pm_add(fs: &FsCap, sys: &SysCap, args: List[String]) {
         println("ooda add: missing vendor");
         process_exit(2);
     }
+    if path_exists(fs, vendor + "/index") {
+        if !pm_index_ok(pm_slurp(fs, vendor + "/index"), pm_slurp(fs, vendor + "/index.sig")) {
+            println("ERR\tpm\tindex");
+            println("ooda add: index");
+            process_exit(2);
+        }
+    }
     let res: String = pm_add_body(fs, sys, vendor, name, from);
     if chars_len(res) < 3 {
         println("ERR\tpm\t" + res);
         println("ooda add: " + res);
         process_exit(2);
     }
-    if str_slice(res, 0, 3) != "ok " {
+    if str_slice(res, 0, 3) == "ok " {
+        let _ok: String = res;
+    } else {
         println("ERR\tpm\t" + res);
         println("ooda add: " + res);
         process_exit(2);
     }
+    let ov: String = pm_override_ver(name, pm_kv(pkg, "overrides"));
     let body: String = str_slice(res, 3, chars_len(res));
+    if ov != "" {
+        if str_index_of(body, name + "@" + ov) < 0 {
+            println("ERR\tpm\toverride");
+            println("ooda add: override");
+            process_exit(2);
+        }
+    }
+    let yank: String = pm_slurp(fs, vendor + "/yank");
+    let allow: String = pm_kv(pkg, "licenses");
     let root: String = pm_root_abs(fs, sys);
+    let live_o: String = pm_oodac_sha(fs, sys);
+    let live_s: String = pm_std_sha(fs, sys);
+    let prev: String = pm_first_nonempty(pm_slurp(fs, root + "/.ooda_modules/lock"), pm_slurp(fs, ".ooda_modules/lock"));
+    if !pm_pin_ok(prev, live_o, live_s) {
+        println("ERR\tpm\tpin");
+        println("ooda add: pin");
+        process_exit(2);
+    }
     let n: Int = chars_len(body);
     let mut start: Int = 0;
     let mut i: Int = 0;
@@ -110,8 +146,7 @@ pub fn run_ooda_pm_add(fs: &FsCap, sys: &SysCap, args: List[String]) {
         if i == n {
             sep = true;
         } else {
-            let c: String = char_at(body, i);
-            if c == "\n" {
+            if char_at(body, i) == "\n" {
                 sep = true;
             }
         }
@@ -122,11 +157,19 @@ pub fn run_ooda_pm_add(fs: &FsCap, sys: &SysCap, args: List[String]) {
                 if pname != "" {
                     if !pm_name_ok(pname) {
                         println("ERR\tpm\trefuse name");
-                        println("ooda add: refuse name");
+                        process_exit(2);
+                    }
+                    let ver: String = pm_tok_ver(tok);
+                    if pm_yanked(yank, pname, ver) {
+                        println("ERR\tpm\tyank " + pname);
                         process_exit(2);
                     }
                     let base: String = pm_pkg_dir(fs, vendor, pname);
                     let man: String = pm_slurp(fs, base + "/manifest");
+                    if !pm_license_ok(allow, pm_kv(man, "license")) {
+                        println("ERR\tpm\tlicense " + pname);
+                        process_exit(2);
+                    }
                     let pay: String = pm_kv(man, "payload");
                     let mut pn: String = pay;
                     if pn == "" { pn = pname + ".oo"; }
@@ -139,7 +182,6 @@ pub fn run_ooda_pm_add(fs: &FsCap, sys: &SysCap, args: List[String]) {
                     }
                     if !pm_put_cas(fs, root, live, pn, src) {
                         println("ERR\tpm\tinstall failed " + pname);
-                        println("ooda add: install failed " + pname);
                         process_exit(2);
                     }
                     let oname: String = pm_kv(man, "outline");
@@ -160,7 +202,6 @@ pub fn run_ooda_pm_add(fs: &FsCap, sys: &SysCap, args: List[String]) {
         }
         i = i + 1;
     }
-    let prev: String = pm_first_nonempty(pm_slurp(fs, root + "/.ooda_modules/lock"), pm_slurp(fs, ".ooda_modules/lock"));
     let pn2: Int = chars_len(prev);
     let mut kept: String = "";
     let mut ps: Int = 0;
@@ -169,8 +210,8 @@ pub fn run_ooda_pm_add(fs: &FsCap, sys: &SysCap, args: List[String]) {
         if pi == pn2 || char_at(prev, pi) == "\n" {
             if pi > ps {
                 let pline: String = str_slice(prev, ps, pi);
-                let pnm: String = pm_tok_name(pline);
-                if pnm != "" {
+                if pm_is_pkg_line(pline) {
+                    let pnm: String = pm_tok_name(pline);
                     if str_index_of(acc, pnm + "@") < 0 {
                         kept = kept + pline + "\n";
                     }
@@ -180,10 +221,9 @@ pub fn run_ooda_pm_add(fs: &FsCap, sys: &SysCap, args: List[String]) {
         }
         pi = pi + 1;
     }
-    acc = kept + acc;
+    acc = pm_lock_hdr(live_o, live_s) + kept + acc;
     if !pm_put_lock(fs, root, acc) {
         println("ERR\tpm\tlock write failed");
-        println("ooda add: lock write failed");
         process_exit(2);
     }
     if js {

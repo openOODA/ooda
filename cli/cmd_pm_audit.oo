@@ -1,0 +1,107 @@
+// # Product PM audit and SBOM
+//
+// Logline: Report yank/advisory/pin hits and emit CycloneDX-lite JSON from the lock.
+//
+// Setup: Reads .ooda_modules/lock, vendor yank/advisory, and std.pin. No HTTP.
+//
+// Beats:
+//   1. audit walks lock package lines against yank, advisory, and toolchain pins.
+//   2. No hits prints ooda audit: ok.
+//   3. sbom prints a CycloneDX-lite object. --json is the same shape.
+
+import "cmd_pm_cat.oo";
+import "cmd_pm_io.oo";
+import "pm_pin.oo";
+import "pm_policy.oo";
+import "pm_store.oo";
+
+fn pm_lock_now(fs: &FsCap, sys: &SysCap) -> String {
+    let root: String = pm_root_abs(fs, sys);
+    return pm_first_nonempty(pm_slurp(fs, root + "/.ooda_modules/lock"), pm_slurp(fs, ".ooda_modules/lock"));
+}
+
+pub fn run_ooda_pm_audit(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let vendor: String = pm_pick_vendor(args);
+    let yank: String = pm_slurp(fs, vendor + "/yank");
+    let adv: String = pm_slurp(fs, vendor + "/advisory");
+    let acc: String = pm_lock_now(fs, sys);
+    let live_o: String = pm_oodac_sha(fs, sys);
+    let live_s: String = pm_std_sha(fs, sys);
+    let js: Bool = pm_flag(args, "--json") || pm_flag(args, "-json");
+    let n: Int = chars_len(acc);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    let mut hits: String = "";
+    let mut nh: Int = 0;
+    if !pm_pin_ok(acc, live_o, live_s) {
+        hits = hits + "pin";
+        nh = 1;
+        if js == false {
+            println("ooda audit: pin");
+        }
+    }
+    while i <= n {
+        if i == n || char_at(acc, i) == "\n" {
+            if i > start {
+                let line: String = str_slice(acc, start, i);
+                if pm_is_pkg_line(line) {
+                    let nm: String = pm_tok_name(line);
+                    let ver: String = pm_tok_ver(line);
+                    if pm_yanked(yank, nm, ver) {
+                        nh = nh + 1;
+                        if hits != "" { hits = hits + ","; }
+                        hits = hits + "yank:" + nm;
+                        if js == false {
+                            println("ooda audit: yank " + nm + "@" + ver);
+                        }
+                    }
+                    let ah: String = pm_advisory_hit(adv, nm, ver);
+                    if ah != "" {
+                        nh = nh + 1;
+                        if hits != "" { hits = hits + ","; }
+                        hits = hits + "advisory:" + nm;
+                        if js == false {
+                            println("ooda audit: advisory " + ah);
+                        }
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if js {
+        println("{\"ok\":true,\"cmd\":\"audit\",\"hits\":" + nh.to_string() + ",\"detail\":\"" + pm_jesc(hits) + "\"}");
+        return;
+    }
+    if nh == 0 {
+        println("ooda audit: ok");
+    }
+}
+
+pub fn run_ooda_pm_sbom(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let acc: String = pm_lock_now(fs, sys);
+    let n: Int = chars_len(acc);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    let mut first: Bool = true;
+    let _a: Int = list_len(args);
+    println("{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\",\"components\":[");
+    while i <= n {
+        if i == n || char_at(acc, i) == "\n" {
+            if i > start {
+                let line: String = str_slice(acc, start, i);
+                if pm_is_pkg_line(line) {
+                    if first == false {
+                        println(",");
+                    }
+                    first = false;
+                    println("{\"type\":\"library\",\"name\":\"" + pm_jesc(pm_tok_name(line)) + "\",\"version\":\"" + pm_jesc(pm_tok_ver(line)) + "\",\"hashes\":[{\"alg\":\"SHA-256\",\"content\":\"" + pm_jesc(pm_tok_sha(line)) + "\"}]}");
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    println("]}");
+}
