@@ -1,20 +1,54 @@
 // # Fetch a static HTTPS vendor into a local cache
 //
-// Logline: GET index, index.sig, and package files. Verify HMAC. Then add is file-backed.
+// Logline: GET index and index.minisig. Verify minisign. Then add is file-backed.
 //
-// Setup: curl under SysCap. Origin must be pm_reg_origin_ok. Files land under dest.
+// Setup: curl and minisign under SysCap. Pubkey is cli/registry.pub, not fetched.
 //
 // Beats:
 //   1. Refuse a bad origin before any GET.
-//   2. index.sig must match pm_index_ok or return err index.
+//   2. minisign -V must pass. Missing minisign or HMAC-only is not ok.
 //   3. Fetch each index name's manifest and payload.
 
 import "cmd_pm_io.oo";
 import "host_run.oo";
-import "pm_index.oo";
 import "pm_name.oo";
 import "pm_reg.oo";
 import "pm_resolve.oo";
+
+pub fn pm_reg_pub_path() -> String {
+    return "cli/registry.pub";
+}
+
+pub fn pm_reg_minisign_ok(fs: &FsCap, sys: &SysCap, pubp: String, msgp: String, sigp: String) -> String {
+    if !path_exists(fs, pubp) {
+        return "err minisign";
+    }
+    if !path_exists(fs, msgp) {
+        return "err index";
+    }
+    if !path_exists(fs, sigp) {
+        return "err index";
+    }
+    let rc: String = msgp + ".msrc";
+    let cmd: String = "if command -v minisign >/dev/null 2>&1; then minisign -V -p " + sq(pubp) + " -m " + sq(msgp) + " -x " + sq(sigp) + " >/dev/null 2>&1; echo $? > " + sq(rc) + "; else echo 127 > " + sq(rc) + "; fi; exit 0";
+    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    if r.is_err() {
+        return "err minisign";
+    }
+    let out: String = pm_slurp(fs, rc);
+    if str_slice(out, 0, 3) == "127" {
+        return "err minisign";
+    }
+    if str_slice(out, 0, 1) == "0" {
+        if chars_len(out) == 1 {
+            return "ok";
+        }
+        if char_at(out, 1) == "\n" {
+            return "ok";
+        }
+    }
+    return "err index";
+}
 
 fn pm_reg_pull(fs: &FsCap, sys: &SysCap, url: String, dir: String, leaf: String) -> Bool {
     if !pm_reg_rel_ok(leaf) {
@@ -73,20 +107,16 @@ pub fn pm_reg_materialize(fs: &FsCap, sys: &SysCap, url: String, dest: String) -
     if !pm_reg_pull(fs, sys, base + "/index", dest, "index") {
         return "err fetch";
     }
-    if !pm_reg_pull(fs, sys, base + "/index.sig", dest, "index.sig") {
+    if !pm_reg_pull(fs, sys, base + "/index.minisig", dest, "index.minisig") {
         return "err fetch";
     }
+    let vr: String = pm_reg_minisign_ok(fs, sys, pm_reg_pub_path(), dest + "/index", dest + "/index.minisig");
+    if vr == "ok" {
+        let _v: String = vr;
+    } else {
+        return vr;
+    }
     let idx: String = pm_slurp(fs, dest + "/index");
-    let raws: String = pm_slurp(fs, dest + "/index.sig");
-    let mut sig: String = raws;
-    if chars_len(sig) > 0 {
-        if char_at(sig, chars_len(sig) - 1) == "\n" {
-            sig = str_slice(sig, 0, chars_len(sig) - 1);
-        }
-    }
-    if !pm_index_ok(idx, sig) {
-        return "err index";
-    }
     let _y: Bool = pm_reg_pull(fs, sys, base + "/yank", dest, "yank");
     let n: Int = chars_len(idx);
     let mut start: Int = 0;
