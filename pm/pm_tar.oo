@@ -1,0 +1,138 @@
+// # In-process ustar member walk
+//
+// Logline: Walk 512-byte ustar headers and take regular file bytes. Refuse bad names.
+//
+// Setup: Uncompressed data.tar only. No gzip. No sys_exec tar. No HTTP.
+//
+// Beats:
+//   1. Parse name, octal size, and typeflag.
+//   2. Refuse .., absolute, and maintainer-script names.
+//   3. Missing ustar or no regular files is err magic.
+
+import "pm_core.oo";
+import "pm_extract.oo";
+
+fn pm_octal(s: String) -> Int {
+    let n: Int = chars_len(s);
+    let mut v: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "0" { v = v * 8; }
+        else if c == "1" { v = v * 8 + 1; }
+        else if c == "2" { v = v * 8 + 2; }
+        else if c == "3" { v = v * 8 + 3; }
+        else if c == "4" { v = v * 8 + 4; }
+        else if c == "5" { v = v * 8 + 5; }
+        else if c == "6" { v = v * 8 + 6; }
+        else if c == "7" { v = v * 8 + 7; }
+        else if c == " " {
+            let _s: String = c;
+        } else {
+            return v;
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+fn pm_tar_name(hdr: String) -> String {
+    let raw: String = str_slice(hdr, 0, 100);
+    let n: Int = chars_len(raw);
+    let mut e: Int = n;
+    while e > 0 {
+        let c: String = char_at(raw, e - 1);
+        if c == " " {
+            e = e - 1;
+        } else {
+            return str_slice(raw, 0, e);
+        }
+    }
+    return "";
+}
+
+fn pm_hdr_zero(hdr: String) -> Bool {
+    let n: Int = chars_len(hdr);
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(hdr, i) == "\0" {
+            i = i + 1;
+        } else {
+            if char_at(hdr, i) == " " {
+                i = i + 1;
+            } else {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+pub fn pm_tar_walk(body: String) -> String {
+    let n: Int = chars_len(body);
+    if n < 512 {
+        return "err magic";
+    }
+    let mut i: Int = 0;
+    let mut out: String = "";
+    let mut saw: Bool = false;
+    while i + 512 <= n {
+        let hdr: String = str_slice(body, i, i + 512);
+        if pm_hdr_zero(hdr) {
+            return "ok " + out;
+        }
+        let nm: String = pm_tar_name(hdr);
+        if !pm_member_ok(nm) {
+            return "err path";
+        }
+        let tf: String = char_at(hdr, 156);
+        let sz: Int = pm_octal(str_slice(hdr, 124, 136));
+        i = i + 512;
+        if i + sz > n {
+            return "err magic";
+        }
+        if tf == "0" {
+            out = out + str_slice(body, i, i + sz);
+            saw = true;
+        } else {
+            if tf == "\0" {
+                out = out + str_slice(body, i, i + sz);
+                saw = true;
+            }
+        }
+        let pad: Int = ((sz + 511) / 512) * 512;
+        i = i + pad;
+    }
+    if saw == false {
+        return "err magic";
+    }
+    return "ok " + out;
+}
+
+pub fn pm_deb_extract(raw: String) -> String {
+    if !pm_ar_magic(raw) {
+        return "err magic";
+    }
+    let data: String = pm_ar_find(raw, "data.tar");
+    if data == "err path" {
+        return "err path";
+    }
+    let gz: String = pm_ar_find(raw, "data.tar.gz");
+    if gz == "err path" {
+        return "err path";
+    }
+    if gz == "" {
+        let xz: String = pm_ar_find(raw, "data.tar.xz");
+        if xz == "err path" {
+            return "err path";
+        }
+        if xz == "" {
+            if data == "" {
+                return "err magic";
+            }
+            return pm_tar_walk(data);
+        }
+        return "err magic";
+    }
+    return "err magic";
+}
