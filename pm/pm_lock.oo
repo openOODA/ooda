@@ -1,0 +1,179 @@
+// # Sorted SHA-256 lock text
+//
+// Logline: Build a deterministic lock of sorted name@version#sha256 lines and hash it.
+//
+// Setup: crypto_sha256_internal. Disk write is only through the helpers. Proofs stay in memory.
+//
+// Beats:
+//   1. Sort lock lines lexicographically and join them with newlines.
+//   2. Hash the sorted payload; the same lines match and a tampered checksum does not.
+//   3. Write sorted text to .ooda_modules/lock only via the CLI helpers.
+
+fn pm_lock_line_lt(a: String, b: String) -> Bool {
+    let na: Int = chars_len(a);
+    let nb: Int = chars_len(b);
+    let mut n: Int = na;
+    if nb < n {
+        n = nb;
+    }
+    let mut i: Int = 0;
+    while i < n {
+        let ca: Int = byte_at(a, i);
+        let cb: Int = byte_at(b, i);
+        if ca < cb {
+            return true;
+        }
+        if ca > cb {
+            return false;
+        }
+        i = i + 1;
+    }
+    return na < nb;
+}
+
+fn pm_lock_insert(xs: List[String], item: String) -> List[String] {
+    let mut next: List[String] = list_new();
+    let mut placed: Bool = false;
+    let m: Int = list_len(xs);
+    let mut j: Int = 0;
+    while j < m {
+        let cur: String = list_get(xs, j);
+        if placed == false {
+            if pm_lock_line_lt(item, cur) {
+                next = list_push(next, item);
+                placed = true;
+            }
+        }
+        next = list_push(next, cur);
+        j = j + 1;
+    }
+    if placed == false {
+        next = list_push(next, item);
+    }
+    return next;
+}
+
+fn pm_lock_join(xs: List[String]) -> String {
+    let m: Int = list_len(xs);
+    let mut out: String = "";
+    let mut j: Int = 0;
+    while j < m {
+        out = out + list_get(xs, j) + "\n";
+        j = j + 1;
+    }
+    return out;
+}
+
+fn pm_lock_sq(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    let mut out: String = "'";
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "'" {
+            out = out + "'\\''";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out + "'";
+}
+
+pub fn pm_lock_line(name: String, ver: String, sha: String) -> String {
+    return name + "@" + ver + "#" + sha;
+}
+
+pub fn pm_lock_sort_text(text: String) -> String {
+    let mut lines: List[String] = list_new();
+    let n: Int = chars_len(text);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(text, i) == "\n" {
+            if i > start {
+                let line: String = str_slice(text, start, i);
+                lines = pm_lock_insert(lines, line);
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return pm_lock_join(lines);
+}
+
+pub fn pm_lock_digest(text: String) -> String {
+    return crypto_sha256_internal(pm_lock_sort_text(text));
+}
+
+pub fn pm_lock_match(a: String, b: String) -> Bool {
+    let ha: String = pm_lock_digest(a);
+    let hb: String = pm_lock_digest(b);
+    return ha == hb;
+}
+
+pub fn pm_lock_dir(root: String) -> String {
+    if root == "" {
+        return ".ooda_modules";
+    }
+    if root == "." {
+        return ".ooda_modules";
+    }
+    return root + "/.ooda_modules";
+}
+
+pub fn pm_lock_path(root: String) -> String {
+    return pm_lock_dir(root) + "/lock";
+}
+
+pub fn pm_lock_write_text(fs: &FsCap, root: String, text: String) -> Result[Bool, String] {
+    let wr = write_file(fs, pm_lock_path(root), pm_lock_sort_text(text));
+    if wr.is_err() {
+        return Err("lock write failed");
+    }
+    return Ok(true);
+}
+
+pub fn pm_lock_write_cli(sys: &SysCap, root: String, text: String) -> Result[Bool, String] {
+    let path: String = pm_lock_path(root);
+    let dir: String = pm_lock_dir(root);
+    let body: String = pm_lock_sort_text(text);
+    let cmd: String = "mkdir -p " + pm_lock_sq(dir) + "; printf '%s' " + pm_lock_sq(body) + " > " + pm_lock_sq(path);
+    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    if r.is_ok() {
+        return Ok(true);
+    }
+    return Err("lock write failed");
+}
+
+pub fn pm_lock_unit_match() -> Bool {
+    let line: String = pm_lock_line("foo", "1.0.0", crypto_sha256_internal("foo-body"));
+    let payload: String = line + "\n";
+    let h1: String = crypto_sha256_internal(pm_lock_sort_text(payload));
+    let h2: String = crypto_sha256_internal(pm_lock_sort_text(payload));
+    if h1 != h2 {
+        return false;
+    }
+    return chars_len(h1) == 64;
+}
+
+pub fn pm_lock_unit_tamper() -> Bool {
+    let good: String = pm_lock_line("foo", "1.0.0", crypto_sha256_internal("foo-body")) + "\n";
+    let bad: String = pm_lock_line("foo", "1.0.0", crypto_sha256_internal("TAMPER")) + "\n";
+    let hg: String = pm_lock_digest(good);
+    let hb: String = pm_lock_digest(bad);
+    if hg == hb {
+        return false;
+    }
+    return chars_len(hg) == 64;
+}
+
+pub fn pm_lock_unit_order() -> Bool {
+    let a: String = pm_lock_line("zeta", "3.0.0", crypto_sha256_internal("z"));
+    let b: String = pm_lock_line("alpha", "1.2.0", crypto_sha256_internal("a"));
+    let first: String = a + "\n" + b + "\n";
+    let second: String = b + "\n" + a + "\n";
+    return pm_lock_digest(first) == pm_lock_digest(second);
+}
+
+

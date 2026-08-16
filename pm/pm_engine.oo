@@ -1,125 +1,43 @@
-// # Package manager engine
+// # Lock engine
 //
-// Logline: Orchestrate package dependency resolution, generate deterministic lockfiles, and verify manifest integrity.
+// Logline: Hash sorted name@version#sha256 lock lines and write them only through helpers.
 //
-// Setup: Imports resolve_tree, archive_unpack, and manifest_parse. Drives complete PM lifecycle.
+// Setup: Imports pm_lock. crypto_sha256_internal. No hard-coded hex. Proofs hash in memory.
 //
 // Beats:
-//   1. Resolve recursive dependency trees under capability bounds.
-//   2. Generate cryptographic lockfiles capturing deterministic package resolutions.
-//   3. Verify lockfile integrity and validate manifest consistency against locked dependencies.
-// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
-// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
-import "./resolve_tree.oo";
-import "./archive_unpack.oo";
+//   1. Hash lock text after sorting the lines.
+//   2. Same payload matches; a tampered checksum does not.
+//   3. CLI writes .ooda_modules/lock only via pm_engine_write_lock.
 
-pub fn pm_lockfile_calculate_hash(entries: List[PmLockEntry], man_name: String, man_ver: String) -> String {
-    let mut payload: String = man_name;
-    payload = payload + "@";
-    payload = payload + man_ver;
-    let n: Int = list_len(entries);
-    let mut i: Int = 0;
-    while i < n {
-        let e: PmLockEntry = list_get(entries, i);
-        let ev: String = e.vendor;
-        let en: String = e.name;
-        let ever: String = e.version_str;
-        let echk: String = e.checksum;
-        payload = payload + "|";
-        payload = payload + ev;
-        payload = payload + "/";
-        payload = payload + en;
-        payload = payload + "@";
-        payload = payload + ever;
-        payload = payload + "#";
-        payload = payload + echk;
-        i = i + 1;
-    }
-    return crypto_sha256_internal(payload);
+import "pm_lock.oo";
+
+pub fn pm_engine_lock_hash(entries: String) -> String {
+    return pm_lock_digest(entries);
 }
 
-pub fn pm_lockfile_generate(
-    manifest: PmManifest,
-    res: PmResolveResult,
-    timestamp: Int
-) -> PmLockfile {
-    let mut lock_entries: List[PmLockEntry] = list_new();
-    let n_nodes: Int = list_len(res.nodes);
-    let mut i: Int = 0;
-    while i < n_nodes {
-        let node: PmResolveNode = list_get(res.nodes, i);
-        let nv: String = node.vendor;
-        let nn: String = node.name;
-        let nver: String = node.version_str;
-        let chk: String = "cas_" + nv + "_" + nn + "_" + nver;
-        let v_maj: Int = node.version.major;
-        let v_min: Int = node.version.minor;
-        let v_pat: Int = node.version.patch;
-        let g_caps: Int = node.granted_caps;
-        let n_depth: Int = node.depth;
-        let entry = PmLockEntry {
-            name: nn,
-            vendor: nv,
-            version_str: nver,
-            major: v_maj,
-            minor: v_min,
-            patch: v_pat,
-            granted_caps: g_caps,
-            checksum: chk,
-            depth: n_depth
-        };
-        lock_entries = list_push(lock_entries, entry);
-        i = i + 1;
-    }
-    let m_name: String = manifest.name;
-    let m_ver: String = manifest.version_str;
-    let l_hash: String = pm_lockfile_calculate_hash(lock_entries, m_name, m_ver);
-    let n_entries: Int = list_len(lock_entries);
-    return PmLockfile {
-        manifest_name: m_name,
-        manifest_version: m_ver,
-        entries: lock_entries,
-        total_entries: n_entries,
-        generated_at: timestamp,
-        lock_hash: l_hash,
-        is_locked: true
-    };
+pub fn pm_engine_lock_ok(a: String, b: String) -> Bool {
+    return pm_lock_match(a, b);
 }
 
-pub fn pm_lockfile_verify(lock: PmLockfile, manifest: PmManifest) -> Result[Bool, String] {
-    let locked: Bool = lock.is_locked;
-    if locked == false {
-        return Err("Lockfile is not marked locked");
-    }
-    let l_man_name: String = lock.manifest_name;
-    let m_name: String = manifest.name;
-    if l_man_name != m_name {
-        return Err("Lockfile manifest name mismatch");
-    }
-    let l_man_ver: String = lock.manifest_version;
-    let m_ver: String = manifest.version_str;
-    if l_man_ver != m_ver {
-        return Err("Lockfile manifest version mismatch");
-    }
-    let expected_hash: String = pm_lockfile_calculate_hash(lock.entries, l_man_name, l_man_ver);
-    let l_hash: String = lock.lock_hash;
-    if l_hash != expected_hash {
-        return Err("Lockfile integrity hash mismatch (tampered lockfile)");
-    }
-    return Ok(true);
+pub fn pm_engine_write_lock(sys: &SysCap, root: String, text: String) -> Result[Bool, String] {
+    return pm_lock_write_cli(sys, root, text);
 }
 
-pub fn pm_engine_resolve_and_lock(
-    manifest: PmManifest,
-    registry: List[PmManifest],
-    timestamp: Int
-) -> Result[PmLockfile, String] {
-    let res: PmResolveResult = pm_resolve_tree(manifest, registry, 16);
-    let r_succ: Bool = res.success;
-    if r_succ == false {
-        let r_msg: String = res.error_msg;
-        return Err("Resolution failed: " + r_msg);
-    }
-    let lock: PmLockfile = pm_lockfile_generate(manifest, res, timestamp);
-    return Ok(lock);
+pub fn pm_engine_write_lock_fs(fs: &FsCap, root: String, text: String) -> Result[Bool, String] {
+    return pm_lock_write_text(fs, root, text);
 }
+
+pub fn pm_engine_lock_unit() -> Bool {
+    if pm_lock_unit_match() == false {
+        return false;
+    }
+    if pm_lock_unit_tamper() == false {
+        return false;
+    }
+    if pm_lock_unit_order() == false {
+        return false;
+    }
+    return true;
+}
+
+

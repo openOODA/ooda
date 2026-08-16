@@ -1,168 +1,116 @@
-// # Package dependency tree resolver
+// # SemVer dependency tree
 //
-// Logline: Solve recursive SemVer dependency trees, prevent capability escalation, and build resolution nodes.
+// Logline: Resolve a root and every transitive dep from a file-backed catalog.
 //
-// Setup: Imports manifest_parse. Solves deterministic package graph satisfying SemVer and capability bounds.
+// Setup: Uses resolve.oo pick. Catalog is name|version|caps|deps. No HTTP.
 //
 // Beats:
-//   1. Check capability rights containment and prevent unauthorized capability escalation.
-//   2. Search candidate packages in registry and pick the highest satisfying SemVer release.
-//   3. Recursively resolve dependency subtrees with depth limiting and deterministic ordering.
-// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
-// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
-import "./manifest_parse.oo";
+//   1. Pick the root, then enqueue each comma-separated dep.
+//   2. Recurse with a depth bound and skip names already chosen.
+//   3. Fail closed on a missing name or capability escalation.
+//
+// residual: no fetch of registry.openooda.org
 
-pub fn pm_validate_capability_escalation(requested_caps: Int, granted_caps: Int) -> Bool {
-    let mut req = requested_caps;
-    let mut granted = granted_caps;
-    let mut bit = 0;
-    while bit < 8 {
-        let r_bit = req % 2;
-        let g_bit = granted % 2;
-        if r_bit == 1 && g_bit == 0 {
-            return false; // Escalation: requested capability not granted
-        }
-        req = req / 2;
-        granted = granted / 2;
-        bit = bit + 1;
-    }
-    return true;
+import "./resolve.oo";
+import "./pm_core.oo";
+
+fn tree_fail(code: String) -> String {
+    return code;
 }
 
-pub fn pm_find_best_candidate(
-    registry: List[PmManifest],
-    dep: PmDependency,
-    caller_caps: Int
-) -> Result[PmManifest, String] {
-    let count: Int = list_len(registry);
+fn tree_seen(out: String, name: String) -> Bool {
+    return str_index_of(out, name + "@") >= 0;
+}
+
+fn tree_expand(
+    catalog: String,
+    deps: String,
+    parent_caps: Int,
+    out: String,
+    queue: List[String],
+    depths: List[Int],
+    next_depth: Int
+) -> String {
+    let dn: Int = chars_len(deps);
+    let mut start: Int = 0;
     let mut i: Int = 0;
-    let mut found_match: Bool = false;
-    let mut best_manifest: PmManifest = pm_manifest_empty();
-
-    // Check parent does not grant capabilities it lacks
-    if pm_validate_capability_escalation(dep.granted_caps, caller_caps) == false {
-        return Err("Parent delegates capabilities it does not possess");
-    }
-
-    while i < count {
-        let cand: PmManifest = list_get(registry, i);
-        if cand.name == dep.name && cand.vendor == dep.vendor {
-            if pm_semver_satisfies(cand.version, dep) {
-                // Capability escalation check on candidate's own requirements
-                if pm_validate_capability_escalation(cand.required_caps, dep.granted_caps) {
-                    if found_match == false {
-                        best_manifest = cand;
-                        found_match = true;
-                    } else {
-                        // Pick higher SemVer
-                        let cmp_ver: Int = pm_semver_compare(cand.version, best_manifest.version);
-                        if cmp_ver == 1 {
-                            best_manifest = cand;
-                        }
+    let mut acc: String = out;
+    let mut q: List[String] = queue;
+    let mut ds: List[Int] = depths;
+    while i <= dn {
+        if i == dn || char_at(deps, i) == "," {
+            let tok: String = str_slice(deps, start, i);
+            if tok != "" {
+                if str_index_of(tok, "@") < 1 {
+                    return tree_fail("err dep");
+                }
+                let dname: String = dep_name(tok);
+                if pm_name_ok(dname) == false {
+                    return tree_fail("err name");
+                }
+                let dgrant: Int = dep_grant(tok, parent_caps);
+                if pm_caps_ok(parent_caps, dgrant) == false {
+                    return tree_fail("err caps");
+                }
+                if tree_seen(acc, dname) == false {
+                    let dline: String = resolve_pick(catalog, dname, dep_spec(tok));
+                    if dline == "" {
+                        return tree_fail("err missing");
                     }
+                    let dcaps: Int = pm_int(rec_field(dline, 2));
+                    if pm_caps_ok(dgrant, dcaps) == false {
+                        return tree_fail("err caps");
+                    }
+                    acc = acc + " " + dname + "@" + rec_field(dline, 1);
+                    q = list_push(q, dline);
+                    ds = list_push(ds, next_depth);
                 }
             }
+            start = i + 1;
         }
         i = i + 1;
     }
-
-    if found_match == false {
-        let dv = dep.vendor;
-        let dn = dep.name;
-        return Err("No satisfying candidate found for dependency " + dv + "/" + dn);
-    }
-    return Ok(best_manifest);
+    return acc;
 }
 
-pub fn pm_resolve_tree(
-    root: PmManifest,
-    registry: List[PmManifest],
-    max_depth: Int
-) -> PmResolveResult {
-    let mut out_nodes: List[PmResolveNode] = list_new();
-    let root_node = PmResolveNode {
-        name: root.name,
-        vendor: root.vendor,
-        version: root.version,
-        version_str: root.version_str,
-        granted_caps: root.required_caps,
-        parent_name: "root",
-        depth: 0
-    };
-    out_nodes = list_push(out_nodes, root_node);
-
-    let mut queue_manifests: List[PmManifest] = list_new();
-    let mut queue_parents: List[String] = list_new();
-    let mut queue_depths: List[Int] = list_new();
-
-    queue_manifests = list_push(queue_manifests, root);
-    queue_parents = list_push(queue_parents, "root");
-    queue_depths = list_push(queue_depths, 0);
-
+pub fn pm_resolve_tree(catalog: String, name: String, parent_caps: Int) -> String {
+    if pm_name_ok(name) == false {
+        return "err name";
+    }
+    let root: String = resolve_pick(catalog, name, "*");
+    if root == "" {
+        return "err missing";
+    }
+    let rcaps: Int = pm_int(rec_field(root, 2));
+    if pm_caps_ok(parent_caps, rcaps) == false {
+        return "err caps";
+    }
+    let mut out: String = name + "@" + rec_field(root, 1);
+    let mut queue: List[String] = list_new();
+    let mut depths: List[Int] = list_new();
+    queue = list_push(queue, root);
+    depths = list_push(depths, 0);
     let mut head: Int = 0;
-    while head < list_len(queue_manifests) {
-        let cur_man: PmManifest = list_get(queue_manifests, head);
-        let cur_depth: Int = list_get(queue_depths, head);
-
-        if cur_depth >= max_depth {
-            let empty_res: List[PmResolveNode] = list_new();
-            return PmResolveResult {
-                success: false,
-                error_code: 101,
-                error_msg: "Max dependency resolution depth exceeded (possible cycle)",
-                nodes: empty_res,
-                total_nodes: 0
-            };
+    while head < list_len(queue) {
+        let cur: String = list_get(queue, head);
+        let depth: Int = list_get(depths, head);
+        if depth >= 16 {
+            return "err depth";
         }
-
-        let deps: List[PmDependency] = cur_man.dependencies;
-        let n_deps: Int = list_len(deps);
-        let mut d_idx: Int = 0;
-
-        while d_idx < n_deps {
-            let dep: PmDependency = list_get(deps, d_idx);
-            let cand_res: Result[PmManifest, String] = pm_find_best_candidate(registry, dep, cur_man.required_caps);
-            let cand: PmManifest = match cand_res {
-                Ok(c) => c,
-                Err(_) => pm_manifest_empty()
-            };
-            if cand.is_valid == false {
-                let empty_res: List[PmResolveNode] = list_new();
-                return PmResolveResult {
-                    success: false,
-                    error_code: 102,
-                    error_msg: "Unresolved dependency",
-                    nodes: empty_res,
-                    total_nodes: 0
-                };
-            }
-
-            let node = PmResolveNode {
-                name: cand.name,
-                vendor: cand.vendor,
-                version: cand.version,
-                version_str: cand.version_str,
-                granted_caps: dep.granted_caps,
-                parent_name: cur_man.name,
-                depth: cur_depth + 1
-            };
-            out_nodes = list_push(out_nodes, node);
-
-            queue_manifests = list_push(queue_manifests, cand);
-            queue_parents = list_push(queue_parents, cur_man.name);
-            queue_depths = list_push(queue_depths, cur_depth + 1);
-
-            d_idx = d_idx + 1;
+        let expanded: String = tree_expand(
+            catalog,
+            rec_field(cur, 3),
+            parent_caps,
+            out,
+            queue,
+            depths,
+            depth + 1
+        );
+        if str_index_of(expanded, "err ") == 0 {
+            return expanded;
         }
-
+        out = expanded;
         head = head + 1;
     }
-
-    return PmResolveResult {
-        success: true,
-        error_code: 0,
-        error_msg: "",
-        nodes: out_nodes,
-        total_nodes: list_len(out_nodes)
-    };
+    return "ok " + out;
 }

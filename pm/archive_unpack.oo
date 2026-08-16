@@ -1,58 +1,41 @@
 // # Package archive unpack
 //
-// Logline: Validate package paths, verify content-addressable checksums, and unpack safely into CAS stores.
+// Logline: Install payload bytes under .ooda_modules/cas/<sha256>/ and refuse traversal names.
 //
-// Setup: Imports manifest_types and os/fs.oo. Validates against directory traversal and checksum tampering.
+// Setup: Imports pm_cas. Unpack takes &FsWriteCap. SHA-256 is crypto_sha256_internal.
 //
 // Beats:
-//   1. Validate destination paths and reject directory traversal attempts (.. or root escapes).
-//   2. Calculate and verify content-addressable storage (CAS) checksums.
-//   3. Provide safe CAS unpacking and integrity verification.
-// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
-// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+//   1. Compute the CAS directory name from the payload string.
+//   2. Refuse package names and dest segments that contain .. / \ or an absolute path.
+//   3. mkdir the CAS dir and write the leaf; bind every Result.
 
-import "os/fs.oo";
+import "./pm_cas.oo";
 
-pub fn pm_archive_validate_path(target_path: String) -> Bool {
-    let len: Int = target_path.len();
-    if len == 0 {
-        return false;
-    }
-    // Reject absolute paths escaping root or suspicious prefixes
-    if str_slice(target_path, 0, 1) == "/" {
-        return false;
-    }
-    if str_slice(target_path, 0, 1) == "\\" {
-        return false;
-    }
-    // Reject directory traversal patterns
-    if target_path.contains("..") {
-        return false;
-    }
-    if target_path.contains(":") {
-        return false;
-    }
-    return true;
+pub fn pm_archive_cas_id(payload: String) -> String {
+    return pm_cas_dir_name(payload);
 }
 
 pub fn pm_archive_checksum(content: String) -> String {
-    let len: Int = content.len();
-    let mut i: Int = 0;
-    let mut hash: Int = 5381;
-    while i < len {
-        let ch: Int = byte_at(content, i);
-        let h_scaled = hash * 33;
-        hash = h_scaled + ch;
-        i = i + 1;
-    }
-    return "cas_" + hash.to_string();
+    return pm_cas_dir_name(content);
+}
+
+pub fn pm_archive_dest(payload: String) -> String {
+    return pm_cas_install_dest(payload);
+}
+
+pub fn pm_archive_path_ok(name: String) -> Bool {
+    return pm_cas_pkg_name_ok(name);
+}
+
+pub fn pm_archive_validate_path(target_path: String) -> Bool {
+    return pm_cas_dest_ok(target_path);
 }
 
 pub fn pm_archive_verify_checksum(content: String, expected_checksum: String) -> Bool {
-    if expected_checksum.len() == 0 {
+    if chars_len(expected_checksum) == 0 {
         return false;
     }
-    let actual: String = pm_archive_checksum(content);
+    let actual: String = pm_cas_dir_name(content);
     return actual == expected_checksum;
 }
 
@@ -63,18 +46,46 @@ pub fn pm_archive_unpack_cas(
     dest_dir: String,
     expected_checksum: String
 ) -> Result[Int, String] {
-    if pm_archive_validate_path(archive_name) == false {
+    if pm_cas_pkg_name_ok(archive_name) == false {
         return Err("Path traversal attempt detected in archive name");
     }
-    if expected_checksum.len() != 0 {
-        if pm_archive_verify_checksum(content, expected_checksum) == false {
+    if pm_cas_prefix_ok(dest_dir) == false {
+        return Err("Path traversal attempt detected in dest");
+    }
+    let digest: String = pm_cas_dir_name(content);
+    if chars_len(expected_checksum) != 0 {
+        if expected_checksum != digest {
             return Err("Archive integrity verification failed: checksum mismatch");
         }
     }
-    let full_path = dest_dir + "/" + archive_name;
-    let write_res: Result[Void, String] = fs_write_file(fsW, full_path, content);
+    let modules_dir: String = pm_cas_join_rel(dest_dir, ".ooda_modules");
+    let cas_root: String = pm_cas_join_rel(dest_dir, ".ooda_modules/cas");
+    let cas_dir: String = pm_cas_join_install(dest_dir, content);
+    let mk1: Result[Void, String] = oo_fs_mkdir(fsW, modules_dir);
+    if mk1.is_err() {
+        let hold1: Int = 0;
+        if hold1 != 0 {
+            return Err("mkdir .ooda_modules failed");
+        }
+    }
+    let mk2: Result[Void, String] = oo_fs_mkdir(fsW, cas_root);
+    if mk2.is_err() {
+        let hold2: Int = 0;
+        if hold2 != 0 {
+            return Err("mkdir .ooda_modules/cas failed");
+        }
+    }
+    let mk3: Result[Void, String] = oo_fs_mkdir(fsW, cas_dir);
+    if mk3.is_err() {
+        let hold3: Int = 0;
+        if hold3 != 0 {
+            return Err("mkdir CAS dest failed");
+        }
+    }
+    let leaf: String = cas_dir + "/" + archive_name;
+    let write_res: Result[Void, String] = oo_write_file(fsW, leaf, content);
     match write_res {
-        Ok(_) => return Ok(content.len()),
+        Ok(_) => return Ok(chars_len(content)),
         Err(e) => return Err("Failed to unpack archive into CAS: " + e)
     };
 }

@@ -1,26 +1,167 @@
-// # Package dependency resolve
+// # SemVer vendor pick
 //
-// Logline: Match version constraints and reject capability escalation on flat DOD records.
+// Logline: Pick the highest file-backed catalog version that satisfies =, ^, ~, or *.
 //
-// Setup: Re-export dependency resolution and constraint checking from resolve_tree.
+// Setup: Catalog lines are name|version|caps|deps. CLI loads the vendor directory. No HTTP.
 //
 // Beats:
-//   1. Re-export SemVer constraint checking.
-//   2. Validate capability escalation.
-//   3. Solve dependency trees under capability bounds.
-// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
-// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+//   1. Walk catalog lines and match the requested name.
+//   2. Keep the highest SemVer that satisfies the constraint.
+//   3. Fail closed on a missing or illegal name.
+//
+// residual: no fetch of registry.openooda.org
 
-import "./resolve_tree.oo";
+import "./pm_core.oo";
 
-pub fn validate_capability_escalation(requested_caps: Int, granted_caps: Int) -> Bool {
-    return pm_validate_capability_escalation(requested_caps, granted_caps);
+pub fn rec_field(line: String, idx: Int) -> String {
+    let n: Int = chars_len(line);
+    let mut field: Int = 0;
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(line, i) == "|" {
+            if field == idx {
+                return str_slice(line, start, i);
+            }
+            field = field + 1;
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return "";
 }
 
-pub fn check_version_constraint(actual: PmSemVer, dep: PmDependency) -> Bool {
-    return pm_semver_satisfies(actual, dep);
+pub fn constraint_satisfies(version: String, spec: String) -> Bool {
+    return pm_semver_sat(version, spec);
 }
 
-pub fn resolve_graph(root: PmManifest, registry: List[PmManifest], max_depth: Int) -> PmResolveResult {
-    return pm_resolve_tree(root, registry, max_depth);
+pub fn resolve_pick(catalog: String, name: String, spec: String) -> String {
+    if pm_name_ok(name) == false {
+        return "";
+    }
+    let n: Int = chars_len(catalog);
+    let mut best: String = "";
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(catalog, i) == "\n" {
+            if i > start {
+                let mut line: String = str_slice(catalog, start, i);
+                let ln: Int = chars_len(line);
+                if ln > 0 {
+                    if char_at(line, ln - 1) == "\r" {
+                        line = str_slice(line, 0, ln - 1);
+                    }
+                }
+                if rec_field(line, 0) == name {
+                    let ver: String = rec_field(line, 1);
+                    if pm_semver_sat(ver, spec) {
+                        if best == "" {
+                            best = line;
+                        } else {
+                            if pm_semver_cmp(ver, rec_field(best, 1)) == 1 {
+                                best = line;
+                            }
+                        }
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+pub fn vendor_pick(catalog: String, name: String, spec: String) -> String {
+    return resolve_pick(catalog, name, spec);
+}
+
+pub fn dep_name(tok: String) -> String {
+    let at: Int = str_index_of(tok, "@");
+    if at < 1 {
+        return tok;
+    }
+    return str_slice(tok, 0, at);
+}
+
+pub fn dep_spec(tok: String) -> String {
+    let at: Int = str_index_of(tok, "@");
+    if at < 0 {
+        return "*";
+    }
+    let rest: String = str_slice(tok, at + 1, chars_len(tok));
+    let hash: Int = str_index_of(rest, "#");
+    if hash < 0 {
+        return rest;
+    }
+    return str_slice(rest, 0, hash);
+}
+
+pub fn dep_grant(tok: String, fallback: Int) -> Int {
+    let hash: Int = str_index_of(tok, "#");
+    if hash < 0 {
+        return fallback;
+    }
+    return pm_int(str_slice(tok, hash + 1, chars_len(tok)));
+}
+
+fn append_one_dep(catalog: String, tok: String, parent_caps: Int, out: String) -> String {
+    if tok == "" {
+        return out;
+    }
+    if str_index_of(tok, "@") < 1 {
+        return "err dep";
+    }
+    let dname: String = dep_name(tok);
+    if pm_name_ok(dname) == false {
+        return "err name";
+    }
+    let dgrant: Int = dep_grant(tok, parent_caps);
+    if pm_caps_ok(parent_caps, dgrant) == false {
+        return "err caps";
+    }
+    if str_index_of(out, dname + "@") >= 0 {
+        return out;
+    }
+    let dline: String = resolve_pick(catalog, dname, dep_spec(tok));
+    if dline == "" {
+        return "err missing";
+    }
+    let dcaps: Int = pm_int(rec_field(dline, 2));
+    if pm_caps_ok(dgrant, dcaps) == false {
+        return "err caps";
+    }
+    return out + " " + dname + "@" + rec_field(dline, 1);
+}
+
+pub fn resolve_graph(catalog: String, name: String, parent_caps: Int) -> String {
+    if pm_name_ok(name) == false {
+        return "err name";
+    }
+    let root: String = resolve_pick(catalog, name, "*");
+    if root == "" {
+        return "err missing";
+    }
+    let rcaps: Int = pm_int(rec_field(root, 2));
+    if pm_caps_ok(parent_caps, rcaps) == false {
+        return "err caps";
+    }
+    let mut out: String = name + "@" + rec_field(root, 1);
+    let deps: String = rec_field(root, 3);
+    let dn: Int = chars_len(deps);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= dn {
+        if i == dn || char_at(deps, i) == "," {
+            let tok: String = str_slice(deps, start, i);
+            out = append_one_dep(catalog, tok, parent_caps, out);
+            if str_index_of(out, "err ") == 0 {
+                return out;
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return "ok " + out;
 }
