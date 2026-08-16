@@ -1,0 +1,138 @@
+// # Offline recipe ingest beside add
+//
+// Logline: Read a dir, local git, or hashed blob recipe and lock the payload.
+//
+// Setup: --from DIR. File-backed only. Reuses store, pin, policy. Not ooda add.
+//
+// Beats:
+//   1. Refuse HTTP, bad names, extra caps, yank, and license misses.
+//   2. Verify sha256 and local git commit. Write CAS, wrapper, and lock v2.
+//   3. --json prints a machine object. Wrapper does not claim transmutation.
+
+import "cmd_pm_cat.oo";
+import "cmd_pm_io.oo";
+import "pm_caps.oo";
+import "pm_pin.oo";
+import "pm_policy.oo";
+import "pm_recipe.oo";
+import "pm_store.oo";
+import "pm_v2.oo";
+
+fn ing_die(msg: String) {
+    println("ERR\tpm\t" + msg);
+    println("ooda ingest: " + msg);
+    process_exit(2);
+}
+
+fn ing_recipe_dir(fs: &FsCap, args: List[String]) -> String {
+    let from: String = pm_opt(args, "--from");
+    if from == "" {
+        return pm_arg_name(args);
+    }
+    return from;
+}
+
+pub fn run_ooda_pm_ingest(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    if pm_flag(args, "--registry") || pm_is_http(pm_opt(args, "--vendor")) || pm_is_http(pm_opt(args, "--from")) {
+        ing_die("file vendor required");
+    }
+    let rec: String = ing_recipe_dir(fs, args);
+    if rec == "" {
+        ing_die("missing recipe");
+    }
+    if pm_is_http(rec) {
+        ing_die("file vendor required");
+    }
+    if !path_exists(fs, rec + "/manifest") {
+        ing_die("missing recipe");
+    }
+    let man: String = pm_slurp(fs, rec + "/manifest");
+    if man == "" {
+        ing_die("missing recipe");
+    }
+    let name: String = pm_kv(man, "name");
+    let ver: String = pm_kv(man, "version");
+    let origin: String = pm_kv(man, "origin");
+    let pn: String = pm_first_nonempty(pm_kv(man, "payload"), name + ".oo");
+    if !pm_name_ok(name) {
+        ing_die("refuse name");
+    }
+    if !pm_name_ok(pn) {
+        ing_die("refuse name");
+    }
+    if !pm_origin_ok(origin) {
+        ing_die("origin");
+    }
+    let pkg: String = pm_slurp(fs, "ooda.pkg");
+    if !pm_caps_ok(pm_cap_parse(pm_kv(pkg, "caps")), pm_cap_parse(pm_kv(man, "caps"))) {
+        ing_die("caps");
+    }
+    if !pm_license_ok(pm_kv(pkg, "licenses"), pm_kv(man, "license")) {
+        ing_die("license");
+    }
+    let ydir: String = pm_first_nonempty(pm_opt(args, "--vendor"), "../registry");
+    if pm_is_http(ydir) {
+        ing_die("file vendor required");
+    }
+    if pm_yanked(pm_slurp(fs, ydir + "/yank"), name, ver) {
+        ing_die("yank " + name);
+    }
+    if origin == "git" {
+        if !pm_git_ok(pm_slurp(fs, rec + "/commit"), pm_recipe_commit_want(man)) {
+            ing_die("git");
+        }
+    }
+    let body: String = pm_slurp(fs, rec + "/" + pn);
+    if body == "" {
+        ing_die("missing payload");
+    }
+    let live: String = pm_cas_id(body);
+    if !pm_recipe_sha_ok(pm_kv(man, "sha256"), live) {
+        ing_die("sha256 mismatch");
+    }
+    let root: String = pm_root_abs(fs, sys);
+    let live_o: String = pm_oodac_sha(fs, sys);
+    let live_s: String = pm_std_sha(fs, sys);
+    let prev: String = pm_first_nonempty(pm_slurp(fs, root + "/.ooda_modules/lock"), pm_slurp(fs, ".ooda_modules/lock"));
+    if !pm_pin_ok(prev, live_o, live_s) {
+        ing_die("pin");
+    }
+    if !pm_put_cas(fs, root, live, pn, body) {
+        ing_die("install failed");
+    }
+    let wrap: String = pm_recipe_wrap(name, live, pn);
+    let wname: String = "ingest_" + name + ".oo";
+    if !pm_put_cas(fs, root, live, wname, wrap) {
+        ing_die("wrapper failed");
+    }
+    let _v: Bool = pm_put_vendor(fs, root, wname, wrap);
+    let tok: String = name + "@" + ver + "#" + live + "#" + pm_cap_name(pm_cap_parse(pm_kv(man, "caps")));
+    let n: Int = chars_len(prev);
+    let mut kept: String = "";
+    let mut ps: Int = 0;
+    let mut pi: Int = 0;
+    while pi <= n {
+        if pi == n || char_at(prev, pi) == "\n" {
+            if pi > ps {
+                let pline: String = str_slice(prev, ps, pi);
+                if pm_is_pkg_line(pline) {
+                    let pnm: String = pm_tok_name(pline);
+                    if str_index_of(tok, pnm + "@") < 0 {
+                        kept = kept + pline + "\n";
+                    }
+                }
+            }
+            ps = pi + 1;
+        }
+        pi = pi + 1;
+    }
+    let acc: String = pm_lock_hdr(live_o, live_s) + kept + tok + "\n";
+    if !pm_put_lock(fs, root, acc) {
+        ing_die("lock write failed");
+    }
+    if pm_flag(args, "--json") || pm_flag(args, "-json") {
+        println("{\"ok\":true,\"cmd\":\"ingest\",\"packages\":" + pm_lock_json(acc) + "}");
+        return;
+    }
+    println("ooda ingest: installed " + name + " cas=" + live);
+}
