@@ -1,0 +1,183 @@
+// # Native LSP method replies
+//
+// Logline: Build framed initialize, hover, documentSymbol, and definition results.
+//
+// Setup: Used by lsp_drive. Scan `fn` names. Read a file:// uri when present.
+//
+// Beats:
+//   1. initialize advertises hover, documentSymbol, and definition.
+//   2. hover / definition name the first fn.
+//   3. documentSymbol lists each fn.
+
+fn lsp_frame(payload: String) -> String {
+    return "Content-Length: " + chars_len(payload).to_string() + "\n\n" + payload;
+}
+
+fn lsp_json_id(body: String) -> String {
+    let key: String = "\"id\":";
+    let at: Int = str_index_of(body, key);
+    if at < 0 {
+        return "1";
+    }
+    let n: Int = chars_len(body);
+    let mut i: Int = at + chars_len(key);
+    while i < n {
+        let c: String = char_at(body, i);
+        if c == " " {
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    let start: Int = i;
+    while i < n {
+        let c2: String = char_at(body, i);
+        if c2 == "0" || c2 == "1" || c2 == "2" || c2 == "3" || c2 == "4" || c2 == "5" || c2 == "6" || c2 == "7" || c2 == "8" || c2 == "9" {
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    if i <= start {
+        return "1";
+    }
+    return str_slice(body, start, i);
+}
+
+fn lsp_file_uri_path(body: String) -> String {
+    let key: String = "file://";
+    let at: Int = str_index_of(body, key);
+    if at < 0 {
+        return "";
+    }
+    let n: Int = chars_len(body);
+    let start: Int = at + chars_len(key);
+    let mut i: Int = start;
+    while i < n {
+        let c: String = char_at(body, i);
+        if c == "\"" {
+            return str_slice(body, start, i);
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn lsp_next_fn(src: String, from: Int) -> Int {
+    let key: String = "fn ";
+    let tail: String = str_slice(src, from, chars_len(src));
+    let at: Int = str_index_of(tail, key);
+    if at < 0 {
+        return 0 - 1;
+    }
+    return from + at;
+}
+
+fn lsp_fn_name_at(src: String, fn_at: Int) -> String {
+    let n: Int = chars_len(src);
+    let mut i: Int = fn_at + 3;
+    while i < n {
+        let c: String = char_at(src, i);
+        if c == " " || c == "\t" {
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    let start: Int = i;
+    while i < n {
+        let c2: String = char_at(src, i);
+        if c2 == "(" || c2 == " " || c2 == "\t" || c2 == "\n" {
+            break;
+        }
+        i = i + 1;
+    }
+    if i <= start {
+        return "main";
+    }
+    return str_slice(src, start, i);
+}
+
+fn lsp_first_fn(src: String) -> String {
+    let at: Int = lsp_next_fn(src, 0);
+    if at < 0 {
+        return "main";
+    }
+    return lsp_fn_name_at(src, at);
+}
+
+fn lsp_load_src(fs: &FsCap, body: String) -> String {
+    let p: String = lsp_file_uri_path(body);
+    if p == "" {
+        return "pub fn main() {\n}\n";
+    }
+    if !path_exists(fs, p) {
+        return "pub fn main() {\n}\n";
+    }
+    let rr: Result[String, String] = read_file(fs, p);
+    if !rr.is_ok() {
+        return "pub fn main() {\n}\n";
+    }
+    return match rr { Ok(s) => s, Err(m) => m };
+}
+
+fn lsp_symbol_json(name: String) -> String {
+    return "{\"name\":\"" + name + "\",\"kind\":12,\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"selectionRange\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}}}";
+}
+
+pub fn lsp_build_reply(fs: &FsCap, body: String) -> String {
+    let id: String = lsp_json_id(body);
+    if str_index_of(body, "textDocument/hover") >= 0 {
+        let src: String = lsp_load_src(fs, body);
+        let nm: String = lsp_first_fn(src);
+        let val: String = "fn " + nm;
+        return lsp_frame("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":\"" + val + "\"}}}");
+    }
+    if str_index_of(body, "textDocument/documentSymbol") >= 0 || str_index_of(body, "documentSymbol") >= 0 {
+        let src2: String = lsp_load_src(fs, body);
+        let mut items: String = "";
+        let mut pos: Int = 0;
+        let mut nsym: Int = 0;
+        while nsym < 32 {
+            let at: Int = lsp_next_fn(src2, pos);
+            if at < 0 {
+                nsym = 32;
+            } else {
+                let nm2: String = lsp_fn_name_at(src2, at);
+                if items != "" {
+                    items = items + ",";
+                }
+                items = items + lsp_symbol_json(nm2);
+                pos = at + 3;
+                nsym = nsym + 1;
+            }
+        }
+        if items == "" {
+            items = lsp_symbol_json("main");
+        }
+        return lsp_frame("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":[" + items + "]}");
+    }
+    if str_index_of(body, "textDocument/definition") >= 0 || str_index_of(body, "\"method\":\"definition\"") >= 0 {
+        let src3: String = lsp_load_src(fs, body);
+        let uri: String = lsp_file_uri_path(body);
+        let mut u: String = "file:///ooda.oo";
+        if uri != "" {
+            u = "file://" + uri;
+        }
+        if lsp_first_fn(src3) == "" {
+            u = "file:///ooda.oo";
+        }
+        return lsp_frame("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"uri\":\"" + u + "\",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":2}}}}");
+    }
+    if str_index_of(body, "shutdown") >= 0 {
+        return lsp_frame("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":null}");
+    }
+    if str_index_of(body, "exit") >= 0 {
+        return "";
+    }
+    if str_index_of(body, "initialize") >= 0 {
+        let caps: String = "{\"capabilities\":{\"textDocumentSync\":1,\"hoverProvider\":true,\"documentSymbolProvider\":true,\"definitionProvider\":true}}";
+        return lsp_frame("{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + caps + "}");
+    }
+    return "";
+}
