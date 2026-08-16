@@ -33,6 +33,7 @@
 #include "chs_rt_landlock.c"
 #include "chs_rt_dns.c"
 #include "chs_rt_vision.c"
+#include "chs_rt_xlang.c"
 
 OoSList str_split(OoStr s, OoStr delim) {
   OoSList l = oo_slist_new();

@@ -111,14 +111,43 @@ OoResS oo_arena_reset(long long cap, long long id) {
   return r;
 }
 
-long long oo_soa_layout(OoStr name) {
-  if (!name.data || name.len <= 0) return 0;
-  return 1;
+/* "x:8,y:4" → 12. A bare name is one 8-byte field. Never a constant 1. */
+long long oo_soa_layout(OoStr spec) {
+  long long total = 0;
+  long long i = 0;
+  int fields = 0;
+  if (!spec.data || spec.len <= 0) return 0;
+  while (i < spec.len) {
+    long long start = i;
+    long long colon = -1;
+    long long sz = 8;
+    while (i < spec.len && spec.data[i] != ',') {
+      if (spec.data[i] == ':') colon = i;
+      i++;
+    }
+    if (colon >= start && colon + 1 < i) {
+      long long v = 0;
+      long long p;
+      for (p = colon + 1; p < i; p++) {
+        if (spec.data[p] >= '0' && spec.data[p] <= '9') {
+          v = v * 10 + (spec.data[p] - '0');
+        }
+      }
+      if (v > 0) sz = v;
+    }
+    if (i > start) {
+      total += sz;
+      fields++;
+    }
+    if (i < spec.len && spec.data[i] == ',') i++;
+  }
+  if (fields == 0) return 0;
+  return total;
 }
 
 long long oo_dod_layout(long long n) {
   if (n < 0) return 0;
-  return n;
+  return n * 8;
 }
 
 long long oo_checkpoint(long long v) {

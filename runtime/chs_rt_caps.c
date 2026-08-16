@@ -230,12 +230,32 @@ OoStr oo_cap_kernel_seal(long long sys, OoStr cap_id) {
   return crypto_hmac_sha256_internal(key, cap_id);
 }
 
-/* OPEN-74: honest enclave floor — measure sealed identity, print hash, return. Not SGX/SEV. */
+/* OPEN-74: measured isolate. Hash domain || sealed || sys token. Not name-only SHA-256. Not SGX. */
 OoStr oo_enclave_enter(long long sys, OoStr sealed) {
+  unsigned char page[64];
+  OoStr acc;
   OoStr meas;
+  size_t n;
   oo_caps_init();
   oo_cap_require_sys(sys, "oo_enclave_enter");
-  meas = crypto_sha256_internal(sealed);
+  memset(page, 0, sizeof page);
+  memcpy(page, "ooda-enclave-v1", 15);
+  if (sealed.data && sealed.len > 0) {
+    n = (size_t)sealed.len;
+    if (n > 32) n = 32;
+    memcpy(page + 16, sealed.data, n);
+  }
+  page[48] = (unsigned char)(sys >> 56);
+  page[49] = (unsigned char)(sys >> 48);
+  page[50] = (unsigned char)(sys >> 40);
+  page[51] = (unsigned char)(sys >> 32);
+  page[52] = (unsigned char)(sys >> 24);
+  page[53] = (unsigned char)(sys >> 16);
+  page[54] = (unsigned char)(sys >> 8);
+  page[55] = (unsigned char)sys;
+  acc.data = (char *)page;
+  acc.len = 64;
+  meas = crypto_sha256_internal(acc);
   fputs("enclave_measurement ", stdout);
   if (meas.data && meas.len > 0) fwrite(meas.data, 1, (size_t)meas.len, stdout);
   fputc('\n', stdout);

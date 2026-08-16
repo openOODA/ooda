@@ -268,4 +268,14 @@ OoResS oo_cap_rpc_send(long long cap, OoStr payload);
 OoResS oo_cap_rpc_recv(long long cap, OoStr sealed);
 OoStr oo_read_stdin(void);
 OoStr oo_file_stamp(OoStr path);
+long long oo_import_c(OoStr hdr);
+long long oo_ffi_gen(OoStr hdr);
+long long oo_lto_xlang_link(OoStr a, OoStr b);
+OoStr oo_str_macro_expand(OoStr src);
+OoStr oo_str_ast_macro(OoStr src);
+long long oo_hot_reload(OoStr path);
+long long oo_live_reload(OoStr path);
+long long oo_emit_ptx(void);
+long long oo_emit_spirv(void);
+long long oo_bare_metal_init(void);
 #endif
