@@ -1,30 +1,31 @@
 // # Native ooda lsp multi-message JSON-RPC
 //
-// Logline: Read framed or bare JSON-RPC requests from a file or stdin and print a framed reply for each.
+// Logline: Reply to each framed stdin request as it arrives. Do not wait for EOF.
 //
-// Setup: initialize and shutdown. Multi-message stdio loop. Not the JS bridge.
+// Setup: LanguageClient writes initialize and waits. File path is batch. Not the JS bridge.
 //
 // Beats:
-//   1. Take a request file or oo_read_stdin.
-//   2. Walk Content-Length frames (body starts at first {) or bare JSON.
-//   3. Print a Content-Length frame per request.
+//   1. Take a request file, or read one stdin chunk at a time.
+//   2. Emit a Content-Length CRLF frame per complete request.
+//   3. Stop on shutdown, exit, or stdin EOF.
 
-import "fix_text.oo";
+import "host_run.oo";
 import "lsp_reply.oo";
-
-fn lsp_has(s: String, needle: String) -> Bool {
-    return find_sub(s, needle) >= 0;
-}
 
 fn lsp_skip_ws(s: String, i0: Int) -> Int {
     let n: Int = chars_len(s);
     let mut i: Int = i0;
     while i < n {
         let c: String = char_at(s, i);
-        if c == " " || c == "\t" || c == "\n" || c == "\r" {
+        if c == " " || c == "\t" || c == "\n" {
             i = i + 1;
         } else {
-            return i;
+            let b: Int = byte_at(c, 0);
+            if b == 13 {
+                i = i + 1;
+            } else {
+                return i;
+            }
         }
     }
     return i;
@@ -67,47 +68,119 @@ fn lsp_obj_end(s: String, start: Int) -> Int {
     return 0 - 1;
 }
 
-fn lsp_serve_buf(fs: &FsCap, raw: String) {
-    let n: Int = chars_len(raw);
-    let mut i: Int = 0;
-    let mut msgs: Int = 0;
-    while msgs < 256 {
-        i = lsp_skip_ws(raw, i);
-        if i >= n {
-            return;
+fn lsp_msg_end(buf: String) -> Int {
+    let n: Int = chars_len(buf);
+    let i: Int = lsp_skip_ws(buf, 0);
+    if i >= n {
+        return 0 - 1;
+    }
+    let rest: String = str_slice(buf, i, n);
+    if str_starts_with(rest, "Content-Length:") {
+        let start: Int = str_index_of(rest, "{");
+        if start < 0 {
+            return 0 - 1;
         }
-        let rest: String = str_slice(raw, i, n);
-        let mut body: String = "";
-        if str_starts_with(rest, "Content-Length:") {
-            let start: Int = str_index_of(rest, "{");
-            if start < 0 {
-                return;
-            }
-            let end: Int = lsp_obj_end(rest, start);
-            if end < 0 {
-                return;
-            }
-            body = str_slice(rest, start, end);
-            i = i + end;
-        } else {
-            let end2: Int = lsp_obj_end(raw, i);
-            if end2 < 0 {
-                return;
-            }
-            body = str_slice(raw, i, end2);
-            i = end2;
+        let end: Int = lsp_obj_end(rest, start);
+        if end < 0 {
+            return 0 - 1;
         }
+        return i + end;
+    }
+    if char_at(buf, i) == "{" {
+        return lsp_obj_end(buf, i);
+    }
+    return 0 - 1;
+}
+
+fn lsp_msg_body(buf: String) -> String {
+    let end: Int = lsp_msg_end(buf);
+    if end < 0 {
+        return "";
+    }
+    let i: Int = lsp_skip_ws(buf, 0);
+    let rest: String = str_slice(buf, i, chars_len(buf));
+    if str_starts_with(rest, "Content-Length:") {
+        let start: Int = str_index_of(rest, "{");
+        return str_slice(rest, start, lsp_obj_end(rest, start));
+    }
+    return str_slice(buf, i, end);
+}
+
+fn lsp_emit(sys: &SysCap, payload: String) {
+    if chars_len(payload) == 0 {
+        return;
+    }
+    let pfile: String = ".ooda-cache/ooda-tmp/lsp_payload.json";
+    let py: String = "import sys\nd=open(sys.argv[1],'rb').read()\nh=('Content-Length: %d'%len(d)).encode('ascii')+bytes([13,10,13,10])\nsys.stdout.buffer.write(h+d)\n";
+    let cmd: String = "mkdir -p .ooda-cache/ooda-tmp; printf '%s' " + sq(payload) + " > " + pfile + "; printf '%s' " + sq(py) + " > .ooda-cache/ooda-tmp/lsp_emit; python3 .ooda-cache/ooda-tmp/lsp_emit " + pfile;
+    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    if r.is_err() {
+        return;
+    }
+}
+
+fn lsp_read_chunk(fs: &FsCap, sys: &SysCap) -> String {
+    let outp: String = ".ooda-cache/ooda-tmp/lsp_chunk.bin";
+    let cmd: String = "mkdir -p .ooda-cache/ooda-tmp; dd bs=65536 count=1 of=.ooda-cache/ooda-tmp/lsp_chunk.bin status=none 2>/dev/null";
+    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    if r.is_err() {
+        return "";
+    }
+    if !path_exists(fs, outp) {
+        return "";
+    }
+    let rr: Result[String, String] = read_file(fs, outp);
+    if !rr.is_ok() {
+        return "";
+    }
+    return match rr { Ok(s) => s, Err(m) => m };
+}
+
+fn lsp_is_stop(body: String) -> Bool {
+    let m: String = lsp_method(body);
+    return m == "shutdown" || m == "exit";
+}
+
+fn lsp_pump(fs: &FsCap, sys: &SysCap, buf0: String) -> String {
+    let mut buf: String = buf0;
+    let mut n: Int = 0;
+    while n < 256 {
+        let body: String = lsp_msg_body(buf);
         if chars_len(body) == 0 {
+            return buf;
+        }
+        let end: Int = lsp_msg_end(buf);
+        buf = str_slice(buf, end, chars_len(buf));
+        lsp_emit(sys, lsp_build_reply(fs, body));
+        if lsp_is_stop(body) {
+            return "STOP";
+        }
+        n = n + 1;
+    }
+    return buf;
+}
+
+fn lsp_serve_stdio(fs: &FsCap, sys: &SysCap) {
+    let mut buf: String = "";
+    let mut n: Int = 0;
+    while n < 256 {
+        buf = lsp_pump(fs, sys, buf);
+        if buf == "STOP" {
             return;
         }
-        let out: String = lsp_build_reply(fs, body);
-        if chars_len(out) > 0 {
-            println(out);
-        }
-        msgs = msgs + 1;
-        if lsp_has(body, "shutdown") || lsp_has(body, "exit") {
+        let chunk: String = lsp_read_chunk(fs, sys);
+        if chars_len(chunk) == 0 {
             return;
         }
+        buf = buf + chunk;
+        n = n + 1;
+    }
+}
+
+fn lsp_serve_buf(fs: &FsCap, sys: &SysCap, raw: String) {
+    let left: String = lsp_pump(fs, sys, raw);
+    if left == "STOP" {
+        return;
     }
 }
 
@@ -123,20 +196,19 @@ pub fn run_ooda_lsp(fs: &FsCap, sys: &SysCap, args: List[String]) {
         }
         i = i + 1;
     }
-    let mut raw: String = "";
     if path == "" {
-        raw = oo_read_stdin();
-    } else {
-        if !path_exists(fs, path) {
-            println("ERR\tlsp\tunreadable file: " + path);
-            process_exit(2);
-        }
-        let rawr: Result[String, String] = read_file(fs, path);
-        if !rawr.is_ok() {
-            println("ERR\tlsp\tcannot read " + path);
-            process_exit(1);
-        }
-        raw = match rawr { Ok(s) => s, Err(m) => m };
+        lsp_serve_stdio(fs, sys);
+        return;
     }
-    lsp_serve_buf(fs, raw);
+    if !path_exists(fs, path) {
+        println("ERR\tlsp\tunreadable file: " + path);
+        process_exit(2);
+    }
+    let rawr: Result[String, String] = read_file(fs, path);
+    if !rawr.is_ok() {
+        println("ERR\tlsp\tcannot read " + path);
+        process_exit(1);
+    }
+    let raw: String = match rawr { Ok(s) => s, Err(m) => m };
+    lsp_serve_buf(fs, sys, raw);
 }
