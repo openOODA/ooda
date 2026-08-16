@@ -10,8 +10,10 @@
 //   3. --json prints a machine object. Wrapper does not claim transmutation.
 
 import "cmd_pm_cat.oo";
+import "cmd_pm_git.oo";
 import "cmd_pm_io.oo";
 import "pm_caps.oo";
+import "pm_extract.oo";
 import "pm_pin.oo";
 import "pm_policy.oo";
 import "pm_recipe.oo";
@@ -77,27 +79,71 @@ pub fn run_ooda_pm_ingest(fs: &FsCap, sys: &SysCap, args: List[String]) {
     if pm_yanked(pm_slurp(fs, ydir + "/yank"), name, ver) {
         ing_die("yank " + name);
     }
+    let root: String = pm_root_abs(fs, sys);
+    let mut payp: String = rec + "/" + pn;
     if origin == "git" {
-        if !pm_git_ok(pm_slurp(fs, rec + "/commit"), pm_recipe_commit_want(man)) {
-            ing_die("git");
+        if path_exists(fs, rec + "/commit") {
+            if !pm_git_ok(pm_slurp(fs, rec + "/commit"), pm_recipe_commit_want(man)) {
+                ing_die("git");
+            }
+        } else {
+            let url: String = pm_kv(man, "url");
+            let _m: Bool = pm_ensure_mod(fs, root);
+            let mk: Result[Void, String] = oo_fs_mkdir(fs, root + "/.ooda_modules/git");
+            if mk.is_err() {
+                if !path_exists(fs, root + "/.ooda_modules/git") {
+                    ing_die("git");
+                }
+            }
+            let dest: String = root + "/.ooda_modules/git/" + name;
+            let cr: String = pm_git_clone_head(fs, sys, url, pm_recipe_commit_want(man), dest);
+            if cr == "ok" {
+                payp = dest + "/" + pn;
+            } else {
+                if cr == "err allow" {
+                    ing_die("allow");
+                }
+                ing_die("git");
+            }
         }
     }
-    let body: String = pm_slurp(fs, rec + "/" + pn);
-    if body == "" {
+    let raw: String = pm_slurp(fs, payp);
+    if raw == "" {
         ing_die("missing payload");
     }
-    let live: String = pm_cas_id(body);
+    let walk: String = pm_ar_walk(raw);
+    let mut payb: String = raw;
+    if origin == "deb" {
+        if str_slice(walk, 0, 8) == "err path" {
+            ing_die("path");
+        }
+        if str_slice(walk, 0, 3) == "ok " {
+            payb = str_slice(walk, 3, chars_len(walk));
+        } else {
+            println("ooda ingest: blob-only");
+        }
+    }
+    if origin == "rpm" {
+        if str_slice(walk, 0, 8) == "err path" {
+            ing_die("path");
+        }
+        if str_slice(walk, 0, 3) == "ok " {
+            payb = str_slice(walk, 3, chars_len(walk));
+        } else {
+            println("ooda ingest: blob-only");
+        }
+    }
+    let live: String = pm_cas_id(payb);
     if !pm_recipe_sha_ok(pm_kv(man, "sha256"), live) {
         ing_die("sha256 mismatch");
     }
-    let root: String = pm_root_abs(fs, sys);
     let live_o: String = pm_oodac_sha(fs, sys);
     let live_s: String = pm_std_sha(fs, sys);
     let prev: String = pm_first_nonempty(pm_slurp(fs, root + "/.ooda_modules/lock"), pm_slurp(fs, ".ooda_modules/lock"));
     if !pm_pin_ok(prev, live_o, live_s) {
         ing_die("pin");
     }
-    if !pm_put_cas(fs, root, live, pn, body) {
+    if !pm_put_cas(fs, root, live, pn, payb) {
         ing_die("install failed");
     }
     let wrap: String = pm_recipe_wrap(name, live, pn);
