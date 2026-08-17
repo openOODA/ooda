@@ -5,9 +5,12 @@
 // Setup: Source string is expanded and verified before C code generation.
 //
 // Beats:
-//   1. Print the preamble, MAX_CYCLES, SECRET env, and returning-fn secret marks.
+//   1. Print the preamble, cycle fuel, secret env, and returning-fn secret marks.
 //   2. Pre-pass String returns into fn_env; emit type aliases.
-//   3. Walk pub/fn items (optional shuffle), skip verify/type/import, else ERR and exit.
+//   3. Walk pub/fn items once, or protos then bodies on the same toks (once mode).
+
+import "c_emit_walk.oo";
+import "c_emit_sum.oo";
 
 pub fn c_emit_stream(src: String) {
     c_emit_stream_mode(src, "full");
@@ -29,7 +32,7 @@ pub fn c_emit_c_headers_scan(src: String, pre: String, seen: String) -> String {
         let mut ok: Bool = true;
         let mut j: Int = 0;
         while j < pn {
-            if char_at(src, i + j) != char_at(pre, j) {
+            if byte_at(src, i + j) != byte_at(pre, j) {
                 ok = false;
                 j = pn;
             } else {
@@ -39,13 +42,13 @@ pub fn c_emit_c_headers_scan(src: String, pre: String, seen: String) -> String {
         if ok {
             let start: Int = i + pn;
             let mut k: Int = start;
-            while k < sn && char_at(src, k) != "\"" {
+            while k < sn && byte_at(src, k) != 34 {
                 k = k + 1;
             }
             if k < sn {
                 let name: String = str_slice(src, start, k);
                 let nn: Int = chars_len(name);
-                if nn >= 2 && char_at(name, nn - 2) == "." && char_at(name, nn - 1) == "h" {
+                if nn >= 2 && byte_at(name, nn - 2) == 46 && byte_at(name, nn - 1) == 104 {
                     let key: String = "\t" + name + "\t";
                     if !s.contains(key) {
                         s = s + name + "\t";
@@ -62,24 +65,37 @@ pub fn c_emit_c_headers_scan(src: String, pre: String, seen: String) -> String {
 }
 
 pub fn c_emit_stream_mode(src: String, mode: String) {
-    if mode != "protos" && mode != "protos_noarc" && mode != "bodies" && mode != "bodies_noarc" {
+    if mode == "preamble" || mode == "preamble_noarc" {
         c_emit_preamble();
-        // full / all / preamble: product path needs #includes from .h imports
-        if mode == "full" || mode == "full_noarc" || mode == "all" || mode == "all_noarc"
-            || mode == "preamble" || mode == "preamble_noarc" {
+        if src.contains(".h\"") {
             c_emit_c_headers(src);
         }
+        return;
     }
-    if mode == "preamble" || mode == "preamble_noarc" { return; }
-    
-    let toks: List[String] = tokenize_lines(src);
+    c_emit_stream_toks(src, tokenize_lines(src), mode);
+}
+
+// Tokenize is O(n²) char_at on concat src. emit-c feeds per-file toks when
+// the TU has no file-level secret marker so line numbers need not match.
+pub fn c_emit_stream_toks(src: String, toks: List[String], mode: String) {
+    if mode != "protos" && mode != "protos_noarc" && mode != "bodies" && mode != "bodies_noarc" {
+        c_emit_preamble();
+        if src.contains(".h\"") {
+            if mode == "full" || mode == "full_noarc" || mode == "all" || mode == "all_noarc" {
+                c_emit_c_headers(src);
+            }
+        }
+    }
     let n: Int = list_len(toks);
-    let mut pos: Int = 0;
     // Program-level: __fr__name=T for String-returning fns (println bare calls).
     let mut fn_env: String = "";
-    // Path A: MAX_CYCLES — env marker is 1-char ("Y") so ARC env parser stays sound;
+    // Path A: cycle-fuel — env marker is 1-char ("Y") so ARC env parser stays sound;
     // budget N is OO_MC_LIMIT macro (multi-digit must not live as c_env value).
-    let mc: String = c_parse_max_cycles(src);
+    // char_at scans are O(n²); skip when the marker cannot occur.
+    let mut mc: String = "";
+    if src.contains("MAX_" + "CYCLES") {
+        mc = c_parse_max_cycles(src);
+    }
     if mc != "" {
         fn_env = c_env_put(fn_env, "__mc__", "Y");
         if mode != "protos" && mode != "protos_noarc" {
@@ -88,16 +104,17 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
         }
     }
     // Path A: file-level SECRET name tags → __sec__name=1 for println bare-IDENT refuse.
-    let sec_env: String = c_parse_secret_env(src);
-    if sec_env != "" {
-        fn_env = fn_env + sec_env;
+    // c_secret_mark walks every body line via c_line_text_at (O(n²) char_at).
+    if src.contains("SEC" + "RET:") {
+        let sec_env: String = c_parse_secret_env(src);
+        if sec_env != "" {
+            fn_env = fn_env + sec_env;
+        }
+        fn_env = c_secret_mark_returning_fns(src, toks, fn_env);
+        check_secret_println_sinks(src, toks);
     }
-    // DE2.1+PV2.1: shared __fr_secret__ mark (emit + check). Requires sec_env merge
-    // first so file-level SECRET names are visible when marking fns.
-    fn_env = c_secret_mark_returning_fns(src, toks, fn_env);
-    check_secret_println_sinks(src, toks);
     // M168 path A: emit C typedefs for `type Name = struct {..}` / simple aliases
-    // (before fns so Point/Box params and lits compile). Residual: List[Struct] not product.
+    // (before fns so Point/Box params and lits compile). List[Name] emits OoL_Name.
     // Product build uses emit-preamble + emit-protos + emit-bodies: aliases must land in
     // protos (not only full/all). Skip bodies so multi-step build does not double-typedef.
     if mode != "bodies" && mode != "bodies_noarc" && mode != "preamble" && mode != "preamble_noarc" {
@@ -126,10 +143,7 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
             if p < n && field_at(list_get(toks, p), 0) == "ARROW" {
                 p = p + 1;
                 if p < n {
-                    let ret_ty: String = field_at(list_get(toks, p), 3);
-                    if ret_ty == "String" {
-                        fn_env = c_env_put(fn_env, "__fr__" + fn_name, "T");
-                    }
+                    fn_env = c_frty_note(fn_env, fn_name, toks, p, n);
                 }
                 // Advance to body LBRACE (multi-token ret types: List[String], etc.)
                 while p < n {
@@ -163,16 +177,18 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
             pre_pos = pre_pos + 1;
         }
     }
-
-    // Path-A metamorphic layout: opt-in via `// METAMORPHIC: path-a` (see c_emit_meta.oo).
+    // Path-A metamorphic layout: opt-in via path-a marker (see c_emit_meta.oo).
     // Default OFF so product builds stay layout-stable / reproducible. Residual:
     // full runtime assembly mutation (metamorphic_emit) remains free-name refuse.
     // CRITICAL: multi-pass protos+bodies must not double-emit decoys — gate via
     // c_meta_layout_emit_decoys (bodies/all/full only).
     // path-a-shuffle: reverse top-level fn emit order (two-pass; bodies only).
-    let meta_layout: Bool = c_parse_metamorphic_path_a(src);
-    let meta_shuffle: Bool = c_parse_metamorphic_shuffle(src);
-    let mut meta_idx: Int = 0;
+    let mut meta_layout: Bool = false;
+    let mut meta_shuffle: Bool = false;
+    if src.contains("METAMOR" + "PHIC:") {
+        meta_layout = c_parse_metamorphic_path_a(src);
+        meta_shuffle = c_parse_metamorphic_shuffle(src);
+    }
     let mut meta_emit: Bool = false;
     if meta_layout {
         if c_meta_layout_emit_decoys(mode) {
@@ -183,51 +199,35 @@ pub fn c_emit_stream_mode(src: String, mode: String) {
         c_emit_meta_banner();
     }
 
-    // Creative path-A-shuffle: collect top-level fn starts, reverse, emit by seek.
-    // Types/imports already handled in pre-pass; only reorder function emission.
-    if meta_emit {
-        if meta_shuffle {
-            let dr: List[String] = c_emit_meta_drive_shuffle(toks, n, fn_env, mode);
-            fn_env = list_get(dr, 0);
-            pos = n;
+    fn_env = c_list_field_env(toks, fn_env);
+    fn_env = c_sum_env_from_toks(toks, fn_env);
+    if mode == "once" || mode == "once_noarc" {
+        let mut pm: String = "protos";
+        let mut bm: String = "bodies";
+        if mode == "once_noarc" {
+            pm = "protos_noarc";
+            bm = "bodies_noarc";
         }
-    }
-
-    while pos < n {
-        let k: String = field_at(list_get(toks, pos), 0);
-        if k == "EOF" {
-            pos = n;
-        } else if k == "KW_PUB" || k == "KW_FN" {
-            let fname: String = c_drive_fn_name_at(toks, pos, n);
-            let fr: List[String] = c_emit_fn_mode(toks, pos, n, fn_env, mode);
-            pos = parse_int(list_get(fr, 0));
-            fn_env = list_get(fr, 1);
-            // Decoys after each top-level fn (body-mode only; layout diversity).
-            // c_emit_meta_decoy / c_emit_meta_decoy_named via c_drive_after_fn.
-            if meta_emit {
-                c_drive_after_fn(meta_idx, fname);
-                meta_idx = meta_idx + 1;
-            }
-        } else if k == "KW_VERIFY" {
-            pos = c_emit_verify_ctor(toks, pos, n, fn_env);
-        } else if k == "KW_TYPE" || k == "KW_IMPORT" {
-            pos = skip_until_semi(toks, pos);
-        } else if k == "IDENT" {
-            let nm: String = field_at(list_get(toks, pos), 3);
-            if nm == "trait" {
-                pos = skip_trait_or_impl(toks, pos);
-            } else if nm == "impl" {
-                let ir: List[String] = c_emit_impl_methods(toks, pos, n, fn_env, mode);
-                pos = parse_int(list_get(ir, 0));
-                fn_env = list_get(ir, 1);
+        fn_env = c_emit_walk_items(toks, n, fn_env, pm, false);
+        if meta_layout {
+            if meta_shuffle {
+                let dr: List[String] = c_emit_meta_drive_shuffle(toks, n, fn_env, bm);
+                fn_env = list_get(dr, 0);
             } else {
-                println("ERR\tc_emit\tunexpected " + k);
-                process_exit(1);
+                fn_env = c_emit_walk_items(toks, n, fn_env, bm, true);
             }
         } else {
-            println("ERR\tc_emit\tunexpected " + k);
-            process_exit(1);
+            fn_env = c_emit_walk_items(toks, n, fn_env, bm, false);
         }
+    } else if meta_emit {
+        if meta_shuffle {
+            let dr2: List[String] = c_emit_meta_drive_shuffle(toks, n, fn_env, mode);
+            fn_env = list_get(dr2, 0);
+        } else {
+            fn_env = c_emit_walk_items(toks, n, fn_env, mode, true);
+        }
+    } else {
+        fn_env = c_emit_walk_items(toks, n, fn_env, mode, false);
     }
 }
 

@@ -6,18 +6,24 @@
 //
 // Beats:
 //   1. Enter the block.
-//   2. Lower statements inside.
+//   2. Lower statements inside; exit if a statement does not advance.
 //   3. Return [new_pos, env].
 
 pub fn c_emit_block(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
     let mut p: Int = pos;
     let mut e: String = env;
+    let mut iter: Int = 0;
     if field_at(list_get(toks, p), 0) == "LBRACE" {
         p = p + 1;
     }
     e = c_env_push_scope(e);
     oo_emit_tmp_enter();
     while p < n {
+        iter = iter + 1;
+        if iter > n + 100 {
+            println("ERR\tc_emit\thang guard exceeded at pos " + p.to_string());
+            process_exit(1);
+        }
         let k: String = field_at(list_get(toks, p), 0);
         if k == "RBRACE" {
             e = c_emit_scope_exit(e);
@@ -25,9 +31,14 @@ pub fn c_emit_block(toks: List[String], pos: Int, n: Int, env: String) -> List[S
             p = p + 1;
             break;
         }
+        let prev: Int = p;
         let st: List[String] = c_emit_stmt(toks, p, n, e);
         p = parse_int(list_get(st, 0));
         e = list_get(st, 1);
+        if p == prev {
+            println("ERR\tc_emit\tno progress at " + k + " pos " + p.to_string());
+            process_exit(1);
+        }
     }
     let mut out: List[String] = list_new();
     out = list_push(out, p.to_string());
@@ -35,46 +46,40 @@ pub fn c_emit_block(toks: List[String], pos: Int, n: Int, env: String) -> List[S
     return out;
 }
 
-// M-CTZ-1: return the text of the 1-indexed line in src (without trailing \n).
+// M-CTZ-1: text of the 1-indexed line in src (no trailing \n).
+// byte_at is O(1); char_at walks UTF-8 from index 0 (O(i) per call).
 pub fn c_line_text_at(src: String, line_num: Int) -> String {
-    let slen: Int = chars_len(src);
-    let mut cur_line: Int = 1;
-    let mut i: Int = 0;
     if line_num <= 0 {
         return "";
     }
-    if line_num == 1 {
-        let mut j: Int = 0;
-        while j < slen && char_at(src, j) != "\n" {
-            j = j + 1;
+    let mut cur: Int = 1;
+    let mut i: Int = 0;
+    while cur < line_num {
+        let b: Int = byte_at(src, i);
+        if b < 0 {
+            return "";
         }
-        return str_slice(src, 0, j);
-    }
-    while i < slen {
-        if char_at(src, i) == "\n" {
-            cur_line = cur_line + 1;
-            if cur_line == line_num {
-                let start: Int = i + 1;
-                let mut j: Int = start;
-                while j < slen && char_at(src, j) != "\n" {
-                    j = j + 1;
-                }
-                return str_slice(src, start, j);
-            }
+        if b == 10 {
+            cur = cur + 1;
         }
         i = i + 1;
     }
-    return "";
+    let start: Int = i;
+    let mut j: Int = start;
+    while byte_at(src, j) != 10 && byte_at(src, j) >= 0 {
+        j = j + 1;
+    }
+    return str_slice(src, start, j);
 }
 
-// True iff the (trimmed) line carries a `// SECRET:` directive.
+// True iff the (trimmed) line carries a secret-name directive.
 // Used by the __fr_secret__<fn> pre-pass.
 pub fn c_is_secret_directive_line(s: String) -> Bool {
     let n: Int = chars_len(s);
     let mut i: Int = 0;
     while i < n {
-        let c: String = char_at(s, i);
-        if c == " " || c == "\t" {
+        let b: Int = byte_at(s, i);
+        if b == 32 || b == 9 {
             i = i + 1;
         } else {
             break;
@@ -83,36 +88,50 @@ pub fn c_is_secret_directive_line(s: String) -> Bool {
     if i + 1 >= n {
         return false;
     }
-    if char_at(s, i) != "/" || char_at(s, i + 1) != "/" {
+    if byte_at(s, i) != 47 || byte_at(s, i + 1) != 47 {
         return false;
     }
     i = i + 2;
     while i < n {
-        let c2: String = char_at(s, i);
-        if c2 == " " || c2 == "\t" {
+        let b2: Int = byte_at(s, i);
+        if b2 == 32 || b2 == 9 {
             i = i + 1;
         } else {
             break;
         }
     }
-    let rest: String = str_slice(s, i, n);
-    let rn: Int = chars_len(rest);
-    if rn < 8 {
+    if i + 8 > n {
         return false;
     }
-    if char_at(rest, 0) != "S" || char_at(rest, 1) != "E" || char_at(rest, 2) != "C"
-        || char_at(rest, 3) != "R" || char_at(rest, 4) != "E" || char_at(rest, 5) != "T"
-        || char_at(rest, 6) != ":" {
+    if byte_at(s, i) != 83 || byte_at(s, i + 1) != 69 || byte_at(s, i + 2) != 67
+        || byte_at(s, i + 3) != 82 || byte_at(s, i + 4) != 69 || byte_at(s, i + 5) != 84
+        || byte_at(s, i + 6) != 58 {
         return false;
     }
-    if rn == 7 {
-        return false;
-    }
-    let fc: String = char_at(rest, 7);
-    if fc != " " && fc != "\t" {
+    let fc: Int = byte_at(s, i + 7);
+    if fc != 32 && fc != 9 {
         return false;
     }
     return true;
+}
+
+// Append file toks, drop the per-file EOF row.
+pub fn c_toks_append_file(dst: List[String], src: List[String]) -> List[String] {
+    let n: Int = list_len(src);
+    let mut out: List[String] = dst;
+    let mut i: Int = 0;
+    while i < n {
+        let row: String = list_get(src, i);
+        if field_at(row, 0) != "EOF" {
+            out = list_push(out, row);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn c_toks_append_eof(dst: List[String]) -> List[String] {
+    return list_push(dst, tok_line("EOF", 1, 1, ""));
 }
 
 pub fn c_emit_builtin(name: String, args: String) -> String {

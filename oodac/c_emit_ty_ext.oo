@@ -6,7 +6,7 @@
 //
 // Beats:
 //   1. c_lower_result_ty uses c_call_result_ty or falls back to long long.
-//   2. c_rhs_call_name walks to the first '(' for a name; c_list_get_result_ty reads the first arg's env kind.
+//   2. c_rhs_call_name walks to '('; c_list_get_result_ty types oo_flist_get, oo_l_Name_get, LF, and struct lists.
 //   3. c_infer_list_kind uses __ann__, payload glyphs, or the first arg's env kind, default I.
 
 pub fn c_lower_result_ty(name: String) -> String {
@@ -51,8 +51,24 @@ pub fn c_rhs_call_name(rhs: String) -> String {
     return "";
 }
 
-// list_get(NAME, i) result type from env kind of NAME (S→OoStr, I→long long).
+// list_get / oo_flist_get / oo_l_Name_get: LF→double, OoL_Name/Name→Name, S→OoStr, I→i64.
 pub fn c_list_get_result_ty(env: String, rhs: String) -> String {
+    let cnm: String = c_rhs_call_name(rhs);
+    if cnm == "oo_flist_get" {
+        return "double";
+    }
+    let cn: Int = chars_len(cnm);
+    if cn > 8 {
+        if char_at(cnm, 0) == "o" {
+            if char_at(cnm, 3) == "l" {
+                if char_at(cnm, 4) == "_" {
+                    if char_at(cnm, cn - 3) == "g" {
+                        return str_slice(cnm, 5, cn - 4);
+                    }
+                }
+            }
+        }
+    }
     let mut an = "";
     let mut qi = 0;
     let rn = chars_len(rhs);
@@ -79,6 +95,32 @@ pub fn c_list_get_result_ty(env: String, rhs: String) -> String {
     if ak == "I" {
         return "long long";
     }
+    if ak == "LF" {
+        return "double";
+    }
+    if ak == "F" {
+        return "double";
+    }
+    if chars_len(ak) > 4 {
+        if char_at(ak, 0) == "O" {
+            if char_at(ak, 1) == "o" {
+                if char_at(ak, 2) == "L" {
+                    if char_at(ak, 3) == "_" {
+                        return str_slice(ak, 4, chars_len(ak));
+                    }
+                }
+            }
+        }
+    }
+    if chars_len(ak) > 1 {
+        if ak != "T" {
+            if ak != "R" {
+                if ak != "V" {
+                    return ak;
+                }
+            }
+        }
+    }
     if an == "toks" || an == "brw" || an == "mr" || an == "args" {
         return "OoStr";
     }
@@ -86,12 +128,28 @@ pub fn c_list_get_result_ty(env: String, rhs: String) -> String {
 }
 
 pub fn c_infer_list_kind(env: String, op: String, a0: String, a1: String) -> String {
+    let ann0: String = c_env_get(env, "__ann__");
     if op == "list_new" {
-        let ann: String = c_env_get(env, "__ann__");
-        if ann == "S" || ann == "I" {
-            return ann;
+        if ann0 != "" {
+            return ann0;
         }
         return "I";
+    }
+    if c_is_ll_kind(ann0) {
+        return ann0;
+    }
+    let ka0: String = c_env_get(env, a0);
+    if ka0 == "S" {
+        return "S";
+    }
+    if ka0 == "I" {
+        return "I";
+    }
+    if ka0 == "LF" {
+        return "LF";
+    }
+    if c_is_ll_kind(ka0) {
+        return ka0;
     }
     if op == "list_push" {
         if c_env_get(env, a1) == "T" {
@@ -103,20 +161,27 @@ pub fn c_infer_list_kind(env: String, op: String, a0: String, a1: String) -> Str
                 return "S";
             }
         }
-        if chars_len(a1) >= 2 {
-            let last = char_at(a1, chars_len(a1) - 1);
-            let prev = char_at(a1, chars_len(a1) - 2);
-            if last == "L" && prev == "L" {
-                return "I";
-            }
-        }
     }
     if chars_len(a0) > 0 {
         let k0: String = c_env_get(env, a0);
-        if k0 == "S" || k0 == "I" {
+        if k0 == "S" || k0 == "I" || k0 == "F" || k0 == "LF" {
             return k0;
         }
+        if chars_len(k0) > 1 {
+            if k0 != "T" {
+                if k0 != "R" {
+                    if k0 != "V" {
+                        return k0;
+                    }
+                }
+            }
+        }
         if chars_len(a0) >= 9 {
+            if char_at(a0, 0) == "o" && char_at(a0, 3) == "l" && char_at(a0, 4) == "l" {
+                if char_at(a0, 6) == "S" { return "S"; }
+                if char_at(a0, 6) == "F" { return "LF"; }
+                return "I";
+            }
             if char_at(a0, 0) == "o" && char_at(a0, 3) == "s" && char_at(a0, 4) == "l" {
                 return "S";
             }
@@ -125,5 +190,64 @@ pub fn c_infer_list_kind(env: String, op: String, a0: String, a1: String) -> Str
             }
         }
     }
+    let fld: String = c_expr_last_field(a0);
+    if fld != "" {
+        let fk: String = c_env_get(env, "__fldelem__" + fld);
+        if fk != "" {
+            return fk;
+        }
+    }
     return "I";
+}
+
+// Last `.name` in a C expr such as `(tree).nodes`. Empty if none.
+pub fn c_expr_last_field(e: String) -> String {
+    let n: Int = chars_len(e);
+    if n < 3 {
+        return "";
+    }
+    let mut i: Int = n - 1;
+    while i >= 0 {
+        if char_at(e, i) == " " {
+            i = i - 1;
+        } else {
+            break;
+        }
+    }
+    let end: Int = i + 1;
+    while i >= 0 {
+        let c: String = char_at(e, i);
+        let b: Int = byte_at(c, 0);
+        let mut ok: Bool = false;
+        if c == "_" {
+            ok = true;
+        }
+        if b >= 65 {
+            if b <= 90 {
+                ok = true;
+            }
+        }
+        if b >= 97 {
+            if b <= 122 {
+                ok = true;
+            }
+        }
+        if b >= 48 {
+            if b <= 57 {
+                ok = true;
+            }
+        }
+        if !ok {
+            break;
+        }
+        i = i - 1;
+    }
+    if i >= 0 {
+        if char_at(e, i) == "." {
+            if end > i + 1 {
+                return str_slice(e, i + 1, end);
+            }
+        }
+    }
+    return "";
 }

@@ -2,11 +2,11 @@
 //
 // Logline: Lowers name = match scrut { Ok/Some => … Err/None => … } to a C if/else that binds the payload and writes name.
 //
-// Setup: c_emit_expr_c, c_env_get, c_env_put, c_env_put_last, c_emit_reassign_arc, c_match_skip_comma, and c_pack_pos_env exist; decl 1 declares name and decl 0 reassigns it; env V means OoResV, else OoResS.
+// Setup: c_emit_expr_c, c_env_get, c_env_put, c_env_put_last, c_emit_reassign_arc, c_match_skip_comma, c_match_rkind, and c_pack_pos_env exist; decl 1 declares name and decl 0 reassigns it; env V=OoResV, RI=OoResI, else OoResS.
 //
 // Beats:
-//   1. Emit the scrutinee, pick V vs R, require { then Ok or Some, and take the success bind.
-//   2. When decl is 1, declare name; emit if (__ml.ok) or if (__ml != 0); bind the payload; emit the Ok/Some expr; assign with c_emit_reassign_arc or name =.
+//   1. Emit the scrutinee, pick V, R, or RI, require { then Ok or Some, and take the success bind.
+//   2. When decl is 1, declare name; emit if (__ml.ok) or != 0; bind typed payload; skip oo_str_to_int on RI; assign.
 //   3. Else bind Err/None, emit that expr, assign the same way, close the braces, put name as I or T, and return pos plus env.
 
 pub fn c_emit_match_assign(name: String, toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
@@ -30,10 +30,7 @@ pub fn c_emit_match_let_core(
     let pr_m: List[String] = c_emit_expr_c(toks, p, n, e);
     p = parse_int(list_get(pr_m, 0));
     let scrut = list_get(pr_m, 1);
-    let mut rkind = "R";
-    if c_env_get(e, scrut) == "V" {
-        rkind = "V";
-    }
+    let rkind: String = c_match_rkind(e, scrut);
     if p >= n || field_at(list_get(toks, p), 0) != "LBRACE" {
         println("ERR\tc_emit\tmatch-let expected {");
         process_exit(1);
@@ -41,6 +38,9 @@ pub fn c_emit_match_let_core(
     p = p + 1;
     let arm1: String = field_at(list_get(toks, p), 3);
     if p >= n || (arm1 != "Ok" && arm1 != "Some") {
+        if p < n && c_env_get(e, "__ctor__" + arm1) != "" {
+            return c_emit_sum_match_let(name, toks, pos, n, env, decl);
+        }
         println("ERR\tc_emit\tmatch-let expected Ok or Some");
         process_exit(1);
     }
@@ -60,37 +60,105 @@ pub fn c_emit_match_let_core(
         p = p + 1;
     }
     let is_some = (arm1 == "Some");
+    // RI Some is Ok on OoResI (Some(0) works). Bare long long Some stays != 0.
+    let mut use_res = true;
+    if is_some {
+        if rkind != "RI" {
+            use_res = false;
+        }
+    }
     if decl == 1 {
-        if is_some || c_env_get(e, "__ret_int__") == "1" {
+        if rkind == "RI" || rkind == "RII" {
+            println("  long long " + name + ";");
+        } else if rkind == "RLI" {
+            println("  OoIList " + name + ";");
+        } else if chars_len(rkind) > 6 {
+            if str_slice(rkind, 0, 6) == "OoRes_" {
+                println("  " + str_slice(rkind, 6, chars_len(rkind)) + " " + name + ";");
+            } else {
+                println("  OoStr " + name + ";");
+            }
+        } else if is_some || c_env_get(e, "__ret_int__") == "1" {
             println("  long long " + name + ";");
         } else {
             println("  OoStr " + name + ";");
         }
     }
     println("  {");
-    if is_some {
+    if !use_res {
         println("  long long __ml = " + scrut + ";");
         println("  if (__ml != 0) {");
         println("    long long " + ok_bind + " = __ml;");
     } else {
         if rkind == "V" {
             println("  OoResV __ml = " + scrut + ";");
+        } else if rkind == "RI" {
+            println("  OoResI __ml = " + scrut + ";");
+        } else if rkind == "RII" {
+            println("  OoResII __ml = " + scrut + ";");
+        } else if rkind == "RLI" {
+            println("  OoResLI __ml = " + scrut + ";");
+        } else if rkind == "RB" {
+            println("  OoResB __ml = " + scrut + ";");
+        } else if rkind == "RF" {
+            println("  OoResF __ml = " + scrut + ";");
+        } else if rkind == "RLS" {
+            println("  OoResLS __ml = " + scrut + ";");
+        } else if rkind == "RLF" {
+            println("  OoResLF __ml = " + scrut + ";");
+        } else if chars_len(rkind) > 5 {
+            if str_slice(rkind, 0, 5) == "OoRes" {
+                println("  " + rkind + " __ml = " + scrut + ";");
+            } else {
+                println("  OoResS __ml = " + scrut + ";");
+            }
         } else {
             println("  OoResS __ml = " + scrut + ";");
         }
         println("  if (__ml.ok) {");
     }
     let mut eok = e;
-    if !is_some && rkind != "V" {
-        println("    OoStr " + ok_bind + " = __ml.val;");
-        eok = c_env_put(e, ok_bind, "T");
+    if use_res {
+        if rkind == "RI" || rkind == "RII" {
+            println("    long long " + ok_bind + " = __ml.val;");
+        } else if rkind == "RLI" {
+            println("    OoIList " + ok_bind + " = __ml.val;");
+        } else if rkind == "RB" {
+            println("    int " + ok_bind + " = __ml.val;");
+        } else if rkind == "RF" {
+            println("    double " + ok_bind + " = __ml.val;");
+        } else if rkind == "RLS" {
+            println("    OoSList " + ok_bind + " = __ml.val;");
+        } else if rkind == "RLF" {
+            println("    OoFList " + ok_bind + " = __ml.val;");
+        } else if chars_len(rkind) > 6 {
+            if str_slice(rkind, 0, 6) == "OoRes_" {
+                println("    " + str_slice(rkind, 6, chars_len(rkind)) + " " + ok_bind + " = __ml.val;");
+            } else {
+                if rkind != "V" {
+                    println("    OoStr " + ok_bind + " = __ml.val;");
+                    eok = c_env_put(e, ok_bind, "T");
+                }
+            }
+        } else {
+            if rkind != "V" {
+                println("    OoStr " + ok_bind + " = __ml.val;");
+                eok = c_env_put(e, ok_bind, "T");
+            }
+        }
     }
     oo_emit_tmp_enter();
     let pr_ok: List[String] = c_emit_expr_c(toks, p, n, eok);
     p = parse_int(list_get(pr_ok, 0));
     let mut okx = list_get(pr_ok, 1);
     oo_emit_tmp_own(okx);
-    if c_env_get(e, "__ret_int__") == "1" && !is_some { okx = "oo_str_to_int(" + okx + ")"; }
+    if c_env_get(e, "__ret_int__") == "1" {
+        if !is_some {
+            if rkind != "RI" {
+                okx = "oo_str_to_int(" + okx + ")";
+            }
+        }
+    }
     if decl == 0 { c_emit_reassign_arc(name, okx, eok); } else { println("    " + name + " = " + okx + ";"); }
     oo_emit_tmp_leave();
     if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
@@ -118,14 +186,19 @@ pub fn c_emit_match_let_core(
     if p < n && field_at(list_get(toks, p), 0) == "FATARROW" {
         p = p + 1;
     }
-    if !is_some {
-        if rkind == "V" {
-            println("    OoStr " + err_bind + " = __ml.err;");
-        } else {
+    if use_res {
+        if rkind == "R" {
             println("    OoStr " + err_bind + " = __ml.val;");
+        } else if rkind == "RII" {
+            println("    long long " + err_bind + " = __ml.err;");
+        } else {
+            println("    OoStr " + err_bind + " = __ml.err;");
         }
     }
-    let eerr: String = c_env_put(e, err_bind, "T");
+    let mut eerr: String = c_env_put(e, err_bind, "T");
+    if rkind == "RII" {
+        eerr = e;
+    }
     oo_emit_tmp_enter();
     let pr_er: List[String] = c_emit_expr_c(toks, p, n, eerr);
     p = parse_int(list_get(pr_er, 0));
@@ -140,6 +213,12 @@ pub fn c_emit_match_let_core(
     if p < n && field_at(list_get(toks, p), 0) == "RBRACE" { p = p + 1; }
     let mut nk = "T";
     if is_some { nk = "I"; }
+    if rkind == "RI" || rkind == "RII" {
+        nk = "";
+    }
+    if rkind == "RLI" {
+        nk = "I";
+    }
     if decl == 1 { e = c_env_put(e, name, nk); } else { e = c_env_put_last(e, name, nk); }
     if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
     return c_pack_pos_env(p, e);

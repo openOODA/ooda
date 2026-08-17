@@ -7,9 +7,9 @@
 // Beats:
 //   1. c_struct_field_c_ty maps String, Int, Bool, Float, List, Result, and user names to C types.
 //   2. c_emit_one_type_alias prints typedef struct { fields } Name or typedef Cty Name.
-//   3. c_emit_type_aliases walks top-level KW_TYPE; c_struct_lit_ty_name reads ((Name){...}).
+//   3. c_emit_type_aliases walks top-level KW_TYPE with a hang guard; c_struct_lit_ty_name reads ((Name){...}).
 //
-// residual: no nested List[Struct]; no &mut T product; not full generics
+// residual: no List[List[T]]; no &mut T product; not full generics
 
 // Map field type tokens at pos → C field type (Int/String/List/user).
 pub fn c_struct_field_c_ty(toks: List[String], pos: Int, n: Int) -> String {
@@ -37,11 +37,16 @@ pub fn c_struct_field_c_ty(toks: List[String], pos: Int, n: Int) -> String {
         if lk == "I" {
             return "OoIList";
         }
-        // List[String] product; List[Struct] residual → still OoSList shape
-        return "OoSList";
+        if lk == "S" {
+            return "OoSList";
+        }
+        if lk == "F" {
+            return "OoFList";
+        }
+        return "OoL_" + lk;
     }
     if tn == "Result" {
-        return "OoResS";
+        return c_result_c_ty(toks, pos, n);
     }
     // user type name / alias (must have been emitted earlier or is Int alias)
     return tn;
@@ -110,7 +115,13 @@ pub fn c_emit_one_type_alias(toks: List[String], pos: Int, n: Int) -> Int {
         }
         println("typedef struct { " + body + " } " + name + ";");
         println("static void oo_retain_" + name + "(" + name + " v) {" + retain + " }");
+        println("typedef struct { int ok; " + name + " val; OoStr err; } OoRes_" + name + ";");
+        c_emit_olist_helpers(name);
         return p;
+    }
+    let after_sum: Int = c_try_emit_sum_alias(toks, p, n, name);
+    if after_sum != p {
+        return after_sum;
     }
     // type Name = Int | String | Float | List[...] | Other
     let simple: String = c_struct_field_c_ty(toks, p, n);
@@ -127,10 +138,27 @@ pub fn c_emit_one_type_alias(toks: List[String], pos: Int, n: Int) -> Int {
 pub fn c_emit_type_aliases(toks: List[String]) {
     let n: Int = list_len(toks);
     let mut i: Int = 0;
+    let mut iter: Int = 0;
     while i < n {
+        iter = iter + 1;
+        if iter > n + 100 {
+            println("ERR\tc_emit\thang guard exceeded at pos " + i.to_string());
+            process_exit(1);
+        }
+        let prev: Int = i;
         let k: String = field_at(list_get(toks, i), 0);
+        let mut pub_ty: Bool = false;
+        if k == "KW_PUB" {
+            if i + 1 < n {
+                if field_at(list_get(toks, i + 1), 0) == "KW_TYPE" {
+                    pub_ty = true;
+                }
+            }
+        }
         if k == "KW_TYPE" {
             i = c_emit_one_type_alias(toks, i, n);
+        } else if pub_ty {
+            i = c_emit_one_type_alias(toks, i + 1, n);
         } else if k == "KW_FN" || k == "KW_PUB" {
             // Prototype `fn greet();` must not swallow the next type's `{`.
             i = i + 1;
@@ -151,6 +179,10 @@ pub fn c_emit_type_aliases(toks: List[String]) {
             }
         } else {
             i = i + 1;
+        }
+        if i == prev {
+            println("ERR\tc_emit\tno progress at KW_TYPE");
+            process_exit(1);
         }
     }
 }

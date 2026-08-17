@@ -7,7 +7,7 @@
 // Beats:
 //   1. Skip let or mut, read the name and optional annotation, fail closed on an empty RHS, and hand match or if to those emitters.
 //   2. Emit the RHS, then choose lty from annotation, untyped inference, a struct-lit name, or Ok, Err, and unwrap heuristics.
-//   3. Put T, R, V, F, S, or I in env, record secret alias and prop, print the C declaration, and retain aliases.
+//   3. Put T, R, V, F, S, I, or LF in env; print a C decl once (__decl__/formal) and assign on a same-block re-let.
 
 pub fn c_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
     let mut p: Int = pos;
@@ -25,7 +25,7 @@ pub fn c_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: String) -> Lis
     let mut ann_ty: String = "";
     if p < n && field_at(list_get(toks, p), 0) == "COLON" {
         p = p + 1;
-        ann_kind = c_peek_list_elem(toks, p, n);
+        ann_kind = c_peek_list_elem2(toks, p, n);
         ann_ty = c_ty_at(toks, p, n);
         p = c_emit_skip_type(toks, p, n);
     }
@@ -51,7 +51,10 @@ pub fn c_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: String) -> Lis
         if ann_ty != "" && ann_ty != "void" {
             lty = ann_ty;
         }
-        println("  " + lty + " " + name + ";");
+        if c_env_get(e, "__decl__" + name) == "" && c_env_get(e, "__formal__" + name) == "" {
+            println("  " + lty + " " + name + ";");
+            e = c_env_put(e, "__decl__" + name, "1");
+        }
         let mut ea: String = c_env_put(e, "__asgn__", name);
         let mut guard: Int = 0;
         while guard < 32 {
@@ -73,8 +76,13 @@ pub fn c_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: String) -> Lis
         return c_pack_pos_env(p, e);
     }
     let mut env_rhs: String = e;
-    if ann_kind == "S" || ann_kind == "I" {
+    if ann_kind != "" {
         env_rhs = c_env_put(e, "__ann__", ann_kind);
+    }
+    let rkind: String = c_result_ret_kind(ann_ty);
+    if rkind != "" {
+        env_rhs = c_env_put(env_rhs, "__ret__", rkind);
+        env_rhs = c_env_put(env_rhs, "__ret_c_ty__", ann_ty);
     }
     // M53: capture RHS start for bare-IDENT secret assign-prop
     let rhs_pos: Int = p;
@@ -95,6 +103,32 @@ pub fn c_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: String) -> Lis
         }
         if ann_ty == "OoIList" {
             bind_kind = "I";
+        }
+        if ann_ty == "OoFList" {
+            bind_kind = "LF";
+            if rhs == "oo_ilist_new()" {
+                rhs = "oo_flist_new()";
+            }
+        }
+        if ann_ty == "OoLL_I" {
+            bind_kind = "LL_I";
+            if rhs == "oo_ilist_new()" {
+                rhs = "oo_ll_I_new()";
+            }
+        }
+        if ann_ty == "OoLL_S" {
+            bind_kind = "LL_S";
+        }
+        if ann_ty == "OoLL_F" {
+            bind_kind = "LL_F";
+        }
+        if chars_len(ann_ty) > 4 {
+            if char_at(ann_ty, 0) == "O" && char_at(ann_ty, 1) == "o" && char_at(ann_ty, 2) == "L" && char_at(ann_ty, 3) == "_" {
+                bind_kind = ann_kind;
+                if rhs == "oo_ilist_new()" || rhs == "oo_slist_new()" {
+                    rhs = "oo_l_" + ann_kind + "_new()";
+                }
+            }
         }
     } else if ann_kind == "S" {
         lty = "OoSList";
@@ -156,7 +190,12 @@ pub fn c_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: String) -> Lis
         }
     }
     if c_rhs_is_unwrap(rhs) {
-        lty = "OoStr";
+        if ann_ty == "" {
+            lty = "OoStr";
+        }
+        if ann_ty == "void" {
+            lty = "OoStr";
+        }
     }
     // User typedefs may be one character (type S = struct). Empty only.
     if lty == "" {
@@ -168,15 +207,47 @@ pub fn c_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: String) -> Lis
         e = c_env_put(e, name, "R");
     } else if lty == "OoResV" {
         e = c_env_put(e, name, "V");
+    } else if lty == "OoResI" {
+        e = c_env_put(e, name, "RI");
+    } else if lty == "OoResII" {
+        e = c_env_put(e, name, "RII");
+    } else if lty == "OoResB" {
+        e = c_env_put(e, name, "RB");
+    } else if lty == "OoResF" {
+        e = c_env_put(e, name, "RF");
+    } else if lty == "OoResLI" {
+        e = c_env_put(e, name, "RLI");
+    } else if lty == "OoResLS" {
+        e = c_env_put(e, name, "RLS");
+    } else if lty == "OoResLF" {
+        e = c_env_put(e, name, "RLF");
+    } else if chars_len(lty) > 5 {
+        if str_slice(lty, 0, 5) == "OoRes" {
+            e = c_env_put(e, name, lty);
+        } else if bind_kind != "" {
+            e = c_env_put(e, name, bind_kind);
+        }
     } else if lty == "double" {
         e = c_env_put(e, name, "F");
-    } else if bind_kind == "S" || bind_kind == "I" {
+    } else if bind_kind == "S" || bind_kind == "I" || bind_kind == "F" {
+        e = c_env_put(e, name, bind_kind);
+    } else if bind_kind != "" {
         e = c_env_put(e, name, bind_kind);
     }
     // CRIT 2.4: let f = println|tcp_write → __alias__f for emit-time guard
     e = c_secret_try_record_alias_rhs(toks, rhs_pos, n, e, name);
     e = c_secret_prop_from_rhs(toks, rhs_pos, n, e, name);
-    println("  " + lty + " " + name + " = " + rhs + ";");
+    // Same-block second let: C forbids redecl (HEAD match_extract_span `ms`).
+    let mut already: String = c_env_get(e, "__decl__" + name);
+    if already == "" {
+        already = c_env_get(e, "__formal__" + name);
+    }
+    if already != "" {
+        println("  " + name + " = " + rhs + ";");
+    } else {
+        println("  " + lty + " " + name + " = " + rhs + ";");
+        e = c_env_put(e, "__decl__" + name, "1");
+    }
     c_emit_let_alias_retain(name, rhs, lty, e);
     if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
         p = p + 1;

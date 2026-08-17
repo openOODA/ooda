@@ -1,0 +1,217 @@
+// # Emit user sum types
+//
+// Logline: Lowers type Name = A(T) | B(T) to a tagged C struct and matches variant arms.
+//
+// Setup: toks hold KW_TYPE sums. c_env_put, c_emit_expr_c, and c_pack_pos_env exist.
+//
+// Beats:
+//   1. Record each ctor as Name:tag in env.
+//   2. Emit typedef struct { int tag; long long v0; } Name.
+//   3. Match arms bind v0 when the tag matches.
+// residual: one Int payload per variant; no String payload; no three-field variants.
+
+pub fn c_sum_ty_of(spec: String) -> String {
+    let n: Int = chars_len(spec);
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(spec, i) == ":" {
+            return str_slice(spec, 0, i);
+        }
+        i = i + 1;
+    }
+    return spec;
+}
+
+pub fn c_sum_tag_of(spec: String) -> String {
+    let n: Int = chars_len(spec);
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(spec, i) == ":" {
+            return str_slice(spec, i + 1, n);
+        }
+        i = i + 1;
+    }
+    return "0";
+}
+
+pub fn c_sum_has_pipe(toks: List[String], pos: Int, n: Int) -> Bool {
+    let mut p: Int = pos;
+    while p < n {
+        let k: String = field_at(list_get(toks, p), 0);
+        if k == "SEMI" || k == "LBRACE" || k == "KW_FN" || k == "KW_TYPE" {
+            return false;
+        }
+        if k == "PIPE" {
+            return true;
+        }
+        p = p + 1;
+    }
+    return false;
+}
+
+pub fn c_sum_env_from_toks(toks: List[String], env0: String) -> String {
+    let n: Int = list_len(toks);
+    let mut e: String = env0;
+    let mut i: Int = 0;
+    while i < n {
+        let k: String = field_at(list_get(toks, i), 0);
+        let mut p: Int = i;
+        if k == "KW_PUB" && i + 1 < n {
+            if field_at(list_get(toks, i + 1), 0) == "KW_TYPE" {
+                p = i + 1;
+            }
+        }
+        if field_at(list_get(toks, p), 0) == "KW_TYPE" {
+            p = p + 1;
+            if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                let ty: String = field_at(list_get(toks, p), 3);
+                p = p + 1;
+                if p < n && field_at(list_get(toks, p), 0) == "EQ" {
+                    p = p + 1;
+                }
+                if c_sum_has_pipe(toks, p, n) {
+                    let mut tag: Int = 0;
+                    while p < n {
+                        let sk: String = field_at(list_get(toks, p), 0);
+                        if sk == "SEMI" {
+                            p = p + 1;
+                            break;
+                        }
+                        if sk == "IDENT" {
+                            let ctor: String = field_at(list_get(toks, p), 3);
+                            p = p + 1;
+                            if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+                                let mut d: Int = 1;
+                                p = p + 1;
+                                while p < n && d > 0 {
+                                    let ik: String = field_at(list_get(toks, p), 0);
+                                    if ik == "LPAREN" {
+                                        d = d + 1;
+                                    }
+                                    if ik == "RPAREN" {
+                                        d = d - 1;
+                                    }
+                                    p = p + 1;
+                                }
+                            }
+                            e = c_env_put(e, "__ctor__" + ctor, ty + ":" + tag.to_string());
+                            tag = tag + 1;
+                        } else {
+                            p = p + 1;
+                        }
+                    }
+                    i = p;
+                } else {
+                    i = i + 1;
+                }
+            } else {
+                i = i + 1;
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    return e;
+}
+
+pub fn c_try_emit_sum_alias(toks: List[String], pos: Int, n: Int, name: String) -> Int {
+    if !c_sum_has_pipe(toks, pos, n) {
+        return pos;
+    }
+    println("typedef struct { int tag; long long v0; } " + name + ";");
+    let mut p: Int = pos;
+    while p < n {
+        if field_at(list_get(toks, p), 0) == "SEMI" {
+            return p + 1;
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+pub fn c_lower_sum_ctor(name: String, args: String, env: String) -> String {
+    let spec: String = c_env_get(env, "__ctor__" + name);
+    if spec == "" {
+        return "";
+    }
+    let ty: String = c_sum_ty_of(spec);
+    let tag: String = c_sum_tag_of(spec);
+    let mut pay: String = args;
+    if pay == "" {
+        pay = "0";
+    }
+    return "((" + ty + "){" + tag + ", " + pay + "})";
+}
+
+pub fn c_emit_sum_match_let(
+    name: String,
+    toks: List[String],
+    pos: Int,
+    n: Int,
+    env: String,
+    decl: Int
+) -> List[String] {
+    let mut p: Int = pos + 1;
+    let mut e: String = env;
+    let pr: List[String] = c_emit_expr_c(toks, p, n, e);
+    p = parse_int(list_get(pr, 0));
+    let scrut: String = list_get(pr, 1);
+    if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+        p = p + 1;
+    }
+    if decl == 1 {
+        println("  long long " + name + ";");
+    }
+    let arm0: String = field_at(list_get(toks, p), 3);
+    let spec0: String = c_env_get(e, "__ctor__" + arm0);
+    let sty: String = c_sum_ty_of(spec0);
+    println("  {");
+    println("  " + sty + " __ml = " + scrut + ";");
+    let mut first: Bool = true;
+    while p < n && field_at(list_get(toks, p), 0) != "RBRACE" {
+        if field_at(list_get(toks, p), 0) != "IDENT" {
+            p = p + 1;
+        } else {
+            let ctor: String = field_at(list_get(toks, p), 3);
+            p = p + 1;
+            let spec: String = c_env_get(e, "__ctor__" + ctor);
+            let tag: String = c_sum_tag_of(spec);
+            let mut bind: String = "_v";
+            if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+                p = p + 1;
+                if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                    bind = field_at(list_get(toks, p), 3);
+                    p = p + 1;
+                }
+                if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
+                    p = p + 1;
+                }
+            }
+            if p < n && field_at(list_get(toks, p), 0) == "FATARROW" {
+                p = p + 1;
+            }
+            if first {
+                println("  if (__ml.tag == " + tag + ") {");
+                first = false;
+            } else {
+                println("  } else if (__ml.tag == " + tag + ") {");
+            }
+            println("    long long " + bind + " = __ml.v0;");
+            let pra: List[String] = c_emit_expr_c(toks, p, n, e);
+            p = parse_int(list_get(pra, 0));
+            println("    " + name + " = " + list_get(pra, 1) + ";");
+            if p < n && field_at(list_get(toks, p), 0) == "COMMA" {
+                p = p + 1;
+            }
+        }
+    }
+    println("  }");
+    println("  }");
+    if p < n && field_at(list_get(toks, p), 0) == "RBRACE" {
+        p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        p = p + 1;
+    }
+    return c_pack_pos_env(p, e);
+}

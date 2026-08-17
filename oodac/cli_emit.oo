@@ -7,7 +7,7 @@
 // Beats:
 //   1. Map cmd to mode all/preamble/protos/bodies and append _noarc when PURE_NO_ARC is set.
 //   2. When EMIT_NO_CONCAT is set, read the file and call c_emit_stream_mode once, or fail unreadable.
-//   3. Otherwise emit preamble if needed, load imports, then stream protos and/or bodies.
+//   3. Otherwise load imports, tokenize each file (or concat on a secret marker), stream.
 //   4. emit-llvm with --backend llvm reads one file (oodac self-host IR). emit-x86 writes .s.
 
 import "load_import.oo";
@@ -49,23 +49,42 @@ pub fn run_emit_c_family(fs: &FsCap, sys: &SysCap, cmd: String, path: String) {
             process_exit(1);
         }
     } else {
-        // Full program emit without giant string concatenation
-        if m == "all" || m == "all_noarc" || m == "preamble" || m == "preamble_noarc" {
+        // Full program emit without giant string concatenation.
+        // emit-c (all) tokenizes once, then walks protos and bodies.
+        if m == "preamble" || m == "preamble_noarc" {
             c_emit_stream_mode("", "preamble");
-            if m == "preamble" || m == "preamble_noarc" { return; }
+            return;
         }
-        
-        let src: String = load_source_with_imports(fs, path);
-        let mut p_mode = "protos";
-        let mut b_mode = "bodies";
-        if no_arc { p_mode = "protos_noarc"; b_mode = "bodies_noarc"; }
-        
-        if m == "all" || m == "all_noarc" || m == "protos" || m == "protos_noarc" {
-            c_emit_stream_mode(src, p_mode);
+        // Concat src is kept for marker gates. Tokenize each import
+        // file (O(sum n_i²)) unless a secret marker needs concat lines.
+        let le: List[String] = load_expand(fs, path, list_new(), list_new());
+        let nle: Int = list_len(le);
+        let src: String = list_get(le, nle - 1);
+        let mut em: String = m;
+        if m == "all" {
+            em = "once";
         }
-        if m == "all" || m == "all_noarc" || m == "bodies" || m == "bodies_noarc" {
-            c_emit_stream_mode(src, b_mode);
+        if m == "all_noarc" {
+            em = "once_noarc";
         }
+        let mut toks: List[String] = list_new();
+        if src.contains("SEC" + "RET:") {
+            toks = tokenize_lines(src);
+        } else {
+            let mut pi: Int = 0;
+            while pi < nle - 1 {
+                let pr: Result[String, String] = read_file(fs, list_get(le, pi));
+                if pr.is_err() {
+                    println("ERR\tload\tunreadable file: " + list_get(le, pi));
+                    process_exit(1);
+                }
+                let fsx: String = match pr { Ok(s) => s, Err(e) => e };
+                toks = c_toks_append_file(toks, tokenize_lines(fsx));
+                pi = pi + 1;
+            }
+            toks = c_toks_append_eof(toks);
+        }
+        c_emit_stream_toks(src, toks, em);
     }
 }
 

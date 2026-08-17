@@ -253,3 +253,5 @@ OoStr oo_slist_get(OoSList l, long long i) {
 }
 
 long long oo_slist_len(OoSList l) { return l.len; }
+
+#include "chs_rt_list_set.c"

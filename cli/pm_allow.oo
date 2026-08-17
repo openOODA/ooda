@@ -1,13 +1,13 @@
 // # Git URL allow-list
 //
-// Logline: Clone only prefixes listed in ingest.allow, ooda.pkg allow=, or github.com/.
+// Logline: Clone only https or git@ hosts that match an exact prefix.
 //
 // Setup: Comma or newline prefixes. registry.openooda.org is never allowed.
 //
 // Beats:
 //   1. Default prefix is github.com/.
-//   2. A url is allowed when it starts with a prefix or the host after :// does.
-//   3. The live registry host is always a miss.
+//   2. http, git://, and userinfo lookalikes refuse before any clone.
+//   3. A host matches a prefix only when the names are equal.
 
 fn pm_pfx_bare(pfx: String) -> String {
     let n: Int = chars_len(pfx);
@@ -18,6 +18,35 @@ fn pm_pfx_bare(pfx: String) -> String {
         return str_slice(pfx, 0, n - 1);
     }
     return pfx;
+}
+
+fn pm_all_digits(s: String) -> Bool {
+    let n: Int = chars_len(s);
+    if n < 1 {
+        return false;
+    }
+    let mut i: Int = 0;
+    while i < n {
+        if char_is_digit(char_at(s, i)) {
+            i = i + 1;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+fn pm_url_scheme_ok(url: String) -> Bool {
+    let at: Int = str_index_of(url, "://");
+    if at < 0 {
+        return true;
+    }
+    if chars_len(url) >= 8 {
+        if str_slice(url, 0, 8) == "https://" {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn pm_url_host(url: String) -> String {
@@ -36,20 +65,67 @@ fn pm_url_host(url: String) -> String {
         return url;
     }
     let rest: String = str_slice(url, at + 3, chars_len(url));
-    let sl: Int = str_index_of(rest, "/");
-    let cl: Int = str_index_of(rest, ":");
     let mut end: Int = chars_len(rest);
+    let sl: Int = str_index_of(rest, "/");
+    let h: Int = str_index_of(rest, "#");
+    let q: Int = str_index_of(rest, "?");
     if sl >= 0 {
         if sl < end {
             end = sl;
         }
     }
-    if cl >= 0 {
-        if cl < end {
-            end = cl;
+    if h >= 0 {
+        if h < end {
+            end = h;
         }
     }
-    return str_slice(rest, 0, end);
+    if q >= 0 {
+        if q < end {
+            end = q;
+        }
+    }
+    let auth: String = str_slice(rest, 0, end);
+    let n: Int = chars_len(auth);
+    let mut last: Int = -1;
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(auth, i) == "@" {
+            last = i;
+        }
+        i = i + 1;
+    }
+    let mut hostport: String = auth;
+    if last >= 0 {
+        hostport = str_slice(auth, last + 1, n);
+    }
+    let cl: Int = str_index_of(hostport, ":");
+    if cl < 0 {
+        return hostport;
+    }
+    let port: String = str_slice(hostport, cl + 1, chars_len(hostport));
+    if pm_all_digits(port) {
+        return str_slice(hostport, 0, cl);
+    }
+    return hostport;
+}
+
+fn pm_pfx_boundary(url: String, pn: Int) -> Bool {
+    if chars_len(url) == pn {
+        return true;
+    }
+    if chars_len(url) < pn {
+        return false;
+    }
+    let c: String = char_at(url, pn);
+    if c == "/" {
+        return true;
+    }
+    if c == ":" {
+        if str_index_of(url, "://") < 0 {
+            return true;
+        }
+    }
+    return false;
 }
 
 fn pm_url_pfx(url: String, pfx: String) -> Bool {
@@ -59,18 +135,15 @@ fn pm_url_pfx(url: String, pfx: String) -> Bool {
     }
     if chars_len(url) >= pn {
         if str_slice(url, 0, pn) == pfx {
-            return true;
+            if pm_pfx_boundary(url, pn) {
+                return true;
+            }
         }
     }
     let host: String = pm_url_host(url);
     let bare: String = pm_pfx_bare(pfx);
     if host == bare {
         return true;
-    }
-    if chars_len(host) >= pn {
-        if str_slice(host, 0, pn) == pfx {
-            return true;
-        }
     }
     return false;
 }
@@ -84,6 +157,9 @@ pub fn pm_url_allowed(allow: String, url: String) -> Bool {
         return false;
     }
     if str_index_of(url, "registry.openooda.org") >= 0 {
+        return false;
+    }
+    if !pm_url_scheme_ok(url) {
         return false;
     }
     let text: String = allow + pm_allow_default();
