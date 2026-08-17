@@ -1,0 +1,164 @@
+// # Drive ooda lsp completion
+//
+// Logline: Feed initialize and textDocument/completion to ./bin/ooda lsp and require &FsCap.
+//
+// Setup: cwd is the ooda worktree. Probe is fixtures/lsp_complete_probe.oo. INT rebuilds bin/ooda later.
+//
+// Beats:
+//   1. Fail if ./bin/ooda is absent.
+//   2. Compute the Fs cursor from the probe text.
+//   3. Write initialize plus completion JSON-RPC.
+//   4. Run ooda lsp with a 10s hang budget.
+//   5. Assert the catalog. Drive missing, directory, no position, and `..`.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn drive_lsp(p: &ProcessCap, fs: &FsReadCap, req: String, tag: String) -> String {
+    let tmpd: String = ".ooda-cache/ooda-tmp";
+    let reqp: String = tmpd + "/lsp_complete_" + tag + "_req.json";
+    let outp: String = tmpd + "/lsp_complete_" + tag + "_out.json";
+    let errp: String = tmpd + "/lsp_complete_" + tag + "_err.txt";
+    if process_exec(p, "mkdir -p " + tmpd).is_err() {
+        fail("mkdir " + tag);
+    }
+    if process_exec(p, "printf '%s\\n' '" + req + "' > " + reqp).is_err() {
+        fail("write " + tag);
+    }
+    if process_exec(p, "timeout 10 ./bin/ooda lsp " + reqp + " > " + outp + " 2> " + errp).is_err() {
+        fail("ooda lsp " + tag);
+    }
+    if !path_exists(fs, outp) {
+        fail("no stdout " + tag);
+    }
+    let orr: Result[String, String] = read_file(fs, outp);
+    if !orr.is_ok() {
+        fail("read " + tag);
+    }
+    return match orr { Ok(s) => s, Err(m) => m };
+}
+
+fn src_line_at(src: String, pos: Int) -> Int {
+    let n: Int = chars_len(src);
+    let mut ln: Int = 0;
+    let mut i: Int = 0;
+    while i < pos && i < n {
+        if char_at(src, i) == "\n" {
+            ln = ln + 1;
+        }
+        i = i + 1;
+    }
+    return ln;
+}
+
+fn src_col_at(src: String, pos: Int) -> Int {
+    let n: Int = chars_len(src);
+    let mut col: Int = 0;
+    let mut i: Int = 0;
+    while i < pos && i < n {
+        if char_at(src, i) == "\n" {
+            col = 0;
+        } else {
+            col = col + 1;
+        }
+        i = i + 1;
+    }
+    return col;
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let ooda: String = "./bin/ooda";
+    let probe: String = "fixtures/lsp_complete_probe.oo";
+    if !path_exists(fs, ooda) {
+        fail("no ooda");
+    }
+    if !path_exists(fs, probe) {
+        fail("no probe");
+    }
+
+    let rr: Result[String, String] = read_file(fs, probe);
+    if !rr.is_ok() {
+        fail("read probe");
+    }
+    let src: String = match rr { Ok(s) => s, Err(m) => m };
+
+    // Cursor is the F of Fs in the first ": &Fs" type prefix in the probe.
+    let needle: String = ": &Fs";
+    let at: Int = str_index_of(src, needle);
+    if at < 0 {
+        fail("no &Fs type");
+    }
+    let fs_pos: Int = at + 3;
+    let line: Int = src_line_at(src, fs_pos);
+    let col: Int = src_col_at(src, fs_pos);
+
+    let uri: String = "file://fixtures/lsp_complete_probe.oo";
+    let init: String = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://.\"}}";
+    let comp: String = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"},\"position\":{\"line\":" + line.to_string() + ",\"character\":" + col.to_string() + "}}}";
+
+    let tmpd: String = ".ooda-cache/ooda-tmp";
+    let reqp: String = tmpd + "/lsp_complete_req.json";
+    let outp: String = tmpd + "/lsp_complete_out.json";
+    let errp: String = tmpd + "/lsp_complete_err.txt";
+    if process_exec(p, "mkdir -p " + tmpd).is_err() {
+        fail("mkdir");
+    }
+    if process_exec(p, "printf '%s\\n%s\\n' '" + init + "' '" + comp + "' > " + reqp).is_err() {
+        fail("write req");
+    }
+    if process_exec(p, "timeout 10 " + ooda + " lsp " + reqp + " > " + outp + " 2> " + errp).is_err() {
+        fail("ooda lsp");
+    }
+    if !path_exists(fs, outp) {
+        fail("no stdout");
+    }
+    let orr: Result[String, String] = read_file(fs, outp);
+    if !orr.is_ok() {
+        fail("read stdout");
+    }
+    let out: String = match orr { Ok(s) => s, Err(m) => m };
+    if str_index_of(out, "completionProvider") < 0 {
+        fail("initialize missing completionProvider");
+    }
+    if str_index_of(out, "&FsCap") < 0 {
+        fail("completion missing &FsCap");
+    }
+    if str_index_of(out, "isIncomplete") < 0 {
+        fail("completion missing isIncomplete");
+    }
+    if str_index_of(out, "\"isIncomplete\":true") >= 0 {
+        fail("isIncomplete true");
+    }
+
+    let miss: String = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file://fixtures/lsp_complete_no_such.oo\"},\"position\":{\"line\":0,\"character\":0}}}";
+    let dirq: String = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file://fixtures\"},\"position\":{\"line\":0,\"character\":0}}}";
+    let npos: String = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"" + uri + "\"}}}";
+    let atk: String = drive_lsp(p, fs, miss + "\n" + dirq + "\n" + npos, "atk");
+    if str_index_of(atk, "\"id\":3") < 0 {
+        fail("missing uri no id 3");
+    }
+    if str_index_of(atk, "\"id\":4") < 0 {
+        fail("dir uri no id 4");
+    }
+    if str_index_of(atk, "\"id\":5") < 0 {
+        fail("no position no id 5");
+    }
+    if str_index_of(atk, "isIncomplete") < 0 {
+        fail("atk missing isIncomplete");
+    }
+    if str_index_of(atk, "\"isIncomplete\":true") >= 0 {
+        fail("atk isIncomplete true");
+    }
+
+    let dots: String = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"textDocument/completion\",\"params\":{\"textDocument\":{\"uri\":\"file://fixtures/../fixtures/lsp_complete_probe.oo\"},\"position\":{\"line\":" + line.to_string() + ",\"character\":" + col.to_string() + "}}}";
+    let dotso: String = drive_lsp(p, fs, dots, "dots");
+    if str_index_of(dotso, "\"label\":\"fn\"") < 0 {
+        fail("dots read through ..");
+    }
+    if str_index_of(dotso, "\"isIncomplete\":true") >= 0 {
+        fail("dots isIncomplete true");
+    }
+    println("lsp_complete_smoke: PASSED");
+}
