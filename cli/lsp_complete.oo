@@ -1,0 +1,179 @@
+// # Native LSP completion list
+//
+// Logline: Build a CompletionList JSON object from the cursor prefix and a fixed catalog.
+//
+// Setup: Called by lsp_reply. Import lsp_ident. Do not import lsp/.
+//
+// Beats:
+//   1. Read line and character from the JSON-RPC body.
+//   2. Load a safe file:// source. If the path is not safe, use an empty string.
+//   3. Make a prefix from the ident. Add "&" when the previous character is "&".
+//   4. Filter the catalog with starts_with. Bound the list at 64 items.
+
+import "lsp_ident.oo";
+
+fn lsp_comp_is_name(c: String) -> Bool {
+    if c == "_" {
+        return true;
+    }
+    let b: Int = byte_at(c, 0);
+    if b >= 48 && b <= 57 {
+        return true;
+    }
+    if b >= 65 && b <= 90 {
+        return true;
+    }
+    if b >= 97 && b <= 122 {
+        return true;
+    }
+    return false;
+}
+
+fn lsp_comp_uri(body: String) -> String {
+    let key: String = "file://";
+    let at: Int = str_index_of(body, key);
+    if at < 0 {
+        return "";
+    }
+    let n: Int = chars_len(body);
+    let start: Int = at + chars_len(key);
+    let mut i: Int = start;
+    while i < n {
+        let c: String = char_at(body, i);
+        if c == "\"" {
+            return str_slice(body, start, i);
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// Load the file when the path exists, has no "..", and is readable.
+// Do not print the source. Do not call process_exec.
+fn lsp_comp_load(fs: &FsCap, body: String) -> String {
+    let p: String = lsp_comp_uri(body);
+    if p == "" {
+        return "";
+    }
+    if str_index_of(p, "..") >= 0 {
+        return "";
+    }
+    if !path_exists(fs, p) {
+        return "";
+    }
+    let rr: Result[String, String] = read_file(fs, p);
+    if !rr.is_ok() {
+        return "";
+    }
+    return match rr { Ok(s) => s, Err(m) => "" };
+}
+
+fn lsp_comp_prefix(src: String, line: Int, col: Int) -> String {
+    let off: Int = lsp_src_offset(src, line, col);
+    let ident: String = lsp_ident_at(src, off);
+    let n: Int = chars_len(src);
+    let mut start: Int = off;
+    if start < 0 {
+        start = 0;
+    }
+    if start > n {
+        start = n;
+    }
+    if ident != "" {
+        if start >= n {
+            start = n - 1;
+        }
+        if start > 0 {
+            if !lsp_comp_is_name(char_at(src, start)) {
+                start = start - 1;
+            }
+        }
+        while start > 0 {
+            if lsp_comp_is_name(char_at(src, start - 1)) {
+                start = start - 1;
+            } else {
+                break;
+            }
+        }
+    }
+    if start > 0 {
+        if char_at(src, start - 1) == "&" {
+            return "&" + ident;
+        }
+    }
+    if ident == "" {
+        if start < n {
+            if char_at(src, start) == "&" {
+                return "&";
+            }
+        }
+    }
+    return ident;
+}
+
+fn lsp_comp_item(label: String, kind: Int, detail: String, doc: String, ins: String) -> String {
+    return "{\"label\":\"" + label + "\",\"kind\":" + kind.to_string() + ",\"detail\":\"" + detail + "\",\"documentation\":\"" + doc + "\",\"insertText\":\"" + ins + "\"}";
+}
+
+fn lsp_comp_take(out: List[String], prefix: String, label: String, kind: Int, detail: String, doc: String, ins: String) -> List[String] {
+    if list_len(out) >= 64 {
+        return out;
+    }
+    if str_starts_with(label, prefix) {
+        return list_push(out, lsp_comp_item(label, kind, detail, doc, ins));
+    }
+    return out;
+}
+
+fn lsp_comp_join(items: List[String]) -> String {
+    let n: Int = list_len(items);
+    let mut buf: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        if i > 0 {
+            buf = buf + ",";
+        }
+        buf = buf + list_get(items, i);
+        i = i + 1;
+    }
+    return "{\"isIncomplete\":false,\"items\":[" + buf + "]}";
+}
+
+pub fn lsp_complete_result(fs: &FsCap, body: String) -> String {
+    let src: String = lsp_comp_load(fs, body);
+    let line: Int = lsp_json_int(body, "\"line\":");
+    let col: Int = lsp_json_int(body, "\"character\":");
+    let prefix: String = lsp_comp_prefix(src, line, col);
+    let mut out: List[String] = list_new();
+    out = lsp_comp_take(out, prefix, "&FsCap", 25, "Capability", "Full filesystem read/write capability.", "&FsCap");
+    out = lsp_comp_take(out, prefix, "&FsReadCap", 25, "Capability", "Read-only filesystem capability.", "&FsReadCap");
+    out = lsp_comp_take(out, prefix, "&FsWriteCap", 25, "Capability", "Write-only filesystem capability.", "&FsWriteCap");
+    out = lsp_comp_take(out, prefix, "&SysCap", 25, "Capability", "System command execution capability.", "&SysCap");
+    out = lsp_comp_take(out, prefix, "&EnvCap", 25, "Capability", "Environment variable capability.", "&EnvCap");
+    out = lsp_comp_take(out, prefix, "&NetCap", 25, "Capability", "Network socket capability.", "&NetCap");
+    out = lsp_comp_take(out, prefix, "&TimeCap", 25, "Capability", "System timer capability.", "&TimeCap");
+    out = lsp_comp_take(out, prefix, "&RandCap", 25, "Capability", "Random entropy capability.", "&RandCap");
+    out = lsp_comp_take(out, prefix, "&AllocCap", 25, "Capability", "Memory allocator capability.", "&AllocCap");
+    out = lsp_comp_take(out, prefix, "fn", 14, "Keyword", "Declare a function.", "fn ");
+    out = lsp_comp_take(out, prefix, "pub", 14, "Keyword", "Export public visibility.", "pub ");
+    out = lsp_comp_take(out, prefix, "let", 14, "Keyword", "Declare immutable binding.", "let ");
+    out = lsp_comp_take(out, prefix, "mut", 14, "Keyword", "Mutable binding modifier.", "mut ");
+    out = lsp_comp_take(out, prefix, "struct", 14, "Keyword", "Define struct record.", "struct ");
+    out = lsp_comp_take(out, prefix, "type", 14, "Keyword", "Define type alias.", "type ");
+    out = lsp_comp_take(out, prefix, "import", 14, "Keyword", "Import module.", "import ");
+    out = lsp_comp_take(out, prefix, "match", 14, "Keyword", "Pattern match.", "match ");
+    out = lsp_comp_take(out, prefix, "if", 14, "Keyword", "Conditional branch.", "if ");
+    out = lsp_comp_take(out, prefix, "else", 14, "Keyword", "Else branch.", "else ");
+    out = lsp_comp_take(out, prefix, "while", 14, "Keyword", "While loop.", "while ");
+    out = lsp_comp_take(out, prefix, "return", 14, "Keyword", "Return value.", "return ");
+    out = lsp_comp_take(out, prefix, "verify", 14, "Keyword", "Formal proof block.", "verify ");
+    out = lsp_comp_take(out, prefix, "Int", 7, "Type", "Signed 64-bit integer.", "Int");
+    out = lsp_comp_take(out, prefix, "String", 7, "Type", "UTF-8 string.", "String");
+    out = lsp_comp_take(out, prefix, "Bool", 7, "Type", "Boolean type.", "Bool");
+    out = lsp_comp_take(out, prefix, "List", 7, "Type", "Dynamic array container.", "List[");
+    out = lsp_comp_take(out, prefix, "Result", 7, "Type", "Result monad.", "Result[");
+    out = lsp_comp_take(out, prefix, "println", 3, "Builtin", "Print string to stdout.", "println(");
+    out = lsp_comp_take(out, prefix, "read_file", 3, "Builtin", "Read file contents.", "read_file(");
+    out = lsp_comp_take(out, prefix, "write_file", 3, "Builtin", "Write to file.", "write_file(");
+    return lsp_comp_join(out);
+}
