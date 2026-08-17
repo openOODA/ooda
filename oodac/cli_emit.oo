@@ -16,6 +16,7 @@ import "c_emit_helpers.oo";
 import "c_emit.oo";
 import "check_drive.oo";
 import "llvm_emit.oo";
+import "llvm_link_shim.oo";
 import "x86_emit.oo";
 
 pub fn run_emit_c_family(fs: &FsCap, sys: &SysCap, cmd: String, path: String) {
@@ -68,6 +69,37 @@ pub fn run_emit_c_family(fs: &FsCap, sys: &SysCap, cmd: String, path: String) {
     }
 }
 
+fn llvm_import_fntab(fs: &FsCap, path: String) -> String {
+    let le: List[String] = load_expand(fs, path, list_new(), list_new());
+    let n: Int = list_len(le);
+    let mut tab: String = "";
+    let mut i: Int = 0;
+    while i + 1 < n {
+        let p: String = list_get(le, i);
+        let src_r: Result[String, String] = read_file(fs, p);
+        if src_r.is_ok() {
+            let s: String = match src_r { Ok(x) => x, Err(m) => m };
+            tab = tab + llvm_fntab_of_src(s);
+        }
+        i = i + 1;
+    }
+    return tab;
+}
+
+fn llvm_fntab_from_env(fs: &FsCap, sys: &SysCap, path: String) -> String {
+    let cached: String = ".ooda-cache/ooda-tmp/llvm_fntab.txt";
+    if path_exists(fs, cached) {
+        let rr: Result[String, String] = read_file(fs, cached);
+        if rr.is_ok() {
+            let body: String = match rr { Ok(s) => s, Err(m) => m };
+            if chars_len(body) > 8 {
+                return body;
+            }
+        }
+    }
+    return llvm_import_fntab(fs, path);
+}
+
 pub fn run_emit_llvm(fs: &FsCap, sys: &SysCap, path: String, backend: String) {
     let probe_concat = "if [ -n \"$EMIT_NO_CONCAT\" ] || [ -n \"$OODA_EMIT_NO_CONCAT\" ]; then exit 0; else exit 1; fi";
     let no_concat_res = sys_exec(sys, "sh", "-c", probe_concat);
@@ -87,12 +119,90 @@ pub fn run_emit_llvm(fs: &FsCap, sys: &SysCap, path: String, backend: String) {
             println("ERR\tload\tunreadable file: " + path);
             process_exit(1);
         }
-        llvm_emit_stream(src, no_pre);
+        llvm_emit_stream(src, no_pre, llvm_fntab_from_env(fs, sys, path));
         return;
     }
     src = load_source_with_imports(fs, path);
     run_check_core(sys, src);
-    llvm_emit_stream(src, no_pre);
+    llvm_emit_stream(src, no_pre, "");
+}
+
+pub fn run_print_llvm_fntab(fs: &FsCap, path: String) {
+    println(llvm_import_fntab(fs, path));
+}
+
+pub fn run_print_llvm_graph(fs: &FsCap, path: String) {
+    let le: List[String] = load_expand(fs, path, list_new(), list_new());
+    let n: Int = list_len(le);
+    let mut i: Int = 0;
+    while i + 1 < n {
+        println(list_get(le, i));
+        i = i + 1;
+    }
+}
+
+fn llvm_mod_ll_name(path: String) -> String {
+    let n: Int = chars_len(path);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(path, i);
+        if c == "/" {
+            out = out + "_";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out + ".ll";
+}
+
+pub fn run_emit_llvm_mods(fs: &FsCap, sys: &SysCap, path: String, outdir: String) {
+    if outdir == "" {
+        println("ERR\temit-mods\tmissing outdir");
+        process_exit(2);
+    }
+    if sys_exec(sys, "sh", "-c", "mkdir -p " + shell_sq(outdir)).is_err() {
+        println("ERR\temit-mods\tmkdir");
+        process_exit(1);
+    }
+    let le: List[String] = load_expand(fs, path, list_new(), list_new());
+    let n: Int = list_len(le);
+    let mut listing: String = "";
+    let mut i: Int = 0;
+    while i + 1 < n {
+        let p: String = list_get(le, i);
+        listing = listing + p + "\n";
+        i = i + 1;
+    }
+    let listp: String = outdir + "/list.txt";
+    if sys_exec(sys, "sh", "-c", "printf '%s' " + shell_sq(listing) + " > " + shell_sq(listp)).is_err() {
+        println("ERR\temit-mods\tlist");
+        process_exit(1);
+    }
+    let tab: String = llvm_import_fntab(fs, path);
+    let tabp: String = ".ooda-cache/ooda-tmp/llvm_fntab.txt";
+    if sys_exec(sys, "sh", "-c", "mkdir -p .ooda-cache/ooda-tmp && printf '%s' " + shell_sq(tab) + " > " + shell_sq(tabp)).is_err() {
+        println("ERR\temit-mods\tfntab");
+        process_exit(1);
+    }
+    let shimp: String = outdir + "/_shim.ll";
+    if sys_exec(sys, "sh", "-c", "printf '%s' " + shell_sq(llvm_link_shim_text()) + " > " + shell_sq(shimp)).is_err() {
+        println("ERR\temit-mods\tshim");
+        process_exit(1);
+    }
+    i = 0;
+    while i + 1 < n {
+        let p2: String = list_get(le, i);
+        let ll: String = outdir + "/" + llvm_mod_ll_name(p2);
+        let cmd: String = "OODA_LLVM_FNTAB_FILE=" + shell_sq(tabp) + " OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac/oodac}}\" && $OODAC_BIN --backend llvm emit-llvm " + shell_sq(p2) + " > " + shell_sq(ll);
+        if sys_exec(sys, "sh", "-c", cmd).is_err() {
+            println("ERR\temit-mods\temit " + p2);
+            process_exit(1);
+        }
+        i = i + 1;
+    }
+    println("OK\temit-mods\t" + outdir);
 }
 
 pub fn run_emit_x86(fs: &FsCap, path: String) {

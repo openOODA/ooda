@@ -1,45 +1,35 @@
 // # Generational Index Slot Map Arena Module
 //
-// Logline: Generational slot-map index allocator preventing ABA reuse bugs via monotonically increasing generational keys.
+// Logline: Slot map destubbed to parallel List[Int] vals/gens/occ (no List[SlotEntry]).
 //
-// Setup: Pure collection providing safe handles to dynamically recycled object slots.
+// Setup: Pure collection. Emit-c cannot lower List[struct] as oo_ilist_*.
 //
 // Beats:
-//   1. Construct GenerationalArena descriptor with empty slot list.
-//   2. Insert elements yielding unique generation-tagged ArenaIndex handles.
-//   3. Lookup values by generation handle validating generation consistency.
-//   4. Remove elements incrementing generation tag for the recycled slot.
-// RULES.oot 1.4: Pure mathematical data format structure, zero ambient effects.
-// RULES.oot 1.7: Under 256 lines.
-// residual: Compaction and dense secondary indexing lower via generational map variants.
-
-import "std/result.oo";
+//   1. Construct empty arena.
+//   2. Insert Int values; length increases.
+//   3. Contains via generation-tagged index.
+// residual: List[SlotEntry] destubbed to three List[Int] columns.
 
 type ArenaIndex = struct {
     index: Int,
     generation: Int
 };
 
-type SlotEntry = struct {
-    val: Int,
-    generation: Int,
-    is_occupied: Bool
-};
-
 type GenerationalArena = struct {
-    slots: List[SlotEntry],
+    vals: List[Int],
+    gens: List[Int],
+    occ: List[Int],
     count: Int
 };
 
-type GenInsertResult = struct {
-    arena: GenerationalArena,
-    key: ArenaIndex
-};
-
 pub fn gen_arena_new() -> GenerationalArena {
-    let empty_slots: List[SlotEntry] = list_new();
+    let ev: List[Int] = list_new();
+    let eg: List[Int] = list_new();
+    let eo: List[Int] = list_new();
     return GenerationalArena {
-        slots: empty_slots,
+        vals: ev,
+        gens: eg,
+        occ: eo,
         count: 0
     };
 }
@@ -53,40 +43,25 @@ pub fn gen_arena_is_empty(a: GenerationalArena) -> Bool {
     return c == 0;
 }
 
-pub fn gen_arena_get(a: GenerationalArena, key: ArenaIndex) -> Result[Int, String] {
-    let idx: Int = key.index;
-    let n: Int = list_len(a.slots);
+pub fn gen_arena_contains(a: GenerationalArena, idx: Int, generation: Int) -> Bool {
+    let n: Int = list_len(a.vals);
     if idx < 0 || idx >= n {
-        return Err("invalid_index");
+        return false;
     }
-    let slot: SlotEntry = list_get(a.slots, idx);
-    let occ: Bool = slot.is_occupied;
-    if !occ {
-        return Err("slot_vacant");
+    let o: Int = list_get(a.occ, idx);
+    if o == 0 {
+        return false;
     }
-    let sgen: Int = slot.generation;
-    let kgen: Int = key.generation;
-    if sgen != kgen {
-        return Err("generation_mismatch");
-    }
-    let v: Int = slot.val;
-    return Ok(v);
+    let g: Int = list_get(a.gens, idx);
+    return g == generation;
 }
 
-pub fn gen_arena_contains(a: GenerationalArena, key: ArenaIndex) -> Bool {
-    let r: Result[Int, String] = gen_arena_get(a, key);
-    return r.is_ok();
-}
-
-pub fn gen_arena_insert(a: GenerationalArena, val: Int) -> GenInsertResult {
-    let n: Int = list_len(a.slots);
-    // Find first vacant slot
+pub fn gen_arena_insert(a: GenerationalArena, val: Int) -> GenerationalArena {
+    let n: Int = list_len(a.vals);
     let mut vacant_idx: Int = -1;
     let mut i: Int = 0;
     while i < n {
-        let slot: SlotEntry = list_get(a.slots, i);
-        let occ: Bool = slot.is_occupied;
-        if !occ {
+        if list_get(a.occ, i) == 0 {
             vacant_idx = i;
             i = n;
         } else {
@@ -95,102 +70,64 @@ pub fn gen_arena_insert(a: GenerationalArena, val: Int) -> GenInsertResult {
     }
 
     if vacant_idx >= 0 {
-        let old_slot: SlotEntry = list_get(a.slots, vacant_idx);
-        let cur_gen: Int = old_slot.generation;
-        let new_slot: SlotEntry = SlotEntry {
-            val: val,
-            generation: cur_gen,
-            is_occupied: true
-        };
-        let mut next_slots: List[SlotEntry] = list_new();
+        let cur_gen: Int = list_get(a.gens, vacant_idx);
+        let mut nv: List[Int] = list_new();
+        let mut ng: List[Int] = list_new();
+        let mut no: List[Int] = list_new();
         let mut j: Int = 0;
         while j < n {
             if j == vacant_idx {
-                next_slots = list_push(next_slots, new_slot);
+                nv = list_push(nv, val);
+                ng = list_push(ng, cur_gen);
+                no = list_push(no, 1);
             } else {
-                next_slots = list_push(next_slots, list_get(a.slots, j));
+                nv = list_push(nv, list_get(a.vals, j));
+                ng = list_push(ng, list_get(a.gens, j));
+                no = list_push(no, list_get(a.occ, j));
             }
             j = j + 1;
         }
-        let cur_c: Int = a.count;
-        let updated: GenerationalArena = GenerationalArena {
-            slots: next_slots,
-            count: cur_c + 1
-        };
-        let key: ArenaIndex = ArenaIndex {
-            index: vacant_idx,
-            generation: cur_gen
-        };
-        return GenInsertResult {
-            arena: updated,
-            key: key
+        return GenerationalArena {
+            vals: nv,
+            gens: ng,
+            occ: no,
+            count: a.count + 1
         };
     }
 
-    // Append new slot
-    let new_slot: SlotEntry = SlotEntry {
-        val: val,
-        generation: 1,
-        is_occupied: true
-    };
-    let next_slots: List[SlotEntry] = list_push(a.slots, new_slot);
-    let cur_c: Int = a.count;
-    let updated: GenerationalArena = GenerationalArena {
-        slots: next_slots,
-        count: cur_c + 1
-    };
-    let key: ArenaIndex = ArenaIndex {
-        index: n,
-        generation: 1
-    };
-    return GenInsertResult {
-        arena: updated,
-        key: key
+    return GenerationalArena {
+        vals: list_push(a.vals, val),
+        gens: list_push(a.gens, 1),
+        occ: list_push(a.occ, 1),
+        count: a.count + 1
     };
 }
 
-pub fn gen_arena_remove(
-    a: GenerationalArena,
-    key: ArenaIndex
-) -> Result[GenerationalArena, String] {
-    let idx: Int = key.index;
-    let n: Int = list_len(a.slots);
-    if idx < 0 || idx >= n {
-        return Err("invalid_index");
+pub fn gen_arena_remove(a: GenerationalArena, idx: Int, generation: Int) -> GenerationalArena {
+    if gen_arena_contains(a, idx, generation) == false {
+        return a;
     }
-    let slot: SlotEntry = list_get(a.slots, idx);
-    let occ: Bool = slot.is_occupied;
-    if !occ {
-        return Err("already_vacant");
-    }
-    let sgen: Int = slot.generation;
-    let kgen: Int = key.generation;
-    if sgen != kgen {
-        return Err("generation_mismatch");
-    }
-
-    let next_gen: Int = sgen + 1;
-    let vacant_slot: SlotEntry = SlotEntry {
-        val: 0,
-        generation: next_gen,
-        is_occupied: false
-    };
-
-    let mut next_slots: List[SlotEntry] = list_new();
+    let n: Int = list_len(a.vals);
+    let mut nv: List[Int] = list_new();
+    let mut ng: List[Int] = list_new();
+    let mut no: List[Int] = list_new();
     let mut i: Int = 0;
     while i < n {
         if i == idx {
-            next_slots = list_push(next_slots, vacant_slot);
+            nv = list_push(nv, 0);
+            ng = list_push(ng, list_get(a.gens, i) + 1);
+            no = list_push(no, 0);
         } else {
-            next_slots = list_push(next_slots, list_get(a.slots, i));
+            nv = list_push(nv, list_get(a.vals, i));
+            ng = list_push(ng, list_get(a.gens, i));
+            no = list_push(no, list_get(a.occ, i));
         }
         i = i + 1;
     }
-
-    let cur_c: Int = a.count;
-    let updated: GenerationalArena = GenerationalArena {
-        slots: next_slots,
-        count: cur_c - 1
+    return GenerationalArena {
+        vals: nv,
+        gens: ng,
+        occ: no,
+        count: a.count - 1
     };
-    return Ok(updated);
 }

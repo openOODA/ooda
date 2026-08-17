@@ -1,0 +1,69 @@
+// # OPEN-68 LLVM-linked oodac hello lock
+//
+// Logline: Per-module emit-llvm of oodac/main.oo, unique string names, clang plus chs_rt, check hello.
+//
+// Setup: cwd is ooda/. Prefer side ELF .ooda-cache/ooda-tmp/oodac_emit. Host clang exists.
+//
+// Beats:
+//   1. emit-graph lists the import graph. emit-mods writes one .ll per module.
+//   2. No shared @.str.0 across modules. clang links all .ll with runtime/chs_rt.c.
+//   3. Linked ELF check fixtures/hello.oo prints OK. Dropping one .ll makes clang fail.
+// residual: C emit plus gcc remains the product path. Not gcc-parity.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let mut oodac = tmpd + "/oodac_emit";
+    if process_exec(p, "test -x " + oodac).is_err() {
+        oodac = tmpd + "/oodac_clangc";
+    }
+    if process_exec(p, "test -x " + oodac).is_err() {
+        fail("no side proof oodac");
+    }
+    if !path_exists(fs, "oodac/main.oo") { fail("no main.oo"); }
+    if !path_exists(fs, "runtime/chs_rt.c") { fail("no chs_rt"); }
+    if !path_exists(fs, "fixtures/hello.oo") { fail("no hello"); }
+    if process_exec(p, "mkdir -p " + tmpd + "/open68-mods").is_err() { fail("mkdir"); }
+    let mods = tmpd + "/open68-mods";
+    if process_exec(p, "rm -rf " + mods + " && mkdir -p " + mods).is_err() { fail("reset mods"); }
+
+    if process_exec(p, "OODAC_BIN=" + oodac + " OODA_COMPILER=" + oodac + " " + oodac + " emit-mods oodac/main.oo " + mods).is_err() {
+        fail("emit-mods");
+    }
+    if process_exec(p, "test -s " + mods + "/list.txt").is_err() { fail("no list"); }
+    if process_exec(p, "test $(find " + mods + " -name '*.ll' | wc -l) -gt 1").is_err() {
+        fail("need more than one .ll");
+    }
+    if process_exec(p, "dups=$(grep -h '^@\\.str' " + mods + "/*.ll | awk '{print $1}' | sort | uniq -d); test -z \"$dups\"").is_err() {
+        fail("duplicate @.str names");
+    }
+
+    let elf = tmpd + "/oodac_lllink";
+    let cl = "clang -O0 -Wno-override-module -Iruntime " + mods + "/*.ll runtime/chs_rt.c -lm -ldl -lpthread -o " + elf;
+    if process_exec(p, cl).is_err() { fail("clang link"); }
+    if process_exec(p, "test -s " + elf).is_err() { fail("empty elf"); }
+    if process_exec(p, elf + " check fixtures/hello.oo 2>&1 | grep -qE '^OK'").is_err() {
+        fail("linked check hello");
+    }
+
+    let drop = tmpd + "/open68-mods-drop";
+    if process_exec(p, "rm -rf " + drop + " && mkdir -p " + drop + " && cp " + mods + "/*.ll " + drop + "/").is_err() {
+        fail("copy mods");
+    }
+    if process_exec(p, "ls " + drop + "/oodac_*.ll 2>/dev/null | grep -v main | head -1 | xargs rm -f").is_err() {
+        fail("drop one");
+    }
+    if process_exec(p, "clang -O0 -Wno-override-module -Iruntime " + drop + "/*.ll runtime/chs_rt.c -lm -ldl -lpthread -o " + tmpd + "/oodac_lllink_drop 2>" + tmpd + "/open68_link_drop.err").is_ok() {
+        if process_exec(p, tmpd + "/oodac_lllink_drop check fixtures/hello.oo 2>&1 | grep -qE '^OK'").is_ok() {
+            fail("drop still checks hello");
+        }
+    }
+
+    println("open68_link_smoke: linked check hello OK");
+    println("open68_link_smoke: C emit plus gcc remains product");
+    println("open68_link_smoke: PASSED");
+}

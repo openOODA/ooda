@@ -5,8 +5,8 @@
 // Setup: tokenize_lines, check_secret_println_sinks, llvm_emit_preamble, llvm_emit_fn, llvm_emit_type_decl, llvm_skip_verify, skip_until_semi, llvm_emit_str_pool, and llvm_ty_map exist.
 //
 // Beats:
-//   1. llvm_scan_fn_rets walks pub/fn signatures into a name=llvm_ty| table.
-//   2. llvm_emit_stream optionally prints the preamble, tokenizes, and refuses secret sinks.
+//   1. Seed the fn table from builtins, imports, then this file.
+//   2. Prefix string globals with a source digest so modules do not share @.str.0.
 //   3. Walk tokens: emit type decls and fns, skip verify and import, then emit the string pool.
 
 import "token_fmt.oo";
@@ -15,6 +15,7 @@ import "check_cap_util.oo";
 import "c_emit_skip.oo";
 import "llvm_emit_preamble.oo";
 import "llvm_emit_ty.oo";
+import "llvm_fntab.oo";
 import "llvm_emit_env.oo";
 import "llvm_emit_mem.oo";
 import "llvm_emit_arc.oo";
@@ -33,63 +34,22 @@ import "llvm_emit_fn.oo";
 import "c_emit_secret.oo";
 import "c_emit_secret_check.oo";
 
-fn llvm_scan_fn_rets(toks: List[String], n: Int) -> String {
-    let mut tab: String = "";
-    let mut pos = 0;
-    while pos < n {
-        let k: String = field_at(list_get(toks, pos), 0);
-        if k == "EOF" {
-            pos = n;
-        } else if k == "KW_PUB" || k == "KW_FN" {
-            let mut p = pos;
-            if field_at(list_get(toks, p), 0) == "KW_PUB" { p = p + 1; }
-            if p < n && field_at(list_get(toks, p), 0) == "KW_FN" { p = p + 1; }
-            if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
-                let fname: String = field_at(list_get(toks, p), 3);
-                p = p + 1;
-                if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
-                    let mut depth = 0;
-                    while p < n {
-                        let kk: String = field_at(list_get(toks, p), 0);
-                        if kk == "LPAREN" { depth = depth + 1; }
-                        if kk == "RPAREN" {
-                            depth = depth - 1;
-                            p = p + 1;
-                            if depth == 0 { break; }
-                        } else {
-                            p = p + 1;
-                        }
-                    }
-                }
-                let mut rty = "void";
-                if p < n && field_at(list_get(toks, p), 0) == "ARROW" {
-                    p = p + 1;
-                    if p < n {
-                        rty = field_at(list_get(toks, p), 3);
-                        p = p + 1;
-                    }
-                }
-                let mut lty: String = llvm_ty_map(rty);
-                if fname == "main" { lty = "i32"; }
-                tab = tab + fname + "=" + lty + "|";
-            }
-            pos = pos + 1;
-        } else {
-            pos = pos + 1;
-        }
-    }
-    return tab;
-}
-
-pub fn llvm_emit_stream(src: String, no_preamble: Bool) {
+pub fn llvm_emit_stream(src: String, no_preamble: Bool, extra_fntab: String) {
     if !no_preamble {
         llvm_emit_preamble();
     }
     let toks: List[String] = tokenize_lines(src);
     check_secret_println_sinks(src, toks);
     let n = list_len(toks);
-    let fntab: String = llvm_scan_fn_rets(toks, n);
+    let used: String = llvm_fntab_used(extra_fntab, toks, n);
+    let local_tab: String = llvm_scan_fn_rets(toks, n);
+    let fntab: String = llvm_builtin_fntab() + used + local_tab;
+    llvm_emit_fntab_declares(llvm_builtin_fntab() + used, local_tab);
     let stab: String = llvm_scan_struct_fields(toks, n);
+    let mut str_pfx: String = crypto_sha256_internal(src);
+    if chars_len(str_pfx) >= 12 {
+        str_pfx = str_slice(str_pfx, 0, 12);
+    }
     let mut pos = 0;
     let mut str_c: String = "0";
     let mut str_t: String = "";
@@ -105,7 +65,7 @@ pub fn llvm_emit_stream(src: String, no_preamble: Bool) {
             if next_k == "KW_TYPE" {
                 pos = llvm_emit_type_decl(toks, pos, n);
             } else {
-                let fn_res: List[String] = llvm_emit_fn(toks, pos, n, str_c, str_t, fntab, stab);
+                let fn_res: List[String] = llvm_emit_fn(toks, pos, n, str_c, str_t, fntab, stab, str_pfx);
                 pos = parse_int(list_get(fn_res, 0));
                 str_c = list_get(fn_res, 1);
                 str_t = list_get(fn_res, 2);

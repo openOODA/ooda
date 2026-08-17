@@ -1,0 +1,118 @@
+// # Hostile Capability Escape Probe Smoke
+//
+// Logline: Prove env deny, attenuate tamper, forged write token, and child env filter fail closed.
+//
+// Setup: cwd is ooda/. Tree oodac and runtime/chs_rt.c exist. Uses ProcessCap builtins.
+//
+// Beats:
+//   1. Assert policy symbols live in the runtime.
+//   2. Emit, gcc, and run hostile_env_get and hostile_attenuate fixtures.
+//   3. C probes: zero FsWriteCap exits; child env drops HOST_SECRET.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = ".";
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let oodac = root + "/oodac/oodac";
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
+    if !path_exists(fs, oodac) { fail("no oodac"); }
+
+    if process_exec(p, "grep -q 'oo_process_policy_getenv' " + root + "/runtime/chs_rt_sys.c").is_err() {
+        fail("missing policy getenv");
+    }
+    if process_exec(p, "grep -q 'oo_child_filter_env' " + root + "/runtime/chs_rt_sys.c").is_err() {
+        fail("missing child env filter");
+    }
+    if process_exec(p, "grep -q 'oo_cap_require_fswrite' " + root + "/runtime/chs_rt_caps.c").is_err() {
+        fail("missing fswrite require");
+    }
+
+    let env_fix = root + "/fixtures/hostile_env_get.oo";
+    let att_fix = root + "/fixtures/hostile_attenuate.oo";
+    if !path_exists(fs, env_fix) { fail("missing hostile_env_get.oo"); }
+    if !path_exists(fs, att_fix) { fail("missing hostile_attenuate.oo"); }
+
+    if process_exec(p, oodac + " check " + env_fix + " 2>&1 | grep -qE '^OK'").is_err() {
+        fail("env fixture check");
+    }
+    if process_exec(p, oodac + " check " + att_fix + " 2>&1 | grep -qE '^OK'").is_err() {
+        fail("attenuate fixture check");
+    }
+
+    let env_c = tmpd + "/hostile_env_get.c";
+    let env_bin = tmpd + "/hostile_env_get.bin";
+    let env_out = tmpd + "/hostile_env_get.run";
+    if process_exec(p, oodac + " emit-c " + env_fix + " > " + env_c + " 2> " + tmpd + "/hostile_env_get.err").is_err() {
+        fail("emit env");
+    }
+    if process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + env_c + " -o " + env_bin + " -lm -ldl -lpthread 2> " + tmpd + "/hostile_env_get.gcc").is_err() {
+        fail("gcc env");
+    }
+    if process_exec(p, "HOME=/tmp PATH=/evil USER=attacker SECRET=leak OO_HOSTILE_PROBE=ok " + env_bin + " > " + env_out + " 2>&1").is_err() {
+        fail("run env");
+    }
+    if process_exec(p, "grep -q 'hostile_env_get: PASSED' " + env_out).is_err() {
+        fail("env probe");
+    }
+
+    let att_c = tmpd + "/hostile_attenuate.c";
+    let att_bin = tmpd + "/hostile_attenuate.bin";
+    let att_out = tmpd + "/hostile_attenuate.run";
+    if process_exec(p, oodac + " emit-c " + att_fix + " > " + att_c + " 2> " + tmpd + "/hostile_attenuate.err").is_err() {
+        fail("emit attenuate");
+    }
+    if process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + att_c + " -o " + att_bin + " -lm -ldl -lpthread 2> " + tmpd + "/hostile_attenuate.gcc").is_err() {
+        fail("gcc attenuate");
+    }
+    if process_exec(p, att_bin + " > " + att_out + " 2>&1").is_err() {
+        fail("run attenuate");
+    }
+    if process_exec(p, "grep -q 'hostile_attenuate: PASSED' " + att_out).is_err() {
+        fail("attenuate probe");
+    }
+
+    let forge = tmpd + "/hostile_forge.c";
+    let forge_bin = tmpd + "/hostile_forge.bin";
+    let forge_out = tmpd + "/hostile_forge.run";
+    let wr_forge = "printf '%s\\n' '#include \"chs_rt.h\"' '#include <stdio.h>' 'int main(void) {' 'OoResV r = oo_write_file(0, oo_str_lit(\"/tmp/oo_hostile_forge.txt\"), oo_str_lit(\"x\"));' '(void)r; printf(\"LEAK\\n\"); return 0; }' > " + forge;
+    if process_exec(p, wr_forge).is_err() { fail("write forge"); }
+    if process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + forge + " -o " + forge_bin + " -lm -ldl -lpthread 2> " + tmpd + "/hostile_forge.gcc").is_err() {
+        fail("gcc forge");
+    }
+    if process_exec(p, "OODA_FS_WRITEDIR=/tmp " + forge_bin + " > " + forge_out + " 2>&1 || true").is_err() {
+        fail("run forge");
+    }
+    if process_exec(p, "grep -q 'LEAK' " + forge_out).is_ok() {
+        fail("zero token wrote");
+    }
+    if process_exec(p, "grep -qE 'ERR.cap|forged capability' " + forge_out).is_err() {
+        fail("forge missing cap err");
+    }
+
+    let child = tmpd + "/hostile_child.c";
+    let child_bin = tmpd + "/hostile_child.bin";
+    let child_out = tmpd + "/hostile_child.run";
+    let wr_child = "printf '%s\\n' '#include \"chs_rt.h\"' '#include <stdio.h>' '#include <stdlib.h>' 'int main(void) {' 'setenv(\"HOST_SECRET\", \"leak\", 1);' 'setenv(\"OO_OK\", \"1\", 1);' 'long long p = oo_cap_grant_process();' 'OoStr av[3];' 'av[0] = oo_str_lit(\"/bin/sh\");' 'av[1] = oo_str_lit(\"-c\");' 'av[2] = oo_str_lit(\"echo HOST=$HOST_SECRET; echo OO=$OO_OK; echo PATH=$PATH\");' 'OoResS r = oo_sys_exec(p, 3, av);' 'if (!r.ok) { printf(\"exec-fail\\n\"); return 1; }' 'return 0; }' > " + child;
+    if process_exec(p, wr_child).is_err() { fail("write child"); }
+    if process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + child + " -o " + child_bin + " -lm -ldl -lpthread 2> " + tmpd + "/hostile_child.gcc").is_err() {
+        fail("gcc child");
+    }
+    if process_exec(p, child_bin + " > " + child_out + " 2>&1").is_err() {
+        fail("run child");
+    }
+    if process_exec(p, "grep -q 'HOST=leak' " + child_out).is_ok() {
+        fail("child leaked HOST_SECRET");
+    }
+    if process_exec(p, "grep -q 'OO=1' " + child_out).is_err() {
+        fail("child dropped OO_OK");
+    }
+    if process_exec(p, "grep -q 'PATH=/usr/bin:/bin' " + child_out).is_err() {
+        fail("child PATH not filtered");
+    }
+
+    println("hostile_cap_probe_smoke: PASSED");
+}

@@ -1,0 +1,231 @@
+// # LLVM function-return table
+//
+// Logline: Scan fn signatures and map List[String] to %OoSList, not a bare List.
+//
+// Setup: tokenize_lines and llvm_ty_map exist. Used by llvm_emit and import fntab.
+//
+// Beats:
+//   1. Walk pub/fn tokens.
+//   2. After the arrow, keep List[T] text when brackets follow.
+//   3. Store name=llvm_ty| rows. Builtin Result calls are %OoResS.
+
+import "token_fmt.oo";
+import "llvm_emit_ty.oo";
+
+pub fn llvm_scan_fn_rets(toks: List[String], n: Int) -> String {
+    let mut tab: String = "";
+    let mut pos = 0;
+    while pos < n {
+        let k: String = field_at(list_get(toks, pos), 0);
+        if k == "EOF" {
+            pos = n;
+        } else if k == "KW_PUB" || k == "KW_FN" {
+            let mut p = pos;
+            if field_at(list_get(toks, p), 0) == "KW_PUB" { p = p + 1; }
+            if p < n && field_at(list_get(toks, p), 0) == "KW_FN" { p = p + 1; }
+            if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                let fname: String = field_at(list_get(toks, p), 3);
+                p = p + 1;
+                let mut psig: String = "";
+                if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+                    p = p + 1;
+                    while p < n && field_at(list_get(toks, p), 0) != "RPAREN" {
+                        if field_at(list_get(toks, p), 0) == "COMMA" {
+                            p = p + 1;
+                        } else if field_at(list_get(toks, p), 0) == "IDENT" {
+                            p = p + 1;
+                            let mut pty = "Int";
+                            if p < n && field_at(list_get(toks, p), 0) == "COLON" {
+                                p = p + 1;
+                                if p < n && field_at(list_get(toks, p), 0) == "AMP" {
+                                    p = p + 1;
+                                }
+                                if p < n {
+                                    pty = field_at(list_get(toks, p), 3);
+                                    p = p + 1;
+                                    if p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
+                                        p = p + 1;
+                                        if p < n {
+                                            pty = pty + "[" + field_at(list_get(toks, p), 3) + "]";
+                                            p = p + 1;
+                                        }
+                                        if p < n && field_at(list_get(toks, p), 0) == "RBRACKET" {
+                                            p = p + 1;
+                                        }
+                                    }
+                                }
+                            }
+                            if psig != "" { psig = psig + ", "; }
+                            psig = psig + llvm_ty_map(pty);
+                        } else {
+                            p = p + 1;
+                        }
+                    }
+                    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
+                        p = p + 1;
+                    }
+                }
+                let mut rty = "void";
+                if p < n && field_at(list_get(toks, p), 0) == "ARROW" {
+                    p = p + 1;
+                    if p < n {
+                        rty = field_at(list_get(toks, p), 3);
+                        p = p + 1;
+                        if rty == "List" && p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
+                            p = p + 1;
+                            if p < n {
+                                rty = "List[" + field_at(list_get(toks, p), 3) + "]";
+                                p = p + 1;
+                            }
+                        }
+                    }
+                }
+                let mut lty: String = llvm_ty_map(rty);
+                if fname == "main" { lty = "i32"; }
+                tab = tab + fname + "=" + lty + "#" + psig + "|";
+            }
+            pos = pos + 1;
+        } else {
+            pos = pos + 1;
+        }
+    }
+    return tab;
+}
+
+pub fn llvm_fntab_of_src(src: String) -> String {
+    let toks: List[String] = tokenize_lines(src);
+    return llvm_scan_fn_rets(toks, list_len(toks));
+}
+
+pub fn llvm_fntab_used(tab: String, toks: List[String], n: Int) -> String {
+    let mut hay: String = "|";
+    let mut i = 0;
+    while i < n {
+        if field_at(list_get(toks, i), 0) == "IDENT" {
+            let nm: String = field_at(list_get(toks, i), 3);
+            if str_index_of(hay, "|" + nm + "|") < 0 {
+                hay = hay + nm + "|";
+            }
+        }
+        i = i + 1;
+    }
+    let mut out: String = "";
+    let mut ent: String = "";
+    let tn: Int = chars_len(tab);
+    i = 0;
+    while i <= tn {
+        let at_end = i == tn;
+        let mut c = "|";
+        if !at_end { c = char_at(tab, i); }
+        if c == "|" || at_end {
+            if ent != "" {
+                let elen = chars_len(ent);
+                let mut eq = 0 - 1;
+                let mut j = 0;
+                while j < elen {
+                    if char_at(ent, j) == "=" { eq = j; }
+                    j = j + 1;
+                }
+                if eq > 0 {
+                    let nm = str_slice(ent, 0, eq);
+                    if str_index_of(hay, "|" + nm + "|") >= 0 {
+                        out = out + ent + "|";
+                    }
+                }
+            }
+            ent = "";
+        } else {
+            ent = ent + c;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn llvm_builtin_fntab() -> String {
+    return "sys_exec=%OoResS#i64, %OoStr, %OoStr, %OoStr|process_exec=%OoResS#i64, %OoStr|read_file=%OoResS#i64, %OoStr|write_file=%OoResS#i64, %OoStr, %OoStr|process_exit=void#i64|byte_at=i64#%OoStr, i64|bytes_len=i64#%OoStr|path_exists=i32#i64, %OoStr|str_index_of=i64#%OoStr, %OoStr|oo_str_index_of=i64#%OoStr, %OoStr|file_size=i64#%OoStr|oo_file_size=i64#%OoStr|str_starts_with=i32#%OoStr, %OoStr|oo_str_starts_with=i32#%OoStr, %OoStr|str_ends_with=i32#%OoStr, %OoStr|oo_str_ends_with=i32#%OoStr, %OoStr|crypto_sha256_internal=%OoStr#%OoStr|oo_file_stamp=%OoStr#%OoStr|oo_wasm_write_empty_module=void#|oo_emit_tmp_reset=void#|oo_emit_tmp_enter=void#|oo_emit_tmp_leave=void#|oo_emit_tmp_release_print=void#|oo_emit_tmp_own=void#%OoStr|oo_emit_tmp_release_all_print=void#|oo_emit_tmp_bind=%OoStr#%OoStr|";
+}
+
+fn llvm_fntab_mark(tab: String, seen0: String) -> String {
+    let mut seen: String = seen0;
+    let mut ent: String = "";
+    let n: Int = chars_len(tab);
+    let mut i: Int = 0;
+    while i <= n {
+        let at_end = i == n;
+        let mut c = "|";
+        if !at_end { c = char_at(tab, i); }
+        if c == "|" || at_end {
+            if ent != "" {
+                let elen = chars_len(ent);
+                let mut eq = 0 - 1;
+                let mut j = 0;
+                while j < elen {
+                    if char_at(ent, j) == "=" { eq = j; }
+                    j = j + 1;
+                }
+                if eq > 0 {
+                    let nm = str_slice(ent, 0, eq);
+                    let mark = "|" + nm + "|";
+                    if str_index_of(seen, mark) < 0 {
+                        seen = seen + nm + "|";
+                    }
+                }
+            }
+            ent = "";
+        } else {
+            ent = ent + c;
+        }
+        i = i + 1;
+    }
+    return seen;
+}
+
+pub fn llvm_emit_fntab_declares(tab: String, skip: String) {
+    let mut seen: String = llvm_fntab_mark(skip, "|main|");
+    let mut ent: String = "";
+    let n: Int = chars_len(tab);
+    let mut i: Int = 0;
+    while i <= n {
+        let at_end = i == n;
+        let mut c = "|";
+        if !at_end { c = char_at(tab, i); }
+        if c == "|" || at_end {
+            if ent != "" {
+                let elen = chars_len(ent);
+                let mut eq = 0 - 1;
+                let mut j = 0;
+                while j < elen {
+                    if char_at(ent, j) == "=" { eq = j; }
+                    j = j + 1;
+                }
+                if eq > 0 {
+                    let nm = str_slice(ent, 0, eq);
+                    let ty0 = str_slice(ent, eq + 1, elen);
+                    let mut ty = ty0;
+                    let mut ps = "";
+                    let tlen = chars_len(ty0);
+                    let mut h = 0 - 1;
+                    let mut k = 0;
+                    while k < tlen {
+                        if char_at(ty0, k) == "#" { h = k; k = tlen; }
+                        else { k = k + 1; }
+                    }
+                    if h >= 0 {
+                        ty = str_slice(ty0, 0, h);
+                        ps = str_slice(ty0, h + 1, tlen);
+                    }
+                    let mark = "|" + nm + "|";
+                    if str_index_of(seen, mark) < 0 && nm != "" && ty != "" {
+                        println("declare " + ty + " @" + nm + "(" + ps + ")");
+                        seen = seen + nm + "|";
+                    }
+                }
+            }
+            ent = "";
+        } else {
+            ent = ent + c;
+        }
+        i = i + 1;
+    }
+}

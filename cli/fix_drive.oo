@@ -1,118 +1,19 @@
 // # Drive ooda fix in the product CLI
 //
-// Logline: Check a file, ask a person, then apply one E_CAP, E_TC, E_PARSE, or E_IMP edit.
+// Logline: Check a file, ask a person, then apply one E_CAP, E_TC, E_PARSE, E_IMP, or E_MUST edit.
 // Setup: SysCap runs oodac. FsCap reads and writes the source. No .py and no .sh file.
 // Beats:
 //   1. Parse path, --yes, and --dry-run.
 //   2. Read check text. Ask unless --yes. Refuse with no TTY.
 //   3. Apply at most eight edits. Host sh -c only starts oodac and the TTY read.
+
 import "fix_text.oo";
 import "fix_apply.oo";
 import "fix_imp.oo";
+import "fix_must.oo";
+import "fix_util.oo";
 import "find_compiler.oo";
 import "host_run.oo";
-fn refuse_symlink(sys: &SysCap, path: String) {
-    let cmd: String = "if [ -L " + sq(path) + " ]; then exit 0; else exit 1; fi";
-    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
-    if r.is_ok() {
-        println("ERR\tfix\tsymlink refused");
-        process_exit(2);
-    }
-}
-
-fn check_text(sys: &SysCap, fs: &FsCap, oodac: String, path: String) -> String {
-    let stem: String = log_stem(path);
-    let outp: String = stem + ".out";
-    let errp: String = stem + ".err";
-    let cmd: String = "mkdir -p .ooda-cache/ooda-tmp; " + sq(oodac) + " check " + sq(path) + " > " + sq(outp) + " 2> " + sq(errp) + "; exit 0";
-    let ign: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
-    if ign.is_ok() {
-        let hold = 0;
-        if hold != 0 { println(""); }
-    }
-    let mut acc: String = "";
-    let ro: Result[String, String] = read_file(fs, outp);
-    match ro {
-        Ok(s) => {
-            acc = acc + s;
-        }
-        Err(m) => {}
-    }
-    let re: Result[String, String] = read_file(fs, errp);
-    match re {
-        Ok(s2) => {
-            acc = acc + "\n" + s2;
-        }
-        Err(m2) => {}
-    }
-    return acc;
-}
-
-fn digit_val(c: String) -> Int {
-    if c == "1" { return 1; }
-    if c == "2" { return 2; }
-    if c == "3" { return 3; }
-    if c == "4" { return 4; }
-    if c == "5" { return 5; }
-    if c == "6" { return 6; }
-    if c == "7" { return 7; }
-    if c == "8" { return 8; }
-    if c == "9" { return 9; }
-    return 0;
-}
-
-fn is_digit_char(c: String) -> Bool {
-    if c == "0" || c == "1" || c == "2" || c == "3" || c == "4" || c == "5" || c == "6" || c == "7" || c == "8" || c == "9" {
-        return true;
-    }
-    return false;
-}
-
-fn parse_int_digits(s: String) -> Int {
-    let n = chars_len(s);
-    let mut i = 0;
-    let mut v = 0;
-    while i < n {
-        let c: String = char_at(s, i);
-        if is_digit_char(c) {
-            v = v * 10 + digit_val(c);
-        }
-        i = i + 1;
-    }
-    if v <= 0 {
-        return 1;
-    }
-    return v;
-}
-
-fn ask_fix(sys: &SysCap, path: String, what: String) -> Int {
-    let msg: String = "ooda fix will change " + path + " (" + what + ").\nApply? [y/N] ";
-    let cmd: String = "if [ -t 0 ]; then printf %s " + sq(msg) + " >&2; read ans; case \"$ans\" in y|Y|yes|YES) exit 0;; *) exit 1;; esac; else exit 2; fi";
-    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
-    if r.is_ok() {
-        return 0;
-    }
-    let tty_check: Result[String, String] = sys_exec(sys, "sh", "-c", "if [ -t 0 ]; then exit 0; else exit 1; fi");
-    if tty_check.is_ok() {
-        return 1;
-    }
-    return 2;
-}
-fn classify(log: String) -> String {
-    if find_sub(log, "ERR\tcapability\t") >= 0 || find_sub(log, "E_CAP") >= 0 {
-        return "ecap";
-    }
-    if find_sub(log, "undefined variable '") >= 0 || find_sub(log, "ERR\ttype\t") >= 0 || find_sub(log, "E_TC") >= 0 {
-        return "etc";
-    }
-    if find_sub(log, "ERR\tparse\t") >= 0 {
-        return "eparse";
-    }
-    if find_sub(log, "ERR\timport\t") >= 0 {
-        return "eimp";
-    }
-    return "";
-}
 
 pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
     let mut path = "";
@@ -163,7 +64,7 @@ pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
                 println("OK\tfix\tmulti-pass clean after " + applied.to_string() + " apply step(s)");
                 process_exit(0);
             }
-            println("ERR\tfix\tno supported diagnostic class (want E_CAP, E_TC, E_PARSE, or E_IMP)");
+            println("ERR\tfix\tno supported diagnostic class (want E_CAP, E_TC, E_PARSE, E_IMP, or E_MUST)");
             process_exit(1);
         }
         let mut what: String = "insert a missing let for an undefined name";
@@ -172,6 +73,9 @@ pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
         }
         if kind == "eparse" {
             what = "insert missing closing braces";
+        }
+        if kind == "emust" {
+            what = "handle a discarded Result call";
         }
         let ispec: String = infer_import_spec(fs, log);
         if kind == "etc" {
@@ -220,6 +124,15 @@ pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
             next = apply_eparse(text);
         } else if kind == "eimp" {
             next = apply_eimp(text, ispec);
+        } else if kind == "emust" {
+            let name: String = between(log, "do not discard ", ")");
+            if name == "" {
+                println("ERR\tfix\tno discarded call name");
+                process_exit(1);
+            }
+            let loc: String = between(log, "Type error at ", ":");
+            let line: Int = parse_int_digits(loc);
+            next = apply_emust(text, name, line);
         } else {
             let name: String = between(log, "undefined variable '", "'");
             if name == "" {
@@ -245,6 +158,8 @@ pub fn run_ooda_fix(fs: &FsCap, sys: &SysCap, args: List[String]) {
             println("OK\tfix\tapplied E_PARSE brace fix to " + path);
         } else if kind == "eimp" {
             println("OK\tfix\tapplied E_IMP import fix to " + path);
+        } else if kind == "emust" {
+            println("OK\tfix\tapplied E_MUST Result handle to " + path);
         } else {
             println("OK\tfix\tapplied E_TC undefined-var let to " + path);
         }

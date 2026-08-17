@@ -1,14 +1,12 @@
 // # Lower expressions to LLVM
 //
-// Logline: Emits a primary or Pratt-parsed binop as LLVM IR and returns value, type, pos, and the five-slot env.
+// Logline: Emits a primary or Pratt-parsed binop as LLVM IR and returns value, type, pos, and env.
 //
-// Setup: llvm_gen_reg, llvm_add_str_lit, llvm_env_get_var_ty, llvm_ty_map, llvm_emit_builtin_println, llvm_emit_builtin_assert, llvm_emit_call_expr, and llvm_emit_method exist.
+// Setup: sibling llvm_emit_* helpers; env is the five-slot emit env.
 //
 // Beats:
-//   1. llvm_emit_slit allocates and initializes struct literals via GEP stores.
-//   2. llvm_emit_primary lowers ints, floats, bools, strings, calls, methods, fields, parens, unary, bang, and skips match-as-expr.
-//   3. llvm_emit_expr_prec applies binops at min_prec via llvm_apply_binop; llvm_emit_expr starts at precedence 1.
-
+//   1. Primary: lits, calls, methods including contains, fields, parens, unary.
+//   2. Pratt binops via llvm_apply_binop.
 import "token_fmt.oo";
 import "llvm_emit_ty.oo";
 import "llvm_emit_env.oo";
@@ -118,7 +116,14 @@ pub fn llvm_emit_primary(toks: List[String], pos: Int, n: Int, env: List[String]
     if k == "IDENT" {
         if txt == "println" || txt == "print" || txt == "eprintln" { return llvm_emit_builtin_println(toks, pos, n, env); }
         if txt == "assert" || txt == "assert_eq" || txt == "assert_ne" { return llvm_emit_builtin_assert(txt, toks, pos, n, env); }
-        if pos + 1 < n && field_at(list_get(toks, pos + 1), 0) == "LPAREN" { return llvm_emit_call_expr(txt, toks, pos + 1, n, env); }
+        if pos + 1 < n && field_at(list_get(toks, pos + 1), 0) == "LPAREN" {
+            let cr: List[String] = llvm_emit_call_expr(txt, toks, pos + 1, n, env);
+            let cp = 0 + parse_int(list_get(cr, 2));
+            if cp < n && field_at(list_get(toks, cp), 0) == "DOT" {
+                return llvm_emit_method_val(list_get(cr, 0), list_get(cr, 1), toks, cp, n, llvm_pack_env5(cr, 3));
+            }
+            return cr;
+        }
         if pos + 1 < n && field_at(list_get(toks, pos + 1), 0) == "LBRACE" {
             let p2 = pos + 2;
             if p2 < n && (field_at(list_get(toks, p2), 0) == "RBRACE" || (p2 + 1 < n && field_at(list_get(toks, p2 + 1), 0) == "COLON")) {
@@ -130,6 +135,21 @@ pub fn llvm_emit_primary(toks: List[String], pos: Int, n: Int, env: List[String]
             let lty: String = llvm_ty_map(vty_ooda);
             let is_struct = chars_len(lty) >= 8 && str_slice(lty, 0, 8) == "%struct.";
             let is_meth = pos + 3 < n && field_at(list_get(toks, pos + 3), 0) == "LPAREN";
+            if is_meth && field_at(list_get(toks, pos + 2), 3) == "contains" {
+                let gld: List[String] = llvm_gen_reg(cur_env);
+                let rv: String = list_get(gld, 0);
+                cur_env = llvm_pack_env5(gld, 1);
+                println("  " + rv + " = load " + lty + ", " + lty + "* %" + llvm_env_slot(cur_env, txt) + ".slot, align 8");
+                let ar: List[String] = llvm_emit_expr(toks, pos + 4, n, cur_env);
+                let mut ap = 0 + parse_int(list_get(ar, 2));
+                cur_env = llvm_pack_env5(ar, 3);
+                if ap < n && field_at(list_get(toks, ap), 0) == "RPAREN" { ap = ap + 1; }
+                let gc: List[String] = llvm_gen_reg(cur_env);
+                let crv: String = list_get(gc, 0);
+                cur_env = llvm_pack_env5(gc, 1);
+                println("  " + crv + " = call i32 @oo_str_contains(%OoStr " + rv + ", %OoStr " + list_get(ar, 0) + ")");
+                return llvm_out_val(crv, "i32", ap, cur_env);
+            }
             if is_struct && !is_meth {
                 let fname: String = field_at(list_get(toks, pos + 2), 3);
                 let f_res: List[String] = llvm_emit_struct_field_get(txt, fname, cur_env);
@@ -145,7 +165,8 @@ pub fn llvm_emit_primary(toks: List[String], pos: Int, n: Int, env: List[String]
         let reg_res: List[String] = llvm_gen_reg(cur_env);
         let treg: String = list_get(reg_res, 0);
         cur_env = llvm_pack_env5(reg_res, 1);
-        println("  " + treg + " = load " + lty + ", " + lty + "* %" + txt + ".slot, align 8");
+        let eslot: String = llvm_env_slot(cur_env, txt);
+        println("  " + treg + " = load " + lty + ", " + lty + "* %" + eslot + ".slot, align 8");
         return llvm_out_val(treg, lty, pos + 1, cur_env);
     }
     if k == "LPAREN" {
@@ -221,7 +242,7 @@ pub fn llvm_emit_expr_prec(toks: List[String], pos: Int, n: Int, env: List[Strin
         let rhs_val: String = list_get(rhs, 0);
         p = parse_int(list_get(rhs, 2));
         cur_env = llvm_pack_env5(rhs, 3);
-        let applied: List[String] = llvm_apply_binop(op_k, lhs_val, lhs_ty, rhs_val, cur_env);
+        let applied: List[String] = llvm_apply_binop(op_k, lhs_val, lhs_ty, rhs_val, list_get(rhs, 1), cur_env);
         lhs_val = list_get(applied, 0);
         lhs_ty = list_get(applied, 1);
         cur_env = llvm_pack_env5(applied, 2);

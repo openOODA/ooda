@@ -1,0 +1,139 @@
+// # Named package-manager proofs
+//
+// Logline: Drive shipped resolve, traversal refuse, lock match/tamper, and add helpers.
+//
+// Setup: Imports pm/pm_resolve.oo. In-memory catalog. Live crypto_sha256_internal. No baked hex.
+//
+// Beats:
+//   1. Resolve hello onto world@^1.0.0 from the file-backed catalog shape.
+//   2. Refuse .., slash, and absolute names through pm_name_ok and pm_resolve.
+//   3. Lock hash matches on the same payload and differs when tampered.
+//   4. Add a local package through shipped install helpers (resolve plus CAS plus lock).
+
+import "pm/pm_resolve.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn want_ok_prefix(s: String) -> Bool {
+    if chars_len(s) < 3 {
+        return false;
+    }
+    return str_slice(s, 0, 3) == "ok ";
+}
+
+pub fn main() {
+    let cat: String = "world|1.0.0|1|\nhello|1.0.0|1|world@^1.0.0#1\nevilcap|1.0.0|2|\n";
+
+    let r: String = pm_resolve(cat, "hello", 1);
+    if !want_ok_prefix(r) {
+        fail("resolve " + r);
+    }
+    if str_index_of(r, "hello@1.0.0") < 0 {
+        fail("hello missing " + r);
+    }
+    if str_index_of(r, "world@1.0.0") < 0 {
+        fail("world missing " + r);
+    }
+    if !pm_semver_sat("1.0.0", "^1.0.0") {
+        fail("caret world");
+    }
+
+    if pm_name_ok("..") {
+        fail("name ..");
+    }
+    if pm_name_ok("/") {
+        fail("name /");
+    }
+    if pm_name_ok("/etc/passwd") {
+        fail("name absolute");
+    }
+    if pm_name_ok("foo/../bar") {
+        fail("name traversal");
+    }
+    if !pm_name_ok("hello") {
+        fail("name hello");
+    }
+    let r_dot: String = pm_resolve(cat, "..", 1);
+    if r_dot != "err name" {
+        fail("resolve .. " + r_dot);
+    }
+    let r_abs: String = pm_resolve(cat, "/abs", 1);
+    if r_abs != "err name" {
+        fail("resolve abs " + r_abs);
+    }
+
+    let lock: String = "hello@1.0.0#abc\nworld@1.0.0#def\n";
+    let h1: String = pm_lock_hash(lock);
+    let h2: String = pm_lock_hash(lock);
+    let live: String = crypto_sha256_internal(lock);
+    if h1 != h2 {
+        fail("lock match");
+    }
+    if h1 != live {
+        fail("lock live sha");
+    }
+    if chars_len(h1) != 64 {
+        fail("lock len");
+    }
+    if !pm_lock_same(lock, lock) {
+        fail("lock same");
+    }
+    let tampered: String = "hello@1.0.0#EVIL\nworld@1.0.0#def\n";
+    let h3: String = pm_lock_hash(tampered);
+    if h1 == h3 {
+        fail("lock tamper hash");
+    }
+    if pm_lock_same(lock, tampered) {
+        fail("lock tamper same");
+    }
+
+    if !pm_name_ok("world") {
+        fail("add name world");
+    }
+    let add_r: String = pm_resolve(cat, "hello", 1);
+    if !want_ok_prefix(add_r) {
+        fail("add resolve " + add_r);
+    }
+    let world_bytes: String = "World";
+    let hello_bytes: String = "Hello, World!";
+    let world_cas: String = pm_cas_id(world_bytes);
+    let hello_cas: String = pm_cas_id(hello_bytes);
+    if chars_len(world_cas) != 64 {
+        fail("add cas world");
+    }
+    if chars_len(hello_cas) != 64 {
+        fail("add cas hello");
+    }
+    if world_cas == hello_cas {
+        fail("add cas collide");
+    }
+    if world_cas != crypto_sha256_internal(world_bytes) {
+        fail("add cas live");
+    }
+    let add_lock: String = "hello@1.0.0#" + hello_cas + "\nworld@1.0.0#" + world_cas + "\n";
+    let add_h: String = pm_lock_hash(add_lock);
+    if add_h != crypto_sha256_internal(add_lock) {
+        fail("add lock live");
+    }
+    if chars_len(add_h) != 64 {
+        fail("add lock len");
+    }
+    let add_bad: String = add_lock + "tamper";
+    if pm_lock_same(add_lock, add_bad) {
+        fail("add lock tamper");
+    }
+
+    let gate_ok: Result[Bool, String] = pm_caps_gate(1, 1);
+    if gate_ok.is_err() {
+        fail("caps gate allow");
+    }
+    let gate_bad: Result[Bool, String] = pm_caps_gate(1, 2);
+    if gate_bad.is_ok() {
+        fail("caps gate refuse");
+    }
+
+    println("pm_proof: PASSED");
+}
