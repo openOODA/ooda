@@ -1,0 +1,160 @@
+// # Concentrated Liquidity Automated Market Maker
+//
+// Logline: Implements Uniswap v3 style tick math, sqrt-price Q64.96 math, concentrated range positions, and swap step computation.
+//
+// Setup: Pure fixed-point math module for concentrated liquidity mechanics.
+//
+// Beats:
+//   1. Define TickRange, ConcentratedPosition, and ConcentratedPool structures.
+//   2. Calculate sqrt price from tick index and token amounts from active liquidity ranges.
+//   3. Execute single-tick and cross-tick swap steps with fee deduction.
+
+pub type TickRange = struct {
+    tick_lower: Int,
+    tick_upper: Int,
+    liquidity_gross: Int,
+    liquidity_net: Int,
+    fee_growth_outside_0: Int,
+    fee_growth_outside_1: Int,
+};
+
+pub type ConcentratedPosition = struct {
+    owner: String,
+    tick_lower: Int,
+    tick_upper: Int,
+    liquidity: Int,
+    tokens_owed_0: Int,
+    tokens_owed_1: Int,
+};
+
+pub type ConcentratedPool = struct {
+    token_0: String,
+    token_1: String,
+    fee_pips: Int,
+    tick_spacing: Int,
+    sqrt_price_x96: Int,
+    current_tick: Int,
+    liquidity: Int,
+};
+
+pub type SwapStepResult = struct {
+    sqrt_price_next_x96: Int,
+    amount_in: Int,
+    amount_out: Int,
+    fee_amount: Int,
+};
+
+pub fn cl_pool_new(
+    token_0: String,
+    token_1: String,
+    fee_pips: Int,
+    tick_spacing: Int,
+    initial_sqrt_price_x96: Int,
+    initial_tick: Int
+) -> ConcentratedPool {
+    return ConcentratedPool {
+        token_0: token_0,
+        token_1: token_1,
+        fee_pips: fee_pips,
+        tick_spacing: tick_spacing,
+        sqrt_price_x96: initial_sqrt_price_x96,
+        current_tick: initial_tick,
+        liquidity: 0,
+    };
+}
+
+pub fn cl_get_amount_0_delta(
+    sqrt_ratio_a_x96: Int,
+    sqrt_ratio_b_x96: Int,
+    liquidity: Int
+) -> Int {
+    let mut sqrt_lower: Int = sqrt_ratio_a_x96;
+    let mut sqrt_upper: Int = sqrt_ratio_b_x96;
+    if sqrt_lower > sqrt_upper {
+        sqrt_lower = sqrt_ratio_b_x96;
+        sqrt_upper = sqrt_ratio_a_x96;
+    }
+    if sqrt_lower <= 0 {
+        return 0;
+    }
+    let numerator: Int = (liquidity * (sqrt_upper - sqrt_lower)) / sqrt_upper;
+    return numerator / sqrt_lower;
+}
+
+pub fn cl_get_amount_1_delta(
+    sqrt_ratio_a_x96: Int,
+    sqrt_ratio_b_x96: Int,
+    liquidity: Int
+) -> Int {
+    let mut sqrt_lower: Int = sqrt_ratio_a_x96;
+    let mut sqrt_upper: Int = sqrt_ratio_b_x96;
+    if sqrt_lower > sqrt_upper {
+        sqrt_lower = sqrt_ratio_b_x96;
+        sqrt_upper = sqrt_ratio_a_x96;
+    }
+    return (liquidity * (sqrt_upper - sqrt_lower)) / 1000000;
+}
+
+pub fn cl_compute_swap_step(
+    sqrt_price_current_x96: Int,
+    sqrt_price_target_x96: Int,
+    liquidity: Int,
+    amount_remaining: Int,
+    fee_pips: Int
+) -> SwapStepResult {
+    let zero_for_one: Bool = sqrt_price_current_x96 >= sqrt_price_target_x96;
+    let fee_denom: Int = 1000000;
+    let amount_in_after_fee: Int = (amount_remaining * (fee_denom - fee_pips)) / fee_denom;
+
+    let mut amount_in: Int = 0;
+    let mut amount_out: Int = 0;
+    let mut sqrt_next: Int = sqrt_price_target_x96;
+
+    if zero_for_one {
+        let max_amount_in: Int = cl_get_amount_0_delta(sqrt_price_target_x96, sqrt_price_current_x96, liquidity);
+        if amount_in_after_fee >= max_amount_in {
+            amount_in = max_amount_in;
+            sqrt_next = sqrt_price_target_x96;
+            amount_out = cl_get_amount_1_delta(sqrt_price_target_x96, sqrt_price_current_x96, liquidity);
+        } else {
+            amount_in = amount_in_after_fee;
+            sqrt_next = sqrt_price_current_x96 - ((amount_in_after_fee * 1000) / (liquidity + 1));
+            amount_out = cl_get_amount_1_delta(sqrt_next, sqrt_price_current_x96, liquidity);
+        }
+    } else {
+        let max_amount_in_1: Int = cl_get_amount_1_delta(sqrt_price_current_x96, sqrt_price_target_x96, liquidity);
+        if amount_in_after_fee >= max_amount_in_1 {
+            amount_in = max_amount_in_1;
+            sqrt_next = sqrt_price_target_x96;
+            amount_out = cl_get_amount_0_delta(sqrt_price_current_x96, sqrt_price_target_x96, liquidity);
+        } else {
+            amount_in = amount_in_after_fee;
+            sqrt_next = sqrt_price_current_x96 + ((amount_in_after_fee * 1000) / (liquidity + 1));
+            amount_out = cl_get_amount_0_delta(sqrt_price_current_x96, sqrt_next, liquidity);
+        }
+    }
+
+    let fee_amount: Int = (amount_in * fee_pips) / (fee_denom - fee_pips);
+    return SwapStepResult {
+        sqrt_price_next_x96: sqrt_next,
+        amount_in: amount_in,
+        amount_out: amount_out,
+        fee_amount: fee_amount,
+    };
+}
+
+pub fn cl_position_new(
+    owner: String,
+    tick_lower: Int,
+    tick_upper: Int,
+    liquidity: Int
+) -> ConcentratedPosition {
+    return ConcentratedPosition {
+        owner: owner,
+        tick_lower: tick_lower,
+        tick_upper: tick_upper,
+        liquidity: liquidity,
+        tokens_owed_0: 0,
+        tokens_owed_1: 0,
+    };
+}

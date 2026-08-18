@@ -1,0 +1,115 @@
+// # ELF64 Relocation Resolver Engine
+//
+// Logline: ELF64 relocation calculation (R_X86_64_64, R_X86_64_PC32, R_AARCH64_CALL26, R_AARCH64_ADR_PREL_PG_HI21).
+//
+// Setup: Solves static and dynamic relocations S + A and S + A - P for x86_64 and AArch64 binary linkers.
+//
+// Beats:
+//   1. Define Elf64Rela entry and RelocationResult structures.
+//   2. Compute x86_64 relocations (direct 64-bit, PC-relative 32-bit, PLT32).
+//   3. Compute ARM64 AArch64 relocations (ADR_PREL_PG_HI21 page delta, CALL26 branch offsets).
+
+pub type Elf64Rela = struct {
+    r_offset: Int,
+    r_info_sym: Int,
+    r_info_type: Int,
+    r_addend: Int,
+};
+
+pub type RelocationPatch = struct {
+    target_offset: Int,
+    patch_size_bytes: Int,
+    calculated_value: Int,
+    is_pc_relative: Int,
+};
+
+// -------------------------------------------------------------------
+// Relocation Types (x86_64 and ARM64)
+// -------------------------------------------------------------------
+
+pub fn r_x86_64_none() -> Int { return 0; }
+pub fn r_x86_64_64() -> Int { return 1; }
+pub fn r_x86_64_pc32() -> Int { return 2; }
+pub fn r_x86_64_got32() -> Int { return 3; }
+pub fn r_x86_64_plt32() -> Int { return 4; }
+
+pub fn r_aarch64_none() -> Int { return 0; }
+pub fn r_aarch64_abs64() -> Int { return 257; }
+pub fn r_aarch64_adr_prel_pg_hi21() -> Int { return 275; }
+pub fn r_aarch64_add_abs_lo12_nc() -> Int { return 277; }
+pub fn r_aarch64_call26() -> Int { return 283; }
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn elf64_rela_new(offset: Int, sym: Int, r_type: Int, addend: Int) -> Elf64Rela {
+    return Elf64Rela {
+        r_offset: offset,
+        r_info_sym: sym,
+        r_info_type: r_type,
+        r_addend: addend,
+    };
+}
+
+pub fn relocation_patch_new(offset: Int, size: Int, val: Int, pc_rel: Int) -> RelocationPatch {
+    return RelocationPatch {
+        target_offset: offset,
+        patch_size_bytes: size,
+        calculated_value: val,
+        is_pc_relative: pc_rel,
+    };
+}
+
+// -------------------------------------------------------------------
+// Relocation Resolver Logic
+// -------------------------------------------------------------------
+
+pub fn resolve_x86_64_relocation(rela: Elf64Rela, sym_addr: Int, pc_addr: Int) -> RelocationPatch {
+    let r_type: Int = (rela).r_info_type;
+    let s: Int = sym_addr;
+    let a: Int = (rela).r_addend;
+    let p: Int = pc_addr;
+    
+    // R_X86_64_64: S + A (64-bit absolute)
+    if r_type == 1 {
+        let val: Int = s + a;
+        return relocation_patch_new((rela).r_offset, 8, val, 0);
+    }
+    
+    // R_X86_64_PC32: S + A - P (32-bit signed PC-relative)
+    if r_type == 2 || r_type == 4 {
+        let val: Int = (s + a) - p;
+        return relocation_patch_new((rela).r_offset, 4, val, 1);
+    }
+    
+    return relocation_patch_new((rela).r_offset, 0, 0, 0);
+}
+
+pub fn resolve_aarch64_relocation(rela: Elf64Rela, sym_addr: Int, pc_addr: Int) -> RelocationPatch {
+    let r_type: Int = (rela).r_info_type;
+    let s: Int = sym_addr;
+    let a: Int = (rela).r_addend;
+    let p: Int = pc_addr;
+    
+    // R_AARCH64_ABS64: S + A
+    if r_type == 257 {
+        let val: Int = s + a;
+        return relocation_patch_new((rela).r_offset, 8, val, 0);
+    }
+    
+    // R_AARCH64_CALL26: (S + A - P) / 4 (26-bit branch offset)
+    if r_type == 283 {
+        let diff: Int = (s + a) - p;
+        let val: Int = diff / 4;
+        return relocation_patch_new((rela).r_offset, 4, val & 67108863, 1); // 26-bit mask (0x3FFFFFF)
+    }
+    
+    // R_AARCH64_ADD_ABS_LO12_NC: (S + A) & 0xFFF
+    if r_type == 277 {
+        let val: Int = (s + a) & 4095;
+        return relocation_patch_new((rela).r_offset, 4, val, 0);
+    }
+    
+    return relocation_patch_new((rela).r_offset, 0, 0, 0);
+}

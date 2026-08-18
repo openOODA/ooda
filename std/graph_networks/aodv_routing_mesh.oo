@@ -1,0 +1,159 @@
+// # Ad hoc On-Demand Distance Vector (AODV) Routing Mesh
+//
+// Logline: Implements reactive AODV mesh routing with route requests (RREQ), replies (RREP), and destination sequence numbers.
+//
+// Setup: Loop-free reactive ad-hoc routing engine maintaining on-demand routing tables with freshness sequence numbers.
+//
+// Beats:
+//   1. Broadcast Route Request (RREQ) discovery frames with monotonic broadcast IDs.
+//   2. Unicast Route Reply (RREP) acknowledgments establishing reverse and forward path state.
+//   3. Maintain destination sequence numbers to guarantee loop freedom and freshest path selection.
+
+pub type AodvRouteEntry = struct {
+    dest_ip: Int,
+    next_hop: Int,
+    hop_count: Int,
+    dest_seq_num: Int,
+    is_valid: Bool,
+    lifetime_ms: Int,
+};
+
+pub type AodvRreq = struct {
+    rreq_id: Int,
+    dest_ip: Int,
+    dest_seq_num: Int,
+    orig_ip: Int,
+    orig_seq_num: Int,
+    hop_count: Int,
+};
+
+pub type AodvRrep = struct {
+    dest_ip: Int,
+    dest_seq_num: Int,
+    orig_ip: Int,
+    hop_count: Int,
+    lifetime_ms: Int,
+};
+
+pub type AodvRoutingTable = struct {
+    local_ip: Int,
+    sequence_number: Int,
+    rreq_broadcast_id: Int,
+    routes: List[AodvRouteEntry],
+};
+
+pub fn aodv_table_create(local_ip: Int) -> AodvRoutingTable {
+    let empty: List[AodvRouteEntry] = list_new();
+    return AodvRoutingTable {
+        local_ip: local_ip,
+        sequence_number: 1,
+        rreq_broadcast_id: 0,
+        routes: empty,
+    };
+}
+
+pub fn aodv_find_route_idx(table: &AodvRoutingTable, dest_ip: Int) -> Int {
+    let n: Int = list_len((table).routes);
+    let mut i: Int = 0;
+    while i < n {
+        let r: AodvRouteEntry = list_get((table).routes, i);
+        if (r).dest_ip == dest_ip {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+pub fn aodv_update_or_insert_route(
+    table: &mut AodvRoutingTable,
+    dest: Int,
+    next_hop: Int,
+    hops: Int,
+    seq: Int,
+    lifetime: Int
+) -> Bool {
+    let idx: Int = aodv_find_route_idx(table, dest);
+    let new_entry: AodvRouteEntry = AodvRouteEntry {
+        dest_ip: dest,
+        next_hop: next_hop,
+        hop_count: hops,
+        dest_seq_num: seq,
+        is_valid: true,
+        lifetime_ms: lifetime,
+    };
+
+    if idx >= 0 {
+        let cur: AodvRouteEntry = list_get((table).routes, idx);
+        // Update if seq number is higher, or same seq with lower hop count
+        if (seq > (cur).dest_seq_num) || (seq == (cur).dest_seq_num && hops < (cur).hop_count) || !(cur).is_valid {
+            let mut updated_list: List[AodvRouteEntry] = list_new();
+            let n: Int = list_len((table).routes);
+            let mut i: Int = 0;
+            while i < n {
+                if i == idx {
+                    updated_list = list_push(updated_list, new_entry);
+                } else {
+                    updated_list = list_push(updated_list, list_get((table).routes, i));
+                }
+                i = i + 1;
+            }
+            (table).routes = updated_list;
+            return true;
+        }
+        return false;
+    }
+
+    (table).routes = list_push((table).routes, new_entry);
+    return true;
+}
+
+pub fn aodv_create_rreq(table: &mut AodvRoutingTable, dest_ip: Int) -> AodvRreq {
+    (table).rreq_broadcast_id = (table).rreq_broadcast_id + 1;
+    (table).sequence_number = (table).sequence_number + 1;
+
+    let dest_idx: Int = aodv_find_route_idx(table, dest_ip);
+    let mut last_seq: Int = 0;
+    if dest_idx >= 0 {
+        let r: AodvRouteEntry = list_get((table).routes, dest_idx);
+        last_seq = (r).dest_seq_num;
+    }
+
+    return AodvRreq {
+        rreq_id: (table).rreq_broadcast_id,
+        dest_ip: dest_ip,
+        dest_seq_num: last_seq,
+        orig_ip: (table).local_ip,
+        orig_seq_num: (table).sequence_number,
+        hop_count: 0,
+    };
+}
+
+pub fn aodv_process_rreq(table: &mut AodvRoutingTable, rreq: &AodvRreq, from_neighbor: Int) -> Bool {
+    // 1. Create/update reverse route to originator
+    aodv_update_or_insert_route(
+        table,
+        (rreq).orig_ip,
+        from_neighbor,
+        (rreq).hop_count + 1,
+        (rreq).orig_seq_num,
+        3000
+    );
+
+    // 2. Check if local node is destination
+    if (table).local_ip == (rreq).dest_ip {
+        (table).sequence_number = (table).sequence_number + 1;
+        return true; // Node will respond with RREP
+    }
+
+    // 3. Check if local node has fresh route to destination
+    let dest_idx: Int = aodv_find_route_idx(table, (rreq).dest_ip);
+    if dest_idx >= 0 {
+        let r: AodvRouteEntry = list_get((table).routes, dest_idx);
+        if (r).is_valid && (r).dest_seq_num >= (rreq).dest_seq_num {
+            return true; // Intermediate node can respond with RREP
+        }
+    }
+
+    return false; // Re-broadcast RREQ
+}

@@ -1,0 +1,94 @@
+// # Parquet Delta Encoding & Prefix Codecs
+//
+// Logline: Implements Parquet DELTA_BINARY_PACKED and DELTA_BYTE_ARRAY algorithms for integer and string columns.
+//
+// Setup: Encodes delta sequences of integers and shared prefix byte arrays for sorted timestamp and string columns.
+//
+// Beats:
+//   1. Define DeltaBlockHeader, DeltaBinaryPackedState, and DeltaByteArrayState structures.
+//   2. Implement zigzag decoding, block-relative delta accumulation, and mini-block bit unpacking.
+//   3. Implement shared prefix string reconstruction and suffix appending.
+
+pub type DeltaBlockHeader = struct {
+    block_size: Int,
+    num_mini_blocks: Int,
+    total_value_count: Int,
+    first_value: Int,
+    min_delta: Int,
+};
+
+pub type DeltaBinaryPackedState = struct {
+    header: DeltaBlockHeader,
+    accumulated_values: List[Int],
+    last_value: Int,
+};
+
+pub type DeltaByteArrayState = struct {
+    last_string: String,
+    materialized_strings: List[String],
+};
+
+pub fn delta_block_header_new(b_size: Int, mini_blocks: Int, total_v: Int, first_v: Int) -> DeltaBlockHeader {
+    return DeltaBlockHeader {
+        block_size: b_size,
+        num_mini_blocks: mini_blocks,
+        total_value_count: total_v,
+        first_value: first_v,
+        min_delta: 0,
+    };
+}
+
+pub fn delta_binary_state_new(first_v: Int) -> DeltaBinaryPackedState {
+    let mut vals: List[Int] = list_new();
+    vals = list_push(vals, first_v);
+    let hdr: DeltaBlockHeader = delta_block_header_new(128, 4, 1, first_v);
+    return DeltaBinaryPackedState {
+        header: hdr,
+        accumulated_values: vals,
+        last_value: first_v,
+    };
+}
+
+pub fn delta_decode_zigzag(n: Int) -> Int {
+    if (n % 2) == 0 {
+        return n / 2;
+    } else {
+        return -((n + 1) / 2);
+    }
+}
+
+pub fn delta_binary_add_delta(state: DeltaBinaryPackedState, delta_val: Int) -> DeltaBinaryPackedState {
+    let next_v: Int = (state).last_value + delta_val;
+    let new_vals: List[Int] = list_push((state).accumulated_values, next_v);
+    return DeltaBinaryPackedState {
+        header: (state).header,
+        accumulated_values: new_vals,
+        last_value: next_v,
+    };
+}
+
+pub fn delta_byte_array_state_new() -> DeltaByteArrayState {
+    let empty_s: List[String] = list_new();
+    return DeltaByteArrayState {
+        last_string: "",
+        materialized_strings: empty_s,
+    };
+}
+
+pub fn delta_byte_array_add_entry(
+    state: DeltaByteArrayState,
+    prefix_len: Int,
+    suffix: String
+) -> DeltaByteArrayState {
+    let prev: String = (state).last_string;
+    let prev_len: Int = chars_len(prev);
+    let actual_prefix_len: Int = if prefix_len <= prev_len { prefix_len } else { prev_len };
+    let prefix_part: String = if actual_prefix_len > 0 { str_slice(prev, 0, actual_prefix_len) } else { "" };
+    let reconstructed: String = prefix_part + suffix;
+
+    let updated_list: List[String] = list_push((state).materialized_strings, reconstructed);
+    return DeltaByteArrayState {
+        last_string: reconstructed,
+        materialized_strings: updated_list,
+    };
+}

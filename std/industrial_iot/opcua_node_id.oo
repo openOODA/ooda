@@ -1,0 +1,205 @@
+// # OPC UA NodeId & QualifiedName Modeling
+//
+// Logline: Implements OPC UA Address Space NodeId encodings, namespaces, and canonical string representation.
+//
+// Setup: Pure identifier serializer supporting numeric, string, two-byte, and four-byte NodeIds.
+//
+// Beats:
+//   1. Define OpcUaNodeId and QualifiedName data models with typed identifiers.
+//   2. Encode and decode compact binary NodeId wire representations.
+//   3. Format standard canonical NodeId string representations (ns=X;i=Y, ns=X;s=Z).
+
+pub type OpcUaNodeId = struct {
+    node_type: Int,       // 0=TwoByte, 1=FourByte, 2=Numeric, 3=String
+    namespace_idx: Int,
+    numeric_id: Int,
+    string_id: String,
+};
+
+pub type OpcUaQualifiedName = struct {
+    namespace_idx: Int,
+    name: String,
+};
+
+/// Construct a standard Numeric NodeId.
+pub fn opcua_node_id_numeric(ns: Int, id: Int) -> OpcUaNodeId {
+    if ns == 0 && id <= 255 {
+        return OpcUaNodeId {
+            node_type: 0, // TwoByte
+            namespace_idx: 0,
+            numeric_id: id,
+            string_id: "",
+        };
+    } else if ns <= 255 && id <= 65535 {
+        return OpcUaNodeId {
+            node_type: 1, // FourByte
+            namespace_idx: ns,
+            numeric_id: id,
+            string_id: "",
+        };
+    } else {
+        return OpcUaNodeId {
+            node_type: 2, // Standard Numeric UInt32
+            namespace_idx: ns,
+            numeric_id: id,
+            string_id: "",
+        };
+    }
+}
+
+/// Construct a standard String NodeId.
+pub fn opcua_node_id_string(ns: Int, identifier: String) -> OpcUaNodeId {
+    return OpcUaNodeId {
+        node_type: 3, // String
+        namespace_idx: ns,
+        numeric_id: 0,
+        string_id: identifier,
+    };
+}
+
+/// Format NodeId as canonical string representation.
+pub fn opcua_node_id_to_string(node: &OpcUaNodeId) -> String {
+    let ns: Int = (node).namespace_idx;
+    let ntype: Int = (node).node_type;
+
+    let mut prefix: String = "";
+    if ns > 0 {
+        prefix = "ns=" + ns.to_string() + ";";
+    }
+
+    if ntype == 3 {
+        return prefix + "s=" + (node).string_id;
+    } else {
+        return prefix + "i=" + (node).numeric_id.to_string();
+    }
+}
+
+/// Check equality between two NodeIds.
+pub fn opcua_node_id_equals(a: &OpcUaNodeId, b: &OpcUaNodeId) -> Bool {
+    if (a).namespace_idx != (b).namespace_idx {
+        return false;
+    }
+    if (a).node_type != (b).node_type {
+        return false;
+    }
+    if (a).node_type == 3 {
+        return (a).string_id == (b).string_id;
+    } else {
+        return (a).numeric_id == (b).numeric_id;
+    }
+}
+
+/// Encode NodeId into OPC UA binary format.
+pub fn opcua_node_id_encode(node: &OpcUaNodeId) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let ntype: Int = (node).node_type;
+    let ns: Int = (node).namespace_idx;
+    let num: Int = (node).numeric_id;
+
+    if ntype == 0 {
+        // TwoByte: [0x00, UInt8]
+        out = list_push(out, 0);
+        out = list_push(out, num % 256);
+    } else if ntype == 1 {
+        // FourByte: [0x01, UInt8(ns), UInt16(id)]
+        out = list_push(out, 1);
+        out = list_push(out, ns % 256);
+        out = list_push(out, num % 256);
+        out = list_push(out, (num / 256) % 256);
+    } else if ntype == 2 {
+        // Numeric: [0x02, UInt16(ns), UInt32(id)]
+        out = list_push(out, 2);
+        out = list_push(out, ns % 256);
+        out = list_push(out, (ns / 256) % 256);
+        out = list_push(out, num % 256);
+        out = list_push(out, (num / 256) % 256);
+        out = list_push(out, (num / 65536) % 256);
+        out = list_push(out, (num / 16777216) % 256);
+    } else {
+        // String: [0x03, UInt16(ns), Int32(len), string bytes]
+        out = list_push(out, 3);
+        out = list_push(out, ns % 256);
+        out = list_push(out, (ns / 256) % 256);
+
+        let s: String = (node).string_id;
+        let slen: Int = s.len();
+        out = list_push(out, slen % 256);
+        out = list_push(out, (slen / 256) % 256);
+        out = list_push(out, (slen / 65536) % 256);
+        out = list_push(out, (slen / 16777216) % 256);
+
+        let mut i: Int = 0;
+        while i < slen {
+            out = list_push(out, byte_at(s, i));
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+/// Decode NodeId from byte stream at offset.
+pub fn opcua_node_id_decode(bytes: &List[Int], offset: Int) -> Result[OpcUaNodeId, String] {
+    let size: Int = list_len(*bytes);
+    if size <= offset {
+        return Err("Unexpected end of buffer while decoding NodeId");
+    }
+
+    let encoding_byte: Int = list_get(*bytes, offset);
+    if encoding_byte == 0 {
+        if size < (offset + 2) {
+            return Err("Buffer too short for TwoByte NodeId");
+        }
+        let id: Int = list_get(*bytes, offset + 1);
+        return Ok(opcua_node_id_numeric(0, id));
+    } else if encoding_byte == 1 {
+        if size < (offset + 4) {
+            return Err("Buffer too short for FourByte NodeId");
+        }
+        let ns: Int = list_get(*bytes, offset + 1);
+        let id_lo: Int = list_get(*bytes, offset + 2);
+        let id_hi: Int = list_get(*bytes, offset + 3);
+        let id: Int = id_lo + (id_hi * 256);
+        return Ok(opcua_node_id_numeric(ns, id));
+    } else if encoding_byte == 2 {
+        if size < (offset + 7) {
+            return Err("Buffer too short for Numeric NodeId");
+        }
+        let ns_lo: Int = list_get(*bytes, offset + 1);
+        let ns_hi: Int = list_get(*bytes, offset + 2);
+        let ns: Int = ns_lo + (ns_hi * 256);
+
+        let b0: Int = list_get(*bytes, offset + 3);
+        let b1: Int = list_get(*bytes, offset + 4);
+        let b2: Int = list_get(*bytes, offset + 5);
+        let b3: Int = list_get(*bytes, offset + 6);
+        let id: Int = b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216);
+        return Ok(opcua_node_id_numeric(ns, id));
+    } else if encoding_byte == 3 {
+        if size < (offset + 7) {
+            return Err("Buffer too short for String NodeId header");
+        }
+        let ns_lo: Int = list_get(*bytes, offset + 1);
+        let ns_hi: Int = list_get(*bytes, offset + 2);
+        let ns: Int = ns_lo + (ns_hi * 256);
+
+        let l0: Int = list_get(*bytes, offset + 3);
+        let l1: Int = list_get(*bytes, offset + 4);
+        let l2: Int = list_get(*bytes, offset + 5);
+        let l3: Int = list_get(*bytes, offset + 6);
+        let slen: Int = l0 + (l1 * 256) + (l2 * 65536) + (l3 * 16777216);
+
+        if size < (offset + 7 + slen) {
+            return Err("Buffer too short for String NodeId value");
+        }
+
+        let mut str_buf: List[Int] = bytes_new();
+        let mut i: Int = 0;
+        while i < slen {
+            str_buf = bytes_push(str_buf, list_get(*bytes, offset + 7 + i));
+            i = i + 1;
+        }
+        return Ok(opcua_node_id_string(ns, bytes_to_str(str_buf)));
+    } else {
+        return Err("Unsupported OPC UA NodeId encoding format");
+    }
+}

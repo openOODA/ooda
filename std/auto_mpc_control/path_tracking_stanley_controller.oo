@@ -1,0 +1,83 @@
+// # Stanley Front-Axle Path Tracking Controller
+//
+// Logline: Calculates steering commands compensating for front axle cross-track error, heading error, and speed-adaptive soft scaling.
+//
+// Setup: Geometric front-axle path tracking controller renowned for asymptotic convergence and non-oscillatory capture of straight/curved paths.
+//
+// Beats:
+//   1. Calculate front axle center position (xf, yf) from rear axle/CG state and vehicle heading.
+//   2. Compute front cross-track error e_fa to the nearest path segment.
+//   3. Apply Stanley nonlinear steering law delta = e_psi + atan(k * e_fa / (v + v_soft)).
+//   4. Clamp steering angle and steering rate to physical actuator saturation limits.
+
+pub type StanleyConfig = struct {
+    gain_k: Float,
+    softening_speed_ms: Float,
+    max_steer_rad: Float,
+    dist_cg_to_front: Float,
+};
+
+pub type StanleyOutput = struct {
+    steer_cmd_rad: Float,
+    front_cte: Float,
+    heading_error: Float,
+};
+
+pub fn stanley_config_default() -> StanleyConfig {
+    return StanleyConfig {
+        gain_k: 2.5,
+        softening_speed_ms: 1.0,
+        max_steer_rad: 0.6,
+        dist_cg_to_front: 1.3,
+    };
+}
+
+pub fn stanley_control_step(
+    veh_x: Float,
+    veh_y: Float,
+    veh_yaw: Float,
+    veh_v: Float,
+    ref_x: Float,
+    ref_y: Float,
+    ref_yaw: Float,
+    cfg: &StanleyConfig
+) -> StanleyOutput {
+    // Front axle position
+    let xf: Float = veh_x + ((cfg).dist_cg_to_front * cos(veh_yaw));
+    let yf: Float = veh_y + ((cfg).dist_cg_to_front * sin(veh_yaw));
+
+    // Vector from ref to front axle
+    let dx: Float = xf - ref_x;
+    let dy: Float = yf - ref_y;
+
+    // Cross-track error (positive when vehicle is to the left of path)
+    let s_ref: Float = sin(ref_yaw);
+    let c_ref: Float = cos(ref_yaw);
+    let e_fa: Float = ((0.0 - dx) * s_ref) + (dy * c_ref);
+
+    let mut e_psi: Float = veh_yaw - ref_yaw;
+    // Normalize e_psi to [-pi, pi]
+    let pi_val: Float = 3.14159265;
+    while e_psi > pi_val { e_psi = e_psi - (2.0 * pi_val); }
+    while e_psi < (0.0 - pi_val) { e_psi = e_psi + (2.0 * pi_val); }
+
+    // Stanley cross-track term
+    let denom: Float = veh_v + (cfg).softening_speed_ms;
+    let safe_denom: Float = if denom < 0.1 { 0.1 } else { denom };
+    let ratio: Float = ((cfg).gain_k * (0.0 - e_fa)) / safe_denom;
+
+    let atan_term: Float = ratio * (1.0 - (0.33333333 * ratio * ratio));
+    let raw_steer: Float = (0.0 - e_psi) + atan_term;
+
+    let clamped_steer: Float = if raw_steer < (0.0 - (cfg).max_steer_rad) {
+        0.0 - (cfg).max_steer_rad
+    } else {
+        if raw_steer > (cfg).max_steer_rad { (cfg).max_steer_rad } else { raw_steer }
+    };
+
+    return StanleyOutput {
+        steer_cmd_rad: clamped_steer,
+        front_cte: e_fa,
+        heading_error: e_psi,
+    };
+}

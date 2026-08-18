@@ -1,0 +1,126 @@
+// # CLIP Pairwise Similarity & Zero-Shot Retrieval Metrics
+//
+// Logline: Computes dense multi-modal cosine similarity logits, zero-shot classification scores, and Recall@K retrieval accuracy.
+//
+// Setup: Evaluates vision-language alignment across test batches with top-1 and top-5 rank ranking.
+//
+// Beats:
+//   1. Define RetrievalConfig and RetrievalMetrics structs.
+//   2. Compute full cross-modal dot product matrix: S_ij = (v_i . t_j) * exp(temp).
+//   3. Compute top-1 and top-k accuracy for image-to-text and text-to-image retrieval.
+
+pub type RetrievalConfig = struct {
+    temperature: Float,
+    top_k: Int,
+};
+
+pub type RetrievalMetrics = struct {
+    recall_at_1: Float,
+    recall_at_k: Float,
+    mean_rank: Float,
+    num_samples: Int,
+};
+
+pub fn clip_retrieval_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn clip_retrieval_config_new(temp: Float, k_val: Int) -> RetrievalConfig {
+    return RetrievalConfig {
+        temperature: temp,
+        top_k: k_val,
+    };
+}
+
+pub fn clip_compute_similarity_matrix(
+    cfg: &RetrievalConfig,
+    img_embeds: List[Float],
+    txt_embeds: List[Float],
+    n_images: Int,
+    n_texts: Int,
+    embed_dim: Int
+) -> List[Float] {
+    let temp: Float = (cfg).temperature;
+    let scale: Float = exp(temp);
+
+    let mut sim: List[Float] = list_new();
+
+    let mut i: Int = 0;
+    while i < n_images {
+        let mut j: Int = 0;
+        while j < n_texts {
+            let mut dot: Float = 0.0;
+            let mut d: Int = 0;
+            while d < embed_dim {
+                let iv: Float = list_get(img_embeds, (i * embed_dim) + d);
+                let tv: Float = list_get(txt_embeds, (j * embed_dim) + d);
+                dot = dot + (iv * tv);
+                d = d + 1;
+            }
+            sim = list_push(sim, dot * scale);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    return sim;
+}
+
+pub fn clip_eval_i2t_retrieval(
+    cfg: &RetrievalConfig,
+    sim_matrix: List[Float],
+    batch_size: Int
+) -> RetrievalMetrics {
+    let k_lim: Int = (cfg).top_k;
+    let mut hits_1: Int = 0;
+    let mut hits_k: Int = 0;
+    let mut total_rank: Int = 0;
+
+    let mut i: Int = 0;
+    while i < batch_size {
+        let correct_sim: Float = list_get(sim_matrix, (i * batch_size) + i);
+        let mut rank: Int = 1;
+
+        let mut j: Int = 0;
+        while j < batch_size {
+            if j != i {
+                let other_sim: Float = list_get(sim_matrix, (i * batch_size) + j);
+                if other_sim > correct_sim {
+                    rank = rank + 1;
+                }
+            }
+            j = j + 1;
+        }
+
+        if rank == 1 { hits_1 = hits_1 + 1; }
+        if rank <= k_lim { hits_k = hits_k + 1; }
+        total_rank = total_rank + rank;
+
+        i = i + 1;
+    }
+
+    let b_f: Float = clip_retrieval_int_to_float(batch_size);
+    let r1: Float = if b_f > 0.0 { clip_retrieval_int_to_float(hits_1) / b_f } else { 0.0 };
+    let rk: Float = if b_f > 0.0 { clip_retrieval_int_to_float(hits_k) / b_f } else { 0.0 };
+    let mr: Float = if b_f > 0.0 { clip_retrieval_int_to_float(total_rank) / b_f } else { 0.0 };
+
+    return RetrievalMetrics {
+        recall_at_1: r1,
+        recall_at_k: rk,
+        mean_rank: mr,
+        num_samples: batch_size,
+    };
+}
+
+pub fn clip_similarity_matrix_marker() -> Int {
+    return 1;
+}

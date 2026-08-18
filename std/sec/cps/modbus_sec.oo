@@ -1,0 +1,375 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::cps::modbus_sec
+// Modbus TCP / RTU Industrial Protocol Security Module
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. CAP-G6: Modbus TCP prefers &TcpCap.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+// -------------------------------------------------------------------
+// Core Modbus Types
+// -------------------------------------------------------------------
+
+pub type ModbusFrame = struct {
+    frame_id: String,
+    transaction_id: Int,
+    protocol_id: Int,
+    unit_id: Int,
+    function_code: Int,
+    pdu: String,
+    timestamp: Int,
+    is_valid: Bool,
+};
+
+pub type ModbusFunction = struct {
+    function_id: String,
+    code: Int,
+    name: String,
+    is_dangerous: Bool,
+    requires_authorization: Bool,
+    description: String,
+};
+
+pub type ModbusPolicy = struct {
+    policy_id: String,
+    allow_read_only: Bool,
+    allow_write_coils: Bool,
+    allow_write_holding: Bool,
+    allow_diag_funcs: Bool,
+    rate_limit_per_sec: Int,
+    require_authorization: Bool,
+    fail_closed: Bool,
+    is_valid: Bool,
+};
+
+pub type ModbusSession = struct {
+    session_id: String,
+    peer_addr: String,
+    peer_port: Int,
+    unit_id: Int,
+    authenticated: Bool,
+    authorized_for_writes: Bool,
+    request_count: Int,
+    start_ts: Int,
+};
+
+pub type ModbusViolation = struct {
+    violation_id: String,
+    violation_type: Int,
+    function_code: Int,
+    source_addr: String,
+    timestamp: Int,
+    description: String,
+};
+
+pub type ModbusEngine = struct {
+    engine_id: String,
+    policy: ModbusPolicy,
+    sessions: List[ModbusSession],
+    violations: List[ModbusViolation],
+    requests_total: Int,
+    requests_allowed: Int,
+    requests_denied: Int,
+    is_halted: Bool,
+};
+
+// -------------------------------------------------------------------
+// Function Code Constants (Modbus spec)
+// -------------------------------------------------------------------
+
+pub fn modbus_fc_read_coils() -> Int {
+    return 1;
+}
+
+pub fn modbus_fc_read_discrete_inputs() -> Int {
+    return 2;
+}
+
+pub fn modbus_fc_read_holding_registers() -> Int {
+    return 3;
+}
+
+pub fn modbus_fc_read_input_registers() -> Int {
+    return 4;
+}
+
+pub fn modbus_fc_write_single_coil() -> Int {
+    return 5;
+}
+
+pub fn modbus_fc_write_single_register() -> Int {
+    return 6;
+}
+
+pub fn modbus_fc_write_multiple_coils() -> Int {
+    return 15;
+}
+
+pub fn modbus_fc_write_multiple_registers() -> Int {
+    return 16;
+}
+
+pub fn modbus_fc_diag() -> Int {
+    return 8;
+}
+
+pub fn modbus_fc_report_slave_id() -> Int {
+    return 17;
+}
+
+// -------------------------------------------------------------------
+// Violation Type Constants
+// -------------------------------------------------------------------
+
+pub fn modbus_violation_write_unauth() -> Int {
+    return 1;
+}
+
+pub fn modbus_violation_diag_unauth() -> Int {
+    return 2;
+}
+
+pub fn modbus_violation_rate_limit() -> Int {
+    return 3;
+}
+
+pub fn modbus_violation_invalid_frame() -> Int {
+    return 4;
+}
+
+// -------------------------------------------------------------------
+// Function Classification (Pure)
+// -------------------------------------------------------------------
+
+pub fn modbus_is_read_only(fc: Int) -> Bool {
+    if fc == 1 {
+        return true;
+    }
+    if fc == 2 {
+        return true;
+    }
+    if fc == 3 {
+        return true;
+    }
+    if fc == 4 {
+        return true;
+    }
+    return false;
+}
+
+pub fn modbus_is_write_coil(fc: Int) -> Bool {
+    if fc == 5 {
+        return true;
+    }
+    if fc == 15 {
+        return true;
+    }
+    return false;
+}
+
+pub fn modbus_is_write_register(fc: Int) -> Bool {
+    if fc == 6 {
+        return true;
+    }
+    if fc == 16 {
+        return true;
+    }
+    return false;
+}
+
+pub fn modbus_is_dangerous(fc: Int) -> Bool {
+    if modbus_is_write_coil(fc) {
+        return true;
+    }
+    if modbus_is_write_register(fc) {
+        return true;
+    }
+    if fc == 8 {
+        return true;
+    }
+    if fc == 17 {
+        return true;
+    }
+    return false;
+}
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn modbus_frame_create(
+    tx_id: Int,
+    unit_id_v: Int,
+    fc: Int,
+    pdu_v: String,
+    ts: Int
+) -> ModbusFrame {
+    return ModbusFrame {
+        frame_id: "mb-frame",
+        transaction_id: tx_id,
+        protocol_id: 0,
+        unit_id: unit_id_v,
+        function_code: fc,
+        pdu: pdu_v,
+        timestamp: ts,
+        is_valid: true,
+    };
+}
+
+pub fn modbus_session_create(
+    session_id_val: String,
+    peer_addr_val: String,
+    peer_port_v: Int,
+    unit_id_v: Int
+) -> ModbusSession {
+    return ModbusSession {
+        session_id: session_id_val,
+        peer_addr: peer_addr_val,
+        peer_port: peer_port_v,
+        unit_id: unit_id_v,
+        authenticated: false,
+        authorized_for_writes: false,
+        request_count: 0,
+        start_ts: 0,
+    };
+}
+
+pub fn modbus_policy_default() -> ModbusPolicy {
+    return ModbusPolicy {
+        policy_id: "MODBUS_POLICY_DEFAULT",
+        allow_read_only: true,
+        allow_write_coils: false,
+        allow_write_holding: false,
+        allow_diag_funcs: false,
+        rate_limit_per_sec: 100,
+        require_authorization: true,
+        fail_closed: true,
+        is_valid: true,
+    };
+}
+
+// -------------------------------------------------------------------
+// Decision Logic (Pure)
+// -------------------------------------------------------------------
+
+pub fn modbus_should_allow(policy: &ModbusPolicy, session: &ModbusSession, fc: Int) -> Bool {
+    let read_only_v = modbus_is_read_only(fc);
+    if read_only_v {
+        if (policy).allow_read_only == false {
+            return false;
+        }
+        return true;
+    }
+    let is_diag = fc == modbus_fc_diag();
+    if is_diag {
+        if (policy).allow_diag_funcs == false {
+            return false;
+        }
+        if (policy).require_authorization {
+            if (session).authenticated == false {
+                return false;
+            }
+        }
+        return true;
+    }
+    let is_write = modbus_is_write_coil(fc) || modbus_is_write_register(fc);
+    if is_write {
+        let is_coil = modbus_is_write_coil(fc);
+        if is_coil {
+            if (policy).allow_write_coils == false {
+                return false;
+            }
+        } else {
+            if (policy).allow_write_holding == false {
+                return false;
+            }
+        }
+        if (policy).require_authorization {
+            if (session).authenticated == false {
+                return false;
+            }
+            if (session).authorized_for_writes == false {
+                return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
+// -------------------------------------------------------------------
+// Engine (Pure)
+// -------------------------------------------------------------------
+
+pub fn modbus_engine_init(engine_id_val: String) -> ModbusEngine {
+    return ModbusEngine {
+        engine_id: engine_id_val,
+        policy: modbus_policy_default(),
+        sessions: list_new(),
+        violations: list_new(),
+        requests_total: 0,
+        requests_allowed: 0,
+        requests_denied: 0,
+        is_halted: false,
+    };
+}
+
+pub fn modbus_engine_record_request(engine: &mut ModbusEngine, allowed_v: Bool) {
+    let mut eng = engine;
+    let inc_one: Int = 1;
+    let cur_t: Int = eng.requests_total;
+    eng.requests_total = cur_t + inc_one;
+    if allowed_v {
+        let cur_a: Int = eng.requests_allowed;
+        eng.requests_allowed = cur_a + inc_one;
+    } else {
+        let cur_d: Int = eng.requests_denied;
+        eng.requests_denied = cur_d + inc_one;
+    }
+}
+
+pub fn modbus_engine_record_violation(engine: &mut ModbusEngine, v: ModbusViolation) {
+    let mut eng = engine;
+    let old = eng.violations;
+    let mut updated: List[ModbusViolation] = list_new();
+    let n = list_len(old);
+    let mut i = 0;
+    while i < n {
+        let cur = list_get(old, i);
+        updated = list_push(updated, cur);
+        let ni: Int = i + 1;
+        i = ni;
+    }
+    updated = list_push(updated, v);
+    eng.violations = updated;
+}
+
+pub fn modbus_engine_do_work(engine: &ModbusEngine) -> Int {
+    let s_n = list_len((engine).sessions);
+    let v_n = list_len((engine).violations);
+    let allowed: Int = (engine).requests_allowed;
+    return s_n + v_n + allowed;
+}
+
+// -------------------------------------------------------------------
+// Fail-Closed Modbus TCP/RTU Stubs
+// -------------------------------------------------------------------
+
+pub fn modbus_tcp_open(tcp: &TcpCap, host: String, port: Int) -> Result[Int, String] {
+    // COMPILER LIMITATION: openOODA lacks native Modbus TCP/502 socket+MBAP framing FFI.
+    // CAP-G6: TCP-ish path prefers &TcpCap (NetCap supersede remains valid at sealed layer).
+    process_exit(1);
+    return Err("Unimplemented: Modbus TCP socket open requires TcpCap+TCP FFI lowering");
+}
+
+pub fn modbus_rtu_open(fs: &FsCap, device: String, baud: Int) -> Result[Int, String] {
+    // COMPILER LIMITATION: openOODA lacks native serial /dev/ttyUSB* termios+libmodbus FFI.
+    process_exit(1);
+    return Err("Unimplemented: Modbus RTU serial open requires serial FFI lowering");
+}
+
+pub fn modbus_send_request(tcp: &TcpCap, fd: Int, frame: &ModbusFrame) -> Result[String, String] {
+    // COMPILER LIMITATION: openOODA lacks Modbus MBAP encode/decode + socket send FFI.
+    // CAP-G6: MBAP over TCP session — &TcpCap.
+    process_exit(1);
+    return Err("Unimplemented: Modbus request send requires MBAP+TcpCap FFI lowering");
+}

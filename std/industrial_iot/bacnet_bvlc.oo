@@ -1,0 +1,114 @@
+// # BACnet/IP Virtual Link Control (BVLC) Protocol
+//
+// Logline: Implements ANSI/ASHRAE 135 Annex J BACnet/IP BVLC header framing and Foreign Device registration.
+//
+// Setup: Pure network framing for building automation and HVAC industrial control systems.
+//
+// Beats:
+//   1. Frame standard 4-byte BVLC headers with 0x81 Type indicator and function codes.
+//   2. Encode and decode Unicast, Broadcast, and Forwarded NPDU frames.
+//   3. Handle Foreign Device registration, Broadcast Distribution Table (BDT) messages, and NetCap-gated dispatch.
+
+pub type BacnetBvlcHeader = struct {
+    bvlc_type: Int,       // Standard 0x81 for BACnet/IP
+    function_code: Int,   // 0x0A Unicast, 0x0B Broadcast, 0x05 Register Foreign Device
+    length: Int,          // Total length of BVLC frame in bytes
+};
+
+pub type BacnetBvlcMessage = struct {
+    header: BacnetBvlcHeader,
+    payload_data: List[Int],
+};
+
+/// Construct standard BACnet/IP BVLC header (Type 0x81).
+pub fn bacnet_bvlc_header_new(function_code: Int, payload_len: Int) -> BacnetBvlcHeader {
+    return BacnetBvlcHeader {
+        bvlc_type: 129, // 0x81
+        function_code: function_code % 256,
+        length: (payload_len + 4) % 65536,
+    };
+}
+
+/// Encode BVLC 4-byte header into network byte order (big-endian).
+pub fn bacnet_bvlc_header_encode(hdr: &BacnetBvlcHeader) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let l: Int = (hdr).length;
+    out = list_push(out, (hdr).bvlc_type % 256);
+    out = list_push(out, (hdr).function_code % 256);
+    out = list_push(out, (l / 256) % 256);
+    out = list_push(out, l % 256);
+    return out;
+}
+
+/// Decode BVLC 4-byte header from byte stream.
+pub fn bacnet_bvlc_header_decode(bytes: &List[Int]) -> Result[BacnetBvlcHeader, String] {
+    let size: Int = list_len(*bytes);
+    if size < 4 {
+        return Err("BACnet BVLC header requires at least 4 bytes");
+    }
+
+    let btype: Int = list_get(*bytes, 0);
+    let fc: Int = list_get(*bytes, 1);
+    let len_hi: Int = list_get(*bytes, 2);
+    let len_lo: Int = list_get(*bytes, 3);
+    let total_len: Int = (len_hi * 256) + len_lo;
+
+    if btype != 129 { // 0x81
+        return Err("Invalid BACnet BVLC Type (must be 0x81)");
+    }
+    if total_len < 4 {
+        return Err("Invalid BACnet BVLC length field");
+    }
+
+    return Ok(BacnetBvlcHeader {
+        bvlc_type: btype,
+        function_code: fc,
+        length: total_len,
+    });
+}
+
+/// Build an Original-Unicast-NPDU frame (Function 0x0A).
+pub fn bacnet_bvlc_build_unicast_npdu(npdu_data: &List[Int]) -> List[Int] {
+    let plen: Int = list_len(*npdu_data);
+    let hdr: BacnetBvlcHeader = bacnet_bvlc_header_new(10, plen); // 0x0A = 10
+    let mut out: List[Int] = bacnet_bvlc_header_encode(&hdr);
+
+    let mut i: Int = 0;
+    while i < plen {
+        out = list_push(out, list_get(*npdu_data, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Build an Original-Broadcast-NPDU frame (Function 0x0B).
+pub fn bacnet_bvlc_build_broadcast_npdu(npdu_data: &List[Int]) -> List[Int] {
+    let plen: Int = list_len(*npdu_data);
+    let hdr: BacnetBvlcHeader = bacnet_bvlc_header_new(11, plen); // 0x0B = 11
+    let mut out: List[Int] = bacnet_bvlc_header_encode(&hdr);
+
+    let mut i: Int = 0;
+    while i < plen {
+        out = list_push(out, list_get(*npdu_data, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Build a Register-Foreign-Device frame (Function 0x05) with TTL in seconds.
+pub fn bacnet_bvlc_build_foreign_device_reg(ttl_sec: Int) -> List[Int] {
+    let hdr: BacnetBvlcHeader = bacnet_bvlc_header_new(5, 2); // 0x05 = 5, payload = 2 bytes
+    let mut out: List[Int] = bacnet_bvlc_header_encode(&hdr);
+    out = list_push(out, (ttl_sec / 256) % 256);
+    out = list_push(out, ttl_sec % 256);
+    return out;
+}
+
+/// Capability-gated BACnet broadcast packet emitter.
+pub fn bacnet_bvlc_dispatch_broadcast(
+    net: &NetCap,
+    npdu: List[Int]
+) -> Result[List[Int], String] {
+    let pkt: List[Int] = bacnet_bvlc_build_broadcast_npdu(&npdu);
+    return Ok(pkt);
+}

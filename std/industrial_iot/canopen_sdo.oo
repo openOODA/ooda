@@ -1,0 +1,113 @@
+// # CANopen Service Data Object (SDO) Protocol
+//
+// Logline: Implements CiA 301 CANopen SDO expedited transfer, object dictionary indexing, and abort code handling.
+//
+// Setup: Pure CAN frame serializer and parser for embedded industrial motion and sensor bus communication.
+//
+// Beats:
+//   1. Frame 8-byte SDO expedited download and upload requests with little-endian index/subindex.
+//   2. Encode standard CiA 301 SDO abort transfer codes with full diagnostics.
+//   3. Parse incoming SDO server responses and extract typed parameter payload bytes.
+
+pub type CanopenSdoMessage = struct {
+    command_byte: Int,
+    index: Int,          // 16-bit Object Dictionary Index
+    subindex: Int,       // 8-bit Sub-index
+    data_bytes: List[Int],
+    is_abort: Bool,
+    abort_code: Int,
+};
+
+/// Construct an SDO Expedited Download Request (write to Object Dictionary).
+pub fn canopen_sdo_expedited_download_req(
+    index: Int,
+    subindex: Int,
+    value: Int,
+    byte_count: Int
+) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let n: Int = (4 - byte_count) % 4;
+    // Command Specifier CCS = 1 (0x20) | expedited 'e' = 2 | size indicator 's' = 1 | (n << 2)
+    let ccs_byte: Int = 32 + (n * 4) + 2 + 1;
+
+    out = list_push(out, ccs_byte);
+    out = list_push(out, index % 256);
+    out = list_push(out, (index / 256) % 256);
+    out = list_push(out, subindex % 256);
+
+    out = list_push(out, value % 256);
+    out = list_push(out, (value / 256) % 256);
+    out = list_push(out, (value / 65536) % 256);
+    out = list_push(out, (value / 16777216) % 256);
+    return out;
+}
+
+/// Construct an SDO Upload Request (read from Object Dictionary).
+pub fn canopen_sdo_upload_req(index: Int, subindex: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    // CCS = 2 (0x40)
+    out = list_push(out, 64);
+    out = list_push(out, index % 256);
+    out = list_push(out, (index / 256) % 256);
+    out = list_push(out, subindex % 256);
+    out = list_push(out, 0);
+    out = list_push(out, 0);
+    out = list_push(out, 0);
+    out = list_push(out, 0);
+    return out;
+}
+
+/// Construct an SDO Abort Transfer message (CS = 0x80).
+pub fn canopen_sdo_abort_msg(index: Int, subindex: Int, abort_code: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    out = list_push(out, 128); // 0x80
+    out = list_push(out, index % 256);
+    out = list_push(out, (index / 256) % 256);
+    out = list_push(out, subindex % 256);
+
+    out = list_push(out, abort_code % 256);
+    out = list_push(out, (abort_code / 256) % 256);
+    out = list_push(out, (abort_code / 65536) % 256);
+    out = list_push(out, (abort_code / 16777216) % 256);
+    return out;
+}
+
+/// Parse an 8-byte CANopen SDO frame.
+pub fn canopen_sdo_parse_frame(bytes: &List[Int]) -> Result[CanopenSdoMessage, String] {
+    let size: Int = list_len(*bytes);
+    if size < 8 {
+        return Err("CANopen SDO frame requires exactly 8 bytes");
+    }
+
+    let cs: Int = list_get(*bytes, 0);
+    let idx_lo: Int = list_get(*bytes, 1);
+    let idx_hi: Int = list_get(*bytes, 2);
+    let index: Int = idx_lo + (idx_hi * 256);
+    let subindex: Int = list_get(*bytes, 3);
+
+    let b4: Int = list_get(*bytes, 4);
+    let b5: Int = list_get(*bytes, 5);
+    let b6: Int = list_get(*bytes, 6);
+    let b7: Int = list_get(*bytes, 7);
+
+    let mut data_list: List[Int] = list_new();
+    data_list = list_push(data_list, b4);
+    data_list = list_push(data_list, b5);
+    data_list = list_push(data_list, b6);
+    data_list = list_push(data_list, b7);
+
+    let is_abort_msg: Bool = (cs == 128);
+    let mut abort_val: Int = 0;
+    if is_abort_msg {
+        abort_val = b4 + (b5 * 256) + (b6 * 65536) + (b7 * 16777216);
+    }
+
+    return Ok(CanopenSdoMessage {
+        command_byte: cs,
+        index: index,
+        subindex: subindex,
+        data_bytes: data_list,
+        is_abort: is_abort_msg,
+        abort_code: abort_val,
+    });
+}

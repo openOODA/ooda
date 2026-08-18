@@ -1,0 +1,80 @@
+// # UAV Linear Quadratic Regulator (LQR) Attitude Controller
+//
+// Logline: Computes optimal state-feedback gain matrix K minimizing quadratic performance index J = integral(x^T Q x + u^T R u) dt.
+//
+// Setup: Optimal linear state feedback controller linearized around hover equilibrium for energy-efficient flight stabilization.
+//
+// Beats:
+//   1. Define 6-State Attitude Vector (roll, pitch, yaw, roll_rate, pitch_rate, yaw_rate).
+//   2. Define LQR Gain Matrix structure K (3 control torques x 6 states).
+//   3. Compute state-feedback control action u = -K * x.
+//   4. Apply actuator torque saturation bounds and evaluate quadratic cost.
+
+import "./uav_coordinate_frames.oo";
+import "./uav_quaternion_kinematics.oo";
+
+pub type LqrAttitudeState = struct {
+    roll: Float,
+    pitch: Float,
+    yaw: Float,
+    p_rate: Float,
+    q_rate: Float,
+    r_rate: Float,
+};
+
+pub type LqrGainMatrix = struct {
+    k_phi_p: Float,
+    k_phi_d: Float,
+    k_theta_p: Float,
+    k_theta_d: Float,
+    k_psi_p: Float,
+    k_psi_d: Float,
+    max_torque: Float,
+};
+
+pub type LqrControlOutput = struct {
+    torques: Vector3D,
+    quadratic_cost_approx: Float,
+};
+
+pub fn lqr_gain_matrix_default() -> LqrGainMatrix {
+    // Tuned for standard 1.5kg quadrotor with Q_diag=[10, 10, 5, 1, 1, 0.5], R_diag=[0.1, 0.1, 0.1]
+    return LqrGainMatrix {
+        k_phi_p: 7.2,
+        k_phi_d: 1.4,
+        k_theta_p: 7.2,
+        k_theta_d: 1.4,
+        k_psi_p: 3.5,
+        k_psi_d: 0.8,
+        max_torque: 2.5,
+    };
+}
+
+pub fn lqr_attitude_control(
+    state: &LqrAttitudeState,
+    target_angles: &EulerAngles,
+    gains: &LqrGainMatrix
+) -> LqrControlOutput {
+    // State error: e = [phi - phi_d, theta - theta_d, psi - psi_d, p, q, r]
+    let e_phi: Float = (state).roll - (target_angles).roll;
+    let e_theta: Float = (state).pitch - (target_angles).pitch;
+    let e_psi: Float = (state).yaw - (target_angles).yaw;
+
+    // Linear optimal state feedback: tau_i = -k_p * e_angle - k_d * angular_rate
+    let tau_roll_raw: Float = (0.0 - ((gains).k_phi_p * e_phi)) - ((gains).k_phi_d * (state).p_rate);
+    let tau_pitch_raw: Float = (0.0 - ((gains).k_theta_p * e_theta)) - ((gains).k_theta_d * (state).q_rate);
+    let tau_yaw_raw: Float = (0.0 - ((gains).k_psi_p * e_psi)) - ((gains).k_psi_d * (state).r_rate);
+
+    let max_t: Float = (gains).max_torque;
+
+    let tau_roll: Float = if tau_roll_raw > max_t { max_t } else if tau_roll_raw < (0.0 - max_t) { 0.0 - max_t } else { tau_roll_raw };
+    let tau_pitch: Float = if tau_pitch_raw > max_t { max_t } else if tau_pitch_raw < (0.0 - max_t) { 0.0 - max_t } else { tau_pitch_raw };
+    let tau_yaw: Float = if tau_yaw_raw > max_t { max_t } else if tau_yaw_raw < (0.0 - max_t) { 0.0 - max_t } else { tau_yaw_raw };
+
+    let cost: Float = (10.0 * e_phi * e_phi) + (10.0 * e_theta * e_theta) + (5.0 * e_psi * e_psi) + (0.1 * tau_roll * tau_roll) + (0.1 * tau_pitch * tau_pitch);
+
+    return LqrControlOutput {
+        torques: Vector3D { x: tau_roll, y: tau_pitch, z: tau_yaw },
+        quadratic_cost_approx: cost,
+    };
+}

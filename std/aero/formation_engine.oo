@@ -1,0 +1,204 @@
+// # Formation Relative Motion & HCW Dynamics Engine
+//
+// Logline: Propagates relative motion via Hill-Clohessy-Wiltshire equations and evaluates formation geometry.
+//
+// Setup: Formation flight simulation engine importing formation_ops.oo.
+//
+// Beats:
+//   1. Propagate relative satellite trajectories using closed-form HCW solutions.
+//   2. Evaluate inter-satellite range, line-of-sight angles, and drift rates.
+//   3. Synthesize formation maintenance geometry and relative boundary bounds.
+
+import "./formation_ops.oo";
+
+pub fn hcw_compute_mean_motion(a_sma: Float, mu_val: Float) -> Float {
+    if a_sma <= 0.0 {
+        return 0.0;
+    }
+    if mu_val <= 0.0 {
+        return 0.0;
+    }
+    let a_cubed: Float = a_sma * a_sma * a_sma;
+    return sqrt(mu_val / a_cubed);
+}
+
+/// Calculate in-track secular drift rate: vy_drift = 6 * n * x0 + 4 * vy0
+pub fn hcw_drift_rate(initial_state: RelativeState, n_mean: Float) -> Float {
+    let x0: Float = ((initial_state).position).x;
+    let vy0: Float = ((initial_state).velocity).y;
+    return (6.0 * n_mean * x0) + (4.0 * vy0);
+}
+
+/// Compute required in-track velocity vy0 for zero secular drift: vy0_bounded = -2 * n * x0
+pub fn hcw_bounded_v_intrack(x0: Float, n_mean: Float) -> Float {
+    return (0.0 - 2.0) * n_mean * x0;
+}
+
+/// Check if relative orbit is bounded (zero secular drift within tolerance)
+pub fn hcw_is_bounded(initial_state: RelativeState, n_mean: Float, tolerance: Float) -> Bool {
+    let drift: Float = hcw_drift_rate(initial_state, n_mean);
+    return math_abs(drift) <= tolerance;
+}
+
+/// Compute HCW relative orbital energy integral
+pub fn hcw_relative_energy(state: RelativeState, n_mean: Float) -> Float {
+    let pos: Vec3 = (state).position;
+    let vel: Vec3 = (state).velocity;
+    let v_sq: Float = vec3_length_sq(vel);
+    let x2: Float = (pos).x * (pos).x;
+    let z2: Float = (pos).z * (pos).z;
+    let n2: Float = n_mean * n_mean;
+    
+    let kinetic: Float = 0.5 * v_sq;
+    let potential: Float = (0.5 * n2 * z2) - (1.5 * n2 * x2);
+    return kinetic + potential;
+}
+
+/// Propagate relative state forward by time dt using closed-form HCW analytical solution
+pub fn hcw_propagate(initial_state: RelativeState, n_mean: Float, dt: Float) -> RelativeState {
+    let x0: Float = ((initial_state).position).x;
+    let y0: Float = ((initial_state).position).y;
+    let z0: Float = ((initial_state).position).z;
+
+    let vx0: Float = ((initial_state).velocity).x;
+    let vy0: Float = ((initial_state).velocity).y;
+    let vz0: Float = ((initial_state).velocity).z;
+
+    let theta: Float = n_mean * dt;
+    let s: Float = sin(theta);
+    let c: Float = cos(theta);
+
+    // Relative Position in LVLH Frame
+    let x_t: Float = ((4.0 - (3.0 * c)) * x0) + ((s / n_mean) * vx0) + (((2.0 * (1.0 - c)) / n_mean) * vy0);
+    let y_t: Float = ((6.0 * (s - theta)) * x0) + y0 - (((2.0 * (1.0 - c)) / n_mean) * vx0) + ((((4.0 * s) - (3.0 * theta)) / n_mean) * vy0);
+    let z_t: Float = (c * z0) + ((s / n_mean) * vz0);
+
+    // Relative Velocity in LVLH Frame
+    let vx_t: Float = ((3.0 * n_mean * s) * x0) + (c * vx0) + ((2.0 * s) * vy0);
+    let vy_t: Float = ((6.0 * n_mean * (c - 1.0)) * x0) - ((2.0 * s) * vx0) + (((4.0 * c) - 3.0) * vy0);
+    let vz_t: Float = ((0.0 - (n_mean * s)) * z0) + (c * vz0);
+
+    let pos_t: Vec3 = vec3_new(x_t, y_t, z_t);
+    let vel_t: Vec3 = vec3_new(vx_t, vy_t, vz_t);
+    let t_new: Float = (initial_state).epoch_sec + dt;
+
+    return relative_state_new(pos_t, vel_t, t_new);
+}
+
+// -------------------------------------------------------------------
+// 5. Formation Geometry & Trajectory Synthesis
+// -------------------------------------------------------------------
+
+/// Generate Projected Circular Orbit (PCO) relative state at phase angle alpha.
+/// PCO forms a circular trajectory when projected into the y-z (along-track / cross-track) plane.
+pub fn geometry_projected_circular_orbit(radius: Float, phase: Float, n_mean: Float) -> RelativeState {
+    let alpha: Float = math_normalize_angle(phase);
+    let s: Float = sin(alpha);
+    let c: Float = cos(alpha);
+
+    let x: Float = 0.5 * radius * s;
+    let y: Float = radius * c;
+    let z: Float = 0.8660254037844386 * radius * s; // sqrt(3)/2 * R * sin(alpha)
+
+    let vx: Float = 0.5 * radius * n_mean * c;
+    let vy: Float = (0.0 - radius) * n_mean * s;
+    let vz: Float = 0.8660254037844386 * radius * n_mean * c;
+
+    let pos: Vec3 = vec3_new(x, y, z);
+    let vel: Vec3 = vec3_new(vx, vy, vz);
+    return relative_state_new(pos, vel, 0.0);
+}
+
+/// Generate In-Plane Leader-Follower relative state with fixed along-track displacement d_y.
+pub fn geometry_in_plane_leader_follower(d_y: Float) -> RelativeState {
+    let pos: Vec3 = vec3_new(0.0, d_y, 0.0);
+    let vel: Vec3 = vec3_zero();
+    return relative_state_new(pos, vel, 0.0);
+}
+
+/// Generate Along-Track Centered relative ellipse state with semi-major axis a_rel.
+pub fn geometry_along_track_centered(a_rel: Float, phase: Float, n_mean: Float) -> RelativeState {
+    let alpha: Float = math_normalize_angle(phase);
+    let s: Float = sin(alpha);
+    let c: Float = cos(alpha);
+
+    let x: Float = a_rel * s;
+    let y: Float = 2.0 * a_rel * c;
+    let z: Float = 0.0;
+
+    let vx: Float = a_rel * n_mean * c;
+    let vy: Float = (0.0 - 2.0) * a_rel * n_mean * s;
+    let vz: Float = 0.0;
+
+    let pos: Vec3 = vec3_new(x, y, z);
+    let vel: Vec3 = vec3_new(vx, vy, vz);
+    return relative_state_new(pos, vel, 0.0);
+}
+
+/// Generate General Inclined Ellipse (GIE) 3D relative orbit state.
+pub fn geometry_general_inclined_ellipse(a_rel: Float, z_max: Float, phase: Float, n_mean: Float) -> RelativeState {
+    let alpha: Float = math_normalize_angle(phase);
+    let s: Float = sin(alpha);
+    let c: Float = cos(alpha);
+
+    let x: Float = a_rel * s;
+    let y: Float = 2.0 * a_rel * c;
+    let z: Float = z_max * s;
+
+    let vx: Float = a_rel * n_mean * c;
+    let vy: Float = (0.0 - 2.0) * a_rel * n_mean * s;
+    let vz: Float = z_max * n_mean * c;
+
+    let pos: Vec3 = vec3_new(x, y, z);
+    let vel: Vec3 = vec3_new(vx, vy, vz);
+    return relative_state_new(pos, vel, 0.0);
+}
+
+/// Convert FormationGeometry descriptor into RelativeState at time t
+pub fn formation_geometry_to_relative_state(geom: FormationGeometry, n_mean: Float, t: Float) -> RelativeState {
+    let gtype: Int = (geom).geometry_type;
+    let a_rel: Float = (geom).semi_major_axis_rel;
+    let y_off: Float = (geom).in_track_offset;
+    let z_amp: Float = (geom).cross_track_amplitude;
+    let alpha0: Float = (geom).phase_angle;
+    let x_off: Float = (geom).radial_offset;
+
+    let current_phase: Float = math_normalize_angle(alpha0 + (n_mean * t));
+
+    if gtype == 0 {
+        let base_state: RelativeState = geometry_in_plane_leader_follower(y_off);
+        return base_state;
+    }
+    if gtype == 1 {
+        let base_state: RelativeState = geometry_projected_circular_orbit(a_rel, current_phase, n_mean);
+        let pos: Vec3 = vec3_add((base_state).position, vec3_new(x_off, y_off, 0.0));
+        return relative_state_new(pos, (base_state).velocity, t);
+    }
+    if gtype == 2 {
+        let base_state: RelativeState = geometry_general_inclined_ellipse(a_rel, z_amp, current_phase, n_mean);
+        let pos: Vec3 = vec3_add((base_state).position, vec3_new(x_off, y_off, 0.0));
+        return relative_state_new(pos, (base_state).velocity, t);
+    }
+    if gtype == 3 {
+        let base_state: RelativeState = geometry_along_track_centered(a_rel, current_phase, n_mean);
+        let pos: Vec3 = vec3_add((base_state).position, vec3_new(x_off, y_off, 0.0));
+        return relative_state_new(pos, (base_state).velocity, t);
+    }
+
+    let pos: Vec3 = vec3_new(x_off, y_off, 0.0);
+    return relative_state_new(pos, vec3_zero(), t);
+}
+
+/// Extract FormationGeometry parameters from a given RelativeState
+pub fn relative_state_to_formation_geometry(state: RelativeState, n_mean: Float) -> FormationGeometry {
+    let x0: Float = ((state).position).x;
+    let y0: Float = ((state).position).y;
+    let z0: Float = ((state).position).z;
+    let vx0: Float = ((state).velocity).x;
+
+    let a_rel: Float = sqrt((x0 * x0) + ((vx0 / n_mean) * (vx0 / n_mean)));
+    let phase: Float = math_atan2(x0, vx0 / n_mean);
+    let drift: Float = hcw_drift_rate(state, n_mean);
+
+    return formation_geometry_new(2, a_rel, y0, math_abs(z0), phase, 0.0);
+}

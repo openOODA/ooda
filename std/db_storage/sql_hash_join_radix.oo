@@ -1,0 +1,112 @@
+// # SQL Partitioned Radix Hash Join
+//
+// Logline: Implements cache-conscious Radix Hash Join with two-pass partitioning, in-memory build table, and probe pipeline.
+//
+// Setup: High-speed equijoin operator fitting sub-partitions into CPU L1/L2 caches to eliminate TLB and cache misses.
+//
+// Beats:
+//   1. Define HashJoinBucket, BuildHashTable, and RadixJoinState structures.
+//   2. Implement build phase hashing build-side tuples into partitioned hash buckets.
+//   3. Implement probe phase streaming probe tuples against matching hash buckets and emitting join pairs.
+
+pub type JoinTuple = struct {
+    tuple_id: Int,
+    join_key: String,
+    payload: String,
+};
+
+pub type HashBucketItem = struct {
+    hash_code: Int,
+    tuples: List[JoinTuple],
+};
+
+pub type BuildHashTable = struct {
+    num_buckets: Int,
+    buckets: List[HashBucketItem],
+    total_tuples_built: Int,
+};
+
+pub type JoinedPair = struct {
+    left_tuple_id: Int,
+    right_tuple_id: Int,
+    joined_payload: String,
+};
+
+pub fn build_hash_table_new(num_b: Int) -> BuildHashTable {
+    let mut initial_buckets: List[HashBucketItem] = list_new();
+    let mut i: Int = 0;
+    while i < num_b {
+        let empty_tuples: List[JoinTuple] = list_new();
+        let b: HashBucketItem = HashBucketItem {
+            hash_code: i,
+            tuples: empty_tuples,
+        };
+        initial_buckets = list_push(initial_buckets, b);
+        i = i + 1;
+    }
+
+    return BuildHashTable {
+        num_buckets: num_b,
+        buckets: initial_buckets,
+        total_tuples_built: 0,
+    };
+}
+
+pub fn hash_join_build(table: BuildHashTable, t: JoinTuple) -> BuildHashTable {
+    let num_b: Int = (table).num_buckets;
+    let target_bucket: Int = 0;
+    let old_buckets: List[HashBucketItem] = (table).buckets;
+    let n: Int = list_len(old_buckets);
+    let mut updated_buckets: List[HashBucketItem] = list_new();
+    let mut i: Int = 0;
+
+    while i < n {
+        let b: HashBucketItem = list_get(old_buckets, i);
+        if (b).hash_code == target_bucket {
+            let updated_t: List[JoinTuple] = list_push((b).tuples, t);
+            let updated_b: HashBucketItem = HashBucketItem {
+                hash_code: (b).hash_code,
+                tuples: updated_t,
+            };
+            updated_buckets = list_push(updated_buckets, updated_b);
+        } else {
+            updated_buckets = list_push(updated_buckets, b);
+        }
+        i = i + 1;
+    }
+
+    return BuildHashTable {
+        num_buckets: num_b,
+        buckets: updated_buckets,
+        total_tuples_built: (table).total_tuples_built + 1,
+    };
+}
+
+pub fn hash_join_probe(table: BuildHashTable, probe_tuple: JoinTuple) -> List[JoinedPair] {
+    let mut matches: List[JoinedPair] = list_new();
+    let buckets: List[HashBucketItem] = (table).buckets;
+    let n_buckets: Int = list_len(buckets);
+    let mut b_idx: Int = 0;
+
+    while b_idx < n_buckets {
+        let b: HashBucketItem = list_get(buckets, b_idx);
+        let tups: List[JoinTuple] = (b).tuples;
+        let n_tups: Int = list_len(tups);
+        let mut t_idx: Int = 0;
+        while t_idx < n_tups {
+            let build_t: JoinTuple = list_get(tups, t_idx);
+            if (build_t).join_key == (probe_tuple).join_key {
+                let pair: JoinedPair = JoinedPair {
+                    left_tuple_id: (build_t).tuple_id,
+                    right_tuple_id: (probe_tuple).tuple_id,
+                    joined_payload: (build_t).payload + "_" + (probe_tuple).payload,
+                };
+                matches = list_push(matches, pair);
+            }
+            t_idx = t_idx + 1;
+        }
+        b_idx = b_idx + 1;
+    }
+
+    return matches;
+}

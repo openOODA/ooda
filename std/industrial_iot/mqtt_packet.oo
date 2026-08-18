@@ -1,0 +1,173 @@
+// # MQTT Control Packet Framing & Serialization
+//
+// Logline: Implements MQTT fixed header encoding, variable-length integer encoding, and packet framing.
+//
+// Setup: Pure framing algorithms for MQTT protocol serializers and network parsers.
+//
+// Beats:
+//   1. Encode and decode MQTT variable-length remaining length fields.
+//   2. Serialize and deserialize MQTT fixed headers with QoS and control flags.
+//   3. Frame UTF-8 length-prefixed strings and payload data streams.
+
+pub type MqttFixedHeader = struct {
+    packet_type: Int,
+    dup: Bool,
+    qos: Int,
+    retain: Bool,
+    remaining_length: Int,
+};
+
+pub type MqttPublishPacket = struct {
+    topic: String,
+    packet_id: Int,
+    payload: String,
+    qos: Int,
+    dup: Bool,
+    retain: Bool,
+};
+
+/// Encode a non-negative integer into MQTT variable-length remaining length bytes.
+pub fn mqtt_encode_remaining_length(length: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut x: Int = length;
+
+    let mut cont: Bool = true;
+    while cont {
+        let mut encoded_byte: Int = x % 128;
+        x = x / 128;
+        if x > 0 {
+            encoded_byte = encoded_byte + 128;
+            out = list_push(out, encoded_byte);
+        } else {
+            out = list_push(out, encoded_byte);
+            cont = false;
+        }
+    }
+    return out;
+}
+
+/// Decode MQTT variable-length integer from byte stream starting at offset.
+/// Returns Result[(value, bytes_consumed), String].
+pub fn mqtt_decode_remaining_length(bytes: &List[Int], offset: Int) -> Result[List[Int], String] {
+    let size: Int = list_len(*bytes);
+    let mut multiplier: Int = 1;
+    let mut value: Int = 0;
+    let mut cursor: Int = offset;
+    let mut cont: Bool = true;
+    let mut bytes_consumed: Int = 0;
+
+    while cont {
+        if cursor >= size {
+            return Err("Unexpected end of stream while decoding remaining length");
+        }
+        let encoded_byte: Int = list_get(*bytes, cursor);
+        value = value + ((encoded_byte % 128) * multiplier);
+        multiplier = multiplier * 128;
+        cursor = cursor + 1;
+        bytes_consumed = bytes_consumed + 1;
+
+        if (encoded_byte / 128) == 0 {
+            cont = false;
+        } else if bytes_consumed >= 4 {
+            return Err("MQTT variable length exceeds 4 bytes");
+        }
+    }
+
+    let mut res: List[Int] = list_new();
+    res = list_push(res, value);
+    res = list_push(res, bytes_consumed);
+    return Ok(res);
+}
+
+/// Encode MQTT fixed header byte 1 from packet type and flags.
+pub fn mqtt_encode_fixed_header(hdr: &MqttFixedHeader) -> List[Int] {
+    let mut b1: Int = ((hdr).packet_type % 16) * 16;
+    if (hdr).dup {
+        b1 = b1 + 8;
+    }
+    b1 = b1 + (((hdr).qos % 4) * 2);
+    if (hdr).retain {
+        b1 = b1 + 1;
+    }
+
+    let mut out: List[Int] = list_new();
+    out = list_push(out, b1);
+
+    let rem_bytes: List[Int] = mqtt_encode_remaining_length((hdr).remaining_length);
+    let r_len: Int = list_len(rem_bytes);
+    let mut i: Int = 0;
+    while i < r_len {
+        out = list_push(out, list_get(rem_bytes, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Decode MQTT fixed header from byte stream at index 0.
+pub fn mqtt_decode_fixed_header(bytes: &List[Int]) -> Result[MqttFixedHeader, String] {
+    let size: Int = list_len(*bytes);
+    if size < 2 {
+        return Err("MQTT frame too short for fixed header");
+    }
+
+    let b1: Int = list_get(*bytes, 0);
+    let p_type: Int = b1 / 16;
+    let dup_flag: Bool = ((b1 / 8) % 2) == 1;
+    let qos_val: Int = (b1 / 2) % 4;
+    let retain_flag: Bool = (b1 % 2) == 1;
+
+    let rem_res: Result[List[Int], String] = mqtt_decode_remaining_length(bytes, 1);
+    if !rem_res.is_ok() {
+        return Err(rem_res.unwrap_err());
+    }
+
+    let rem_info: List[Int] = rem_res.unwrap();
+    let rem_len: Int = list_get(rem_info, 0);
+
+    return Ok(MqttFixedHeader {
+        packet_type: p_type,
+        dup: dup_flag,
+        qos: qos_val,
+        retain: retain_flag,
+        remaining_length: rem_len,
+    });
+}
+
+/// Encode length-prefixed UTF-8 string into byte buffer.
+pub fn mqtt_encode_string(str_val: String) -> List[Int] {
+    let slen: Int = str_val.len();
+    let mut out: List[Int] = list_new();
+    out = list_push(out, (slen / 256) % 256);
+    out = list_push(out, slen % 256);
+
+    let mut i: Int = 0;
+    while i < slen {
+        out = list_push(out, byte_at(str_val, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Build a serialized MQTT PINGREQ packet (type 12, length 0).
+pub fn mqtt_build_pingreq_packet() -> List[Int] {
+    let hdr: MqttFixedHeader = MqttFixedHeader {
+        packet_type: 12,
+        dup: false,
+        qos: 0,
+        retain: false,
+        remaining_length: 0,
+    };
+    return mqtt_encode_fixed_header(&hdr);
+}
+
+/// Build a serialized MQTT PINGRESP packet (type 13, length 0).
+pub fn mqtt_build_pingresp_packet() -> List[Int] {
+    let hdr: MqttFixedHeader = MqttFixedHeader {
+        packet_type: 13,
+        dup: false,
+        qos: 0,
+        retain: false,
+        remaining_length: 0,
+    };
+    return mqtt_encode_fixed_header(&hdr);
+}

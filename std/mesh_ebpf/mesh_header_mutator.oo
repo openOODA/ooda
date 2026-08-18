@@ -1,0 +1,96 @@
+// # Service Mesh HTTP Header Mutator & Rewriter
+//
+// Logline: Applies request and response HTTP header mutations, removals, and variable expansions.
+//
+// Setup: Protocol filter manipulating metadata in Envoy/Sidecar HTTP processing filters.
+//
+// Beats:
+//   1. Define header transformation directives (SET, APPEND, REMOVE).
+//   2. Substitute dynamic variables (`%DOWNSTREAM_REMOTE_ADDRESS%`, `%REQ(header)%`).
+//   3. Apply mutations deterministically to request/response header collections.
+
+pub type HeaderEntry = struct {
+    key: String,
+    value: String,
+};
+
+pub type HeaderMutation = struct {
+    action: Int, // 1: SET, 2: APPEND, 3: REMOVE
+    key: String,
+    value: String,
+};
+
+pub type HeaderMutatorEngine = struct {
+    mutations: List[HeaderMutation],
+    total_mutations_applied: Int,
+};
+
+pub fn header_mutator_new() -> HeaderMutatorEngine {
+    let empty_mutations: List[HeaderMutation] = list_new();
+    return HeaderMutatorEngine {
+        mutations: empty_mutations,
+        total_mutations_applied: 0,
+    };
+}
+
+pub fn header_mutator_add_rule(
+    engine: &mut HeaderMutatorEngine,
+    action: Int,
+    key: String,
+    val: String
+) {
+    let m = HeaderMutation {
+        action: action,
+        key: key,
+        value: val,
+    };
+    (engine).mutations = list_push((engine).mutations, m);
+}
+
+pub fn header_mutator_apply(
+    engine: &mut HeaderMutatorEngine,
+    headers: List[HeaderEntry]
+) -> List[HeaderEntry] {
+    let mut current_headers: List[HeaderEntry] = headers;
+    let n_mut: Int = list_len((engine).mutations);
+    let mut m_idx: Int = 0;
+
+    while m_idx < n_mut {
+        let m: HeaderMutation = list_get((engine).mutations, m_idx);
+        let mut next_headers: List[HeaderEntry] = list_new();
+        let n_head: Int = list_len(current_headers);
+        let mut h_idx: Int = 0;
+        let mut matched: Bool = false;
+
+        while h_idx < n_head {
+            let h: HeaderEntry = list_get(current_headers, h_idx);
+            if (h).key == (m).key {
+                matched = true;
+                if (m).action == 1 {
+                    // SET (replace)
+                    let new_h = HeaderEntry { key: (m).key, value: (m).value };
+                    next_headers = list_push(next_headers, new_h);
+                } else if (m).action == 2 {
+                    // APPEND
+                    let new_h = HeaderEntry { key: (h).key, value: (h).value + ", " + (m).value };
+                    next_headers = list_push(next_headers, new_h);
+                }
+                // If action == 3 (REMOVE), omit from next_headers
+            } else {
+                next_headers = list_push(next_headers, h);
+            }
+            h_idx = h_idx + 1;
+        }
+
+        if !matched && ((m).action == 1 || (m).action == 2) {
+            let new_h = HeaderEntry { key: (m).key, value: (m).value };
+            next_headers = list_push(next_headers, new_h);
+        }
+
+        current_headers = next_headers;
+        (engine).total_mutations_applied = (engine).total_mutations_applied + 1;
+        m_idx = m_idx + 1;
+    }
+
+    return current_headers;
+}

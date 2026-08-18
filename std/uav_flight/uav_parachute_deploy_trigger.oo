@@ -1,0 +1,128 @@
+// # UAV Autonomous Ballistic Parachute Deploy Trigger
+//
+// Logline: Persist freefall, tumble, tilt, or fast descent then fire. Int milli destub.
+//
+// Setup: Crash timer filters aerobatics; deploy only above min AGL.
+//
+// Beats:
+//   1. Thresholds: |a|<0.25 g, tilt, rate, descent, persist, min AGL.
+//   2. Compare |a|^2 and |omega|^2 (no sqrt).
+//   3. Integrate persistence while emergency is true.
+//   4. Deploy + motor kill; latch.
+
+type ParachuteConfig = struct {
+    freefall_mm_s2: Int,
+    max_tilt_mrad: Int,
+    max_rate_mrad_s: Int,
+    max_descent_mm_s: Int,
+    persistence_ms: Int,
+    min_deploy_alt_mm: Int
+};
+
+type ParachuteTriggerState = struct {
+    crash_timer_ms: Int,
+    is_parachute_deployed: Bool,
+    is_motor_kill_commanded: Bool,
+    trigger_reason_code: Int
+};
+
+pub fn parachute_config_default() -> ParachuteConfig {
+    return ParachuteConfig {
+        freefall_mm_s2: 2450,
+        max_tilt_mrad: 1309,
+        max_rate_mrad_s: 10470,
+        max_descent_mm_s: 8000,
+        persistence_ms: 200,
+        min_deploy_alt_mm: 10000
+    };
+}
+
+pub fn parachute_state_init() -> ParachuteTriggerState {
+    return ParachuteTriggerState {
+        crash_timer_ms: 0,
+        is_parachute_deployed: false,
+        is_motor_kill_commanded: false,
+        trigger_reason_code: 0
+    };
+}
+
+pub fn evaluate_parachute_trigger(
+    cfg: ParachuteConfig,
+    state: ParachuteTriggerState,
+    ax_mm_s2: Int,
+    ay_mm_s2: Int,
+    az_mm_s2: Int,
+    gx_mrad_s: Int,
+    gy_mrad_s: Int,
+    gz_mrad_s: Int,
+    tilt_mrad: Int,
+    descent_mm_s: Int,
+    altitude_agl_mm: Int,
+    dt_ms: Int
+) -> ParachuteTriggerState {
+    if state.is_parachute_deployed {
+        return ParachuteTriggerState {
+            crash_timer_ms: state.crash_timer_ms,
+            is_parachute_deployed: true,
+            is_motor_kill_commanded: true,
+            trigger_reason_code: state.trigger_reason_code
+        };
+    }
+    let acc2: Int = ((ax_mm_s2 * ax_mm_s2) + (ay_mm_s2 * ay_mm_s2)) + (az_mm_s2 * az_mm_s2);
+    let gyr2: Int = ((gx_mrad_s * gx_mrad_s) + (gy_mrad_s * gy_mrad_s)) + (gz_mrad_s * gz_mrad_s);
+    let free_th2: Int = cfg.freefall_mm_s2 * cfg.freefall_mm_s2;
+    let rate_th2: Int = cfg.max_rate_mrad_s * cfg.max_rate_mrad_s;
+    let is_freefall: Bool = acc2 < free_th2;
+    let is_tumbling: Bool = gyr2 > rate_th2;
+    let is_overtilt: Bool = tilt_mrad > cfg.max_tilt_mrad;
+    let is_fast_dive: Bool = descent_mm_s > cfg.max_descent_mm_s;
+    let is_emergency: Bool = if is_freefall {
+        true
+    } else {
+        if is_tumbling {
+            true
+        } else {
+            if is_overtilt {
+                true
+            } else {
+                is_fast_dive
+            }
+        }
+    };
+    let new_timer: Int = if is_emergency {
+        state.crash_timer_ms + dt_ms
+    } else {
+        0
+    };
+    let persist_ok: Bool = new_timer >= cfg.persistence_ms;
+    let alt_ok: Bool = altitude_agl_mm >= cfg.min_deploy_alt_mm;
+    if persist_ok {
+        if alt_ok {
+            let reason: Int = if is_freefall {
+                1
+            } else {
+                if is_tumbling {
+                    2
+                } else {
+                    if is_overtilt {
+                        3
+                    } else {
+                        4
+                    }
+                }
+            };
+            return ParachuteTriggerState {
+                crash_timer_ms: new_timer,
+                is_parachute_deployed: true,
+                is_motor_kill_commanded: true,
+                trigger_reason_code: reason
+            };
+        }
+    }
+    return ParachuteTriggerState {
+        crash_timer_ms: new_timer,
+        is_parachute_deployed: false,
+        is_motor_kill_commanded: false,
+        trigger_reason_code: 0
+    };
+}

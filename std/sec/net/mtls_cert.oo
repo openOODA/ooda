@@ -1,0 +1,246 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::net::mtls_cert
+// mTLS certificate & chain ops (split from mtls.oo, M172)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects.
+// CAP-G6: preferred &TcpCap for TLS/TCP session effects; &NetCap still works via supersede.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins / compiler limitations.
+
+import "./mtls_types.oo";
+
+// -------------------------------------------------------------------
+// Default & Fallback Constructors
+// -------------------------------------------------------------------
+
+pub fn mtls_certificate_empty() -> MtlsCertificate {
+    let empty_sans: List[String] = [];
+    return MtlsCertificate {
+        cert_id: "",
+        subject_cn: "",
+        issuer_cn: "",
+        sans: empty_sans,
+        serial_number: "",
+        public_key_algorithm: "",
+        signature_algorithm: "",
+        not_before: 0,
+        not_after: 0,
+        is_ca: false,
+        is_self_signed: false,
+        raw_pem: "",
+        checksum: 0,
+        is_valid: false,
+    };
+}
+
+pub fn certificate_chain_empty() -> CertificateChain {
+    let dummy_cert: MtlsCertificate = mtls_certificate_empty();
+    let empty_list: List[MtlsCertificate] = [];
+    return CertificateChain {
+        chain_id: "",
+        leaf: dummy_cert,
+        intermediates: empty_list,
+        root: dummy_cert,
+        depth: 0,
+        is_verified: false,
+        error_code: "EMPTY",
+    };
+}
+
+// -------------------------------------------------------------------
+// MtlsCertificate Operations
+// -------------------------------------------------------------------
+
+pub fn mtls_certificate_create(
+    cert_id: String,
+    subject_cn: String,
+    issuer_cn: String,
+    serial_number: String,
+    pk_alg: String,
+    sig_alg: String,
+    not_before: Int,
+    not_after: Int,
+    is_ca: Bool,
+    raw_pem: String
+) -> Result[MtlsCertificate, String] {
+    let cn_len: Int = subject_cn.len();
+    if cn_len == 0 {
+        return Err("INVALID_CERT: Subject CN cannot be empty");
+    }
+    let serial_len: Int = serial_number.len();
+    if serial_len == 0 {
+        return Err("INVALID_CERT: Serial number cannot be empty");
+    }
+    if not_after <= not_before {
+        return Err("INVALID_CERT: Certificate expiration (not_after) must be after not_before");
+    }
+    let pem_len: Int = raw_pem.len();
+    if pem_len == 0 {
+        return Err("INVALID_CERT: Raw PEM content cannot be empty");
+    }
+
+    let is_self_signed: Bool = str_eq(subject_cn, issuer_cn);
+    let chk: Int = checksum_calculate(raw_pem);
+    let empty_sans: List[String] = [];
+
+    let cert = MtlsCertificate {
+        cert_id: cert_id,
+        subject_cn: subject_cn,
+        issuer_cn: issuer_cn,
+        sans: empty_sans,
+        serial_number: serial_number,
+        public_key_algorithm: pk_alg,
+        signature_algorithm: sig_alg,
+        not_before: not_before,
+        not_after: not_after,
+        is_ca: is_ca,
+        is_self_signed: is_self_signed,
+        raw_pem: raw_pem,
+        checksum: chk,
+        is_valid: true,
+    };
+    return Ok(cert);
+}
+
+pub fn mtls_certificate_add_san(cert: MtlsCertificate, san: String) -> MtlsCertificate {
+    let cur_sans: List[String] = cert.sans;
+    let new_sans: List[String] = list_push(cur_sans, san);
+    return MtlsCertificate {
+        cert_id: cert.cert_id,
+        subject_cn: cert.subject_cn,
+        issuer_cn: cert.issuer_cn,
+        sans: new_sans,
+        serial_number: cert.serial_number,
+        public_key_algorithm: cert.public_key_algorithm,
+        signature_algorithm: cert.signature_algorithm,
+        not_before: cert.not_before,
+        not_after: cert.not_after,
+        is_ca: cert.is_ca,
+        is_self_signed: cert.is_self_signed,
+        raw_pem: cert.raw_pem,
+        checksum: cert.checksum,
+        is_valid: cert.is_valid,
+    };
+}
+
+pub fn mtls_certificate_validate(cert_ref: &MtlsCertificate, current_time: Int) -> Bool {
+    let is_valid: Bool = cert_ref.is_valid;
+    if is_valid == false {
+        return false;
+    }
+    let pem: String = cert_ref.raw_pem;
+    let expected_chk: Int = checksum_calculate(pem);
+    let chk: Int = cert_ref.checksum;
+    if chk != expected_chk {
+        return false;
+    }
+    let nb: Int = cert_ref.not_before;
+    if current_time < nb {
+        return false;
+    }
+    let na: Int = cert_ref.not_after;
+    if current_time > na {
+        return false;
+    }
+    return true;
+}
+
+// -------------------------------------------------------------------
+// CertificateChain Operations
+// -------------------------------------------------------------------
+
+pub fn certificate_chain_create(
+    chain_id: String,
+    leaf: MtlsCertificate,
+    root: MtlsCertificate
+) -> CertificateChain {
+    let empty_intermediates: List[MtlsCertificate] = [];
+    return CertificateChain {
+        chain_id: chain_id,
+        leaf: leaf,
+        intermediates: empty_intermediates,
+        root: root,
+        depth: 2,
+        is_verified: false,
+        error_code: "UNVERIFIED",
+    };
+}
+
+pub fn certificate_chain_add_intermediate(
+    chain: CertificateChain,
+    intermediate: MtlsCertificate
+) -> CertificateChain {
+    let cur_list: List[MtlsCertificate] = chain.intermediates;
+    let new_list: List[MtlsCertificate] = list_push(cur_list, intermediate);
+    let cur_depth: Int = chain.depth;
+    let new_depth: Int = cur_depth + 1;
+    return CertificateChain {
+        chain_id: chain.chain_id,
+        leaf: chain.leaf,
+        intermediates: new_list,
+        root: chain.root,
+        depth: new_depth,
+        is_verified: chain.is_verified,
+        error_code: chain.error_code,
+    };
+}
+
+pub fn certificate_chain_verify(
+    chain_ref: &CertificateChain,
+    current_time: Int,
+    max_depth: Int
+) -> Result[Bool, String] {
+    let leaf_ref = &chain_ref.leaf;
+    let leaf_val: Bool = mtls_certificate_validate(leaf_ref, current_time);
+    if leaf_val == false {
+        return Err("INVALID_LEAF_CERT: Leaf certificate in chain failed validation");
+    }
+
+    let root_ref = &chain_ref.root;
+    let root_val: Bool = mtls_certificate_validate(root_ref, current_time);
+    if root_val == false {
+        return Err("INVALID_ROOT_CERT: Root CA certificate in chain failed validation");
+    }
+    let root_is_ca: Bool = root_ref.is_ca;
+    if root_is_ca == false {
+        return Err("INVALID_ROOT_CA: Root certificate is not marked as CA");
+    }
+
+    let c_depth: Int = chain_ref.depth;
+    if c_depth > max_depth {
+        return Err("CHAIN_DEPTH_EXCEEDED: Certificate chain exceeds max allowed depth");
+    }
+
+    let intermediates: List[MtlsCertificate] = chain_ref.intermediates;
+    let count: Int = list_len(intermediates);
+    let mut i: Int = 0;
+    let mut prev_issuer: String = leaf_ref.issuer_cn;
+
+    while i < count {
+        let inter: MtlsCertificate = list_get(intermediates, i);
+        let inter_ref = &inter;
+        let inter_val: Bool = mtls_certificate_validate(inter_ref, current_time);
+        if inter_val == false {
+            return Err("INVALID_INTERMEDIATE_CERT: Intermediate certificate failed validation");
+        }
+        let inter_ca: Bool = inter.is_ca;
+        if inter_ca == false {
+            return Err("INVALID_INTERMEDIATE_CA: Intermediate certificate is not marked as CA");
+        }
+        let inter_subj: String = inter.subject_cn;
+        let match_cn: Bool = str_eq(prev_issuer, inter_subj);
+        if match_cn == false {
+            return Err("CHAIN_LINKAGE_BREAK: Intermediate subject CN does not match previous issuer CN");
+        }
+        let inter_issuer_str: String = inter.issuer_cn;
+        prev_issuer = inter_issuer_str;
+        i = i + 1;
+    }
+
+    let root_subj: String = root_ref.subject_cn;
+    let root_match: Bool = str_eq(prev_issuer, root_subj);
+    if root_match == false {
+        return Err("ROOT_LINKAGE_BREAK: Top issuer CN does not match root CA subject CN");
+    }
+
+    return Ok(true);
+}

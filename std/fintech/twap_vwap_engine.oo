@@ -1,0 +1,245 @@
+// # Algorithmic Execution TWAP & VWAP Engine
+//
+// Logline: Slices institutional parent orders into optimal TWAP and VWAP child order execution schedules.
+//
+// Setup: Pure algorithmic trading schedule generation and execution tracking.
+//
+// Beats:
+//   1. Define algorithmic execution parameters, target volumes, time horizons, and participation limits.
+//   2. Generate linear Time-Weighted Average Price (TWAP) child order time slices.
+//   3. Compute Volume-Weighted Average Price (VWAP) intraday volume profiles and track execution slippage.
+
+pub type AlgoOrderConfig = struct {
+    parent_order_id: Int,
+    symbol: String,
+    total_quantity: Int,
+    is_buy: Bool,
+    start_time_ns: Int,
+    end_time_ns: Int,
+    max_participation_pct: Float,
+    algo_type: Int, // 1 = TWAP, 2 = VWAP
+};
+
+pub type ChildSlice = struct {
+    slice_id: Int,
+    target_time_ns: Int,
+    target_quantity: Int,
+    executed_qty: Int,
+    avg_exec_price: Int,
+    is_complete: Bool,
+};
+
+pub type AlgoExecutionState = struct {
+    config: AlgoOrderConfig,
+    slices: List[ChildSlice],
+    cum_executed_qty: Int,
+    cum_notional: Int,
+    vwap_price: Float,
+    slippage_bps: Int,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 100000 { f = f + 100000.0; count = count - 100000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn algo_config_new(
+    parent_id: Int,
+    symbol: String,
+    total_qty: Int,
+    is_buy: Bool,
+    start_ns: Int,
+    end_ns: Int,
+    algo_type: Int
+) -> AlgoOrderConfig {
+    return AlgoOrderConfig {
+        parent_order_id: parent_id,
+        symbol: symbol,
+        total_quantity: total_qty,
+        is_buy: is_buy,
+        start_time_ns: start_ns,
+        end_time_ns: end_ns,
+        max_participation_pct: 0.15, // 15% max volume participation
+        algo_type: algo_type,
+    };
+}
+
+pub fn generate_twap_schedule(config: &AlgoOrderConfig, slice_count: Int) -> AlgoExecutionState {
+    let mut slices: List[ChildSlice] = list_new();
+    if slice_count <= 0 {
+        return AlgoExecutionState {
+            config: *config,
+            slices: slices,
+            cum_executed_qty: 0,
+            cum_notional: 0,
+            vwap_price: 0.0,
+            slippage_bps: 0,
+        };
+    }
+    
+    let total_time: Int = (config).end_time_ns - (config).start_time_ns;
+    let time_step: Int = total_time / slice_count;
+    let slice_qty: Int = (config).total_quantity / slice_count;
+    let mut rem_qty: Int = (config).total_quantity;
+    
+    let mut i: Int = 0;
+    while i < slice_count {
+        let target_time: Int = (config).start_time_ns + (i * time_step);
+        let mut qty: Int = slice_qty;
+        if i == (slice_count - 1) {
+            qty = rem_qty; // Final slice absorbs rounding remainder
+        }
+        let sl = ChildSlice {
+            slice_id: i + 1,
+            target_time_ns: target_time,
+            target_quantity: qty,
+            executed_qty: 0,
+            avg_exec_price: 0,
+            is_complete: false,
+        };
+        slices = list_push(slices, sl);
+        rem_qty = rem_qty - qty;
+        i = i + 1;
+    }
+    
+    return AlgoExecutionState {
+        config: *config,
+        slices: slices,
+        cum_executed_qty: 0,
+        cum_notional: 0,
+        vwap_price: 0.0,
+        slippage_bps: 0,
+    };
+}
+
+pub fn generate_vwap_schedule(
+    config: &AlgoOrderConfig,
+    volume_profile: List[Float]
+) -> AlgoExecutionState {
+    let mut slices: List[ChildSlice] = list_new();
+    let n_bins: Int = list_len(volume_profile);
+    if n_bins <= 0 {
+        return generate_twap_schedule(config, 10);
+    }
+    
+    let total_time: Int = (config).end_time_ns - (config).start_time_ns;
+    let time_step: Int = total_time / n_bins;
+    let total_qty_f: Float = int_to_float((config).total_quantity);
+    let mut rem_qty: Int = (config).total_quantity;
+    
+    let mut i: Int = 0;
+    while i < n_bins {
+        let weight: Float = list_get(volume_profile, i);
+        let bin_qty_f: Float = total_qty_f * weight;
+        let mut bin_qty: Int = 0;
+        let mut count: Float = bin_qty_f;
+        while count >= 1.0 {
+            bin_qty = bin_qty + 1;
+            count = count - 1.0;
+        }
+        
+        if i == (n_bins - 1) {
+            bin_qty = rem_qty;
+        }
+        
+        let target_time: Int = (config).start_time_ns + (i * time_step);
+        let sl = ChildSlice {
+            slice_id: i + 1,
+            target_time_ns: target_time,
+            target_quantity: bin_qty,
+            executed_qty: 0,
+            avg_exec_price: 0,
+            is_complete: false,
+        };
+        slices = list_push(slices, sl);
+        rem_qty = rem_qty - bin_qty;
+        i = i + 1;
+    }
+    
+    return AlgoExecutionState {
+        config: *config,
+        slices: slices,
+        cum_executed_qty: 0,
+        cum_notional: 0,
+        vwap_price: 0.0,
+        slippage_bps: 0,
+    };
+}
+
+pub fn record_child_execution(
+    state: &mut AlgoExecutionState,
+    slice_id: Int,
+    fill_qty: Int,
+    fill_price: Int
+) {
+    let mut new_slices: List[ChildSlice] = list_new();
+    let old_slices: List[ChildSlice] = (state).slices;
+    let n: Int = list_len(old_slices);
+    let mut i: Int = 0;
+    
+    while i < n {
+        let mut sl: ChildSlice = list_get(old_slices, i);
+        if (sl).slice_id == slice_id {
+            let prev_cum: Int = (sl).executed_qty;
+            let prev_avg: Int = (sl).avg_exec_price;
+            let new_cum: Int = prev_cum + fill_qty;
+            if new_cum > 0 {
+                let notional: Int = (prev_cum * prev_avg) + (fill_qty * fill_price);
+                (sl).avg_exec_price = notional / new_cum;
+            }
+            (sl).executed_qty = new_cum;
+            if new_cum >= (sl).target_quantity {
+                (sl).is_complete = true;
+            }
+        }
+        new_slices = list_push(new_slices, sl);
+        i = i + 1;
+    }
+    (state).slices = new_slices;
+    
+    (state).cum_executed_qty = (state).cum_executed_qty + fill_qty;
+    (state).cum_notional = (state).cum_notional + (fill_qty * fill_price);
+    if (state).cum_executed_qty > 0 {
+        let notional_f: Float = int_to_float((state).cum_notional);
+        let qty_f: Float = int_to_float((state).cum_executed_qty);
+        (state).vwap_price = notional_f / qty_f;
+    }
+}
+
+pub fn calculate_execution_slippage(state: &AlgoExecutionState, benchmark_price: Int) -> Int {
+    if (state).cum_executed_qty == 0 { return 0; }
+    if benchmark_price <= 0 { return 0; }
+    let exec_vwap: Float = (state).vwap_price;
+    let bmk_f: Float = int_to_float(benchmark_price);
+    
+    let diff: Float = if (state).config.is_buy {
+        exec_vwap - bmk_f
+    } else {
+        bmk_f - exec_vwap
+    };
+    
+    let slippage_ratio: Float = diff / bmk_f;
+    let slippage_bps_f: Float = slippage_ratio * 10000.0;
+    
+    let mut res: Int = 0;
+    let mut temp: Float = slippage_bps_f;
+    if temp < 0.0 { temp = 0.0 - temp; }
+    while temp >= 1.0 {
+        res = res + 1;
+        temp = temp - 1.0;
+    }
+    if slippage_bps_f < 0.0 {
+        return 0 - res;
+    }
+    return res;
+}

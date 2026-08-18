@@ -1,0 +1,442 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::cps::scada_fw
+// SCADA / ICS Firewall Policy & Deep Packet Inspection Module
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. CAP-G6: AF_PACKET stays &NetCap residual.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+// -------------------------------------------------------------------
+// Core SCADA Firewall Types
+// -------------------------------------------------------------------
+
+pub type ScadaFlow = struct {
+    flow_id: String,
+    protocol: Int,
+    src_addr: String,
+    src_port: Int,
+    dst_addr: String,
+    dst_port: Int,
+    function_code: Int,
+    duration_ms: Int,
+    bytes_transferred: Int,
+    timestamp: Int,
+};
+
+pub type ScadaRule = struct {
+    rule_id: String,
+    name: String,
+    action: Int,
+    protocol: Int,
+    src_addr: String,
+    dst_addr: String,
+    src_port: Int,
+    dst_port: Int,
+    function_code: Int,
+    enabled: Bool,
+};
+
+pub type ScadaPolicy = struct {
+    policy_id: String,
+    default_action: Int,
+    log_all_drops: Bool,
+    log_all_allows: Bool,
+    enforce_unidirectional: Bool,
+    require_dpi: Bool,
+    fail_closed: Bool,
+    is_valid: Bool,
+};
+
+pub type ScadaDecision = struct {
+    decision_id: String,
+    action: Int,
+    rule_id: String,
+    reason: String,
+    timestamp: Int,
+};
+
+pub type ScadaAnomaly = struct {
+    anomaly_id: String,
+    anomaly_type: Int,
+    flow_id: String,
+    severity: Int,
+    description: String,
+    timestamp: Int,
+};
+
+pub type ScadaEngine = struct {
+    engine_id: String,
+    policy: ScadaPolicy,
+    rules: List[ScadaRule],
+    decisions: List[ScadaDecision],
+    anomalies: List[ScadaAnomaly],
+    flows_inspected: Int,
+    flows_allowed: Int,
+    flows_dropped: Int,
+    is_halted: Bool,
+};
+
+// -------------------------------------------------------------------
+// Action Constants
+// -------------------------------------------------------------------
+
+pub fn scada_action_accept() -> Int {
+    return 1;
+}
+
+pub fn scada_action_drop() -> Int {
+    return 2;
+}
+
+pub fn scada_action_reject() -> Int {
+    return 3;
+}
+
+pub fn scada_action_inspect() -> Int {
+    return 4;
+}
+
+// -------------------------------------------------------------------
+// Protocol Constants
+// -------------------------------------------------------------------
+
+pub fn scada_proto_modbus_tcp() -> Int {
+    return 1;
+}
+
+pub fn scada_proto_dnp3() -> Int {
+    return 2;
+}
+
+pub fn scada_proto_iec61850_goose() -> Int {
+    return 3;
+}
+
+pub fn scada_proto_iec61850_mms() -> Int {
+    return 4;
+}
+
+pub fn scada_proto_iec60870_5_104() -> Int {
+    return 5;
+}
+
+pub fn scada_proto_opc_ua() -> Int {
+    return 6;
+}
+
+pub fn scada_proto_profinet() -> Int {
+    return 7;
+}
+
+pub fn scada_proto_ethernet_ip() -> Int {
+    return 8;
+}
+
+// -------------------------------------------------------------------
+// Anomaly Constants
+// -------------------------------------------------------------------
+
+pub fn scada_anom_unknown_protocol() -> Int {
+    return 1;
+}
+
+pub fn scada_anom_unauth_write() -> Int {
+    return 2;
+}
+
+pub fn scada_anom_recon_scan() -> Int {
+    return 3;
+}
+
+pub fn scada_anom_protocol_violation() -> Int {
+    return 4;
+}
+
+pub fn scada_anom_excessive_drops() -> Int {
+    return 5;
+}
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn scada_flow_create(
+    flow_id_val: String,
+    proto: Int,
+    src_addr_v: String,
+    src_port_v: Int,
+    dst_addr_v: String,
+    dst_port_v: Int,
+    fc: Int,
+    ts: Int
+) -> ScadaFlow {
+    return ScadaFlow {
+        flow_id: flow_id_val,
+        protocol: proto,
+        src_addr: src_addr_v,
+        src_port: src_port_v,
+        dst_addr: dst_addr_v,
+        dst_port: dst_port_v,
+        function_code: fc,
+        duration_ms: 0,
+        bytes_transferred: 0,
+        timestamp: ts,
+    };
+}
+
+pub fn scada_rule_create(
+    rule_id_val: String,
+    name_val: String,
+    action_v: Int,
+    proto: Int
+) -> ScadaRule {
+    return ScadaRule {
+        rule_id: rule_id_val,
+        name: name_val,
+        action: action_v,
+        protocol: proto,
+        src_addr: "",
+        dst_addr: "",
+        src_port: 0,
+        dst_port: 0,
+        function_code: -1,
+        enabled: true,
+    };
+}
+
+pub fn scada_policy_default() -> ScadaPolicy {
+    return ScadaPolicy {
+        policy_id: "SCADA_POLICY_DEFAULT",
+        default_action: 2,
+        log_all_drops: true,
+        log_all_allows: false,
+        enforce_unidirectional: true,
+        require_dpi: true,
+        fail_closed: true,
+        is_valid: true,
+    };
+}
+
+pub fn scada_policy_validate(p: &ScadaPolicy) -> Result[Bool, String] {
+    let def: Int = (p).default_action;
+    if def == scada_action_drop() {
+        return Ok(true);
+    }
+    if def == scada_action_reject() {
+        return Ok(true);
+    }
+    if def == scada_action_accept() {
+        return Err("SCADAError: default action cannot be ACCEPT (default-deny required)");
+    }
+    return Err("SCADAError: invalid default action");
+}
+
+// -------------------------------------------------------------------
+// Rule Matching (Pure)
+// -------------------------------------------------------------------
+
+pub fn scada_match_protocol(rule: &ScadaRule, proto: Int) -> Bool {
+    if (rule).protocol == proto {
+        return true;
+    }
+    return false;
+}
+
+pub fn scada_match_addr(rule: &ScadaRule, src: String, dst: String) -> Bool {
+    if (rule).src_addr == "" {
+        if (rule).dst_addr == "" {
+            return true;
+        }
+    }
+    if (rule).src_addr != "" {
+        if (rule).src_addr != src {
+            return false;
+        }
+    }
+    if (rule).dst_addr != "" {
+        if (rule).dst_addr != dst {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn scada_match_port(rule: &ScadaRule, src_port_v: Int, dst_port_v: Int) -> Bool {
+    if (rule).src_port != 0 {
+        if (rule).src_port != src_port_v {
+            return false;
+        }
+    }
+    if (rule).dst_port != 0 {
+        if (rule).dst_port != dst_port_v {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn scada_rule_matches(rule: &ScadaRule, flow: &ScadaFlow) -> Bool {
+    if (rule).enabled == false {
+        return false;
+    }
+    let proto_ok: Bool = scada_match_protocol(rule, (flow).protocol);
+    if proto_ok == false {
+        return false;
+    }
+    let addr_ok: Bool = scada_match_addr(rule, (flow).src_addr, (flow).dst_addr);
+    if addr_ok == false {
+        return false;
+    }
+    let port_ok: Bool = scada_match_port(rule, (flow).src_port, (flow).dst_port);
+    if port_ok == false {
+        return false;
+    }
+    return true;
+}
+
+// -------------------------------------------------------------------
+// Engine (Pure)
+// -------------------------------------------------------------------
+
+pub fn scada_engine_init(engine_id_val: String) -> ScadaEngine {
+    return ScadaEngine {
+        engine_id: engine_id_val,
+        policy: scada_policy_default(),
+        rules: list_new(),
+        decisions: list_new(),
+        anomalies: list_new(),
+        flows_inspected: 0,
+        flows_allowed: 0,
+        flows_dropped: 0,
+        is_halted: false,
+    };
+}
+
+pub fn scada_engine_add_rule(engine: &mut ScadaEngine, r: ScadaRule) {
+    let mut eng = engine;
+    let old = eng.rules;
+    let mut updated: List[ScadaRule] = list_new();
+    let n = list_len(old);
+    let mut i = 0;
+    while i < n {
+        let cur = list_get(old, i);
+        updated = list_push(updated, cur);
+        let ni: Int = i + 1;
+        i = ni;
+    }
+    updated = list_push(updated, r);
+    eng.rules = updated;
+}
+
+pub fn scada_engine_inspect(engine: &mut ScadaEngine, flow: &ScadaFlow) -> ScadaDecision {
+    let mut eng = engine;
+    let inc_one: Int = 1;
+    let cur_i: Int = eng.flows_inspected;
+    eng.flows_inspected = cur_i + inc_one;
+
+    let n: Int = list_len(eng.rules);
+    let mut i = 0;
+    while i < n {
+        let r = list_get(eng.rules, i);
+        let matches: Bool = scada_rule_matches(&r, flow);
+        if matches {
+            let act: Int = r.action;
+            let cur_a: Int = eng.flows_allowed;
+            let cur_d: Int = eng.flows_dropped;
+            if act == scada_action_accept() {
+                eng.flows_allowed = cur_a + inc_one;
+            } else {
+                eng.flows_dropped = cur_d + inc_one;
+            }
+            let dec = ScadaDecision {
+                decision_id: "dec",
+                action: act,
+                rule_id: r.rule_id,
+                reason: "matched rule",
+                timestamp: (flow).timestamp,
+            };
+            let old = eng.decisions;
+            let mut upd: List[ScadaDecision] = list_new();
+            let m = list_len(old);
+            let mut j = 0;
+            while j < m {
+                let cur = list_get(old, j);
+                upd = list_push(upd, cur);
+                let nj: Int = j + 1;
+                j = nj;
+            }
+            upd = list_push(upd, dec);
+            eng.decisions = upd;
+            return dec;
+        }
+        let ni: Int = i + 1;
+        i = ni;
+    }
+
+    let def: Int = eng.policy.default_action;
+    let cur_d2: Int = eng.flows_dropped;
+    if def == scada_action_accept() {
+        let cur_a2: Int = eng.flows_allowed;
+        eng.flows_allowed = cur_a2 + inc_one;
+    } else {
+        eng.flows_dropped = cur_d2 + inc_one;
+    }
+    let dec = ScadaDecision {
+        decision_id: "dec-default",
+        action: def,
+        rule_id: "default",
+        reason: "no matching rule",
+        timestamp: (flow).timestamp,
+    };
+    let old = eng.decisions;
+    let mut upd: List[ScadaDecision] = list_new();
+    let m = list_len(old);
+    let mut j = 0;
+    while j < m {
+        let cur = list_get(old, j);
+        upd = list_push(upd, cur);
+        let nj: Int = j + 1;
+        j = nj;
+    }
+    upd = list_push(upd, dec);
+    eng.decisions = upd;
+    return dec;
+}
+
+pub fn scada_engine_record_anomaly(engine: &mut ScadaEngine, a: ScadaAnomaly) {
+    let mut eng = engine;
+    let old = eng.anomalies;
+    let mut upd: List[ScadaAnomaly] = list_new();
+    let n = list_len(old);
+    let mut i = 0;
+    while i < n {
+        let cur = list_get(old, i);
+        upd = list_push(upd, cur);
+        let ni: Int = i + 1;
+        i = ni;
+    }
+    upd = list_push(upd, a);
+    eng.anomalies = upd;
+}
+
+pub fn scada_engine_do_work(engine: &ScadaEngine) -> Int {
+    let r_n = list_len((engine).rules);
+    let d_n = list_len((engine).decisions);
+    return (engine).flows_inspected + (engine).flows_allowed + (engine).flows_dropped + r_n + d_n;
+}
+
+// -------------------------------------------------------------------
+// Fail-Closed Netfilter Stubs
+// -------------------------------------------------------------------
+
+pub fn scada_install_nft(net: &SysCap, rule_blob: String) -> Result[Bool, String] {
+    // COMPILER LIMITATION: openOODA lacks nftables via netlink FFI for SCADA-specific DPI rules.
+    process_exit(1);
+    return Err("Unimplemented: nftables rule install requires SysCap+netlink FFI lowering");
+}
+
+pub fn scada_open_capture(net: &NetCap, interface: String) -> Result[Int, String] {
+    // COMPILER LIMITATION: openOODA lacks AF_PACKET / pcap FFI for raw SCADA frame capture.
+    // CAP-G6: raw residual, no SoftGranular — sock_raw/AF_PACKET is hard NetCap-only (CAPS.oot CAP-G1).
+    process_exit(1);
+    return Err("Unimplemented: AF_PACKET/pcap capture requires NetCap raw residual (no SoftGranular) FFI lowering");
+}

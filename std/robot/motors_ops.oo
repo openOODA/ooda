@@ -1,0 +1,307 @@
+// # Motor Control Operations
+//
+// Logline: Mathematical utilities, PWM synthesis, quadrature encoder decoding, thermal modeling, and PID loops.
+//
+// Setup: Pure algorithmic motor control transformations and state updates.
+//
+// Beats:
+//   1. Implement scalar math, clipping, and conversion routines.
+//   2. Configure PWM signals and duty cycle voltage translations.
+//   3. Decode quadrature encoder tick counts and calculate rotational velocity.
+//   4. Calculate motor thermal rise and PID error compensation.
+
+pub fn math_pi() -> Float {
+    return 3.14159265358979323846;
+}
+
+pub fn math_abs(x: Float) -> Float {
+    if x < 0.0 {
+        return 0.0 - x;
+    }
+    return x;
+}
+
+pub fn clamp_float(val: Float, min_v: Float, max_v: Float) -> Float {
+    if val < min_v {
+        return min_v;
+    }
+    if val > max_v {
+        return max_v;
+    }
+    return val;
+}
+
+pub fn rad_to_deg(rad: Float) -> Float {
+    return (rad * 180.0) / math_pi();
+}
+
+pub fn deg_to_rad(deg: Float) -> Float {
+    return (deg * math_pi()) / 180.0;
+}
+
+pub fn rpm_to_rad_s(rpm: Float) -> Float {
+    return (rpm * math_pi()) / 30.0;
+}
+
+pub fn rad_s_to_rpm(rad_s: Float) -> Float {
+    return (rad_s * 30.0) / math_pi();
+}
+
+// -------------------------------------------------------------------
+// PWM Signal Generation & Configuration
+// -------------------------------------------------------------------
+
+type PwmConfig = struct {
+    frequency_hz: Float,
+    duty_cycle: Float,
+    inverted: Bool,
+};
+
+pub fn pwm_config_new(frequency_hz: Float, duty_cycle: Float, inverted: Bool) -> PwmConfig {
+    let clamped_duty: Float = clamp_float(duty_cycle, 0.0, 1.0);
+    return PwmConfig {
+        frequency_hz: frequency_hz,
+        duty_cycle: clamped_duty,
+        inverted: inverted,
+    };
+}
+
+pub fn pwm_to_voltage(cfg_pwm: PwmConfig, max_voltage: Float) -> Float {
+    let duty_raw: Float = cfg_pwm.duty_cycle;
+    let d_val: Float = if cfg_pwm.inverted { 1.0 - duty_raw } else { duty_raw };
+    return d_val * max_voltage;
+}
+
+// -------------------------------------------------------------------
+// Quadrature Encoder State & Kinematics
+// -------------------------------------------------------------------
+
+type EncoderState = struct {
+    ticks: Float,
+    cpr: Float,
+    gear_ratio: Float,
+    position_rad: Float,
+    velocity_rad_s: Float,
+    prev_ticks: Float,
+};
+
+pub fn encoder_init(cpr: Float, gear_ratio: Float) -> EncoderState {
+    return EncoderState {
+        ticks: 0.0,
+        cpr: cpr,
+        gear_ratio: gear_ratio,
+        position_rad: 0.0,
+        velocity_rad_s: 0.0,
+        prev_ticks: 0.0,
+    };
+}
+
+pub fn encoder_reset(enc: EncoderState) -> EncoderState {
+    return EncoderState {
+        ticks: 0.0,
+        cpr: (enc).cpr,
+        gear_ratio: (enc).gear_ratio,
+        position_rad: 0.0,
+        velocity_rad_s: 0.0,
+        prev_ticks: 0.0,
+    };
+}
+
+pub fn encoder_update(enc: EncoderState, new_ticks: Float, dt: Float) -> EncoderState {
+    let prev_val: Float = (enc).prev_ticks;
+    let d_ticks: Float = new_ticks - prev_val;
+
+    let cpr_val: Float = (enc).cpr;
+    if cpr_val <= 0.0 {
+        return EncoderState {
+            ticks: new_ticks,
+            cpr: (enc).cpr,
+            gear_ratio: (enc).gear_ratio,
+            position_rad: (enc).position_rad,
+            velocity_rad_s: (enc).velocity_rad_s,
+            prev_ticks: new_ticks,
+        };
+    }
+
+    let gear_val: Float = (enc).gear_ratio;
+    let ticks_per_rev: Float = cpr_val * gear_val;
+    if ticks_per_rev <= 0.0 {
+        return EncoderState {
+            ticks: new_ticks,
+            cpr: (enc).cpr,
+            gear_ratio: (enc).gear_ratio,
+            position_rad: (enc).position_rad,
+            velocity_rad_s: (enc).velocity_rad_s,
+            prev_ticks: new_ticks,
+        };
+    }
+
+    let pi_val: Float = math_pi();
+    let revs_val: Float = d_ticks / ticks_per_rev;
+    let d_rad_val: Float = (revs_val * 2.0) * pi_val;
+    let new_pos: Float = (enc).position_rad + d_rad_val;
+
+    let new_vel: Float = if dt > 0.000001 { d_rad_val / dt } else { 0.0 };
+
+    return EncoderState {
+        ticks: new_ticks,
+        cpr: (enc).cpr,
+        gear_ratio: (enc).gear_ratio,
+        position_rad: new_pos,
+        velocity_rad_s: new_vel,
+        prev_ticks: new_ticks,
+    };
+}
+
+pub fn encoder_get_position_deg(enc_ref: EncoderState) -> Float {
+    return rad_to_deg((enc_ref).position_rad);
+}
+
+pub fn encoder_get_rpm(enc_ref: EncoderState) -> Float {
+    return rad_s_to_rpm((enc_ref).velocity_rad_s);
+}
+
+// -------------------------------------------------------------------
+// Motor Thermal Model & Current Monitoring
+// -------------------------------------------------------------------
+
+type MotorThermalModel = struct {
+    resistance_ohms: Float,
+    thermal_mass: Float,
+    ambient_temp: Float,
+    current_temp: Float,
+    max_temp: Float,
+};
+
+pub fn thermal_init(resistance_ohms: Float, thermal_mass: Float, max_temp: Float) -> MotorThermalModel {
+    return MotorThermalModel {
+        resistance_ohms: resistance_ohms,
+        thermal_mass: thermal_mass,
+        ambient_temp: 25.0,
+        current_temp: 25.0,
+        max_temp: max_temp,
+    };
+}
+
+pub fn thermal_update(thm: MotorThermalModel, current_amps: Float, dt: Float) -> MotorThermalModel {
+    if dt < 0.000001 {
+        return thm;
+    }
+    let res_val: Float = (thm).resistance_ohms;
+    let p_heat: Float = (current_amps * current_amps) * res_val;
+    let cur_temp: Float = (thm).current_temp;
+    let amb_temp: Float = (thm).ambient_temp;
+    let delta_t: Float = cur_temp - amb_temp;
+    let p_cool: Float = delta_t * 0.1;
+    let p_net: Float = p_heat - p_cool;
+
+    let t_mass: Float = (thm).thermal_mass;
+    let new_temp: Float = if t_mass > 0.0 { (thm).current_temp + ((p_net * dt) / t_mass) } else { (thm).current_temp };
+    return MotorThermalModel {
+        resistance_ohms: (thm).resistance_ohms,
+        thermal_mass: (thm).thermal_mass,
+        ambient_temp: (thm).ambient_temp,
+        current_temp: new_temp,
+        max_temp: (thm).max_temp,
+    };
+}
+
+pub fn thermal_is_overheated(thm_ref: MotorThermalModel) -> Bool {
+    return (thm_ref).current_temp >= (thm_ref).max_temp;
+}
+
+// -------------------------------------------------------------------
+// PID Motor Controller
+// -------------------------------------------------------------------
+
+type MotorPid = struct {
+    kp: Float,
+    ki: Float,
+    kd: Float,
+    integral: Float,
+    prev_error: Float,
+    max_output: Float,
+    deadband: Float,
+    last_output: Float,
+};
+
+pub fn motor_pid_init(kp_val: Float, ki_val: Float, kd_val: Float, max_out: Float) -> MotorPid {
+    return MotorPid {
+        kp: kp_val,
+        ki: ki_val,
+        kd: kd_val,
+        integral: 0.0,
+        prev_error: 0.0,
+        max_output: max_out,
+        deadband: 0.0,
+        last_output: 0.0,
+    };
+}
+
+pub fn motor_pid_reset(pid_ctrl: MotorPid) -> MotorPid {
+    return MotorPid {
+        kp: (pid_ctrl).kp,
+        ki: (pid_ctrl).ki,
+        kd: (pid_ctrl).kd,
+        integral: 0.0,
+        prev_error: 0.0,
+        max_output: (pid_ctrl).max_output,
+        deadband: (pid_ctrl).deadband,
+        last_output: 0.0,
+    };
+}
+
+pub fn motor_pid_compute(pid_ctrl: MotorPid, setpoint: Float, measurement: Float, dt: Float) -> MotorPid {
+    if dt < 0.000001 {
+        return MotorPid {
+            kp: (pid_ctrl).kp,
+            ki: (pid_ctrl).ki,
+            kd: (pid_ctrl).kd,
+            integral: (pid_ctrl).integral,
+            prev_error: (pid_ctrl).prev_error,
+            max_output: (pid_ctrl).max_output,
+            deadband: (pid_ctrl).deadband,
+            last_output: 0.0,
+        };
+    }
+    let error_val: Float = setpoint - measurement;
+    let db_val: Float = (pid_ctrl).deadband;
+    if math_abs(error_val) < db_val {
+        return MotorPid {
+            kp: (pid_ctrl).kp,
+            ki: (pid_ctrl).ki,
+            kd: (pid_ctrl).kd,
+            integral: (pid_ctrl).integral,
+            prev_error: (pid_ctrl).prev_error,
+            max_output: (pid_ctrl).max_output,
+            deadband: (pid_ctrl).deadband,
+            last_output: 0.0,
+        };
+    }
+
+    let limit_val: Float = (pid_ctrl).max_output;
+    let new_integral: Float = clamp_float((pid_ctrl).integral + (error_val * dt), 0.0 - limit_val, limit_val);
+
+    let prev_err: Float = (pid_ctrl).prev_error;
+    let deriv_val: Float = (error_val - prev_err) / dt;
+    let kp_elem: Float = (pid_ctrl).kp;
+    let ki_elem: Float = (pid_ctrl).ki;
+    let kd_elem: Float = (pid_ctrl).kd;
+    let out_val: Float = ((kp_elem * error_val) + (ki_elem * new_integral)) + (kd_elem * deriv_val);
+    let clamped: Float = clamp_float(out_val, 0.0 - limit_val, limit_val);
+
+    return MotorPid {
+        kp: (pid_ctrl).kp,
+        ki: (pid_ctrl).ki,
+        kd: (pid_ctrl).kd,
+        integral: new_integral,
+        prev_error: error_val,
+        max_output: (pid_ctrl).max_output,
+        deadband: (pid_ctrl).deadband,
+        last_output: clamped,
+    };
+}
+
+pub fn motor_pid_last_output(pid_ctrl: MotorPid) -> Float {
+    return (pid_ctrl).last_output;
+}

@@ -1,0 +1,138 @@
+// # WebAssembly Exception Handling Engine
+//
+// Logline: WebAssembly Exception Handling proposal (tag sections, throw, rethrow, try_table, and catch handlers).
+//
+// Setup: Emits exception handling control instructions and encodes tag definitions for typed exceptions.
+//
+// Beats:
+//   1. Define WasmTag, WasmCatchClause, and WasmTryTable structures.
+//   2. Encode throw (0x08), throw_ref (0x0A), and rethrow (0x09) instructions.
+//   3. Encode try_table (0x1F) with catch, catch_ref, catch_all, and catch_all_ref clauses.
+
+import "./wasm_leb128_codec.oo";
+
+pub type WasmTag = struct {
+    tag_id: Int,
+    sig_type_index: Int,
+};
+
+pub type WasmCatchClause = struct {
+    catch_kind: Int, // 0: CATCH, 1: CATCH_REF, 2: CATCH_ALL, 3: CATCH_ALL_REF
+    tag_index: Int,
+    target_label: Int,
+};
+
+pub type WasmTryTable = struct {
+    block_type: Int,
+    catch_clauses: List[WasmCatchClause],
+    clause_count: Int,
+};
+
+// -------------------------------------------------------------------
+// Catch Clause Kinds
+// -------------------------------------------------------------------
+
+pub fn catch_kind_tag() -> Int { return 0; }
+pub fn catch_kind_tag_ref() -> Int { return 1; }
+pub fn catch_kind_all() -> Int { return 2; }
+pub fn catch_kind_all_ref() -> Int { return 3; }
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn wasm_tag_new(tag_id: Int, sig_idx: Int) -> WasmTag {
+    return WasmTag {
+        tag_id: tag_id,
+        sig_type_index: sig_idx,
+    };
+}
+
+pub fn wasm_catch_clause_new(kind: Int, tag_idx: Int, label: Int) -> WasmCatchClause {
+    return WasmCatchClause {
+        catch_kind: kind,
+        tag_index: tag_idx,
+        target_label: label,
+    };
+}
+
+pub fn wasm_try_table_new(block_type: Int) -> WasmTryTable {
+    let empty_clauses: List[WasmCatchClause] = list_new();
+    return WasmTryTable {
+        block_type: block_type,
+        catch_clauses: empty_clauses,
+        clause_count: 0,
+    };
+}
+
+pub fn try_table_add_clause(mut table: WasmTryTable, clause: WasmCatchClause) -> WasmTryTable {
+    let mut c: List[WasmCatchClause] = (table).catch_clauses;
+    c = list_push(c, clause);
+    table.catch_clauses = c;
+    table.clause_count = (table).clause_count + 1;
+    return table;
+}
+
+// -------------------------------------------------------------------
+// Exception Encoders
+// -------------------------------------------------------------------
+
+pub fn encode_throw_instruction(tag_index: Int) -> List[Int] {
+    let mut bytes: List[Int] = list_new();
+    // 0x08: throw
+    bytes = list_push(bytes, 8);
+    let tag_leb: List[Int] = encode_u32_leb128(tag_index);
+    let n: Int = list_len(tag_leb);
+    let mut i: Int = 0;
+    while i < n {
+        bytes = list_push(bytes, list_get(tag_leb, i));
+        i = i + 1;
+    }
+    return bytes;
+}
+
+pub fn encode_try_table(table: WasmTryTable) -> List[Int] {
+    let mut bytes: List[Int] = list_new();
+    // 0x1F: try_table
+    bytes = list_push(bytes, 31);
+    
+    // Block type (e.g. 0x40 for empty)
+    bytes = list_push(bytes, (table).block_type & 255);
+    
+    // Number of catch clauses (vector count)
+    let count_leb: List[Int] = encode_u32_leb128((table).clause_count);
+    let n_c: Int = list_len(count_leb);
+    let mut i: Int = 0;
+    while i < n_c {
+        bytes = list_push(bytes, list_get(count_leb, i));
+        i = i + 1;
+    }
+    
+    // Clauses
+    let total_clauses: Int = (table).clause_count;
+    let mut j: Int = 0;
+    while j < total_clauses {
+        let clause: WasmCatchClause = list_get((table).catch_clauses, j);
+        bytes = list_push(bytes, (clause).catch_kind & 255);
+        
+        if (clause).catch_kind == 0 || (clause).catch_kind == 1 {
+            let t_leb: List[Int] = encode_u32_leb128((clause).tag_index);
+            let n_t: Int = list_len(t_leb);
+            let mut k: Int = 0;
+            while k < n_t {
+                bytes = list_push(bytes, list_get(t_leb, k));
+                k = k + 1;
+            }
+        }
+        
+        let l_leb: List[Int] = encode_u32_leb128((clause).target_label);
+        let n_l: Int = list_len(l_leb);
+        let mut m: Int = 0;
+        while m < n_l {
+            bytes = list_push(bytes, list_get(l_leb, m));
+            m = m + 1;
+        }
+        j = j + 1;
+    }
+    return bytes;
+}

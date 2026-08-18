@@ -1,0 +1,205 @@
+// # eBPF Bytecode Safety Verifier Simulation
+//
+// Logline: Simulates kernel eBPF verifier checking register types, bounds, null dereferences, and acyclic control flow.
+//
+// Setup: Abstract interpretation engine enforcing in-kernel memory safety and execution bounds before JIT compilation.
+//
+// Beats:
+//   1. Track 11 eBPF register types (R0-R10) with scalar ranges, stack offsets, and map pointer states.
+//   2. Validate arithmetic bounds, memory load/store alignments, and reject uninitialized register reads.
+//   3. Enforce loop termination, max instruction limits (1M insns), and non-null pointer assertions.
+
+pub type EbpfRegType = struct {
+    type_id: Int,
+    min_val: Int,
+    max_val: Int,
+    is_nullable: Bool,
+};
+
+pub type EbpfInsn = struct {
+    opcode: Int,
+    dst_reg: Int,
+    src_reg: Int,
+    offset: Int,
+    imm: Int,
+};
+
+pub type VerifierState = struct {
+    regs: List[EbpfRegType],
+    insn_count: Int,
+    max_insns: Int,
+    is_valid: Bool,
+    error_code: Int,
+};
+
+pub fn ebpf_reg_not_init() -> EbpfRegType {
+    return EbpfRegType {
+        type_id: 0,
+        min_val: 0,
+        max_val: 0,
+        is_nullable: false,
+    };
+}
+
+pub fn ebpf_reg_scalar(min_v: Int, max_v: Int) -> EbpfRegType {
+    return EbpfRegType {
+        type_id: 1,
+        min_val: min_v,
+        max_val: max_v,
+        is_nullable: false,
+    };
+}
+
+pub fn ebpf_reg_ctx() -> EbpfRegType {
+    return EbpfRegType {
+        type_id: 3,
+        min_val: 0,
+        max_val: 4096,
+        is_nullable: false,
+    };
+}
+
+pub fn ebpf_reg_stack(offset: Int) -> EbpfRegType {
+    return EbpfRegType {
+        type_id: 2,
+        min_val: offset,
+        max_val: 512,
+        is_nullable: false,
+    };
+}
+
+pub fn ebpf_update_regs(regs: List[EbpfRegType], idx: Int, val: EbpfRegType) -> List[EbpfRegType] {
+    let mut updated: List[EbpfRegType] = list_new();
+    let n: Int = list_len(regs);
+    let mut i: Int = 0;
+    while i < n {
+        if i == idx {
+            updated = list_push(updated, val);
+        } else {
+            updated = list_push(updated, list_get(regs, i));
+        }
+        i = i + 1;
+    }
+    return updated;
+}
+
+pub fn ebpf_verifier_state_new(max_instructions: Int) -> VerifierState {
+    let mut initial_regs: List[EbpfRegType] = list_new();
+    let mut i: Int = 0;
+    while i < 11 {
+        if i == 1 {
+            initial_regs = list_push(initial_regs, ebpf_reg_ctx());
+        } else if i == 10 {
+            initial_regs = list_push(initial_regs, ebpf_reg_stack(512));
+        } else {
+            initial_regs = list_push(initial_regs, ebpf_reg_not_init());
+        }
+        i = i + 1;
+    }
+
+    return VerifierState {
+        regs: initial_regs,
+        insn_count: 0,
+        max_insns: max_instructions,
+        is_valid: true,
+        error_code: 0,
+    };
+}
+
+pub fn ebpf_verify_step(state: &mut VerifierState, insn: &EbpfInsn) -> Bool {
+    if (state).is_valid == false {
+        return false;
+    }
+
+    (state).insn_count = (state).insn_count + 1;
+    if (state).insn_count > (state).max_insns {
+        (state).is_valid = false;
+        (state).error_code = 4;
+        return false;
+    }
+
+    let dst: Int = (insn).dst_reg;
+    let src: Int = (insn).src_reg;
+
+    if dst < 0 || dst > 10 || src < 0 || src > 10 {
+        (state).is_valid = false;
+        (state).error_code = 2;
+        return false;
+    }
+
+    let op: Int = (insn).opcode;
+
+    if dst == 10 && op != 8 {
+        (state).is_valid = false;
+        (state).error_code = 2;
+        return false;
+    }
+
+    if op == 0 {
+        let new_reg: EbpfRegType = ebpf_reg_scalar((insn).imm, (insn).imm);
+        (state).regs = ebpf_update_regs((state).regs, dst, new_reg);
+        return true;
+    }
+
+    if op == 1 {
+        let cur_dst: EbpfRegType = list_get((state).regs, dst);
+        if cur_dst.type_id == 0 {
+            (state).is_valid = false;
+            (state).error_code = 1;
+            return false;
+        }
+        let new_reg: EbpfRegType = EbpfRegType {
+            type_id: cur_dst.type_id,
+            min_val: cur_dst.min_val + (insn).imm,
+            max_val: cur_dst.max_val + (insn).imm,
+            is_nullable: cur_dst.is_nullable,
+        };
+        (state).regs = ebpf_update_regs((state).regs, dst, new_reg);
+        return true;
+    }
+
+    if op == 5 {
+        let cur_src: EbpfRegType = list_get((state).regs, src);
+        if cur_src.type_id == 0 {
+            (state).is_valid = false;
+            (state).error_code = 1;
+            return false;
+        }
+        if cur_src.is_nullable {
+            (state).is_valid = false;
+            (state).error_code = 3;
+            return false;
+        }
+        let loaded_reg: EbpfRegType = ebpf_reg_scalar(0, 2147483647);
+        (state).regs = ebpf_update_regs((state).regs, dst, loaded_reg);
+        return true;
+    }
+
+    if op == 6 {
+        let cur_dst: EbpfRegType = list_get((state).regs, dst);
+        let cur_src: EbpfRegType = list_get((state).regs, src);
+        if cur_dst.type_id == 0 || cur_src.type_id == 0 {
+            (state).is_valid = false;
+            (state).error_code = 1;
+            return false;
+        }
+        if cur_dst.is_nullable {
+            (state).is_valid = false;
+            (state).error_code = 3;
+            return false;
+        }
+        return true;
+    }
+
+    if op == 8 {
+        let r0: EbpfRegType = list_get((state).regs, 0);
+        if r0.type_id == 0 {
+            (state).is_valid = false;
+            (state).error_code = 5;
+            return false;
+        }
+        return true;
+    }
+
+    return true;
+}

@@ -1,0 +1,112 @@
+// # CoAP Options & Payload Serialization
+//
+// Logline: Implements RFC 7252 delta-encoded CoAP options, payload marker separation, and message framing.
+//
+// Setup: Pure options encoder and parser supporting Uri-Path, Content-Format, and variable TLV options.
+//
+// Beats:
+//   1. Define CoapOption structures and standard option number mappings.
+//   2. Encode option deltas, option lengths, and 0xFF payload separator markers.
+//   3. Parse delta-compressed option sequences and extract raw payload strings.
+
+import "./coap_header.oo";
+
+pub type CoapOption = struct {
+    option_number: Int,
+    value_bytes: List[Int],
+};
+
+/// Construct a String-valued CoAP option (e.g. Uri-Path = 11).
+pub fn coap_option_from_string(opt_num: Int, val: String) -> CoapOption {
+    let slen: Int = val.len();
+    let mut b: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < slen {
+        b = list_push(b, byte_at(val, i));
+        i = i + 1;
+    }
+    return CoapOption {
+        option_number: opt_num,
+        value_bytes: b,
+    };
+}
+
+/// Construct an Integer-valued CoAP option (e.g. Content-Format = 12).
+pub fn coap_option_from_uint(opt_num: Int, val: Int) -> CoapOption {
+    let mut b: List[Int] = list_new();
+    if val > 255 {
+        b = list_push(b, (val / 256) % 256);
+    }
+    b = list_push(b, val % 256);
+    return CoapOption {
+        option_number: opt_num,
+        value_bytes: b,
+    };
+}
+
+/// Encode a list of sorted CoAP options and optional string payload into wire bytes.
+pub fn coap_encode_options_and_payload(
+    options: &List[CoapOption],
+    payload: String
+) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let num_opts: Int = list_len(*options);
+    let mut prev_opt_num: Int = 0;
+
+    let mut i: Int = 0;
+    while i < num_opts {
+        let opt: CoapOption = list_get(*options, i);
+        let opt_delta: Int = (opt).option_number - prev_opt_num;
+        let vlen: Int = list_len((opt).value_bytes);
+
+        // Compact encoding for delta < 13 and length < 13
+        let opt_byte: Int = ((opt_delta % 13) * 16) + (vlen % 13);
+        out = list_push(out, opt_byte);
+
+        let mut j: Int = 0;
+        while j < vlen {
+            out = list_push(out, list_get((opt).value_bytes, j));
+            j = j + 1;
+        }
+
+        prev_opt_num = (opt).option_number;
+        i = i + 1;
+    }
+
+    let plen: Int = payload.len();
+    if plen > 0 {
+        out = list_push(out, 255); // Payload Marker (0xFF)
+        let mut k: Int = 0;
+        while k < plen {
+            out = list_push(out, byte_at(payload, k));
+            k = k + 1;
+        }
+    }
+
+    return out;
+}
+
+/// Parse CoAP options starting at offset and return raw payload string.
+pub fn coap_parse_payload(bytes: &List[Int], offset: Int) -> String {
+    let size: Int = list_len(*bytes);
+    let mut cursor: Int = offset;
+
+    while cursor < size {
+        let b: Int = list_get(*bytes, cursor);
+        if b == 255 {
+            // Found payload marker
+            let mut p_buf: List[Int] = bytes_new();
+            let mut i: Int = cursor + 1;
+            while i < size {
+                p_buf = bytes_push(p_buf, list_get(*bytes, i));
+                i = i + 1;
+            }
+            return bytes_to_str(p_buf);
+        }
+        // Advance simple option
+        let delta: Int = b / 16;
+        let len: Int = b % 16;
+        cursor = cursor + 1 + len;
+    }
+    return "";
+}

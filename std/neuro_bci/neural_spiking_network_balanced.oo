@@ -1,0 +1,83 @@
+// # Balanced Spiking Network Dynamics (Brunel Mean-Field)
+//
+// Logline: Analyzes excitation-inhibition balance, asynchronous irregular (AI) firing regimes, and population fluctuations.
+//
+// Setup: Brunel (2000) mean-field theory calculator for sparsely connected recurrent networks of integrate-and-fire neurons.
+//
+// Beats:
+//   1. Define BrunelNetworkParams (n_e, n_i, connection_prob, j_exc, g_ratio, tau_m, v_thresh, v_reset).
+//   2. Compute mean membrane depolarization mu_v and variance of synaptic fluctuations sigma_v^2.
+//   3. Classify network state into Asynchronous Irregular (AI), Synchronous Irregular (SI), or Asynchronous Regular (AR).
+
+pub type BrunelNetworkParams = struct {
+    n_exc: Int,              // Number of excitatory neurons (e.g. 10000)
+    n_inh: Int,              // Number of inhibitory neurons (e.g. 2500)
+    connection_prob: Float,  // Synaptic connection probability (e.g. 0.1)
+    j_exc_mv: Float,         // Post-synaptic EPSP amplitude (mV, default 0.1)
+    g_ratio: Float,          // Ratio of inhibition to excitation IPSP/EPSP (default 5.0)
+    tau_m_ms: Float,         // Membrane time constant (ms, default 20.0)
+    v_thresh_mv: Float,      // Firing threshold (mV, default 20.0)
+    v_reset_mv: Float,       // Reset potential (mV, default 10.0)
+};
+
+pub type NetworkBalancedState = struct {
+    mean_depolarization_mv: Float,
+    fluctuation_std_mv: Float,
+    regime_code: Int, // 1: AI (Asynchronous Irregular), 2: SI (Synchronous Irregular), 3: SR (Synchronous Regular), 4: AR (Asynchronous Regular)
+};
+
+pub fn brunel_params_default() -> BrunelNetworkParams {
+    return BrunelNetworkParams {
+        n_exc: 10000,
+        n_inh: 2500,
+        connection_prob: 0.1,
+        j_exc_mv: 0.1,
+        g_ratio: 5.0,
+        tau_m_ms: 20.0,
+        v_thresh_mv: 20.0,
+        v_reset_mv: 10.0,
+    };
+}
+
+pub fn brunel_compute_balanced_state(
+    nu_ext_over_nu_thresh: Float,
+    nu_network_hz: Float,
+    params: &BrunelNetworkParams
+) -> NetworkBalancedState {
+    let c_e = ((params).n_exc as Float) * (params).connection_prob;
+    let c_i = ((params).n_inh as Float) * (params).connection_prob;
+    let j_e = (params).j_exc_mv;
+    let j_i = 0.0 - ((params).g_ratio * j_e);
+
+    // Mean input mu = tau_m * [ C_e * J_e * nu_e + C_i * J_i * nu_i + C_ext * J_e * nu_ext ]
+    let net_synaptic_mean = (c_e * j_e * nu_network_hz * 0.001) + (c_i * j_i * nu_network_hz * 0.001);
+    let ext_mean = c_e * j_e * (nu_ext_over_nu_thresh * (params).v_thresh_mv / ((params).tau_m_ms * j_e * c_e));
+    let mu_v = (params).tau_m_ms * (net_synaptic_mean + ext_mean);
+
+    // Variance sigma^2 = tau_m * [ C_e * J_e^2 * nu_e + C_i * J_i^2 * nu_i + C_ext * J_e^2 * nu_ext ]
+    let var_syn = (c_e * j_e * j_e * nu_network_hz * 0.001) + (c_i * j_i * j_i * nu_network_hz * 0.001);
+    let var_total = (params).tau_m_ms * (var_syn + 0.05);
+    let sigma_v = sqrt(if var_total < 0.001 { 0.001 } else { var_total });
+
+    // Classification: g > 4 and nu_ext moderate -> AI regime
+    let mut regime = 1; // Default AI
+    if (params).g_ratio < 4.0 {
+        if nu_ext_over_nu_thresh > 2.0 {
+            regime = 3; // SR (Synchronous Regular)
+        } else {
+            regime = 4; // AR (Asynchronous Regular)
+        }
+    } else {
+        if nu_ext_over_nu_thresh > 3.0 {
+            regime = 2; // SI (Synchronous Irregular)
+        } else {
+            regime = 1; // AI (Asynchronous Irregular)
+        }
+    }
+
+    return NetworkBalancedState {
+        mean_depolarization_mv: mu_v,
+        fluctuation_std_mv: sigma_v,
+        regime_code: regime,
+    };
+}

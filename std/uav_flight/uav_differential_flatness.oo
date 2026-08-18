@@ -1,0 +1,97 @@
+// # UAV Differential Flatness Mapping & Trajectory Conversion
+//
+// Logline: Converts 3D flat outputs (position and yaw derivatives up to 4th order) into full SE(3) quadrotor states and control inputs.
+//
+// Setup: Exact nonlinear flatness mapping enabling algebraic trajectory generation without numerical ODE integration.
+//
+// Beats:
+//   1. Define Flat Output Derivatives (pos, vel, acc, jerk, snap, yaw, yaw_rate).
+//   2. Compute Total Thrust Vector T_vec = m * (acc + [0, 0, g]).
+//   3. Construct Body Frame Rotation Matrix R = [x_b, y_b, z_b] using normalized thrust and yaw.
+//   4. Extract body angular velocity omega from projection of jerk onto the body frame.
+
+import "./uav_coordinate_frames.oo";
+import "./uav_so3_rotation_matrix.oo";
+
+pub type FlatTrajectoryPoint = struct {
+    pos: Vector3D,
+    vel: Vector3D,
+    acc: Vector3D,
+    jerk: Vector3D,
+    yaw: Float,
+    yaw_rate: Float,
+};
+
+pub type FlatnessMappedState = struct {
+    thrust_n: Float,
+    rot_matrix: Matrix3x3,
+    body_rate_omega: Vector3D,
+};
+
+pub fn differential_flatness_map(
+    point: &FlatTrajectoryPoint,
+    mass_kg: Float
+) -> FlatnessMappedState {
+    let gravity: Float = 9.80665;
+
+    // Desired total acceleration including gravity compensation: a_tot = acc + [0, 0, g]
+    let a_tot: Vector3D = Vector3D {
+        x: (point).acc.x,
+        y: (point).acc.y,
+        z: (point).acc.z + gravity,
+    };
+
+    let norm_a: Float = vector3d_norm(&a_tot);
+    let safe_norm: Float = if norm_a < 0.001 { 0.001 } else { norm_a };
+
+    // Collective thrust T = m * ||a_tot||
+    let thrust: Float = mass_kg * norm_a;
+
+    // Body Z-axis zb = a_tot / ||a_tot||
+    let zb: Vector3D = Vector3D {
+        x: a_tot.x / safe_norm,
+        y: a_tot.y / safe_norm,
+        z: a_tot.z / safe_norm,
+    };
+
+    // Desired heading vector x_c = [cos(yaw), sin(yaw), 0]
+    let xc: Vector3D = Vector3D {
+        x: cos((point).yaw),
+        y: sin((point).yaw),
+        z: 0.0,
+    };
+
+    // Body Y-axis yb = (zb x xc) / ||zb x xc||
+    let yb_raw: Vector3D = vector3d_cross(&zb, &xc);
+    let norm_yb: Float = vector3d_norm(&yb_raw);
+    let safe_norm_yb: Float = if norm_yb < 0.0001 { 0.0001 } else { norm_yb };
+    let yb: Vector3D = Vector3D {
+        x: yb_raw.x / safe_norm_yb,
+        y: yb_raw.y / safe_norm_yb,
+        z: yb_raw.z / safe_norm_yb,
+    };
+
+    // Body X-axis xb = yb x zb
+    let xb: Vector3D = vector3d_cross(&yb, &zb);
+
+    let rot: Matrix3x3 = Matrix3x3 {
+        m00: xb.x, m01: yb.x, m02: zb.x,
+        m10: xb.y, m11: yb.y, m12: zb.y,
+        m20: xb.z, m21: yb.z, m22: zb.z,
+    };
+
+    // Body rates: omega_x = -jerk . yb / (T/m), omega_y = jerk . xb / (T/m), omega_z = yaw_rate * zb.z
+    let spec_thrust: Float = safe_norm; // T / m
+    let jerk_dot_yb: Float = vector3d_dot(&(point).jerk, &yb);
+    let jerk_dot_xb: Float = vector3d_dot(&(point).jerk, &xb);
+
+    let p_rate: Float = (0.0 - jerk_dot_yb) / spec_thrust;
+    let q_rate: Float = jerk_dot_xb / spec_thrust;
+    let r_rate: Float = (point).yaw_rate * zb.z;
+
+    return FlatnessMappedState {
+        thrust_n: thrust,
+        rot_matrix: rot,
+        body_rate_omega: Vector3D { x: p_rate, y: q_rate, z: r_rate },
+    };
+}

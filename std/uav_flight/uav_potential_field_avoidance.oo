@@ -1,0 +1,91 @@
+// # UAV Artificial Potential Field (APF) Obstacle Avoidance
+//
+// Logline: Computes attractive goal gradients and repulsive obstacle potential forces for reactive 3D collision avoidance.
+//
+// Setup: Real-time reactive navigation generating smooth avoidance trajectories around static and dynamic obstacles.
+//
+// Beats:
+//   1. Define APF Parameters (attractive gain k_att, repulsive gain k_rep, obstacle influence distance d_0).
+//   2. Compute Attractive Force F_att = -k_att * (p_curr - p_goal).
+//   3. Compute Repulsive Force F_rep = k_rep * (1/d - 1/d0) * (1/d^2) * grad(d) for obstacles within d_0.
+//   4. Superimpose net steering force F_tot = F_att + F_rep and apply acceleration limits.
+
+import "./uav_coordinate_frames.oo";
+
+pub type ApfConfig = struct {
+    k_attractive: Float,
+    k_repulsive: Float,
+    obstacle_influence_dist: Float,
+    max_accel_cmd: Float,
+};
+
+pub type SphericalObstacle = struct {
+    center: Vector3D,
+    radius: Float,
+};
+
+pub type ApfSteeringResult = struct {
+    steering_force: Vector3D,
+    attractive_force: Vector3D,
+    repulsive_force: Vector3D,
+    min_dist_to_obstacle: Float,
+};
+
+pub fn apf_config_default() -> ApfConfig {
+    return ApfConfig {
+        k_attractive: 1.5,
+        k_repulsive: 12.0,
+        obstacle_influence_dist: 6.0,
+        max_accel_cmd: 5.0,
+    };
+}
+
+pub fn compute_apf_steering(
+    curr_pos: &Vector3D,
+    goal_pos: &Vector3D,
+    obstacle: &SphericalObstacle,
+    cfg: &ApfConfig
+) -> ApfSteeringResult {
+    // 1. Attractive force towards goal: F_att = -k_att * (curr - goal) = k_att * (goal - curr)
+    let d_goal: Vector3D = vector3d_sub(goal_pos, curr_pos);
+    let dist_g: Float = vector3d_norm(&d_goal);
+    let f_att: Vector3D = vector3d_scale(&d_goal, (cfg).k_attractive);
+
+    // 2. Repulsive force from obstacle
+    let d_obs: Vector3D = vector3d_sub(curr_pos, &(obstacle).center);
+    let dist_center: Float = vector3d_norm(&d_obs);
+    let surface_dist: Float = dist_center - (obstacle).radius;
+
+    let d0: Float = (cfg).obstacle_influence_dist;
+    let mut f_rep: Vector3D = vector3d_zero();
+
+    if (surface_dist > 0.001) && (surface_dist < d0) {
+        // Unit gradient direction away from obstacle
+        let u_rep: Vector3D = vector3d_scale(&d_obs, 1.0 / dist_center);
+
+        // Repulsive magnitude: k_rep * (1/d - 1/d0) * (1 / d^2)
+        let inv_d: Float = 1.0 / surface_dist;
+        let inv_d0: Float = 1.0 / d0;
+        let factor: Float = (cfg).k_repulsive * (inv_d - inv_d0) * (inv_d * inv_d);
+
+        f_rep = vector3d_scale(&u_rep, factor);
+    }
+
+    // 3. Net force
+    let f_tot: Vector3D = vector3d_add(&f_att, &f_rep);
+    let f_mag: Float = vector3d_norm(&f_tot);
+    let max_a: Float = (cfg).max_accel_cmd;
+
+    let f_steer: Vector3D = if f_mag > max_a {
+        vector3d_scale(&f_tot, max_a / f_mag)
+    } else {
+        f_tot
+    };
+
+    return ApfSteeringResult {
+        steering_force: f_steer,
+        attractive_force: f_att,
+        repulsive_force: f_rep,
+        min_dist_to_obstacle: surface_dist,
+    };
+}

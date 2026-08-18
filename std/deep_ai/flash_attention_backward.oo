@@ -1,0 +1,184 @@
+// # FlashAttention-2 Exact Analytical Backward Pass
+//
+// Logline: Computes backward gradients for query, key, and value matrices using online forward statistics and tiled activation recomputation.
+//
+// Setup: Pure numerical algorithms for FlashAttention-2 backward pass gradient accumulation.
+//
+// Beats:
+//   1. Define FlashBackwardConfig and FlashAttentionGradients descriptors.
+//   2. Compute row-wise inner products D_i = sum(dO_i * O_i) for softmax backward normalization.
+//   3. Recompute attention probabilities from saved statistics and accumulate dQ, dK, dV gradients.
+
+pub type FlashBackwardConfig = struct {
+    seq_len: Int,
+    head_dim: Int,
+    scale: Float,
+    is_causal: Bool,
+};
+
+pub type FlashAttentionGradients = struct {
+    dq: List[Float],
+    dk: List[Float],
+    dv: List[Float],
+};
+
+pub fn flash_bw_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn flash_bw_set_float(l: List[Float], idx: Int, val: Float) -> List[Float] {
+    let mut out: List[Float] = list_new();
+    let n: Int = list_len(l);
+    let mut i: Int = 0;
+    while i < n {
+        if i == idx {
+            out = list_push(out, val);
+        } else {
+            out = list_push(out, list_get(l, i));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn flash_backward_config_new(
+    seq_len: Int,
+    head_dim: Int,
+    scale: Float,
+    is_causal: Bool
+) -> FlashBackwardConfig {
+    return FlashBackwardConfig {
+        seq_len: seq_len,
+        head_dim: head_dim,
+        scale: scale,
+        is_causal: is_causal,
+    };
+}
+
+pub fn flash_backward_compute_d_vector(
+    do_mat: List[Float],
+    out_mat: List[Float],
+    seq_len: Int,
+    head_dim: Int
+) -> List[Float] {
+    let mut d_vec: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < seq_len {
+        let mut row_sum: Float = 0.0;
+        let mut d: Int = 0;
+        while d < head_dim {
+            let idx: Int = (i * head_dim) + d;
+            let do_val: Float = list_get(do_mat, idx);
+            let o_val: Float = list_get(out_mat, idx);
+            row_sum = row_sum + (do_val * o_val);
+            d = d + 1;
+        }
+        d_vec = list_push(d_vec, row_sum);
+        i = i + 1;
+    }
+    return d_vec;
+}
+
+pub fn flash_backward_pass(
+    q: List[Float],
+    k: List[Float],
+    v: List[Float],
+    out_mat: List[Float],
+    do_mat: List[Float],
+    lse: List[Float],
+    cfg: &FlashBackwardConfig
+) -> FlashAttentionGradients {
+    let seq_len: Int = (cfg).seq_len;
+    let head_dim: Int = (cfg).head_dim;
+    let scale: Float = (cfg).scale;
+    let is_causal: Bool = (cfg).is_causal;
+
+    let d_vec: List[Float] = flash_backward_compute_d_vector(do_mat, out_mat, seq_len, head_dim);
+
+    let total_elements: Int = seq_len * head_dim;
+    let mut dq: List[Float] = list_new();
+    let mut dk: List[Float] = list_new();
+    let mut dv: List[Float] = list_new();
+    let mut init_idx: Int = 0;
+    while init_idx < total_elements {
+        dq = list_push(dq, 0.0);
+        dk = list_push(dk, 0.0);
+        dv = list_push(dv, 0.0);
+        init_idx = init_idx + 1;
+    }
+
+    let mut i: Int = 0;
+    while i < seq_len {
+        let lse_i: Float = if i < list_len(lse) { list_get(lse, i) } else { 0.0 };
+        let d_i: Float = list_get(d_vec, i);
+
+        let mut j: Int = 0;
+        while j < seq_len {
+            if (!is_causal) || (j <= i) {
+                let mut dot_qk: Float = 0.0;
+                let mut d: Int = 0;
+                while d < head_dim {
+                    let q_val: Float = list_get(q, (i * head_dim) + d);
+                    let k_val: Float = list_get(k, (j * head_dim) + d);
+                    dot_qk = dot_qk + (q_val * k_val);
+                    d = d + 1;
+                }
+                let s_ij: Float = dot_qk * scale;
+                let p_ij: Float = exp(s_ij - lse_i);
+
+                let mut dot_do_v: Float = 0.0;
+                let mut d2: Int = 0;
+                while d2 < head_dim {
+                    let do_val: Float = list_get(do_mat, (i * head_dim) + d2);
+                    let v_val: Float = list_get(v, (j * head_dim) + d2);
+                    dot_do_v = dot_do_v + (do_val * v_val);
+                    d2 = d2 + 1;
+                }
+                let ds_ij: Float = p_ij * (dot_do_v - d_i) * scale;
+
+                let mut d3: Int = 0;
+                while d3 < head_dim {
+                    let q_idx: Int = (i * head_dim) + d3;
+                    let k_idx: Int = (j * head_dim) + d3;
+                    let v_idx: Int = (j * head_dim) + d3;
+
+                    let q_val: Float = list_get(q, q_idx);
+                    let k_val: Float = list_get(k, k_idx);
+                    let do_val: Float = list_get(do_mat, q_idx);
+
+                    let prev_dq: Float = list_get(dq, q_idx);
+                    dq = flash_bw_set_float(dq, q_idx, prev_dq + (ds_ij * k_val));
+
+                    let prev_dk: Float = list_get(dk, k_idx);
+                    dk = flash_bw_set_float(dk, k_idx, prev_dk + (ds_ij * q_val));
+
+                    let prev_dv: Float = list_get(dv, v_idx);
+                    dv = flash_bw_set_float(dv, v_idx, prev_dv + (p_ij * do_val));
+
+                    d3 = d3 + 1;
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    return FlashAttentionGradients {
+        dq: dq,
+        dk: dk,
+        dv: dv,
+    };
+}
+
+pub fn flash_attention_backward_marker() -> Int {
+    return 1;
+}

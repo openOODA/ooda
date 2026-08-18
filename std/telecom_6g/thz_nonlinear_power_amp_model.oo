@@ -1,0 +1,82 @@
+// # Terahertz Power Amplifier AM/AM and AM/PM Distortion
+//
+// Logline: Models Rapp and Saleh solid-state power amplifier (SSPA) nonlinear compression, saturation, and phase distortion.
+//
+// Setup: Pure standard library implementation of RF transmitter nonlinearity at sub-THz frequencies where output power is constrained.
+//
+// Beats:
+//   1. Configure amplifier small-signal gain G_0, saturation power P_sat, and Rapp smoothness parameter p.
+//   2. Compute AM/AM amplitude transfer function: g(r) = (G_0 * r) / (1 + (G_0*r / A_sat)^(2p))^(1/(2p)).
+//   3. Compute AM/PM phase conversion: phi(r) = (alpha_phi * r^2) / (1 + beta_phi * r^2) and evaluate EVM degradation.
+
+pub type PowerAmplifierModel = struct {
+    small_signal_gain_db: Float,
+    saturation_voltage_v: Float,
+    rapp_knee_factor_p: Float, // Typical p = 2.0 for SSPA, p = 1.0 for TWT
+    am_pm_alpha: Float,
+    am_pm_beta: Float,
+};
+
+pub type PaDistortionSample = struct {
+    input_voltage_v: Float,
+    output_voltage_v: Float,
+    output_phase_shift_rad: Float,
+    gain_compression_db: Float,
+};
+
+pub fn pa_model_sub_thz_sspa() -> PowerAmplifierModel {
+    return PowerAmplifierModel {
+        small_signal_gain_db: 20.0,
+        saturation_voltage_v: 1.2, // 1.2V peak saturation
+        rapp_knee_factor_p: 2.0,
+        am_pm_alpha: 0.05,
+        am_pm_beta: 0.1,
+    };
+}
+
+pub fn pa_eval_sample(input_v: Float, pa: PowerAmplifierModel) -> PaDistortionSample {
+    let ln10: Float = 2.302585092994046;
+    let gain_db: Float = pa.small_signal_gain_db;
+    let g_0: Float = exp(gain_db * (ln10 / 20.0)); // Voltage gain
+
+    let v_sat: Float = pa.saturation_voltage_v;
+    let alpha_phi: Float = pa.am_pm_alpha;
+    let beta_phi: Float = pa.am_pm_beta;
+
+    let mut r_in: Float = input_v;
+    if r_in < 0.0 { r_in = 0.0 - r_in; }
+
+    // Rapp model AM/AM: v_out = (G0 * r) / (1 + (G0*r / v_sat)^(2p))^(1/(2p))
+    let lin_out: Float = g_0 * r_in;
+    let ratio: Float = lin_out / v_sat;
+
+    // For p=2: 2p = 4 -> denom = (1 + ratio^4)^(1/4) = sqrt(sqrt(1 + ratio^4))
+    let r2: Float = ratio * ratio;
+    let r4: Float = r2 * r2;
+    let denom: Float = sqrt(sqrt(1.0 + r4));
+
+    let mut v_out: Float = 0.0;
+    if denom > 0.0001 {
+        v_out = lin_out / denom;
+    }
+
+    // Saleh AM/PM: phi = (alpha * r^2) / (1 + beta * r^2)
+    let in_sq: Float = r_in * r_in;
+    let num_phi: Float = alpha_phi * in_sq;
+    let denom_phi: Float = 1.0 + (beta_phi * in_sq);
+    let phi_out: Float = num_phi / denom_phi;
+
+    // Gain compression: 20 * log10(v_out / (G0 * r_in))
+    let mut comp_db: Float = 0.0;
+    if lin_out > 0.00001 && v_out > 0.00001 {
+        let frac: Float = v_out / lin_out;
+        comp_db = 0.0 - (20.0 * (ln(frac) / ln10));
+    }
+
+    return PaDistortionSample {
+        input_voltage_v: input_v,
+        output_voltage_v: v_out,
+        output_phase_shift_rad: phi_out,
+        gain_compression_db: comp_db,
+    };
+}

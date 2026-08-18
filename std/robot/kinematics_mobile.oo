@@ -1,0 +1,203 @@
+// # Mobile Base Kinematics
+//
+// Logline: Forward and inverse kinematics and odometry integration for differential, Ackermann, and Mecanum bases.
+//
+// Setup: Pure kinematic algorithms for ground robotics platforms.
+//
+// Beats:
+//   1. Implement differential drive forward kinematics, inverse kinematics, and odometry updates.
+//   2. Implement Ackermann steering forward and inverse kinematics.
+//   3. Implement 4-wheel omnidirectional Mecanum drive forward and inverse kinematics.
+//   4. Ensure bounded division safety on zero wheelbase or radius parameters.
+
+import "./kinematics_types.oo";
+import "./kinematics_ops.oo";
+
+// -------------------------------------------------------------------
+// Differential Drive
+// -------------------------------------------------------------------
+
+pub fn diff_drive_config_new(radius: Float, width: Float) -> DiffDriveConfig {
+    return DiffDriveConfig {
+        wheel_radius: radius,
+        track_width:  width,
+    };
+}
+
+pub fn diff_drive_wheel_speeds_new(left_spd: Float, right_spd: Float) -> DiffDriveWheelSpeeds {
+    return DiffDriveWheelSpeeds {
+        left:  left_spd,
+        right: right_spd,
+    };
+}
+
+/// Forward kinematics for differential drive: wheel angular speeds (rad/s) -> body Twist2D.
+pub fn diff_drive_fk(cfg: DiffDriveConfig, wheels: DiffDriveWheelSpeeds) -> Twist2D {
+    let r_val: Float = (cfg).wheel_radius;
+    let b_val: Float = (cfg).track_width;
+    let w_l: Float = (wheels).left;
+    let w_r: Float = (wheels).right;
+
+    let vx_val: Float = (r_val / 2.0) * (w_r + w_l);
+    let vy_val: Float = 0.0;
+    let omega_val: Float = (r_val / b_val) * (w_r - w_l);
+
+    return Twist2D { vx: vx_val, vy: vy_val, omega: omega_val };
+}
+
+/// Inverse kinematics for differential drive: body Twist2D -> wheel angular speeds (rad/s).
+pub fn diff_drive_ik(cfg: DiffDriveConfig, twist: Twist2D) -> DiffDriveWheelSpeeds {
+    let r_val: Float = (cfg).wheel_radius;
+    let b_val: Float = (cfg).track_width;
+    let vx_val: Float = (twist).vx;
+    let omega_val: Float = (twist).omega;
+
+    let half_b: Float = b_val / 2.0;
+    let w_l: Float = (vx_val - (omega_val * half_b)) / r_val;
+    let w_r: Float = (vx_val + (omega_val * half_b)) / r_val;
+
+    return DiffDriveWheelSpeeds { left: w_l, right: w_r };
+}
+
+/// Update 2D pose (odometry integration) given wheel speeds and delta time dt (seconds).
+pub fn diff_drive_odometry_update(pose: Pose2D, wheels: DiffDriveWheelSpeeds, cfg: DiffDriveConfig, dt: Float) -> Pose2D {
+    let twist: Twist2D = diff_drive_fk(cfg, wheels);
+    let vx_val: Float = (twist).vx;
+    let omega_val: Float = (twist).omega;
+
+    let curr_x: Float = (pose).x;
+    let curr_y: Float = (pose).y;
+    let curr_th: Float = (pose).theta;
+
+    let delta_th: Float = omega_val * dt;
+    let new_th: Float = normalize_angle(curr_th + delta_th);
+
+    let mid_th: Float = curr_th + (delta_th / 2.0);
+    let delta_x: Float = vx_val * cos(mid_th) * dt;
+    let delta_y: Float = vx_val * sin(mid_th) * dt;
+
+    return Pose2D {
+        x: curr_x + delta_x,
+        y: curr_y + delta_y,
+        theta: new_th,
+    };
+}
+
+// -------------------------------------------------------------------
+// Ackermann Steering
+// -------------------------------------------------------------------
+
+pub fn ackermann_config_new(wheelbase_val: Float, width_val: Float) -> AckermannConfig {
+    return AckermannConfig {
+        wheelbase:   wheelbase_val,
+        track_width: width_val,
+    };
+}
+
+pub fn ackermann_state_new(spd_val: Float, steer_val: Float) -> AckermannState {
+    return AckermannState {
+        speed:          spd_val,
+        steering_angle: steer_val,
+    };
+}
+
+/// Forward kinematics for Ackermann drive: (speed, steering_angle) -> body Twist2D.
+pub fn ackermann_fk(cfg: AckermannConfig, st: AckermannState) -> Twist2D {
+    let l_val: Float = (cfg).wheelbase;
+    let v_val: Float = (st).speed;
+    let delta_val: Float = (st).steering_angle;
+
+    let vx_val: Float = v_val;
+    let vy_val: Float = 0.0;
+
+    let cos_delta: Float = cos(delta_val);
+    let mut omega_val: Float = 0.0;
+    if math_abs(cos_delta) > 0.000001 {
+        let tan_delta: Float = sin(delta_val) / cos_delta;
+        omega_val = (v_val / l_val) * tan_delta;
+    }
+
+    return Twist2D { vx: vx_val, vy: vy_val, omega: omega_val };
+}
+
+/// Inverse kinematics for Ackermann drive: body Twist2D -> (speed, steering_angle).
+pub fn ackermann_ik(cfg: AckermannConfig, twist: Twist2D) -> AckermannState {
+    let l_val: Float = (cfg).wheelbase;
+    let vx_val: Float = (twist).vx;
+    let omega_val: Float = (twist).omega;
+
+    let spd_val: Float = vx_val;
+    let mut steer_val: Float = 0.0;
+
+    if math_abs(vx_val) > 0.000001 {
+        steer_val = math_atan2(omega_val * l_val, vx_val);
+    }
+
+    return AckermannState {
+        speed:          spd_val,
+        steering_angle: steer_val,
+    };
+}
+
+// -------------------------------------------------------------------
+// Mecanum Drive
+// -------------------------------------------------------------------
+
+pub fn mecanum_config_new(radius_val: Float, wheelbase_val: Float, width_val: Float) -> MecanumConfig {
+    return MecanumConfig {
+        wheel_radius: radius_val,
+        wheelbase:    wheelbase_val,
+        track_width:  width_val,
+    };
+}
+
+pub fn mecanum_wheel_speeds_new(fl_val: Float, fr_val: Float, rl_val: Float, rr_val: Float) -> MecanumWheelSpeeds {
+    return MecanumWheelSpeeds {
+        front_left:  fl_val,
+        front_right: fr_val,
+        rear_left:   rl_val,
+        rear_right:  rr_val,
+    };
+}
+
+/// Forward kinematics for 4-wheel Mecanum drive -> Twist2D.
+pub fn mecanum_fk(cfg: MecanumConfig, wheels: MecanumWheelSpeeds) -> Twist2D {
+    let r_val: Float = (cfg).wheel_radius;
+    let l_val: Float = (cfg).wheelbase;
+    let w_val: Float = (cfg).track_width;
+    let fl_val: Float = (wheels).front_left;
+    let fr_val: Float = (wheels).front_right;
+    let rl_val: Float = (wheels).rear_left;
+    let rr_val: Float = (wheels).rear_right;
+
+    let vx_val: Float = (r_val / 4.0) * (fl_val + fr_val + rl_val + rr_val);
+    let vy_val: Float = (r_val / 4.0) * ((0.0 - fl_val) + fr_val + rl_val - rr_val);
+    let k_val: Float = (l_val + w_val) / 2.0;
+    let omega_val: Float = (r_val / (4.0 * k_val)) * ((0.0 - fl_val) + fr_val - rl_val + rr_val);
+
+    return Twist2D { vx: vx_val, vy: vy_val, omega: omega_val };
+}
+
+/// Inverse kinematics for 4-wheel Mecanum drive: Twist2D -> wheel speeds.
+pub fn mecanum_ik(cfg: MecanumConfig, twist: Twist2D) -> MecanumWheelSpeeds {
+    let r_val: Float = (cfg).wheel_radius;
+    let l_val: Float = (cfg).wheelbase;
+    let w_val: Float = (cfg).track_width;
+    let vx_val: Float = (twist).vx;
+    let vy_val: Float = (twist).vy;
+    let omega_val: Float = (twist).omega;
+
+    let k_val: Float = (l_val + w_val) / 2.0;
+
+    let fl_val: Float = (vx_val - vy_val - (k_val * omega_val)) / r_val;
+    let fr_val: Float = (vx_val + vy_val + (k_val * omega_val)) / r_val;
+    let rl_val: Float = (vx_val + vy_val - (k_val * omega_val)) / r_val;
+    let rr_val: Float = (vx_val - vy_val + (k_val * omega_val)) / r_val;
+
+    return MecanumWheelSpeeds {
+        front_left:  fl_val,
+        front_right: fr_val,
+        rear_left:   rl_val,
+        rear_right:  rr_val,
+    };
+}

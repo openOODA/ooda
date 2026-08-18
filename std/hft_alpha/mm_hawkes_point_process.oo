@@ -1,0 +1,126 @@
+// # Hawkes Self-Exciting Point Process
+//
+// Logline: Models high-frequency order arrival clustering, trade cascades, and intensity jumps using 1D and mutually exciting Hawkes processes.
+//
+// Setup: Pure statistical microstructure module estimating exponential kernel intensities and branching ratios.
+//
+// Beats:
+//   1. Define Hawkes1DParams, HawkesBivariateParams, and HawkesIntensityState structures.
+//   2. Update conditional intensity lambda(t) across discrete event timestamps with exponential decay.
+//   3. Compute branching ratio alpha / beta and predict next expected event arrival times.
+
+pub type Hawkes1DParams = struct {
+    mu_baseline: Float,
+    alpha_excitation: Float,
+    beta_decay: Float,
+};
+
+pub type HawkesBivariateParams = struct {
+    mu_buy: Float,
+    mu_sell: Float,
+    alpha_buy_buy: Float,
+    alpha_buy_sell: Float,
+    alpha_sell_buy: Float,
+    alpha_sell_sell: Float,
+    beta_decay: Float,
+};
+
+pub type HawkesIntensityState = struct {
+    last_event_time: Float,
+    current_intensity_buy: Float,
+    current_intensity_sell: Float,
+    branching_ratio_buy: Float,
+    branching_ratio_sell: Float,
+    is_subcritical: Bool,
+};
+
+pub fn hawkes_1d_params_new(
+    mu: Float,
+    alpha: Float,
+    beta: Float
+) -> Hawkes1DParams {
+    return Hawkes1DParams {
+        mu_baseline: mu,
+        alpha_excitation: alpha,
+        beta_decay: beta,
+    };
+}
+
+pub fn hawkes_bivariate_params_new(
+    mu_b: Float,
+    mu_s: Float,
+    a_bb: Float,
+    a_bs: Float,
+    a_sb: Float,
+    a_ss: Float,
+    beta: Float
+) -> HawkesBivariateParams {
+    return HawkesBivariateParams {
+        mu_buy: mu_b,
+        mu_sell: mu_s,
+        alpha_buy_buy: a_bb,
+        alpha_buy_sell: a_bs,
+        alpha_sell_buy: a_sb,
+        alpha_sell_sell: a_ss,
+        beta_decay: beta,
+    };
+}
+
+pub fn hawkes_1d_intensity_at(
+    current_time: Float,
+    last_intensity: Float,
+    last_time: Float,
+    params: &Hawkes1DParams
+) -> Float {
+    let dt: Float = current_time - last_time;
+    if dt < 0.0 {
+        return (params).mu_baseline;
+    }
+    let mu: Float = (params).mu_baseline;
+    let beta: Float = (params).beta_decay;
+    let decay: Float = exp((0.0 - beta) * dt);
+    
+    // lambda(t) = mu + (lambda(t-) - mu) * e^(-beta * dt)
+    let dynamic_part: Float = (last_intensity - mu) * decay;
+    return mu + dynamic_part;
+}
+
+pub fn hawkes_1d_on_event(
+    current_time: Float,
+    last_intensity: Float,
+    last_time: Float,
+    params: &Hawkes1DParams
+) -> Float {
+    let intensity_before: Float = hawkes_1d_intensity_at(current_time, last_intensity, last_time, params);
+    return intensity_before + (params).alpha_excitation;
+}
+
+pub fn hawkes_bivariate_update(
+    state: &mut HawkesIntensityState,
+    event_time: Float,
+    is_buy_event: Bool,
+    params: &HawkesBivariateParams
+) {
+    let dt: Float = event_time - (state).last_event_time;
+    let beta: Float = (params).beta_decay;
+    let decay: Float = if dt >= 0.0 { exp((0.0 - beta) * dt) } else { 1.0 };
+
+    let decayed_b: Float = (params).mu_buy + (((state).current_intensity_buy - (params).mu_buy) * decay);
+    let decayed_s: Float = (params).mu_sell + (((state).current_intensity_sell - (params).mu_sell) * decay);
+
+    if is_buy_event {
+        (state).current_intensity_buy = decayed_b + (params).alpha_buy_buy;
+        (state).current_intensity_sell = decayed_s + (params).alpha_sell_buy;
+    } else {
+        (state).current_intensity_buy = decayed_b + (params).alpha_buy_sell;
+        (state).current_intensity_sell = decayed_s + (params).alpha_sell_sell;
+    }
+
+    (state).last_event_time = event_time;
+    let br_b: Float = if beta > 0.0 { ((params).alpha_buy_buy + (params).alpha_buy_sell) / beta } else { 0.0 };
+    let br_s: Float = if beta > 0.0 { ((params).alpha_sell_buy + (params).alpha_sell_sell) / beta } else { 0.0 };
+    
+    (state).branching_ratio_buy = br_b;
+    (state).branching_ratio_sell = br_s;
+    (state).is_subcritical = (br_b < 1.0) && (br_s < 1.0);
+}

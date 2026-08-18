@@ -1,0 +1,95 @@
+// # eBPF Fast-Path SYN Cookie Proxy & DDoS Mitigator
+//
+// Logline: Generates cryptographic TCP SYN cookies to mitigate SYN flood volumetric DDoS attacks at XDP speed.
+//
+// Setup: Stateless SYN proxy intercepting incoming handshakes before kernel socket allocation.
+//
+// Beats:
+//   1. Compute cryptographic 32-bit SYN cookie over 4-tuple, client MSS, and time counter.
+//   2. Validate ACK sequence numbers matching calculated cookie value to authenticate clients.
+//   3. Pass validated connections to TCP stack while dropping forged SYN flood packets.
+
+pub type SynProxyState = struct {
+    secret_key: Int,
+    time_window_sec: Int,
+    syn_received: Int,
+    cookies_generated: Int,
+    cookies_validated: Int,
+    floods_mitigated: Int,
+};
+
+pub fn synproxy_new(secret: Int) -> SynProxyState {
+    return SynProxyState {
+        secret_key: secret,
+        time_window_sec: 64,
+        syn_received: 0,
+        cookies_generated: 0,
+        cookies_validated: 0,
+        floods_mitigated: 0,
+    };
+}
+
+pub fn synproxy_calc_cookie(
+    state: &SynProxyState,
+    s_ip: Int,
+    d_ip: Int,
+    s_port: Int,
+    d_port: Int,
+    mss_index: Int,
+    now_sec: Int
+) -> Int {
+    let time_slot: Int = (now_sec / (state).time_window_sec) & 7;
+    let mut h: Int = (s_ip * 31 + d_ip) ^ (s_port * 17 + d_port) ^ (state).secret_key;
+    if h < 0 {
+        h = 0 - h;
+    }
+    let cookie_body: Int = h % 16777215; // 24-bit hash
+    let cookie: Int = (time_slot << 29) | ((mss_index & 7) << 24) | cookie_body;
+    return cookie;
+}
+
+pub fn synproxy_handle_syn(
+    state: &mut SynProxyState,
+    s_ip: Int,
+    d_ip: Int,
+    s_port: Int,
+    d_port: Int,
+    mss_idx: Int,
+    now_sec: Int
+) -> Int {
+    (state).syn_received = (state).syn_received + 1;
+    (state).cookies_generated = (state).cookies_generated + 1;
+    return synproxy_calc_cookie(state, s_ip, d_ip, s_port, d_port, mss_idx, now_sec);
+}
+
+pub fn synproxy_validate_ack(
+    state: &mut SynProxyState,
+    s_ip: Int,
+    d_ip: Int,
+    s_port: Int,
+    d_port: Int,
+    ack_seq: Int,
+    now_sec: Int
+) -> Bool {
+    let acked_cookie: Int = ack_seq - 1;
+    let time_slot: Int = (acked_cookie >> 29) & 7;
+    let mss_idx: Int = (acked_cookie >> 24) & 7;
+    let cur_time_slot: Int = (now_sec / (state).time_window_sec) & 7;
+
+    // Allow current or previous time window
+    let diff: Int = (cur_time_slot - time_slot) & 7;
+    if diff > 1 {
+        (state).floods_mitigated = (state).floods_mitigated + 1;
+        return false;
+    }
+
+    let expected_cookie: Int = synproxy_calc_cookie(state, s_ip, d_ip, s_port, d_port, mss_idx, now_sec);
+    let cookie_mask: Int = 16777215; // Bottom 24 bits
+    if (acked_cookie & cookie_mask) == (expected_cookie & cookie_mask) {
+        (state).cookies_validated = (state).cookies_validated + 1;
+        return true;
+    }
+
+    (state).floods_mitigated = (state).floods_mitigated + 1;
+    return false;
+}

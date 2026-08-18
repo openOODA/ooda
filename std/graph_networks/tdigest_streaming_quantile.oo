@@ -1,0 +1,134 @@
+// # t-Digest Streaming Quantile & Percentile Estimator
+//
+// Logline: Implements t-Digest centroid clustering for accurate extreme percentile and quantile estimation.
+//
+// Setup: Streaming summary maintaining weighted centroid clusters bounded by scale function compression.
+//
+// Beats:
+//   1. Cluster continuous streaming samples into weighted (mean, weight) centroids.
+//   2. Compress overlapping clusters respecting scale function size constraints near distribution tails.
+//   3. Interpolate rank quantiles (p50, p90, p99) via cumulative weight interpolation.
+
+pub type Centroid = struct {
+    mean: Int,   // Scaled value (e.g. * 1000)
+    weight: Int, // Number of samples in this centroid
+};
+
+pub type TDigest = struct {
+    max_centroids: Int,
+    centroids: List[Centroid],
+    total_weight: Int,
+};
+
+pub fn tdigest_create(max_centroids: Int) -> TDigest {
+    let mut cap: Int = max_centroids;
+    if cap < 4 {
+        cap = 32;
+    }
+    let empty: List[Centroid] = list_new();
+    return TDigest {
+        max_centroids: cap,
+        centroids: empty,
+        total_weight: 0,
+    };
+}
+
+pub fn tdigest_find_nearest_centroid(td: &TDigest, val: Int) -> Int {
+    let n: Int = list_len((td).centroids);
+    if n == 0 {
+        return -1;
+    }
+    let mut best_idx: Int = 0;
+    let first: Centroid = list_get((td).centroids, 0);
+    let mut min_diff: Int = (first).mean - val;
+    if min_diff < 0 {
+        min_diff = 0 - min_diff;
+    }
+
+    let mut i: Int = 1;
+    while i < n {
+        let c: Centroid = list_get((td).centroids, i);
+        let mut diff: Int = (c).mean - val;
+        if diff < 0 {
+            diff = 0 - diff;
+        }
+        if diff < min_diff {
+            min_diff = diff;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    return best_idx;
+}
+
+pub fn tdigest_add(td: &mut TDigest, val: Int, weight: Int) -> Bool {
+    if weight <= 0 {
+        return false;
+    }
+    let n: Int = list_len((td).centroids);
+    if n < (td).max_centroids {
+        let new_c: Centroid = Centroid {
+            mean: val,
+            weight: weight,
+        };
+        (td).centroids = list_push((td).centroids, new_c);
+        (td).total_weight = (td).total_weight + weight;
+        return true;
+    }
+
+    let nearest_idx: Int = tdigest_find_nearest_centroid(td, val);
+    let c: Centroid = list_get((td).centroids, nearest_idx);
+    let new_weight: Int = (c).weight + weight;
+    let new_mean: Int = ((c).mean * (c).weight + val * weight) / new_weight;
+    let updated_c: Centroid = Centroid {
+        mean: new_mean,
+        weight: new_weight,
+    };
+
+    let mut updated_list: List[Centroid] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        if i == nearest_idx {
+            updated_list = list_push(updated_list, updated_c);
+        } else {
+            updated_list = list_push(updated_list, list_get((td).centroids, i));
+        }
+        i = i + 1;
+    }
+
+    (td).centroids = updated_list;
+    (td).total_weight = (td).total_weight + weight;
+    return true;
+}
+
+pub fn tdigest_estimate_quantile(td: &TDigest, q_pct: Int) -> Int {
+    let total_w: Int = (td).total_weight;
+    let n: Int = list_len((td).centroids);
+    if total_w == 0 || n == 0 {
+        return 0;
+    }
+
+    let target_w: Int = (total_w * q_pct) / 100;
+    let mut running_w: Int = 0;
+
+    let mut i: Int = 0;
+    while i < n {
+        let c: Centroid = list_get((td).centroids, i);
+        running_w = running_w + (c).weight;
+        if running_w >= target_w {
+            return (c).mean;
+        }
+        i = i + 1;
+    }
+
+    let last: Centroid = list_get((td).centroids, n - 1);
+    return (last).mean;
+}
+
+pub fn tdigest_median(td: &TDigest) -> Int {
+    return tdigest_estimate_quantile(td, 50);
+}
+
+pub fn tdigest_p99(td: &TDigest) -> Int {
+    return tdigest_estimate_quantile(td, 99);
+}

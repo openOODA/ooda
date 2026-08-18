@@ -1,0 +1,161 @@
+// # PagedAttention Physical Block & Memory Manager
+//
+// Logline: vLLM-style free-list alloc, refcount free, fork, and append.
+// residual: &mut destubbed to by-value.
+
+type BlockTable = struct {
+    seq_id: Int,
+    block_ids: List[Int],
+    logical_len: Int
+};
+
+type PagedCacheManager = struct {
+    block_size: Int,
+    total_blocks: Int,
+    ref_counts: List[Int],
+    capacities: List[Int],
+    num_tokens: List[Int],
+    free_block_ids: List[Int],
+    last_alloc_id: Int
+};
+
+pub fn paged_cache_manager_new(num_blocks: Int, block_size: Int) -> PagedCacheManager {
+    let mut refs: List[Int] = list_new();
+    let mut caps: List[Int] = list_new();
+    let mut toks: List[Int] = list_new();
+    let mut flist: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < num_blocks {
+        refs = list_push(refs, 0);
+        caps = list_push(caps, block_size);
+        toks = list_push(toks, 0);
+        flist = list_push(flist, i);
+        i = i + 1;
+    }
+    return PagedCacheManager {
+        block_size: block_size,
+        total_blocks: num_blocks,
+        ref_counts: refs,
+        capacities: caps,
+        num_tokens: toks,
+        free_block_ids: flist,
+        last_alloc_id: 0 - 1
+    };
+}
+
+fn list_replace(xs: List[Int], idx: Int, val: Int) -> List[Int] {
+    let n: Int = list_len(xs);
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        if i == idx {
+            out = list_push(out, val);
+        } else {
+            out = list_push(out, list_get(xs, i));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn paged_cache_alloc_block(mgr: PagedCacheManager) -> PagedCacheManager {
+    let num_free: Int = list_len(mgr.free_block_ids);
+    if num_free == 0 {
+        return PagedCacheManager {
+            block_size: mgr.block_size,
+            total_blocks: mgr.total_blocks,
+            ref_counts: mgr.ref_counts,
+            capacities: mgr.capacities,
+            num_tokens: mgr.num_tokens,
+            free_block_ids: mgr.free_block_ids,
+            last_alloc_id: 0 - 1
+        };
+    }
+    let allocated_id: Int = list_get(mgr.free_block_ids, num_free - 1);
+    let mut next_free: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < (num_free - 1) {
+        next_free = list_push(next_free, list_get(mgr.free_block_ids, i));
+        i = i + 1;
+    }
+    return PagedCacheManager {
+        block_size: mgr.block_size,
+        total_blocks: mgr.total_blocks,
+        ref_counts: list_replace(mgr.ref_counts, allocated_id, 1),
+        capacities: mgr.capacities,
+        num_tokens: list_replace(mgr.num_tokens, allocated_id, 0),
+        free_block_ids: next_free,
+        last_alloc_id: allocated_id
+    };
+}
+
+pub fn paged_cache_free_block(mgr: PagedCacheManager, block_id: Int) -> PagedCacheManager {
+    if block_id < 0 {
+        return mgr;
+    }
+    if block_id >= mgr.total_blocks {
+        return mgr;
+    }
+    let cur_ref: Int = list_get(mgr.ref_counts, block_id);
+    if cur_ref <= 1 {
+        return PagedCacheManager {
+            block_size: mgr.block_size,
+            total_blocks: mgr.total_blocks,
+            ref_counts: list_replace(mgr.ref_counts, block_id, 0),
+            capacities: mgr.capacities,
+            num_tokens: list_replace(mgr.num_tokens, block_id, 0),
+            free_block_ids: list_push(mgr.free_block_ids, block_id),
+            last_alloc_id: mgr.last_alloc_id
+        };
+    }
+    return PagedCacheManager {
+        block_size: mgr.block_size,
+        total_blocks: mgr.total_blocks,
+        ref_counts: list_replace(mgr.ref_counts, block_id, cur_ref - 1),
+        capacities: mgr.capacities,
+        num_tokens: mgr.num_tokens,
+        free_block_ids: mgr.free_block_ids,
+        last_alloc_id: mgr.last_alloc_id
+    };
+}
+
+pub fn paged_cache_fork_sequence(mgr: PagedCacheManager, table: BlockTable) -> PagedCacheManager {
+    let num_b: Int = list_len(table.block_ids);
+    let mut refs: List[Int] = mgr.ref_counts;
+    let mut j: Int = 0;
+    while j < mgr.total_blocks {
+        let mut match_found: Bool = false;
+        let mut b_idx: Int = 0;
+        while b_idx < num_b {
+            if list_get(table.block_ids, b_idx) == j {
+                match_found = true;
+            }
+            b_idx = b_idx + 1;
+        }
+        if match_found {
+            refs = list_replace(refs, j, list_get(refs, j) + 1);
+        }
+        j = j + 1;
+    }
+    return PagedCacheManager {
+        block_size: mgr.block_size,
+        total_blocks: mgr.total_blocks,
+        ref_counts: refs,
+        capacities: mgr.capacities,
+        num_tokens: mgr.num_tokens,
+        free_block_ids: mgr.free_block_ids,
+        last_alloc_id: mgr.last_alloc_id
+    };
+}
+
+pub fn block_table_new(seq_id: Int) -> BlockTable {
+    return BlockTable {
+        seq_id: seq_id,
+        block_ids: list_new(),
+        logical_len: 0
+    };
+}
+
+pub fn kv_cache_paged_manager_marker() -> Int {
+    return 1;
+}

@@ -1,0 +1,144 @@
+// # Madgwick IMU Attitude & Heading Reference System
+//
+// Logline: 6-DoF gradient-descent quaternion AHRS from accel and gyro.
+// residual: &mut destubbed to by-value.
+
+type Quaternion = struct {
+    w: Float,
+    x: Float,
+    y: Float,
+    z: Float
+};
+
+type EulerAngles = struct {
+    roll_rad: Float,
+    pitch_rad: Float,
+    yaw_rad: Float
+};
+
+type ImuReading = struct {
+    ax: Float,
+    ay: Float,
+    az: Float,
+    gx: Float,
+    gy: Float,
+    gz: Float
+};
+
+type MadgwickAHRS = struct {
+    q: Quaternion,
+    beta: Float,
+    sample_freq_hz: Float
+};
+
+pub fn quaternion_new(w: Float, x: Float, y: Float, z: Float) -> Quaternion {
+    return Quaternion { w: w, x: x, y: y, z: z };
+}
+
+pub fn quaternion_normalize(q: Quaternion) -> Quaternion {
+    let norm_sq: Float = (((q.w * q.w) + (q.x * q.x)) + ((q.y * q.y) + (q.z * q.z)));
+    if norm_sq < 0.000001 {
+        return quaternion_new(1.0, 0.0, 0.0, 0.0);
+    }
+    let norm: Float = sqrt(norm_sq);
+    return quaternion_new(q.w / norm, q.x / norm, q.y / norm, q.z / norm);
+}
+
+pub fn madgwick_ahrs_new(beta: Float, freq_hz: Float) -> MadgwickAHRS {
+    return MadgwickAHRS {
+        q: quaternion_new(1.0, 0.0, 0.0, 0.0),
+        beta: beta,
+        sample_freq_hz: freq_hz
+    };
+}
+
+pub fn imu_reading_new(ax: Float, ay: Float, az: Float, gx: Float, gy: Float, gz: Float) -> ImuReading {
+    return ImuReading { ax: ax, ay: ay, az: az, gx: gx, gy: gy, gz: gz };
+}
+
+pub fn quaternion_to_euler(q: Quaternion) -> EulerAngles {
+    let qw: Float = q.w;
+    let qx: Float = q.x;
+    let qy: Float = q.y;
+    let qz: Float = q.z;
+    let sinr_cosp: Float = 2.0 * ((qw * qx) + (qy * qz));
+    let sinp: Float = 2.0 * ((qw * qy) - (qz * qx));
+    let mut pitch: Float = sinp;
+    if sinp > 1.0 {
+        pitch = 1.5707963;
+    } else {
+        if sinp < (0.0 - 1.0) {
+            pitch = 0.0 - 1.5707963;
+        }
+    }
+    let siny_cosp: Float = 2.0 * ((qw * qz) + (qx * qy));
+    return EulerAngles {
+        roll_rad: sinr_cosp,
+        pitch_rad: pitch,
+        yaw_rad: siny_cosp
+    };
+}
+
+pub fn madgwick_update_6dof(ahrs: MadgwickAHRS, imu: ImuReading, dt_s: Float) -> MadgwickAHRS {
+    let q: Quaternion = ahrs.q;
+    let qw: Float = q.w;
+    let qx: Float = q.x;
+    let qy: Float = q.y;
+    let qz: Float = q.z;
+    let q_dot_w: Float = 0.5 * (((0.0 - qx) * imu.gx) - (qy * imu.gy) - (qz * imu.gz));
+    let q_dot_x: Float = 0.5 * ((qw * imu.gx) + (qy * imu.gz) - (qz * imu.gy));
+    let q_dot_y: Float = 0.5 * ((qw * imu.gy) - (qx * imu.gz) + (qz * imu.gx));
+    let q_dot_z: Float = 0.5 * ((qw * imu.gz) + (qx * imu.gy) - (qy * imu.gx));
+    let a_norm_sq: Float = ((imu.ax * imu.ax) + (imu.ay * imu.ay)) + (imu.az * imu.az);
+    if a_norm_sq > 0.000001 {
+        let a_norm: Float = sqrt(a_norm_sq);
+        let ax: Float = imu.ax / a_norm;
+        let ay: Float = imu.ay / a_norm;
+        let az: Float = imu.az / a_norm;
+        let f1: Float = (2.0 * ((qx * qz) - (qw * qy))) - ax;
+        let f2: Float = (2.0 * ((qw * qx) + (qy * qz))) - ay;
+        let f3: Float = (2.0 * ((0.5 - (qx * qx)) - (qy * qy))) - az;
+        let j_11or24: Float = 2.0 * qy;
+        let j_12or23: Float = 2.0 * qz;
+        let j_13or22: Float = 2.0 * qw;
+        let j_14or21: Float = 2.0 * qx;
+        let s_w: Float = ((0.0 - j_11or24) * f1) + (j_14or21 * f2);
+        let s_x: Float = (j_12or23 * f1) + (j_13or22 * f2) - ((4.0 * qx) * f3);
+        let s_y: Float = ((0.0 - j_13or22) * f1) + (j_12or23 * f2) - ((4.0 * qy) * f3);
+        let s_z: Float = (j_14or21 * f1) + (j_11or24 * f2);
+        let s_norm_sq: Float = (((s_w * s_w) + (s_x * s_x)) + (s_y * s_y)) + (s_z * s_z);
+        if s_norm_sq > 0.000001 {
+            let s_norm: Float = sqrt(s_norm_sq);
+            let beta: Float = ahrs.beta;
+            let final_qw: Float = qw + ((q_dot_w - (beta * (s_w / s_norm))) * dt_s);
+            let final_qx: Float = qx + ((q_dot_x - (beta * (s_x / s_norm))) * dt_s);
+            let final_qy: Float = qy + ((q_dot_y - (beta * (s_y / s_norm))) * dt_s);
+            let final_qz: Float = qz + ((q_dot_z - (beta * (s_z / s_norm))) * dt_s);
+            let qn: Quaternion = quaternion_normalize(quaternion_new(final_qw, final_qx, final_qy, final_qz));
+            return MadgwickAHRS { q: qn, beta: ahrs.beta, sample_freq_hz: ahrs.sample_freq_hz };
+        }
+    }
+    let int_qw: Float = qw + (q_dot_w * dt_s);
+    let int_qx: Float = qx + (q_dot_x * dt_s);
+    let int_qy: Float = qy + (q_dot_y * dt_s);
+    let int_qz: Float = qz + (q_dot_z * dt_s);
+    let qf: Quaternion = quaternion_normalize(quaternion_new(int_qw, int_qx, int_qy, int_qz));
+    return MadgwickAHRS { q: qf, beta: ahrs.beta, sample_freq_hz: ahrs.sample_freq_hz };
+}
+
+pub fn madgwick_qw_milli(ahrs: MadgwickAHRS) -> Int {
+    let mut acc: Int = 0;
+    let mut rem: Float = ahrs.q.w;
+    if rem < 0.0 {
+        rem = 0.0 - rem;
+    }
+    while rem >= 1.0 {
+        acc = acc + 1000;
+        rem = rem - 1.0;
+    }
+    while rem >= 0.001 {
+        acc = acc + 1;
+        rem = rem - 0.001;
+    }
+    return acc;
+}

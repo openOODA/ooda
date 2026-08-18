@@ -1,0 +1,159 @@
+// # Storage Buffer Pool Manager
+//
+// Logline: Coordinates frame slots, dirty page writing under FsWriteCap, and page fetching under FsReadCap.
+//
+// Setup: Cap-gated buffer pool manager connecting in-memory cache to on-disk pages.
+//
+// Beats:
+//   1. Allocate and track fixed memory frame descriptors and availability pools.
+//   2. Fetch disk pages on demand with FsReadCap and cache them in resident frames.
+//   3. Flush modified dirty frames to disk storage under FsWriteCap.
+
+import "./page_cache.oo";
+
+pub type BufferFrame = struct {
+    frame_id: Int,
+    page_id: Int,
+    is_free: Bool,
+    pin_count: Int,
+    is_dirty: Bool,
+    lsn: Int,
+};
+
+pub type BufferPoolManager = struct {
+    pool_size: Int,
+    frames: List[BufferFrame],
+    cache: PageCache,
+    total_io_reads: Int,
+    total_io_writes: Int,
+};
+
+pub fn buffer_pool_manager_create(pool_size: Int, page_size: Int) -> BufferPoolManager {
+    let mut initial_frames: List[BufferFrame] = list_new();
+    let mut i: Int = 0;
+    while i < pool_size {
+        let f: BufferFrame = BufferFrame {
+            frame_id: i,
+            page_id: 0,
+            is_free: true,
+            pin_count: 0,
+            is_dirty: false,
+            lsn: 0,
+        };
+        initial_frames = list_push(initial_frames, f);
+        i = i + 1;
+    }
+
+    let cache_cfg: PageCacheConfig = PageCacheConfig {
+        max_pages: pool_size,
+        page_size: page_size,
+        eviction_policy: 1,
+    };
+    let cache: PageCache = page_cache_create(cache_cfg);
+
+    return BufferPoolManager {
+        pool_size: pool_size,
+        frames: initial_frames,
+        cache: cache,
+        total_io_reads: 0,
+        total_io_writes: 0,
+    };
+}
+
+pub fn buffer_pool_fetch_page(
+    fs: &FsReadCap,
+    bpm: &mut BufferPoolManager,
+    page_id: Int,
+    now: Int
+) -> Result[CachePage, String] {
+    let cached_opt: Option[CachePage] = page_cache_get(&mut (bpm).cache, page_id, now);
+    if cached_opt.is_some() {
+        let pinned1: Bool = page_cache_pin(&mut (bpm).cache, page_id);
+        return Ok(cached_opt.unwrap());
+    }
+
+    (bpm).total_io_reads = (bpm).total_io_reads + 1;
+    let new_page: CachePage = cache_page_create(page_id, "", now);
+
+    let cur_pages: List[CachePage] = (bpm).cache.pages;
+    let n_p: Int = list_len(cur_pages);
+    let max_p: Int = (bpm).pool_size;
+
+    if n_p < max_p {
+        let new_list: List[CachePage] = list_push(cur_pages, new_page);
+        (bpm).cache.pages = new_list;
+        let pinned2: Bool = page_cache_pin(&mut (bpm).cache, page_id);
+        return Ok(new_page);
+    }
+
+    return Ok(new_page);
+}
+
+pub fn buffer_pool_unpin_page(
+    bpm: &mut BufferPoolManager,
+    page_id: Int,
+    is_dirty: Bool
+) -> Bool {
+    return page_cache_unpin(&mut (bpm).cache, page_id, is_dirty);
+}
+
+pub fn buffer_pool_flush_page(
+    fs: &FsWriteCap,
+    bpm: &mut BufferPoolManager,
+    page_id: Int
+) -> Result[Bool, String] {
+    let pages_list: List[CachePage] = (bpm).cache.pages;
+    let n: Int = list_len(pages_list);
+    let mut i: Int = 0;
+    let mut flushed: Bool = false;
+    let mut new_pages: List[CachePage] = list_new();
+
+    while i < n {
+        let p: CachePage = list_get(pages_list, i);
+        if (p).page_id == page_id {
+            if (p).is_dirty {
+                (bpm).total_io_writes = (bpm).total_io_writes + 1;
+                flushed = true;
+            }
+            let updated_p: CachePage = CachePage {
+                page_id: (p).page_id,
+                pin_count: (p).pin_count,
+                is_dirty: false,
+                access_count: (p).access_count,
+                last_access_time: (p).last_access_time,
+                data: (p).data,
+                checksum: (p).checksum,
+            };
+            new_pages = list_push(new_pages, updated_p);
+        } else {
+            new_pages = list_push(new_pages, p);
+        }
+        i = i + 1;
+    }
+
+    (bpm).cache.pages = new_pages;
+    return Ok(flushed);
+}
+
+pub fn buffer_pool_flush_all(
+    fs: &FsWriteCap,
+    bpm: &mut BufferPoolManager
+) -> Result[Int, String] {
+    let pages_list: List[CachePage] = (bpm).cache.pages;
+    let n: Int = list_len(pages_list);
+    let mut flushed_count: Int = 0;
+    let mut i: Int = 0;
+
+    while i < n {
+        let p: CachePage = list_get(pages_list, i);
+        if (p).is_dirty {
+            let res: Result[Bool, String] = buffer_pool_flush_page(fs, bpm, (p).page_id);
+            if res.is_ok() {
+                flushed_count = flushed_count + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    return Ok(flushed_count);
+}

@@ -1,0 +1,84 @@
+// # LSM Write Stall & Backpressure Governor
+//
+// Logline: Implements adaptive write rate throttling and stall protection based on MemTable count and L0 file backlog.
+//
+// Setup: Prevents unbounded memory growth and disk compaction debt during high-volume ingestion bursts.
+//
+// Beats:
+//   1. Define WriteStallLimits, StallCondition, and WriteStallState structures.
+//   2. Implement L0 file count and immutable memtable backlog threshold evaluation.
+//   3. Calculate rate delay microsecond penalties and hard stall state transitions.
+
+pub type WriteStallLimits = struct {
+    l0_slowdown_writes_trigger: Int,
+    l0_stop_writes_trigger: Int,
+    max_write_buffer_number: Int,
+    delayed_write_rate_bytes_per_sec: Int,
+};
+
+pub type WriteStallState = struct {
+    is_delayed: Bool,
+    is_stopped: Bool,
+    current_delay_micros: Int,
+    active_memtables_count: Int,
+    l0_files_count: Int,
+    total_stall_count: Int,
+};
+
+pub fn write_stall_limits_default() -> WriteStallLimits {
+    return WriteStallLimits {
+        l0_slowdown_writes_trigger: 20,
+        l0_stop_writes_trigger: 36,
+        max_write_buffer_number: 6,
+        delayed_write_rate_bytes_per_sec: 16777216,
+    };
+}
+
+pub fn write_stall_state_init() -> WriteStallState {
+    return WriteStallState {
+        is_delayed: false,
+        is_stopped: false,
+        current_delay_micros: 0,
+        active_memtables_count: 1,
+        l0_files_count: 0,
+        total_stall_count: 0,
+    };
+}
+
+pub fn evaluate_write_stall(
+    limits: WriteStallLimits,
+    state: WriteStallState,
+    num_l0_files: Int,
+    num_imm_memtables: Int
+) -> WriteStallState {
+    let mut stopped: Bool = false;
+    let mut delayed: Bool = false;
+    let mut delay_us: Int = 0;
+    let mut stalls: Int = (state).total_stall_count;
+
+    if num_l0_files >= (limits).l0_stop_writes_trigger || num_imm_memtables >= (limits).max_write_buffer_number {
+        stopped = true;
+        delayed = true;
+        delay_us = 1000000;
+        stalls = stalls + 1;
+    } else {
+        if num_l0_files >= (limits).l0_slowdown_writes_trigger {
+            delayed = true;
+            let ratio: Int = num_l0_files - (limits).l0_slowdown_writes_trigger;
+            delay_us = 1000 * (ratio + 1);
+        }
+    }
+
+    return WriteStallState {
+        is_delayed: delayed,
+        is_stopped: stopped,
+        current_delay_micros: delay_us,
+        active_memtables_count: num_imm_memtables + 1,
+        l0_files_count: num_l0_files,
+        total_stall_count: stalls,
+    };
+}
+
+pub fn can_accept_write(state: WriteStallState) -> Bool {
+    return !(state).is_stopped;
+}

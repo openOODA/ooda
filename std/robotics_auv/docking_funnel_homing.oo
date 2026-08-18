@@ -1,0 +1,109 @@
+// # Subsea Docking Funnel Optical/Acoustic Homing & Capture
+//
+// Logline: Guides AUV into subsea docking cone receiver using relative terminal guidance and latch engagement detection.
+//
+// Setup: Terminal homing guidance algorithm regulating 6-DOF vehicle approach trajectory into seafloor docking stations.
+//
+// Beats:
+//   1. Define docking cone geometry (entry cone diameter, funnel length, capture throat tolerance).
+//   2. Compute 3D vehicle position and attitude alignment relative to docking funnel coordinate frame.
+//   3. Generate exponential terminal approach deceleration profile v_approach(x).
+//   4. Evaluate latch capture state machine and inductive recharge lock verification.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type DockingConeConfig = struct {
+    cone_entry_radius_m: Float,
+    cone_length_m: Float,
+    latch_throat_radius_m: Float,
+    max_approach_speed_m_s: Float,
+    min_dock_speed_m_s: Float,
+    max_angular_misalignment_rad: Float,
+};
+
+pub type DockingHomingState = struct {
+    distance_to_throat_m: Float,
+    radial_offset_m: Float,
+    is_inside_cone: Bool,
+    is_latched: Bool,
+    commanded_approach_speed_m_s: Float,
+    recommended_yaw_rad: Float,
+    recommended_pitch_rad: Float,
+};
+
+pub fn docking_cone_config_default() -> DockingConeConfig {
+    return DockingConeConfig {
+        cone_entry_radius_m: 1.0,     // 2m diameter funnel opening
+        cone_length_m: 2.5,
+        latch_throat_radius_m: 0.15,
+        max_approach_speed_m_s: 0.8,
+        min_dock_speed_m_s: 0.15,
+        max_angular_misalignment_rad: 0.1745, // 10 deg
+    };
+}
+
+pub fn docking_homing_init() -> DockingHomingState {
+    return DockingHomingState {
+        distance_to_throat_m: 10.0,
+        radial_offset_m: 1.5,
+        is_inside_cone: false,
+        is_latched: false,
+        commanded_approach_speed_m_s: 0.5,
+        recommended_yaw_rad: 0.0,
+        recommended_pitch_rad: 0.0,
+    };
+}
+
+pub fn docking_homing_step(
+    cfg: &DockingConeConfig,
+    rel_pos_cone: &Vector3, // x: axial towards throat, y: lateral, z: vertical
+    rel_heading_rad: Float,
+    rel_pitch_rad: Float
+) -> DockingHomingState {
+    let x_dist: Float = (rel_pos_cone).x; // Distance along cone axis
+    let y_lat: Float = (rel_pos_cone).y;
+    let z_vert: Float = (rel_pos_cone).z;
+
+    let r_radial: Float = sqrt((y_lat * y_lat) + (z_vert * z_vert));
+
+    // Cone boundary check: R_cone(x) = R_throat + (R_entry - R_throat) * (x / L)
+    let mut cone_radius_at_x: Float = (cfg).cone_entry_radius_m;
+    if x_dist <= (cfg).cone_length_m {
+        let frac: Float = math_clamp(x_dist / (cfg).cone_length_m, 0.0, 1.0);
+        cone_radius_at_x = (cfg).latch_throat_radius_m + (frac * ((cfg).cone_entry_radius_m - (cfg).latch_throat_radius_m));
+    }
+
+    let in_cone: Bool = (x_dist >= 0.0) && (x_dist <= (cfg).cone_length_m) && (r_radial <= cone_radius_at_x);
+
+    // Latch engagement condition: at throat with tight alignment
+    let latched: Bool = (x_dist <= 0.1) && (r_radial <= (cfg).latch_throat_radius_m) && (math_abs(rel_heading_rad) <= (cfg).max_angular_misalignment_rad);
+
+    // Exponential approach speed profile
+    let mut v_cmd: Float = (cfg).max_approach_speed_m_s;
+    if x_dist < (cfg).cone_length_m {
+        let speed_ratio: Float = x_dist / (cfg).cone_length_m;
+        v_cmd = (cfg).min_dock_speed_m_s + (speed_ratio * ((cfg).max_approach_speed_m_s - (cfg).min_dock_speed_m_s));
+    }
+    if latched {
+        v_cmd = 0.0;
+    }
+
+    // Steering correction towards cone centerline
+    let mut safe_x: Float = x_dist;
+    if safe_x < 0.5 {
+        safe_x = 0.5;
+    }
+    let target_yaw: Float = 0.0 - math_atan2(y_lat, safe_x);
+    let target_pitch: Float = 0.0 - math_atan2(z_vert, safe_x);
+
+    return DockingHomingState {
+        distance_to_throat_m: x_dist,
+        radial_offset_m: r_radial,
+        is_inside_cone: in_cone,
+        is_latched: latched,
+        commanded_approach_speed_m_s: v_cmd,
+        recommended_yaw_rad: target_yaw,
+        recommended_pitch_rad: target_pitch,
+    };
+}

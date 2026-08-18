@@ -1,0 +1,195 @@
+// # Contact Manifold & Collision Point Generation
+//
+// Logline: Represents 2D and 3D contact points, collision normal axes, penetration depths, and friction manifolds.
+//
+// Setup: Multi-point contact manifolds caching persistent contact points for stable rigid body stacking.
+//
+// Beats:
+//   1. Define ContactPoint and ContactManifold data structures with normal and tangent frames.
+//   2. Provide contact point accumulation, penetration depth updating, and feature key matching.
+//   3. Implement normal projection and contact relative separation velocity evaluations.
+
+pub type ContactPoint = struct {
+    pos_x: Float,
+    pos_y: Float,
+    pos_z: Float,
+    local_a_x: Float,
+    local_a_y: Float,
+    local_a_z: Float,
+    local_b_x: Float,
+    local_b_y: Float,
+    local_b_z: Float,
+    penetration: Float,
+    normal_impulse: Float,
+    tangent_impulse_1: Float,
+    tangent_impulse_2: Float,
+    feature_id: Int,
+};
+
+pub type ContactManifold = struct {
+    body_a_id: Int,
+    body_b_id: Int,
+    normal_x: Float,
+    normal_y: Float,
+    normal_z: Float,
+    tangent1_x: Float,
+    tangent1_y: Float,
+    tangent1_z: Float,
+    tangent2_x: Float,
+    tangent2_y: Float,
+    tangent2_z: Float,
+    friction: Float,
+    restitution: Float,
+    point_count: Int,
+    p0: ContactPoint,
+    p1: ContactPoint,
+    p2: ContactPoint,
+    p3: ContactPoint,
+};
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn contact_point_empty() -> ContactPoint {
+    return ContactPoint {
+        pos_x: 0.0, pos_y: 0.0, pos_z: 0.0,
+        local_a_x: 0.0, local_a_y: 0.0, local_a_z: 0.0,
+        local_b_x: 0.0, local_b_y: 0.0, local_b_z: 0.0,
+        penetration: 0.0,
+        normal_impulse: 0.0,
+        tangent_impulse_1: 0.0,
+        tangent_impulse_2: 0.0,
+        feature_id: -1,
+    };
+}
+
+pub fn contact_point_new(
+    px: Float, py: Float, pz: Float,
+    pen: Float,
+    feat_id: Int
+) -> ContactPoint {
+    return ContactPoint {
+        pos_x: px, pos_y: py, pos_z: pz,
+        local_a_x: 0.0, local_a_y: 0.0, local_a_z: 0.0,
+        local_b_x: 0.0, local_b_y: 0.0, local_b_z: 0.0,
+        penetration: pen,
+        normal_impulse: 0.0,
+        tangent_impulse_1: 0.0,
+        tangent_impulse_2: 0.0,
+        feature_id: feat_id,
+    };
+}
+
+pub fn contact_manifold_new(
+    body_a: Int,
+    body_b: Int,
+    nx: Float, ny: Float, nz: Float,
+    friction: Float,
+    restitution: Float
+) -> ContactManifold {
+    // Construct orthonormal tangent basis
+    let mut t1x = 0.0;
+    let mut t1y = 0.0;
+    let mut t1z = 0.0;
+
+    let abs_nx = if nx < 0.0 { -nx } else { nx };
+    if abs_nx < 0.9 {
+        // Cross with (1, 0, 0)
+        t1y = -nz;
+        t1z = ny;
+    } else {
+        // Cross with (0, 1, 0)
+        t1x = nz;
+        t1z = -nx;
+    }
+    let t1_len = sqrt((t1x * t1x) + (t1y * t1y) + (t1z * t1z));
+    if t1_len > 0.000001 {
+        let inv = 1.0 / t1_len;
+        t1x = t1x * inv;
+        t1y = t1y * inv;
+        t1z = t1z * inv;
+    }
+
+    // t2 = normal x t1
+    let t2x = (ny * t1z) - (nz * t1y);
+    let t2y = (nz * t1x) - (nx * t1z);
+    let t2z = (nx * t1y) - (ny * t1x);
+
+    let empty_pt = contact_point_empty();
+
+    return ContactManifold {
+        body_a_id: body_a,
+        body_b_id: body_b,
+        normal_x: nx,
+        normal_y: ny,
+        normal_z: nz,
+        tangent1_x: t1x,
+        tangent1_y: t1y,
+        tangent1_z: t1z,
+        tangent2_x: t2x,
+        tangent2_y: t2y,
+        tangent2_z: t2z,
+        friction: friction,
+        restitution: restitution,
+        point_count: 0,
+        p0: empty_pt,
+        p1: empty_pt,
+        p2: empty_pt,
+        p3: empty_pt,
+    };
+}
+
+// -------------------------------------------------------------------
+// Point Addition & Queries
+// -------------------------------------------------------------------
+
+pub fn contact_manifold_add_point(m: ContactManifold, pt: ContactPoint) -> ContactManifold {
+    let count = (m).point_count;
+    if count == 0 {
+        return ContactManifold {
+            body_a_id: (m).body_a_id, body_b_id: (m).body_b_id,
+            normal_x: (m).normal_x, normal_y: (m).normal_y, normal_z: (m).normal_z,
+            tangent1_x: (m).tangent1_x, tangent1_y: (m).tangent1_y, tangent1_z: (m).tangent1_z,
+            tangent2_x: (m).tangent2_x, tangent2_y: (m).tangent2_y, tangent2_z: (m).tangent2_z,
+            friction: (m).friction, restitution: (m).restitution,
+            point_count: 1, p0: pt, p1: (m).p1, p2: (m).p2, p3: (m).p3,
+        };
+    } else if count == 1 {
+        return ContactManifold {
+            body_a_id: (m).body_a_id, body_b_id: (m).body_b_id,
+            normal_x: (m).normal_x, normal_y: (m).normal_y, normal_z: (m).normal_z,
+            tangent1_x: (m).tangent1_x, tangent1_y: (m).tangent1_y, tangent1_z: (m).tangent1_z,
+            tangent2_x: (m).tangent2_x, tangent2_y: (m).tangent2_y, tangent2_z: (m).tangent2_z,
+            friction: (m).friction, restitution: (m).restitution,
+            point_count: 2, p0: (m).p0, p1: pt, p2: (m).p2, p3: (m).p3,
+        };
+    } else if count == 2 {
+        return ContactManifold {
+            body_a_id: (m).body_a_id, body_b_id: (m).body_b_id,
+            normal_x: (m).normal_x, normal_y: (m).normal_y, normal_z: (m).normal_z,
+            tangent1_x: (m).tangent1_x, tangent1_y: (m).tangent1_y, tangent1_z: (m).tangent1_z,
+            tangent2_x: (m).tangent2_x, tangent2_y: (m).tangent2_y, tangent2_z: (m).tangent2_z,
+            friction: (m).friction, restitution: (m).restitution,
+            point_count: 3, p0: (m).p0, p1: (m).p1, p2: pt, p3: (m).p3,
+        };
+    } else {
+        return ContactManifold {
+            body_a_id: (m).body_a_id, body_b_id: (m).body_b_id,
+            normal_x: (m).normal_x, normal_y: (m).normal_y, normal_z: (m).normal_z,
+            tangent1_x: (m).tangent1_x, tangent1_y: (m).tangent1_y, tangent1_z: (m).tangent1_z,
+            tangent2_x: (m).tangent2_x, tangent2_y: (m).tangent2_y, tangent2_z: (m).tangent2_z,
+            friction: (m).friction, restitution: (m).restitution,
+            point_count: 4, p0: (m).p0, p1: (m).p1, p2: (m).p2, p3: pt,
+        };
+    }
+}
+
+pub fn contact_manifold_max_penetration(m: ContactManifold) -> Float {
+    let mut max_p = 0.0;
+    if (m).point_count > 0 && ((m).p0).penetration > max_p { max_p = ((m).p0).penetration; }
+    if (m).point_count > 1 && ((m).p1).penetration > max_p { max_p = ((m).p1).penetration; }
+    if (m).point_count > 2 && ((m).p2).penetration > max_p { max_p = ((m).p2).penetration; }
+    if (m).point_count > 3 && ((m).p3).penetration > max_p { max_p = ((m).p3).penetration; }
+    return max_p;
+}

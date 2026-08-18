@@ -1,0 +1,102 @@
+// # Engineered Two-Component Signaling Sensors (TCS)
+//
+// Logline: Simulates histidine kinase autophosphorylation, phosphotransfer to response regulators, and transcriptional activation.
+//
+// Setup: Two-component system (HK/RR) ODE signaling cascade modeling environmental sensing (e.g. EnvZ-OmpR, CpxA-CpxR).
+//
+// Beats:
+//   1. Define TcsKineticsParams, TcsPhosphoState, and TcsResponseResult data structures.
+//   2. Compute 4-variable ODE system for HK, HK-P, RR, and RR-P phosphorylated intermediate states.
+//   3. Advance TCS state using Runge-Kutta numerical integration and evaluate steady-state transcriptional induction.
+
+pub type TcsKineticsParams = struct {
+    k_auto_phospho_max: Float, // Stimulus-dependent HK autophosphorylation rate
+    k_phosphotransfer: Float, // HK-P + RR -> HK + RR-P
+    k_phosphatase: Float, // RR-P -> RR dephosphorylation
+    total_hk_conc: Float,
+    total_rr_conc: Float,
+};
+
+pub type TcsPhosphoState = struct {
+    hk_p_conc: Float,
+    rr_p_conc: Float,
+    time_min: Float,
+};
+
+pub type TcsResponseResult = struct {
+    fraction_rr_phosphorylated: Float,
+    target_promoter_activity: Float,
+    response_time_to_half_max_min: Float,
+};
+
+pub fn tcs_derivatives(
+    st: &TcsPhosphoState,
+    p: &TcsKineticsParams,
+    stimulus_intensity: Float, // 0.0 to 1.0
+) -> TcsPhosphoState {
+    let unphospho_hk = (p).total_hk_conc - (st).hk_p_conc;
+    let unphospho_rr = (p).total_rr_conc - (st).rr_p_conc;
+
+    let hk_free = if unphospho_hk < 0.0 { 0.0 } else { unphospho_hk };
+    let rr_free = if unphospho_rr < 0.0 { 0.0 } else { unphospho_rr };
+
+    // Autophosphorylation: HK + ATP -> HK-P
+    let v_auto = (p).k_auto_phospho_max * stimulus_intensity * hk_free;
+
+    // Phosphotransfer: HK-P + RR -> HK + RR-P
+    let v_transfer = (p).k_phosphotransfer * (st).hk_p_conc * rr_free;
+
+    // Dephosphorylation: RR-P -> RR + Pi
+    let v_dephos = (p).k_phosphatase * (st).rr_p_conc;
+
+    // d[HK-P]/dt = v_auto - v_transfer
+    let d_hk_p = v_auto - v_transfer;
+
+    // d[RR-P]/dt = v_transfer - v_dephos
+    let d_rr_p = v_transfer - v_dephos;
+
+    return TcsPhosphoState {
+        hk_p_conc: d_hk_p,
+        rr_p_conc: d_rr_p,
+        time_min: (st).time_min,
+    };
+}
+
+pub fn tcs_rk4_step(
+    st: &TcsPhosphoState,
+    p: &TcsKineticsParams,
+    stimulus: Float,
+    dt: Float,
+) -> TcsPhosphoState {
+    let k1 = tcs_derivatives(st, p, stimulus);
+
+    let s2 = TcsPhosphoState {
+        hk_p_conc: (st).hk_p_conc + (0.5 * dt * (k1).hk_p_conc),
+        rr_p_conc: (st).rr_p_conc + (0.5 * dt * (k1).rr_p_conc),
+        time_min: (st).time_min + (0.5 * dt),
+    };
+    let k2 = tcs_derivatives(&s2, p, stimulus);
+
+    let s3 = TcsPhosphoState {
+        hk_p_conc: (st).hk_p_conc + (0.5 * dt * (k2).hk_p_conc),
+        rr_p_conc: (st).rr_p_conc + (0.5 * dt * (k2).rr_p_conc),
+        time_min: (st).time_min + (0.5 * dt),
+    };
+    let k3 = tcs_derivatives(&s3, p, stimulus);
+
+    let s4 = TcsPhosphoState {
+        hk_p_conc: (st).hk_p_conc + (dt * (k3).hk_p_conc),
+        rr_p_conc: (st).rr_p_conc + (dt * (k3).rr_p_conc),
+        time_min: (st).time_min + dt,
+    };
+    let k4 = tcs_derivatives(&s4, p, stimulus);
+
+    let next_hk = (st).hk_p_conc + (dt / 6.0) * ((k1).hk_p_conc + (2.0 * (k2).hk_p_conc) + (2.0 * (k3).hk_p_conc) + (k4).hk_p_conc);
+    let next_rr = (st).rr_p_conc + (dt / 6.0) * ((k1).rr_p_conc + (2.0 * (k2).rr_p_conc) + (2.0 * (k3).rr_p_conc) + (k4).rr_p_conc);
+
+    return TcsPhosphoState {
+        hk_p_conc: if next_hk < 0.0 { 0.0 } else { next_hk },
+        rr_p_conc: if next_rr < 0.0 { 0.0 } else { next_rr },
+        time_min: (st).time_min + dt,
+    };
+}

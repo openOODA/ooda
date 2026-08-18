@@ -1,0 +1,151 @@
+// # Options Straddle and Strangle Volatility Strategy Engine
+//
+// Logline: Models non-directional volatility strategies (ATM Straddles and OTM Strangles), computing breakeven cones and gamma convexity profiles.
+//
+// Setup: Pure quantitative finance module measuring non-directional Vega and Gamma exposure for volatility trading desks.
+//
+// Beats:
+//   1. Define StraddlePosition, StranglePosition, and VolStrategyResult structures.
+//   2. Compute aggregate premium debit, upper/lower breakeven bounds, and delta neutrality.
+//   3. Measure gamma convexity explosion and daily theta time-decay burn rates.
+
+pub type StraddlePosition = struct {
+    strike: Float,
+    expiry_years: Float,
+    implied_vol: Float,
+    spot_price: Float,
+    risk_free_rate: Float,
+};
+
+pub type StranglePosition = struct {
+    call_strike: Float,
+    put_strike: Float,
+    expiry_years: Float,
+    call_vol: Float,
+    put_vol: Float,
+    spot_price: Float,
+    risk_free_rate: Float,
+};
+
+pub type VolStrategyResult = struct {
+    total_cost_debit: Float,
+    upper_breakeven: Float,
+    lower_breakeven: Float,
+    required_move_pct: Float,
+    net_delta: Float,
+    net_gamma: Float,
+    net_vega: Float,
+    net_theta_daily: Float,
+};
+
+pub fn ss_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn ss_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (ss_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn ss_bs_call(s: Float, k: Float, t: Float, r: Float, vol: Float) -> Float {
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    let df: Float = exp((0.0 - r) * t);
+    return (s * ss_norm_cdf(d1)) - (k * df * ss_norm_cdf(d2));
+}
+
+pub fn evaluate_straddle(p: &StraddlePosition) -> VolStrategyResult {
+    let s: Float = (p).spot_price;
+    let k: Float = (p).strike;
+    let t: Float = (p).expiry_years;
+    let r: Float = (p).risk_free_rate;
+    let vol: Float = (p).implied_vol;
+
+    let c: Float = ss_bs_call(s, k, t, r, vol);
+    let df: Float = exp((0.0 - r) * t);
+    let put: Float = c - s + (k * df);
+    let total_cost: Float = c + put;
+
+    let upper_be: Float = k + total_cost;
+    let lower_be: Float = k - total_cost;
+    let move_req: Float = total_cost / s;
+
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+
+    let delta_c: Float = ss_norm_cdf(d1);
+    let delta_p: Float = delta_c - 1.0;
+    let net_delta: Float = delta_c + delta_p;
+
+    let gamma: Float = (2.0 * ss_norm_pdf(d1)) / (s * vol * sqrt_t);
+    let vega: Float = 2.0 * s * sqrt_t * ss_norm_pdf(d1) * 0.01;
+
+    let theta_annual: Float = (0.0 - (s * ss_norm_pdf(d1) * vol)) / sqrt_t - (r * k * df);
+    let theta_daily: Float = theta_annual / 365.0;
+
+    return VolStrategyResult {
+        total_cost_debit: total_cost,
+        upper_breakeven: upper_be,
+        lower_breakeven: lower_be,
+        required_move_pct: move_req,
+        net_delta: net_delta,
+        net_gamma: gamma,
+        net_vega: vega,
+        net_theta_daily: theta_daily,
+    };
+}
+
+pub fn evaluate_strangle(p: &StranglePosition) -> VolStrategyResult {
+    let s: Float = (p).spot_price;
+    let kc: Float = (p).call_strike;
+    let kp: Float = (p).put_strike;
+    let t: Float = (p).expiry_years;
+    let r: Float = (p).risk_free_rate;
+
+    let c: Float = ss_bs_call(s, kc, t, r, (p).call_vol);
+    let df: Float = exp((0.0 - r) * t);
+    let c_p: Float = ss_bs_call(s, kp, t, r, (p).put_vol);
+    let put: Float = c_p - s + (kp * df);
+    let total_cost: Float = c + put;
+
+    let upper_be: Float = kc + total_cost;
+    let lower_be: Float = kp - total_cost;
+    let move_req: Float = total_cost / s;
+
+    let sqrt_t: Float = sqrt(t);
+    let d1_c: Float = (ln(s / kc) + ((r + (0.5 * (p).call_vol * (p).call_vol)) * t)) / ((p).call_vol * sqrt_t);
+    let d1_p: Float = (ln(s / kp) + ((r + (0.5 * (p).put_vol * (p).put_vol)) * t)) / ((p).put_vol * sqrt_t);
+
+    let delta_c: Float = ss_norm_cdf(d1_c);
+    let delta_p: Float = ss_norm_cdf(d1_p) - 1.0;
+    let net_delta: Float = delta_c + delta_p;
+
+    let gamma_c: Float = ss_norm_pdf(d1_c) / (s * (p).call_vol * sqrt_t);
+    let gamma_p: Float = ss_norm_pdf(d1_p) / (s * (p).put_vol * sqrt_t);
+    let net_gamma: Float = gamma_c + gamma_p;
+
+    let vega_c: Float = s * sqrt_t * ss_norm_pdf(d1_c) * 0.01;
+    let vega_p: Float = s * sqrt_t * ss_norm_pdf(d1_p) * 0.01;
+    let net_vega: Float = vega_c + vega_p;
+
+    let theta_c: Float = ((0.0 - (s * ss_norm_pdf(d1_c) * (p).call_vol)) / (2.0 * sqrt_t) - (r * kc * df * ss_norm_cdf(d1_c - ((p).call_vol * sqrt_t)))) / 365.0;
+    let theta_p: Float = ((0.0 - (s * ss_norm_pdf(d1_p) * (p).put_vol)) / (2.0 * sqrt_t) + (r * kp * df * (1.0 - ss_norm_cdf(d1_p - ((p).put_vol * sqrt_t))))) / 365.0;
+
+    return VolStrategyResult {
+        total_cost_debit: total_cost,
+        upper_breakeven: upper_be,
+        lower_breakeven: lower_be,
+        required_move_pct: move_req,
+        net_delta: net_delta,
+        net_gamma: net_gamma,
+        net_vega: net_vega,
+        net_theta_daily: theta_c + theta_p,
+    };
+}

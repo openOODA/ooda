@@ -1,0 +1,68 @@
+// # eBPF Socket Lookup (sk_lookup) Multi-Port Router
+//
+// Logline: Routes incoming TCP SYN connections to local proxy sockets via BPF_PROG_TYPE_SK_LOOKUP hooks.
+//
+// Setup: Kernel socket selection hook directing arbitrary port traffic into sidecar proxy listeners.
+//
+// Beats:
+//   1. Intercept incoming connection tuple (protocol, src IP, src port, dst IP, dst port).
+//   2. Match destination port against proxy redirect rules and preservation policies.
+//   3. Bind incoming connection to target proxy socket cookie, selecting destination socket.
+
+pub type SkLookupRule = struct {
+    dst_port_start: Int,
+    dst_port_end: Int,
+    proxy_socket_cookie: Int,
+    preserve_orig_dst: Bool,
+};
+
+pub type SkLookupState = struct {
+    rules: List[SkLookupRule],
+    redirects_performed: Int,
+    fallbacks_performed: Int,
+};
+
+pub fn sk_lookup_state_new() -> SkLookupState {
+    let empty_rules: List[SkLookupRule] = list_new();
+    return SkLookupState {
+        rules: empty_rules,
+        redirects_performed: 0,
+        fallbacks_performed: 0,
+    };
+}
+
+pub fn sk_lookup_add_rule(
+    state: &mut SkLookupState,
+    p_start: Int,
+    p_end: Int,
+    socket_cookie: Int,
+    preserve_orig: Bool
+) {
+    let r = SkLookupRule {
+        dst_port_start: p_start,
+        dst_port_end: p_end,
+        proxy_socket_cookie: socket_cookie,
+        preserve_orig_dst: preserve_orig,
+    };
+    (state).rules = list_push((state).rules, r);
+}
+
+pub fn sk_lookup_select_socket(
+    state: &mut SkLookupState,
+    dst_port: Int
+) -> Int {
+    let n: Int = list_len((state).rules);
+    let mut i: Int = 0;
+
+    while i < n {
+        let r: SkLookupRule = list_get((state).rules, i);
+        if dst_port >= (r).dst_port_start && dst_port <= (r).dst_port_end {
+            (state).redirects_performed = (state).redirects_performed + 1;
+            return (r).proxy_socket_cookie;
+        }
+        i = i + 1;
+    }
+
+    (state).fallbacks_performed = (state).fallbacks_performed + 1;
+    return 0; // BPF_SK_LOOKUP_PASS
+}

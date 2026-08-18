@@ -1,0 +1,165 @@
+// # GC Content, GC Skew & CpG Obs/Exp
+//
+// Logline: GC percent, (G-C)/(G+C) skew, Gardiner-Garden island test. Destubbed off pub type / String.
+//
+// Setup: Packed 2-bit DNA A=0 C=1 G=2 T=3. No import.
+//
+// Beats:
+//   1. GC% = 100*(G+C)/N; AT = 100-GC.
+//   2. Skew x1000 = 1000*(G-C)/(G+C).
+//   3. CpG Obs/Exp = (obs*N*100)/(C*G); island if N>=200, GC>=50, ratio>=60.
+
+type NtTally = struct {
+    n_a: Int,
+    n_c: Int,
+    n_g: Int,
+    n_t: Int
+};
+
+type GcMetrics = struct {
+    gc_pct: Int,
+    at_pct: Int,
+    gc_skew_x1000: Int,
+    cpg_n: Int,
+    cpg_obs_exp_x100: Int,
+    is_cpg_island: Int
+};
+
+type SlidingWindowGcConfig = struct {
+    window_n: Int,
+    step_n: Int,
+    window_total: Int
+};
+
+pub fn int_pow4(n: Int) -> Int {
+    if n <= 0 {
+        return 1;
+    }
+    return 4 * int_pow4(n - 1);
+}
+
+pub fn dna_base_at(packed: Int, idx: Int) -> Int {
+    let div: Int = packed / int_pow4(idx);
+    return div % 4;
+}
+
+pub fn dna_pack4(b0: Int, b1: Int, b2: Int, b3: Int) -> Int {
+    return b0 + (b1 * 4) + (b2 * 16) + (b3 * 64);
+}
+
+pub fn dna_pack8(lo4: Int, hi4: Int) -> Int {
+    return lo4 + (hi4 * 256);
+}
+
+pub fn nt_tally_scan(packed: Int, n: Int, i: Int, acc: NtTally) -> NtTally {
+    if i >= n {
+        return acc;
+    }
+    let b: Int = dna_base_at(packed, i);
+    let nxt: NtTally = NtTally {
+        n_a: if b == 0 { acc.n_a + 1 } else { acc.n_a },
+        n_c: if b == 1 { acc.n_c + 1 } else { acc.n_c },
+        n_g: if b == 2 { acc.n_g + 1 } else { acc.n_g },
+        n_t: if b == 3 { acc.n_t + 1 } else { acc.n_t }
+    };
+    return nt_tally_scan(packed, n, i + 1, nxt);
+}
+
+pub fn nt_tally_empty() -> NtTally {
+    return NtTally { n_a: 0, n_c: 0, n_g: 0, n_t: 0 };
+}
+
+pub fn nt_tally_total(t: NtTally) -> Int {
+    return t.n_a + t.n_c + t.n_g + t.n_t;
+}
+
+pub fn gc_content_pct(packed: Int, n: Int) -> Int {
+    let t: NtTally = nt_tally_scan(packed, n, 0, nt_tally_empty());
+    let gc: Int = t.n_g + t.n_c;
+    let total: Int = nt_tally_total(t);
+    if total == 0 {
+        return 0;
+    }
+    return (gc * 100) / total;
+}
+
+pub fn at_content_pct(packed: Int, n: Int) -> Int {
+    let gc: Int = gc_content_pct(packed, n);
+    if gc > 100 {
+        return 0;
+    }
+    return 100 - gc;
+}
+
+pub fn gc_skew_x1000(packed: Int, n: Int) -> Int {
+    let t: NtTally = nt_tally_scan(packed, n, 0, nt_tally_empty());
+    let g: Int = t.n_g;
+    let c: Int = t.n_c;
+    let sum_gc: Int = g + c;
+    if sum_gc == 0 {
+        return 0;
+    }
+    let diff: Int = g - c;
+    return (diff * 1000) / sum_gc;
+}
+
+pub fn cpg_scan(packed: Int, n: Int, i: Int) -> Int {
+    if (i + 1) >= n {
+        return 0;
+    }
+    let b1: Int = dna_base_at(packed, i);
+    let b2: Int = dna_base_at(packed, i + 1);
+    let hit: Int = if b1 == 1 { if b2 == 2 { 1 } else { 0 } } else { 0 };
+    return hit + cpg_scan(packed, n, i + 1);
+}
+
+pub fn cpg_observed_expected_ratio_x100(packed: Int, n: Int) -> Int {
+    if n < 2 {
+        return 0;
+    }
+    let t: NtTally = nt_tally_scan(packed, n, 0, nt_tally_empty());
+    let c: Int = t.n_c;
+    let g: Int = t.n_g;
+    let cpg_obs: Int = cpg_scan(packed, n, 0);
+    let denom: Int = c * g;
+    if denom == 0 {
+        return 0;
+    }
+    return (cpg_obs * n * 100) / denom;
+}
+
+pub fn gc_metrics_compute(packed: Int, n: Int) -> GcMetrics {
+    let gc: Int = gc_content_pct(packed, n);
+    let at: Int = at_content_pct(packed, n);
+    let skew: Int = gc_skew_x1000(packed, n);
+    let cpg_sites: Int = cpg_scan(packed, n, 0);
+    let cpg_ratio: Int = cpg_observed_expected_ratio_x100(packed, n);
+    let is_island: Int = if n >= 200 { if gc >= 50 { if cpg_ratio >= 60 { 1 } else { 0 } } else { 0 } } else { 0 };
+    return GcMetrics {
+        gc_pct: gc,
+        at_pct: at,
+        gc_skew_x1000: skew,
+        cpg_n: cpg_sites,
+        cpg_obs_exp_x100: cpg_ratio,
+        is_cpg_island: is_island
+    };
+}
+
+pub fn sliding_window_gc_init(seq_n: Int, window: Int, step: Int) -> SlidingWindowGcConfig {
+    let w: Int = if window > 0 { window } else { 100 };
+    let s: Int = if step > 0 { step } else { 20 };
+    let total_w: Int = if seq_n >= w { ((seq_n - w) / s) + 1 } else { 0 };
+    return SlidingWindowGcConfig {
+        window_n: w,
+        step_n: s,
+        window_total: total_w
+    };
+}
+
+pub fn gc_metrics_gc_pct(m: GcMetrics) -> Int {
+    return m.gc_pct;
+}
+
+pub fn gc_metrics_cpg_n(m: GcMetrics) -> Int {
+    return m.cpg_n;
+}

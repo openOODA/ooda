@@ -1,0 +1,80 @@
+// # UAV On-Manifold IMU Preintegration
+//
+// Logline: Accumulates high-rate accelerometer and gyroscope measurements into manifold preintegrated relative motion factors (delta_R, delta_v, delta_p).
+//
+// Setup: Decouples high-rate inertial integration from graph optimization keyframes, preventing repetitive re-propagation.
+//
+// Beats:
+//   1. Define IMU Measurement (specific force accel, angular velocity gyro, dt).
+//   2. Define Preintegrated NavState Factors (delta_R, delta_v, delta_p, delta_time).
+//   3. Incrementally update relative rotation matrix: delta_R_{k+1} = delta_R_k * exp(gyro * dt).
+//   4. Incrementally update relative velocity delta_v and position delta_p with accelerometer bias corrections.
+
+import "./uav_coordinate_frames.oo";
+import "./uav_so3_rotation_matrix.oo";
+
+pub type ImuMeasurement = struct {
+    accel: Vector3D,
+    gyro: Vector3D,
+    dt: Float,
+};
+
+pub type ImuBiases = struct {
+    accel_bias: Vector3D,
+    gyro_bias: Vector3D,
+};
+
+pub type PreintegratedImuState = struct {
+    delta_r: Matrix3x3,
+    delta_v: Vector3D,
+    delta_p: Vector3D,
+    total_dt: Float,
+};
+
+pub fn preintegrated_imu_init() -> PreintegratedImuState {
+    return PreintegratedImuState {
+        delta_r: mat3_identity(),
+        delta_v: vector3d_zero(),
+        delta_p: vector3d_zero(),
+        total_dt: 0.0,
+    };
+}
+
+pub fn imu_preintegrate_step(
+    curr_state: &PreintegratedImuState,
+    meas: &ImuMeasurement,
+    biases: &ImuBiases
+) -> PreintegratedImuState {
+    let dt: Float = (meas).dt;
+
+    // Unbiased measurements
+    let unb_acc: Vector3D = vector3d_sub(&(meas).accel, &(biases).accel_bias);
+    let unb_gyr: Vector3D = vector3d_sub(&(meas).gyro, &(biases).gyro_bias);
+
+    // Delta position update: delta_p + delta_v * dt + 0.5 * delta_R * unb_acc * dt^2
+    let acc_in_prev_frame: Vector3D = mat3_multiply_vec(&(curr_state).delta_r, &unb_acc);
+    let dp_from_v: Vector3D = vector3d_scale(&(curr_state).delta_v, dt);
+    let dp_from_a: Vector3D = vector3d_scale(&acc_in_prev_frame, 0.5 * dt * dt);
+    let next_dp: Vector3D = vector3d_add(&(curr_state).delta_p, &vector3d_add(&dp_from_v, &dp_from_a));
+
+    // Delta velocity update: delta_v + delta_R * unb_acc * dt
+    let dv_from_a: Vector3D = vector3d_scale(&acc_in_prev_frame, dt);
+    let next_dv: Vector3D = vector3d_add(&(curr_state).delta_v, &dv_from_a);
+
+    // Delta rotation update: delta_R * Exp(unb_gyr * dt)
+    let gyr_norm: Float = vector3d_norm(&unb_gyr);
+    let gyr_unit: Vector3D = if gyr_norm > 0.000001 {
+        vector3d_scale(&unb_gyr, 1.0 / gyr_norm)
+    } else {
+        Vector3D { x: 0.0, y: 0.0, z: 1.0 }
+    };
+    let exp_omega: Matrix3x3 = so3_exp(&gyr_unit, gyr_norm * dt);
+    let next_dr: Matrix3x3 = mat3_multiply(&(curr_state).delta_r, &exp_omega);
+
+    return PreintegratedImuState {
+        delta_r: next_dr,
+        delta_v: next_dv,
+        delta_p: next_dp,
+        total_dt: (curr_state).total_dt + dt,
+    };
+}

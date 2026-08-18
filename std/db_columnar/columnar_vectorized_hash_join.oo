@@ -1,0 +1,118 @@
+// # Columnar Vectorized Hash Equi-Join Operator
+//
+// Logline: Implements vectorized hash table construction and batch-wise equi-join probing on columnar data.
+//
+// Setup: Builds in-memory hash tables over build-side columns and probes batches emitting matched row pair vectors.
+//
+// Beats:
+//   1. Define JoinBucketEntry, ColumnarHashTable, and JoinMatchBatch structures.
+//   2. Implement build-phase columnar hash insertion with collision chaining.
+//   3. Implement probe-phase vectorized lookup emitting left/right join index vectors.
+
+pub type JoinBucketEntry = struct {
+    key_int: Int,
+    build_row_id: Int,
+    next_entry_idx: Int,
+};
+
+pub type ColumnarHashTable = struct {
+    bucket_heads: List[Int],
+    entries: List[JoinBucketEntry],
+    num_buckets: Int,
+    total_entries: Int,
+};
+
+pub type JoinMatchBatch = struct {
+    left_row_ids: List[Int],
+    right_row_ids: List[Int],
+    match_count: Int,
+};
+
+pub fn columnar_hash_table_new(num_b: Int) -> ColumnarHashTable {
+    let mut heads: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < num_b {
+        heads = list_push(heads, -1);
+        i = i + 1;
+    }
+    let empty_entries: List[JoinBucketEntry] = list_new();
+    return ColumnarHashTable {
+        bucket_heads: heads,
+        entries: empty_entries,
+        num_buckets: num_b,
+        total_entries: 0,
+    };
+}
+
+pub fn hash_int_key(k: Int, num_buckets: Int) -> Int {
+    let abs_k: Int = if k < 0 { -k } else { k };
+    return abs_k % num_buckets;
+}
+
+pub fn columnar_hash_table_insert(table: ColumnarHashTable, key: Int, row_id: Int) -> ColumnarHashTable {
+    let bucket_idx: Int = hash_int_key(key, (table).num_buckets);
+    let prev_head: Int = list_get((table).bucket_heads, bucket_idx);
+    let new_entry_idx: Int = list_len((table).entries);
+
+    let entry: JoinBucketEntry = JoinBucketEntry {
+        key_int: key,
+        build_row_id: row_id,
+        next_entry_idx: prev_head,
+    };
+    let updated_entries: List[JoinBucketEntry] = list_push((table).entries, entry);
+
+    let mut new_heads: List[Int] = list_new();
+    let n_heads: Int = (table).num_buckets;
+    let mut h_i: Int = 0;
+    while h_i < n_heads {
+        if h_i == bucket_idx {
+            new_heads = list_push(new_heads, new_entry_idx);
+        } else {
+            new_heads = list_push(new_heads, list_get((table).bucket_heads, h_i));
+        }
+        h_i = h_i + 1;
+    }
+
+    return ColumnarHashTable {
+        bucket_heads: new_heads,
+        entries: updated_entries,
+        num_buckets: (table).num_buckets,
+        total_entries: (table).total_entries + 1,
+    };
+}
+
+pub fn columnar_hash_join_probe_batch(
+    table: ColumnarHashTable,
+    probe_keys: List[Int],
+    probe_offset: Int
+) -> JoinMatchBatch {
+    let mut left_ids: List[Int] = list_new();
+    let mut right_ids: List[Int] = list_new();
+    let n_probe: Int = list_len(probe_keys);
+    let entries_list: List[JoinBucketEntry] = (table).entries;
+
+    let mut p_i: Int = 0;
+    while p_i < n_probe {
+        let probe_key: Int = list_get(probe_keys, p_i);
+        let current_probe_row_id: Int = probe_offset + p_i;
+        let bucket_idx: Int = hash_int_key(probe_key, (table).num_buckets);
+        let mut curr_entry_idx: Int = list_get((table).bucket_heads, bucket_idx);
+
+        while curr_entry_idx >= 0 && curr_entry_idx < list_len(entries_list) {
+            let entry: JoinBucketEntry = list_get(entries_list, curr_entry_idx);
+            if (entry).key_int == probe_key {
+                left_ids = list_push(left_ids, (entry).build_row_id);
+                right_ids = list_push(right_ids, current_probe_row_id);
+            }
+            curr_entry_idx = (entry).next_entry_idx;
+        }
+        p_i = p_i + 1;
+    }
+
+    let match_c: Int = list_len(left_ids);
+    return JoinMatchBatch {
+        left_row_ids: left_ids,
+        right_row_ids: right_ids,
+        match_count: match_c,
+    };
+}

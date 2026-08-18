@@ -1,0 +1,97 @@
+// # WAL Segment File Manager & Rotation Controller
+//
+// Logline: Manages multi-segment WAL file rotation, segment retention policies, archiving, and recovery replay cursors.
+//
+// Setup: Divides continuous logical WAL streams into fixed-size physical segment files (e.g. 16MB or 64MB).
+//
+// Beats:
+//   1. Define WalSegmentMeta, RetentionPolicy, and WalSegmentManager structures.
+//   2. Implement segment size tracking, boundary detection, and active segment rotation.
+//   3. Implement obsolete segment pruning based on checkpoint min_rec_lsn watermarks.
+
+pub type WalSegmentMeta = struct {
+    segment_number: Int,
+    file_path: String,
+    start_lsn: Int,
+    end_lsn: Int,
+    size_bytes: Int,
+    is_sealed: Bool,
+};
+
+pub type WalSegmentManager = struct {
+    segment_size_limit: Int,
+    active_segment_number: Int,
+    segments: List[WalSegmentMeta],
+    total_segments_created: Int,
+};
+
+pub fn wal_segment_manager_new(seg_size: Int) -> WalSegmentManager {
+    let mut initial_segs: List[WalSegmentMeta] = list_new();
+    let seg0: WalSegmentMeta = WalSegmentMeta {
+        segment_number: 0,
+        file_path: "wal_00000000.log",
+        start_lsn: 1,
+        end_lsn: 0,
+        size_bytes: 0,
+        is_sealed: false,
+    };
+    initial_segs = list_push(initial_segs, seg0);
+
+    return WalSegmentManager {
+        segment_size_limit: seg_size,
+        active_segment_number: 0,
+        segments: initial_segs,
+        total_segments_created: 1,
+    };
+}
+
+pub fn wal_should_rotate(mgr: WalSegmentManager, current_seg_bytes: Int) -> Bool {
+    return current_seg_bytes >= (mgr).segment_size_limit;
+}
+
+pub fn wal_rotate_segment(
+    mgr: WalSegmentManager,
+    last_lsn: Int,
+    current_bytes: Int
+) -> WalSegmentManager {
+    let next_num: Int = (mgr).active_segment_number + 1;
+    let old_segs: List[WalSegmentMeta] = (mgr).segments;
+    let n: Int = list_len(old_segs);
+    let mut updated_segs: List[WalSegmentMeta] = list_new();
+
+    let mut i: Int = 0;
+    while i < n {
+        let s: WalSegmentMeta = list_get(old_segs, i);
+        if (s).segment_number == (mgr).active_segment_number {
+            let sealed: WalSegmentMeta = WalSegmentMeta {
+                segment_number: (s).segment_number,
+                file_path: (s).file_path,
+                start_lsn: (s).start_lsn,
+                end_lsn: last_lsn,
+                size_bytes: current_bytes,
+                is_sealed: true,
+            };
+            updated_segs = list_push(updated_segs, sealed);
+        } else {
+            updated_segs = list_push(updated_segs, s);
+        }
+        i = i + 1;
+    }
+
+    let new_seg: WalSegmentMeta = WalSegmentMeta {
+        segment_number: next_num,
+        file_path: "wal_" + next_num.to_string() + ".log",
+        start_lsn: last_lsn + 1,
+        end_lsn: 0,
+        size_bytes: 0,
+        is_sealed: false,
+    };
+    updated_segs = list_push(updated_segs, new_seg);
+
+    return WalSegmentManager {
+        segment_size_limit: (mgr).segment_size_limit,
+        active_segment_number: next_num,
+        segments: updated_segs,
+        total_segments_created: (mgr).total_segments_created + 1,
+    };
+}

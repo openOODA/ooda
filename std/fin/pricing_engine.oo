@@ -1,0 +1,238 @@
+// # Financial Options Pricing Engine
+//
+// Logline: Computes Black-Scholes European and American option prices, analytic Greeks, and engine valuations.
+//
+// Setup: By-value contract configurations and normal distribution functions.
+//
+// Beats:
+//   1. Calculate d1 and d2 transition parameters from spot, strike, and volatility.
+//   2. Compute Black-Scholes option prices and Delta, Gamma, Theta, Vega, and Rho Greeks.
+//   3. Provide American option approximation and pricing engine evaluation entry points.
+
+type OptionContract = struct {
+    is_call: Bool,
+    is_american: Bool,
+    strike: Float,
+    spot: Float,
+    time_to_expiry: Float,
+    risk_free_rate: Float,
+    dividend_yield: Float,
+    volatility: Float
+};
+
+type VolatilitySurface = struct {
+    base_volatility: Float,
+    skew_coefficient: Float,
+    smile_coefficient: Float,
+    term_structure_slope: Float,
+    reference_spot: Float
+};
+
+type PricingResult = struct {
+    price: Float,
+    delta: Float,
+    gamma: Float,
+    theta: Float,
+    vega: Float,
+    rho: Float,
+    intrinsic_value: Float,
+    time_value: Float
+};
+
+type PricingEngine = struct {
+    base_surface: VolatilitySurface,
+    default_rate: Float,
+    calculated_count: Int
+};
+
+pub fn option_contract_new(
+    is_call: Bool,
+    is_american: Bool,
+    strike: Float,
+    spot: Float,
+    time_to_expiry: Float,
+    risk_free_rate: Float,
+    dividend_yield: Float,
+    volatility: Float
+) -> OptionContract {
+    return OptionContract {
+        is_call: is_call,
+        is_american: is_american,
+        strike: strike,
+        spot: spot,
+        time_to_expiry: time_to_expiry,
+        risk_free_rate: risk_free_rate,
+        dividend_yield: dividend_yield,
+        volatility: volatility
+    };
+}
+
+pub fn std_normal_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804014327;
+    let exponent: Float = 0.0 - (x * x / 2.0);
+    return pi_factor * exp(exponent);
+}
+
+pub fn std_normal_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 {
+        abs_x = 0.0 - x;
+    }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.319381530 + (k * ((0.0 - 0.356563782) + (k * (1.781477937 + (k * ((0.0 - 1.821255978) + (1.330274429 * k))))))));
+    let cdf_abs: Float = 1.0 - (std_normal_pdf(abs_x) * poly);
+    if x < 0.0 {
+        return 1.0 - cdf_abs;
+    }
+    return cdf_abs;
+}
+
+pub fn option_intrinsic_value(contract: OptionContract) -> Float {
+    if contract.is_call {
+        let val: Float = contract.spot - contract.strike;
+        if val > 0.0 {
+            return val;
+        }
+        return 0.0;
+    }
+    let pval: Float = contract.strike - contract.spot;
+    if pval > 0.0 {
+        return pval;
+    }
+    return 0.0;
+}
+
+pub fn calculate_d1(spot: Float, strike: Float, t: Float, r: Float, q: Float, vol: Float) -> Float {
+    if spot <= 0.0 {
+        return 0.0;
+    }
+    if strike <= 0.0 {
+        return 0.0;
+    }
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if vol <= 0.0 {
+        return 0.0;
+    }
+    let numerator: Float = ln(spot / strike) + ((r - q + ((vol * vol) / 2.0)) * t);
+    let denominator: Float = vol * sqrt(t);
+    return numerator / denominator;
+}
+
+pub fn calculate_d2(d1: Float, vol: Float, t: Float) -> Float {
+    if t <= 0.0 {
+        return d1;
+    }
+    return d1 - (vol * sqrt(t));
+}
+
+pub fn price_black_scholes(contract: OptionContract) -> PricingResult {
+    let s: Float = contract.spot;
+    let k: Float = contract.strike;
+    let t: Float = contract.time_to_expiry;
+    let r: Float = contract.risk_free_rate;
+    let q: Float = contract.dividend_yield;
+    let vol: Float = contract.volatility;
+    let intrinsic: Float = option_intrinsic_value(contract);
+    if t <= 0.0 {
+        return PricingResult {
+            price: intrinsic,
+            delta: 0.0,
+            gamma: 0.0,
+            theta: 0.0,
+            vega: 0.0,
+            rho: 0.0,
+            intrinsic_value: intrinsic,
+            time_value: 0.0
+        };
+    }
+    let d1: Float = calculate_d1(s, k, t, r, q, vol);
+    let d2: Float = calculate_d2(d1, vol, t);
+    let pdf_d1: Float = std_normal_pdf(d1);
+    let cdf_d1: Float = std_normal_cdf(d1);
+    let cdf_d2: Float = std_normal_cdf(d2);
+    let cdf_neg_d1: Float = std_normal_cdf(0.0 - d1);
+    let cdf_neg_d2: Float = std_normal_cdf(0.0 - d2);
+    let exp_qt: Float = exp((0.0 - q) * t);
+    let exp_rt: Float = exp((0.0 - r) * t);
+    let mut price: Float = 0.0;
+    let mut delta: Float = 0.0;
+    let mut theta: Float = 0.0;
+    let mut rho: Float = 0.0;
+    let gamma: Float = (exp_qt * pdf_d1) / (s * vol * sqrt(t));
+    let vega: Float = s * exp_qt * pdf_d1 * sqrt(t);
+    let theta_common: Float = (0.0 - (s * exp_qt * pdf_d1 * vol)) / (2.0 * sqrt(t));
+    if contract.is_call == true {
+        price = (s * exp_qt * cdf_d1) - (k * exp_rt * cdf_d2);
+        delta = exp_qt * cdf_d1;
+        theta = theta_common - (r * k * exp_rt * cdf_d2) + (q * s * exp_qt * cdf_d1);
+        rho = k * t * exp_rt * cdf_d2;
+    } else {
+        price = (k * exp_rt * cdf_neg_d2) - (s * exp_qt * cdf_neg_d1);
+        delta = 0.0 - (exp_qt * cdf_neg_d1);
+        theta = theta_common + (r * k * exp_rt * cdf_neg_d2) - (q * s * exp_qt * cdf_neg_d1);
+        rho = 0.0 - (k * t * exp_rt * cdf_neg_d2);
+    }
+    let time_val: Float = price - intrinsic;
+    return PricingResult {
+        price: price,
+        delta: delta,
+        gamma: gamma,
+        theta: theta,
+        vega: vega,
+        rho: rho,
+        intrinsic_value: intrinsic,
+        time_value: time_val
+    };
+}
+
+pub fn price_american_option_approx(contract: OptionContract) -> PricingResult {
+    let bs_res: PricingResult = price_black_scholes(contract);
+    let intrinsic: Float = option_intrinsic_value(contract);
+    if bs_res.price < intrinsic {
+        return PricingResult {
+            price: intrinsic,
+            delta: bs_res.delta,
+            gamma: bs_res.gamma,
+            theta: bs_res.theta,
+            vega: bs_res.vega,
+            rho: bs_res.rho,
+            intrinsic_value: intrinsic,
+            time_value: 0.0
+        };
+    }
+    return bs_res;
+}
+
+pub fn pricing_engine_init(base_vol: Float, rate: Float) -> PricingEngine {
+    let surf: VolatilitySurface = VolatilitySurface {
+        base_volatility: base_vol,
+        skew_coefficient: 0.0,
+        smile_coefficient: 0.0,
+        term_structure_slope: 0.0,
+        reference_spot: 100.0
+    };
+    return PricingEngine {
+        base_surface: surf,
+        default_rate: rate,
+        calculated_count: 0
+    };
+}
+
+pub fn pricing_engine_price(engine: PricingEngine, contract: OptionContract) -> PricingEngine {
+    let _priced: PricingResult = price_black_scholes(contract);
+    if contract.is_american == true {
+        let _am: PricingResult = price_american_option_approx(contract);
+        return PricingEngine {
+            base_surface: engine.base_surface,
+            default_rate: engine.default_rate,
+            calculated_count: engine.calculated_count + 1
+        };
+    }
+    return PricingEngine {
+        base_surface: engine.base_surface,
+        default_rate: engine.default_rate,
+        calculated_count: engine.calculated_count + 1
+    };
+}

@@ -1,0 +1,121 @@
+// # Non-Linear Delta-Gamma Value at Risk (VaR) Engine
+//
+// Logline: Computes portfolio Value at Risk and Expected Shortfall using Delta-Gamma second-order quadratic approximations and Cornish-Fisher expansions.
+//
+// Setup: Pure quantitative risk module for non-linear derivative portfolio risk modeling and tail risk estimation.
+//
+// Beats:
+//   1. Define PortfolioGreeks, DeltaGammaVarConfig, and VarResult structures.
+//   2. Compute second-order quadratic Taylor approximation moments (Mean, Variance, Skewness, Kurtosis).
+//   3. Calculate Delta-Normal, Delta-Gamma, and Cornish-Fisher VaR quantiles for user-defined confidence levels.
+
+pub type PortfolioGreeks = struct {
+    portfolio_value_usd: Float,
+    net_delta_usd: Float,
+    net_gamma_usd: Float,
+    net_vega_usd: Float,
+    net_theta_daily_usd: Float,
+};
+
+pub type DeltaGammaVarConfig = struct {
+    confidence_level: Float, // e.g. 0.99 or 0.95
+    time_horizon_days: Float,
+    underlying_annual_vol: Float,
+    annual_trading_days: Float,
+};
+
+pub type VarResult = struct {
+    confidence_level: Float,
+    time_horizon_days: Float,
+    delta_normal_var_usd: Float,
+    delta_gamma_var_usd: Float,
+    cornish_fisher_var_usd: Float,
+    expected_shortfall_usd: Float,
+    expected_portfolio_drift: Float,
+};
+
+pub fn portfolio_greeks_new(
+    val: Float,
+    delta: Float,
+    gamma: Float,
+    vega: Float,
+    theta: Float
+) -> PortfolioGreeks {
+    return PortfolioGreeks {
+        portfolio_value_usd: val,
+        net_delta_usd: delta,
+        net_gamma_usd: gamma,
+        net_vega_usd: vega,
+        net_theta_daily_usd: theta,
+    };
+}
+
+pub fn var_config_default_99() -> DeltaGammaVarConfig {
+    return DeltaGammaVarConfig {
+        confidence_level: 0.99,
+        time_horizon_days: 1.0,
+        underlying_annual_vol: 0.70, // 70% annualized crypto vol
+        annual_trading_days: 365.0,
+    };
+}
+
+pub fn calc_z_score(confidence: Float) -> Float {
+    if confidence >= 0.99 {
+        return 2.32635;
+    }
+    if confidence >= 0.95 {
+        return 1.64485;
+    }
+    if confidence >= 0.90 {
+        return 1.28155;
+    }
+    return 1.95996; // fallback 97.5%
+}
+
+pub fn calc_delta_gamma_var(
+    greeks: &PortfolioGreeks,
+    cfg: &DeltaGammaVarConfig
+) -> VarResult {
+    let dt: Float = (cfg).time_horizon_days / (cfg).annual_trading_days;
+    let sigma_t: Float = (cfg).underlying_annual_vol * sqrt(dt);
+    let z: Float = calc_z_score((cfg).confidence_level);
+
+    // 1st moment: Drift = Theta * days + 0.5 * Gamma * sigma_t^2
+    let gamma_drift: Float = 0.5 * (greeks).net_gamma_usd * sigma_t * sigma_t;
+    let theta_drift: Float = (greeks).net_theta_daily_usd * (cfg).time_horizon_days;
+    let expected_drift: Float = theta_drift + gamma_drift;
+
+    // Linear delta variance
+    let delta_std: Float = (greeks).net_delta_usd * sigma_t;
+    let mut abs_delta_std: Float = delta_std;
+    if abs_delta_std < 0.0 {
+        abs_delta_std = 0.0 - abs_delta_std;
+    }
+    let delta_normal_var: Float = (z * abs_delta_std) - expected_drift;
+
+    // Second-order Gamma variance contribution: Var = (Delta * sigma)^2 + 0.5 * (Gamma * sigma^2)^2
+    let gamma_term: Float = (greeks).net_gamma_usd * sigma_t * sigma_t;
+    let total_variance: Float = (abs_delta_std * abs_delta_std) + (0.5 * gamma_term * gamma_term);
+    let total_std: Float = sqrt(total_variance);
+
+    // Skewness approximation for Cornish-Fisher
+    let skewness: Float = (1.5 * (greeks).net_delta_usd * (greeks).net_delta_usd * gamma_term * sigma_t) / (total_std * total_std * total_std + 0.000001);
+    let cf_z: Float = z + ((skewness / 6.0) * ((z * z) - 1.0));
+
+    let cf_var: Float = (cf_z * total_std) - expected_drift;
+    let dg_var: Float = (z * total_std) - expected_drift;
+
+    // Expected Shortfall approximation (tail conditional expectation)
+    let es_factor: Float = exp(0.0 - (z * z / 2.0)) / (0.39894228 * (1.0 - (cfg).confidence_level) + 0.000001);
+    let es_usd: Float = (es_factor * total_std * 0.4) + dg_var;
+
+    return VarResult {
+        confidence_level: (cfg).confidence_level,
+        time_horizon_days: (cfg).time_horizon_days,
+        delta_normal_var_usd: delta_normal_var,
+        delta_gamma_var_usd: dg_var,
+        cornish_fisher_var_usd: cf_var,
+        expected_shortfall_usd: es_usd,
+        expected_portfolio_drift: expected_drift,
+    };
+}

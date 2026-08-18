@@ -1,0 +1,124 @@
+// # AI/ML Scaled Dot-Product & Multi-Head Attention
+//
+// Logline: Implements transformer multi-head self-attention, query-key-value projections, scaled softmax scoring, and causal masking.
+//
+// Setup: Imports tensor_types.oo, tensor_ops.oo, and activation_ops.oo for sequence tensor calculations.
+//
+// Beats:
+//   1. Project input sequence representations into multi-head Query, Key, and Value subspaces.
+//   2. Compute scaled dot-product attention scores with optional autoregressive causal masking.
+//   3. Aggregate attention weighted values and project back to output embedding dimensions.
+
+import "./tensor_types.oo";
+import "./tensor_ops.oo";
+import "./activation_ops.oo";
+
+// -------------------------------------------------------------------
+// Multi-Head Attention Configuration and Layer
+// -------------------------------------------------------------------
+
+pub type AttentionConfig = struct {
+    embed_dim: Int,
+    num_heads: Int,
+    head_dim: Int,
+    is_causal: Bool,
+};
+
+pub type MultiHeadAttention = struct {
+    config: AttentionConfig,
+    w_q: Tensor2D,
+    w_k: Tensor2D,
+    w_v: Tensor2D,
+    w_out: Tensor2D,
+};
+
+pub fn attention_config_new(embed_dim: Int, num_heads: Int, is_causal: Bool) -> AttentionConfig {
+    let h_dim = embed_dim / num_heads;
+    return AttentionConfig {
+        embed_dim: embed_dim,
+        num_heads: num_heads,
+        head_dim: h_dim,
+        is_causal: is_causal,
+    };
+}
+
+pub fn attention_layer_new(config: AttentionConfig) -> MultiHeadAttention {
+    let dim = (config).embed_dim;
+    let total_w = dim * dim;
+    let mut w_data: List[Float] = list_new();
+    let mut i = 0;
+    while i < total_w {
+        w_data = list_push(w_data, 0.0);
+        i = i + 1;
+    }
+
+    return MultiHeadAttention {
+        config: config,
+        w_q: Tensor2D { data: w_data, rows: dim, cols: dim },
+        w_k: Tensor2D { data: w_data, rows: dim, cols: dim },
+        w_v: Tensor2D { data: w_data, rows: dim, cols: dim },
+        w_out: Tensor2D { data: w_data, rows: dim, cols: dim },
+    };
+}
+
+// -------------------------------------------------------------------
+// Scaled Dot-Product Attention: Softmax(Q * K^T / sqrt(d_k) + Mask) * V
+// -------------------------------------------------------------------
+
+pub fn scaled_dot_product_attention_single_head(
+    q: Tensor2D,
+    k: Tensor2D,
+    v: Tensor2D,
+    seq_len: Int,
+    head_dim: Int,
+    is_causal: Bool
+) -> Tensor2D {
+    // q: [seq_len, head_dim]
+    // k: [seq_len, head_dim]
+    // v: [seq_len, head_dim]
+    // k^T: [head_dim, seq_len]
+    let k_t = tensor_2d_transpose(k);
+    let raw_scores = tensor_2d_matmul(q, k_t); // [seq_len, seq_len]
+    let scale_factor = 1.0 / sqrt(int_to_float(head_dim));
+
+    let mut attn_weights: List[Float] = list_new();
+    let mut i = 0;
+    while i < seq_len {
+        let mut row_logits: List[Float] = list_new();
+        let mut j = 0;
+        while j < seq_len {
+            let idx = (i * seq_len) + j;
+            let mut val = list_get((raw_scores).data, idx) * scale_factor;
+            if is_causal && j > i {
+                // Causal masking: mask future positions with large negative constant
+                val = 0.0 - 10000.0;
+            }
+            row_logits = list_push(row_logits, val);
+            j = j + 1;
+        }
+        let row_probs = act_softmax_1d(row_logits);
+        let mut p_idx = 0;
+        while p_idx < seq_len {
+            attn_weights = list_push(attn_weights, list_get(row_probs, p_idx));
+            p_idx = p_idx + 1;
+        }
+        i = i + 1;
+    }
+
+    let attn_matrix = Tensor2D { data: attn_weights, rows: seq_len, cols: seq_len };
+    return tensor_2d_matmul(attn_matrix, v); // [seq_len, head_dim]
+}
+
+pub fn attention_forward(mha: &MultiHeadAttention, x: Tensor2D, seq_len: Int) -> Tensor2D {
+    // x: [seq_len, embed_dim]
+    let q = tensor_2d_matmul(x, (mha).w_q);
+    let k = tensor_2d_matmul(x, (mha).w_k);
+    let v = tensor_2d_matmul(x, (mha).w_v);
+
+    let dim = ((mha).config).embed_dim;
+    let is_causal = ((mha).config).is_causal;
+    let head_dim = ((mha).config).head_dim;
+
+    let out_context = scaled_dot_product_attention_single_head(q, k, v, seq_len, head_dim, is_causal);
+    return tensor_2d_matmul(out_context, (mha).w_out);
+}

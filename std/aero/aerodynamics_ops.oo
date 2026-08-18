@@ -1,0 +1,252 @@
+// # Aerodynamic Force & Atmosphere Operations
+//
+// Logline: Computes atmospheric density, dynamic pressure, Reynolds numbers, and lift/drag forces.
+//
+// Setup: Pure aerodynamic operational logic importing aerodynamics_types.oo.
+//
+// Beats:
+//   1. Implement US Standard Atmosphere 1976 temperature and pressure models.
+//   2. Calculate dynamic pressure, Mach number, and Reynolds numbers.
+//   3. Compute aerodynamic lift, drag, side-force vectors, and pitching moments.
+
+import "./aerodynamics_types.oo";
+
+// Mathematical Utilities & Trigonometry
+
+pub fn math_pi() -> Float {
+    return 3.141592653589793;
+}
+
+pub fn math_abs(val: Float) -> Float {
+    if val < 0.0 {
+        return 0.0 - val;
+    }
+    return val;
+}
+
+pub fn deg_to_rad(deg: Float) -> Float {
+    return (deg * math_pi()) / 180.0;
+}
+
+pub fn rad_to_deg(rad: Float) -> Float {
+    return (rad * 180.0) / math_pi();
+}
+
+pub fn math_atan_unit(z_val: Float) -> Float {
+    let z2: Float = z_val * z_val;
+    let c1: Float = 0.3333333333333333;
+    let c2: Float = 0.2;
+    let c3: Float = 0.14285714285714285;
+    let c4: Float = 0.1111111111111111;
+    let c5: Float = 0.09090909090909091;
+    let poly: Float = z2 * (c1 - (z2 * (c2 - (z2 * (c3 - (z2 * (c4 - (z2 * c5))))))));
+    return z_val * (1.0 - poly);
+}
+
+pub fn math_atan(z_val: Float) -> Float {
+    let abs_z: Float = math_abs(z_val);
+    if abs_z <= 1.0 {
+        let res_atan: Float = math_atan_unit(abs_z);
+        if z_val < 0.0 {
+            return 0.0 - res_atan;
+        }
+        return res_atan;
+    }
+    let half_pi: Float = math_pi() / 2.0;
+    let res_atan: Float = half_pi - math_atan_unit(1.0 / abs_z);
+    if z_val < 0.0 {
+        return 0.0 - res_atan;
+    }
+    return res_atan;
+}
+
+pub fn math_atan2(y_val: Float, x_val: Float) -> Float {
+    let pi_val: Float = math_pi();
+    if x_val > 0.0 {
+        return math_atan(y_val / x_val);
+    }
+    if x_val < 0.0 {
+        if y_val >= 0.0 {
+            return math_atan(y_val / x_val) + pi_val;
+        }
+        return math_atan(y_val / x_val) - pi_val;
+    }
+    if y_val > 0.0 {
+        return pi_val / 2.0;
+    }
+    if y_val < 0.0 {
+        return 0.0 - (pi_val / 2.0);
+    }
+    return 0.0;
+}
+
+pub fn math_asin(x_val: Float) -> Float {
+    let mut clamped: Float = x_val;
+    if clamped > 1.0 {
+        clamped = 1.0;
+    }
+    let neg_one: Float = 0.0 - 1.0;
+    if clamped < neg_one {
+        clamped = neg_one;
+    }
+    let cos_val: Float = sqrt(1.0 - (clamped * clamped));
+    return math_atan2(clamped, cos_val);
+}
+
+// Vector3 Operations
+pub fn vector3_new(x_val: Float, y_val: Float, z_val: Float) -> Vector3 {
+    return Vector3 { x: x_val, y: y_val, z: z_val };
+}
+
+pub fn vector3_zero() -> Vector3 {
+    return Vector3 { x: 0.0, y: 0.0, z: 0.0 };
+}
+
+pub fn vector3_add(vec_a: Vector3, vec_b: Vector3) -> Vector3 {
+    return Vector3 {
+        x: (vec_a).x + (vec_b).x,
+        y: (vec_a).y + (vec_b).y,
+        z: (vec_a).z + (vec_b).z,
+    };
+}
+
+pub fn vector3_sub(vec_a: Vector3, vec_b: Vector3) -> Vector3 {
+    return Vector3 {
+        x: (vec_a).x - (vec_b).x,
+        y: (vec_a).y - (vec_b).y,
+        z: (vec_a).z - (vec_b).z,
+    };
+}
+
+pub fn vector3_scale(v_in: Vector3, s_val: Float) -> Vector3 {
+    return Vector3 {
+        x: (v_in).x * s_val,
+        y: (v_in).y * s_val,
+        z: (v_in).z * s_val,
+    };
+}
+
+pub fn vector3_dot(vec_a: Vector3, vec_b: Vector3) -> Float {
+    return ((vec_a).x * (vec_b).x) + ((vec_a).y * (vec_b).y) + ((vec_a).z * (vec_b).z);
+}
+
+pub fn vector3_cross(vec_a: Vector3, vec_b: Vector3) -> Vector3 {
+    let nx: Float = ((vec_a).y * (vec_b).z) - ((vec_a).z * (vec_b).y);
+    let ny: Float = ((vec_a).z * (vec_b).x) - ((vec_a).x * (vec_b).z);
+    let nz: Float = ((vec_a).x * (vec_b).y) - ((vec_a).y * (vec_b).x);
+    return Vector3 { x: nx, y: ny, z: nz };
+}
+
+pub fn vector3_length_sq(v_in: Vector3) -> Float {
+    return vector3_dot(v_in, v_in);
+}
+
+pub fn vector3_length(v_in: Vector3) -> Float {
+    return sqrt(vector3_length_sq(v_in));
+}
+
+pub fn vector3_normalize(v_in: Vector3) -> Vector3 {
+    let len: Float = vector3_length(v_in);
+    if len < 0.000001 {
+        return vector3_zero();
+    }
+    return vector3_scale(v_in, 1.0 / len);
+}
+
+// International Standard Atmosphere (ISA) Model
+pub fn atmosphere_state_new(alt_m: Float, temp_k: Float, pres_pa: Float, rho_val: Float, a_sound: Float, mu_visc: Float) -> AtmosphereState {
+    return AtmosphereState {
+        altitude: alt_m,
+        temperature: temp_k,
+        pressure: pres_pa,
+        density: rho_val,
+        speed_of_sound: a_sound,
+        viscosity: mu_visc,
+    };
+}
+
+pub fn isa_temperature(alt_m: Float) -> Float {
+    if alt_m <= 11000.0 {
+        return 288.15 - (0.0065 * alt_m);
+    }
+    return 216.65;
+}
+
+pub fn isa_pressure(alt_m: Float) -> Float {
+    if alt_m <= 11000.0 {
+        let t_ratio: Float = isa_temperature(alt_m) / 288.15;
+        return 101325.0 * pow(t_ratio, 5.25588);
+    }
+    let h_diff: Float = alt_m - 11000.0;
+    let exp_term: Float = (0.0 - 9.80665 * h_diff) / (287.058 * 216.65);
+    return 22632.1 * exp(exp_term);
+}
+
+pub fn isa_air_density(alt_m: Float) -> Float {
+    let temp_k: Float = isa_temperature(alt_m);
+    let pres_pa: Float = isa_pressure(alt_m);
+    if temp_k <= 0.0 {
+        return 1.225;
+    }
+    return pres_pa / (287.058 * temp_k);
+}
+
+pub fn isa_speed_of_sound(alt_m: Float) -> Float {
+    let temp_k: Float = isa_temperature(alt_m);
+    if temp_k <= 0.0 {
+        return 340.29;
+    }
+    return sqrt(1.4 * 287.058 * temp_k);
+}
+
+pub fn isa_viscosity(temp_k: Float) -> Float {
+    let mu0: Float = 0.000017894;
+    let t0: Float = 273.15;
+    let s_const: Float = 110.4;
+    if temp_k <= 0.0 {
+        return mu0;
+    }
+    let ratio: Float = temp_k / t0;
+    let term1: Float = mu0 * pow(ratio, 1.5);
+    let term2: Float = (t0 + s_const) / (temp_k + s_const);
+    return term1 * term2;
+}
+
+pub fn isa_atmosphere(alt_m: Float) -> AtmosphereState {
+    let temp_k: Float = isa_temperature(alt_m);
+    let pres_pa: Float = isa_pressure(alt_m);
+    let rho_val: Float = isa_air_density(alt_m);
+    let a_sound: Float = isa_speed_of_sound(alt_m);
+    let mu_visc: Float = isa_viscosity(temp_k);
+    return AtmosphereState {
+        altitude: alt_m,
+        temperature: temp_k,
+        pressure: pres_pa,
+        density: rho_val,
+        speed_of_sound: a_sound,
+        viscosity: mu_visc,
+    };
+}
+
+// Dynamic Pressure Calculations
+pub fn dynamic_pressure_new(rho_dyn: Float, v_speed: Float) -> DynamicPressure {
+    let q_pa: Float = 0.5 * rho_dyn * v_speed * v_speed;
+    return DynamicPressure {
+        q: q_pa,
+        density: rho_dyn,
+        velocity: v_speed,
+    };
+}
+
+pub fn dynamic_pressure_zero() -> DynamicPressure {
+    return DynamicPressure {
+        q: 0.0,
+        density: 1.225,
+        velocity: 0.0,
+    };
+}
+
+pub fn dynamic_pressure_from_mach(rho_dyn: Float, mach_val: Float, a_sound: Float) -> DynamicPressure {
+    let v_speed: Float = mach_val * a_sound;
+    return dynamic_pressure_new(rho_dyn, v_speed);
+}

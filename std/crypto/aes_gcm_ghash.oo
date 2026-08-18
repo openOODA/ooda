@@ -1,0 +1,207 @@
+// # AES-GCM GHASH and hex helpers
+//
+// Logline: Provide GHASH over AAD and ciphertext and hex encode or decode of raw blocks.
+//
+// Setup: GF(2^128) multiply uses the SP 800-38D bit order. No AES. No nonce.
+//
+// Beats:
+//   1. Decode and encode lowercase hex.
+//   2. Multiply and XOR 16-byte blocks for GHASH.
+//   3. Hash padded AAD, ciphertext, and 128-bit length block.
+
+pub fn gcm_xor_byte(a: Int, b: Int) -> Int {
+    return (a | b) - (a & b);
+}
+
+fn gcm_nibble(ch: Int) -> Int {
+    if ch >= 48 {
+        if ch <= 57 {
+            return ch - 48;
+        }
+    }
+    if ch >= 97 {
+        if ch <= 102 {
+            return ch - 87;
+        }
+    }
+    if ch >= 65 {
+        if ch <= 70 {
+            return ch - 55;
+        }
+    }
+    return -1;
+}
+
+pub fn gcm_unhex(hex: String) -> String {
+    let n: Int = hex.len();
+    if n % 2 != 0 {
+        process_exit(1);
+        return "";
+    }
+    let mut i: Int = 0;
+    let mut buf: List[Int] = bytes_new();
+    while i < n {
+        let hi_v: Int = gcm_nibble(byte_at(hex, i));
+        let lo_v: Int = gcm_nibble(byte_at(hex, i + 1));
+        if hi_v < 0 {
+            process_exit(1);
+            return "";
+        }
+        if lo_v < 0 {
+            process_exit(1);
+            return "";
+        }
+        buf = bytes_push(buf, hi_v * 16 + lo_v);
+        i = i + 2;
+    }
+    return bytes_to_str(buf);
+}
+
+pub fn gcm_hex(raw: String) -> String {
+    let hex: String = "0123456789abcdef";
+    let n: Int = bytes_len(raw);
+    let mut out: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < n {
+        let b: Int = byte_at(raw, i);
+        out = bytes_push(out, byte_at(hex, (b / 16) % 16));
+        out = bytes_push(out, byte_at(hex, b % 16));
+        i = i + 1;
+    }
+    return bytes_to_str(out);
+}
+
+pub fn gcm_z16() -> String {
+    let mut buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < 16 {
+        buf = bytes_push(buf, 0);
+        i = i + 1;
+    }
+    return bytes_to_str(buf);
+}
+
+fn gcm_blk(s: String, off: Int) -> String {
+    let mut buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < 16 {
+        buf = bytes_push(buf, byte_at(s, off + i));
+        i = i + 1;
+    }
+    return bytes_to_str(buf);
+}
+
+fn gcm_xor16(a: String, b: String) -> String {
+    let mut buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < 16 {
+        buf = bytes_push(buf, gcm_xor_byte(byte_at(a, i), byte_at(b, i)));
+        i = i + 1;
+    }
+    return bytes_to_str(buf);
+}
+
+fn gcm_bit(s: String, i: Int) -> Int {
+    let bi: Int = i / 8;
+    let bj: Int = 7 - (i % 8);
+    return (byte_at(s, bi) >> bj) & 1;
+}
+
+fn gcm_shr(v: String) -> String {
+    let mut buf: List[Int] = bytes_new();
+    let mut carry: Int = 0;
+    let mut i: Int = 0;
+    while i < 16 {
+        let b: Int = byte_at(v, i);
+        buf = bytes_push(buf, (b >> 1) | (carry * 128));
+        carry = b & 1;
+        i = i + 1;
+    }
+    return bytes_to_str(buf);
+}
+
+fn gcm_mul(x: String, y: String) -> String {
+    let mut z: String = gcm_z16();
+    let mut v: String = y;
+    let mut i: Int = 0;
+    while i < 128 {
+        if gcm_bit(x, i) == 1 {
+            z = gcm_xor16(z, v);
+        }
+        let lsb: Int = byte_at(v, 15) & 1;
+        v = gcm_shr(v);
+        if lsb == 1 {
+            let mut r: List[Int] = bytes_new();
+            r = bytes_push(r, 225);
+            let mut k: Int = 1;
+            while k < 16 {
+                r = bytes_push(r, 0);
+                k = k + 1;
+            }
+            v = gcm_xor16(v, bytes_to_str(r));
+        }
+        i = i + 1;
+    }
+    return z;
+}
+
+fn gcm_pad16(data: String) -> String {
+    let n: Int = bytes_len(data);
+    let rem: Int = n % 16;
+    if rem == 0 {
+        return data;
+    }
+    let mut buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < n {
+        buf = bytes_push(buf, byte_at(data, i));
+        i = i + 1;
+    }
+    let need: Int = 16 - rem;
+    let mut z: Int = 0;
+    while z < need {
+        buf = bytes_push(buf, 0);
+        z = z + 1;
+    }
+    return bytes_to_str(buf);
+}
+
+fn gcm_be64(bits: Int) -> List[Int] {
+    let mut buf: List[Int] = bytes_new();
+    buf = bytes_push(buf, (bits >> 56) & 255);
+    buf = bytes_push(buf, (bits >> 48) & 255);
+    buf = bytes_push(buf, (bits >> 40) & 255);
+    buf = bytes_push(buf, (bits >> 32) & 255);
+    buf = bytes_push(buf, (bits >> 24) & 255);
+    buf = bytes_push(buf, (bits >> 16) & 255);
+    buf = bytes_push(buf, (bits >> 8) & 255);
+    buf = bytes_push(buf, bits & 255);
+    return buf;
+}
+
+pub fn gcm_ghash(h: String, aad: String, ct: String) -> String {
+    let mut x: String = gcm_z16();
+    let ap: String = gcm_pad16(aad);
+    let cp: String = gcm_pad16(ct);
+    let mut i: Int = 0;
+    let an: Int = bytes_len(ap);
+    while i < an {
+        x = gcm_mul(h, gcm_xor16(x, gcm_blk(ap, i)));
+        i = i + 16;
+    }
+    i = 0;
+    let cn: Int = bytes_len(cp);
+    while i < cn {
+        x = gcm_mul(h, gcm_xor16(x, gcm_blk(cp, i)));
+        i = i + 16;
+    }
+    let mut lb: List[Int] = gcm_be64(bytes_len(aad) * 8);
+    let hi: List[Int] = gcm_be64(bytes_len(ct) * 8);
+    let mut k: Int = 0;
+    while k < 8 {
+        lb = bytes_push(lb, byte_at(bytes_to_str(hi), k));
+        k = k + 1;
+    }
+    x = gcm_mul(h, gcm_xor16(x, bytes_to_str(lb)));
+    return x;
+}

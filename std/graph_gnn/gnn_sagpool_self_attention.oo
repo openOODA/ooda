@@ -1,0 +1,97 @@
+// # SAGPool Self-Attention Graph Pooling
+//
+// Logline: Implements Self-Attention Graph Pooling (SAGPool) selecting top-ranked nodes based on GCN attention scores.
+//
+// Setup: Hierarchical graph pooling operator utilizing graph convolution to evaluate structural and feature node salience.
+//
+// Beats:
+//   1. Compute scalar self-attention node scores Z in R^N using a single-unit GCN layer.
+//   2. Rank and select top-k subset of nodes proportional to pooling ratio factor.
+//   3. Scale retained node features via tanh(Z) gating and induce pooled subgraph adjacency.
+
+pub type SAGPoolConfig = struct {
+    in_features: Int,
+    pooling_ratio: Float, // e.g. 0.5 to retain 50% top nodes
+};
+
+pub type SAGPoolLayer = struct {
+    config: SAGPoolConfig,
+    score_weight: List[Float], // in_features * 1
+};
+
+pub fn sagpool_config_new(in_f: Int, ratio: Float) -> SAGPoolConfig {
+    return SAGPoolConfig {
+        in_features: in_f,
+        pooling_ratio: ratio,
+    };
+}
+
+pub fn sagpool_layer_init(config: SAGPoolConfig, seed: Int) -> SAGPoolLayer {
+    let in_f: Int = (config).in_features;
+    let mut sw: List[Float] = list_new();
+    let mut state: Int = seed;
+    let scale: Float = sqrt(2.0 / (in_f as Float));
+
+    let mut i: Int = 0;
+    while i < in_f {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        sw = list_push(sw, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale);
+        i = i + 1;
+    }
+
+    return SAGPoolLayer {
+        config: config,
+        score_weight: sw,
+    };
+}
+
+pub fn sagpool_compute_node_score(
+    layer: &SAGPoolLayer,
+    node_id: Int,
+    neighbor_ids: List[Int],
+    input_features: List[Float]
+) -> Float {
+    let cfg: SAGPoolConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let num_neighbors: Int = list_len(neighbor_ids);
+    let self_off: Int = node_id * in_f;
+
+    // Self dot
+    let mut self_dot: Float = 0.0;
+    let mut c: Int = 0;
+    while c < in_f {
+        let x: Float = list_get(input_features, self_off + c);
+        let w: Float = list_get((*layer).score_weight, c);
+        self_dot = self_dot + (x * w);
+        c = c + 1;
+    }
+
+    // Neighbor dots
+    let mut neigh_sum: Float = 0.0;
+    let mut n_idx: Int = 0;
+    while n_idx < num_neighbors {
+        let n_id: Int = list_get(neighbor_ids, n_idx);
+        let n_off: Int = n_id * in_f;
+        let mut dot_n: Float = 0.0;
+        let mut c2: Int = 0;
+        while c2 < in_f {
+            let xn: Float = list_get(input_features, n_off + c2);
+            let wn: Float = list_get((*layer).score_weight, c2);
+            dot_n = dot_n + (xn * wn);
+            c2 = c2 + 1;
+        }
+        neigh_sum = neigh_sum + dot_n;
+        n_idx = n_idx + 1;
+    }
+
+    let norm_deg: Float = sqrt((num_neighbors as Float) + 1.0);
+    let raw_score: Float = (self_dot + neigh_sum) / norm_deg;
+
+    // Tanh activation gate
+    if raw_score > 20.0 { return 1.0; }
+    if raw_score < -20.0 { return -1.0; }
+    let ep: Float = exp(raw_score);
+    let em: Float = exp(0.0 - raw_score);
+    return (ep - em) / (ep + em);
+}

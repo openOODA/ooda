@@ -1,0 +1,157 @@
+// # Doppler Velocity Log (DVL/DVB) Dead Reckoning Navigation
+//
+// Logline: Converts 4-beam Janus acoustic Doppler frequencies into 3D body velocities and integrates bottom-track dead reckoning.
+//
+// Setup: High-rate bottom-tracking acoustic navigation fusing 4-beam Janus transducer geometry with attitude orientation.
+//
+// Beats:
+//   1. Define Janus 4-beam acoustic configuration (beam tilt angle theta_b, carrier frequency f_0).
+//   2. Transform 4 acoustic beam Doppler frequency shifts into 3D instrument velocities (u, v, w).
+//   3. Compute fourth-beam redundant error velocity for acoustic outlier and multi-path rejection.
+//   4. Integrate bottom-track body velocities into Earth-fixed NED dead-reckoning trajectory.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type DvlJanusConfig = struct {
+    carrier_frequency_hz: Float,
+    beam_tilt_angle_rad: Float, // Typically 30 deg (0.5236 rad)
+    sound_speed_m_s: Float,
+    max_altitude_m: Float,
+    min_altitude_m: Float,
+    variance_vel_m2_s2: Float,
+};
+
+pub type DvlRawBeams = struct {
+    doppler_hz_1: Float,
+    doppler_hz_2: Float,
+    doppler_hz_3: Float,
+    doppler_hz_4: Float,
+    range_m_1: Float,
+    range_m_2: Float,
+    range_m_3: Float,
+    range_m_4: Float,
+    is_bottom_lock: Bool,
+};
+
+pub type DvlVelocitySolution = struct {
+    u_surge: Float,
+    v_sway: Float,
+    w_heave: Float,
+    error_velocity: Float,
+    altitude_m: Float,
+    is_valid: Bool,
+};
+
+pub type DeadReckoningState = struct {
+    x_north: Float,
+    y_east: Float,
+    z_down: Float,
+    total_distance_m: Float,
+};
+
+pub fn dvl_config_default() -> DvlJanusConfig {
+    return DvlJanusConfig {
+        carrier_frequency_hz: 600000.0, // 600 kHz Workhorse / Pathfinder
+        beam_tilt_angle_rad: 0.52359877, // 30 deg
+        sound_speed_m_s: 1500.0,
+        max_altitude_m: 75.0,
+        min_altitude_m: 0.5,
+        variance_vel_m2_s2: 0.0004, // (0.02 m/s)^2
+    };
+}
+
+pub fn dead_reckoning_state_init(init_x: Float, init_y: Float, init_z: Float) -> DeadReckoningState {
+    return DeadReckoningState {
+        x_north: init_x,
+        y_east: init_y,
+        z_down: init_z,
+        total_distance_m: 0.0,
+    };
+}
+
+pub fn dvl_solve_janus_velocities(
+    cfg: &DvlJanusConfig,
+    beams: &DvlRawBeams
+) -> DvlVelocitySolution {
+    if !(beams).is_bottom_lock {
+        return DvlVelocitySolution {
+            u_surge: 0.0,
+            v_sway: 0.0,
+            w_heave: 0.0,
+            error_velocity: 99.0,
+            altitude_m: 0.0,
+            is_valid: false,
+        };
+    }
+
+    let c: Float = (cfg).sound_speed_m_s;
+    let f0: Float = (cfg).carrier_frequency_hz;
+    let th: Float = (cfg).beam_tilt_angle_rad;
+    let sin_th: Float = sin(th);
+    let cos_th: Float = cos(th);
+
+    let fd1: Float = (beams).doppler_hz_1;
+    let fd2: Float = (beams).doppler_hz_2;
+    let fd3: Float = (beams).doppler_hz_3;
+    let fd4: Float = (beams).doppler_hz_4;
+
+    // Standard Janus 4-beam transformation
+    let factor_xy: Float = c / (4.0 * f0 * sin_th);
+    let factor_z: Float = c / (4.0 * f0 * cos_th);
+
+    let u: Float = (fd1 - fd2) * factor_xy;
+    let v: Float = (fd4 - fd3) * factor_xy;
+    let w: Float = 0.0 - ((fd1 + fd2 + fd3 + fd4) * factor_z);
+
+    // Redundant 4th beam error velocity (should be zero in homogeneous bottom flow)
+    let err_v: Float = math_abs((fd1 + fd2) - (fd3 + fd4)) * factor_xy;
+
+    let avg_altitude: Float = ((beams).range_m_1 + (beams).range_m_2 + (beams).range_m_3 + (beams).range_m_4) * 0.25 * cos_th;
+
+    let is_valid: Bool = (err_v < 0.25) && (avg_altitude >= (cfg).min_altitude_m) && (avg_altitude <= (cfg).max_altitude_m);
+
+    return DvlVelocitySolution {
+        u_surge: u,
+        v_sway: v,
+        w_heave: w,
+        error_velocity: err_v,
+        altitude_m: avg_altitude,
+        is_valid: is_valid,
+    };
+}
+
+pub fn dead_reckoning_step(
+    state: &DeadReckoningState,
+    vel: &DvlVelocitySolution,
+    phi: Float,
+    theta: Float,
+    psi: Float,
+    dt: Float
+) -> DeadReckoningState {
+    if !(vel).is_valid {
+        return DeadReckoningState {
+            x_north: (state).x_north,
+            y_east: (state).y_east,
+            z_down: (state).z_down,
+            total_distance_m: (state).total_distance_m,
+        };
+    }
+
+    let ned_vel: Vector3 = fossen_body_to_ned_linear_vel(
+        phi, theta, psi,
+        (vel).u_surge, (vel).v_sway, (vel).w_heave
+    );
+
+    let dx: Float = (ned_vel).x * dt;
+    let dy: Float = (ned_vel).y * dt;
+    let dz: Float = (ned_vel).z * dt;
+    let step_dist: Float = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+
+    return DeadReckoningState {
+        x_north: (state).x_north + dx,
+        y_east: (state).y_east + dy,
+        z_down: (state).z_down + dz,
+        total_distance_m: (state).total_distance_m + step_dist,
+    };
+}

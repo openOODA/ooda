@@ -1,0 +1,132 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::sys::objcap_attenuate
+// Capability attenuation create/validate/apply
+// (split from objcap.oo, M172)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+import "./objcap_rights.oo";
+
+pub fn objcap_attenuation_create(
+    att_id_val: String,
+    source_cap_id_val: String,
+    allowed_rights_val: Int,
+    path_restriction_val: String,
+    max_uses_val: Int,
+    valid_until_val: Int
+) -> CapabilityAttenuation {
+    let mut active: Bool = true;
+    let aid_len: Int = att_id_val.len();
+    let scid_len: Int = source_cap_id_val.len();
+    if aid_len == 0 || scid_len == 0 {
+        active = false;
+    }
+    return CapabilityAttenuation {
+        attenuation_id: att_id_val,
+        source_cap_id: source_cap_id_val,
+        allowed_rights_mask: allowed_rights_val,
+        path_prefix_restriction: path_restriction_val,
+        max_use_count: max_uses_val,
+        uses_consumed: 0,
+        valid_after: 0,
+        valid_until: valid_until_val,
+        is_active: active,
+    };
+}
+
+pub fn objcap_attenuation_validate(att_ref: &CapabilityAttenuation, current_time: Int) -> Bool {
+    if (att_ref).is_active == false {
+        return false;
+    }
+    let max_u: Int = (att_ref).max_use_count;
+    let u_cons: Int = (att_ref).uses_consumed;
+    if max_u >= 0 {
+        if u_cons >= max_u {
+            return false;
+        }
+    }
+    let v_after: Int = (att_ref).valid_after;
+    if v_after > 0 {
+        if current_time < v_after {
+            return false;
+        }
+    }
+    let v_until: Int = (att_ref).valid_until;
+    if v_until > 0 {
+        if current_time >= v_until {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn objcap_attenuate(
+    source_cap_ref: &ObjectCapability,
+    attenuation_val: CapabilityAttenuation,
+    new_cap_id_val: String,
+    current_time: Int
+) -> Result[ObjectCapability, String] {
+    if objcap_validate(source_cap_ref, current_time) == false {
+        return Err("OBJCAP_ATTENUATE_ERR: Source capability is invalid or expired");
+    }
+    if attenuation_val.is_active == false {
+        return Err("OBJCAP_ATTENUATE_ERR: Attenuation filter is inactive");
+    }
+    let src_cid: String = (source_cap_ref).cap_id;
+    let att_scid: String = attenuation_val.source_cap_id;
+    if src_cid != att_scid {
+        return Err("OBJCAP_ATTENUATE_ERR: Attenuation filter target mismatch");
+    }
+
+    let src_rights: Int = (source_cap_ref).rights;
+    let att_rights: Int = attenuation_val.allowed_rights_mask;
+    let granted_r: CapabilityRights = capability_rights_from_mask(src_rights);
+    let allow_r: CapabilityRights = capability_rights_from_mask(att_rights);
+
+    let combined_rights = CapabilityRights {
+        allow_read: granted_r.allow_read && allow_r.allow_read,
+        allow_write: granted_r.allow_write && allow_r.allow_write,
+        allow_execute: granted_r.allow_execute && allow_r.allow_execute,
+        allow_delegate: granted_r.allow_delegate && allow_r.allow_delegate,
+        allow_revoke: granted_r.allow_revoke && allow_r.allow_revoke,
+    };
+    let final_mask: Int = capability_rights_to_mask(combined_rights);
+    let final_str: String = capability_rights_format_str(combined_rights);
+
+    let mut exp: Int = (source_cap_ref).expires_at;
+    let att_until: Int = attenuation_val.valid_until;
+    if att_until > 0 {
+        if exp == 0 || att_until < exp {
+            exp = att_until;
+        }
+    }
+
+    let mut res_uri: String = (source_cap_ref).resource_uri;
+    let rest_path: String = attenuation_val.path_prefix_restriction;
+    let rest_len: Int = rest_path.len();
+    if rest_len > 0 {
+        res_uri = rest_path;
+    }
+
+    let src_owner: String = (source_cap_ref).owner_id;
+    let att_id: String = attenuation_val.attenuation_id;
+    let src_revid: String = (source_cap_ref).revocation_id;
+
+    let attenuated_cap = ObjectCapability {
+        cap_id: new_cap_id_val,
+        resource_uri: res_uri,
+        owner_id: src_owner,
+        rights: final_mask,
+        rights_mask: final_str,
+        parent_cap_id: src_cid,
+        attenuation_id: att_id,
+        revocation_id: src_revid,
+        issued_at: current_time,
+        expires_at: exp,
+        is_sealed: false,
+        is_valid: true,
+    };
+
+    return Ok(attenuated_cap);
+}

@@ -1,0 +1,232 @@
+// # Level-2 Aggregated Market Depth Order Book
+//
+// Logline: Maintains price-aggregated Level-2 market depth ladders, best bids/offers, and depth metrics.
+//
+// Setup: Pure Level 2 orderbook algorithms and depth calculations.
+//
+// Beats:
+//   1. Manage sorted bid and ask price level buckets with volume aggregation and order count tracking.
+//   2. Update, insert, and delete price levels from top-of-book market data snapshots and delta feeds.
+//   3. Compute BBO, micro-price, bid-ask spread, order book imbalance, and depth VWAP.
+
+pub type PriceLevel = struct {
+    price: Int,
+    quantity: Int,
+    order_count: Int,
+};
+
+pub type OrderBookL2 = struct {
+    symbol: String,
+    bids: List[PriceLevel],
+    asks: List[PriceLevel],
+    max_depth: Int,
+    last_update_ns: Int,
+};
+
+pub type BboQuote = struct {
+    symbol: String,
+    best_bid_price: Int,
+    best_bid_qty: Int,
+    best_ask_price: Int,
+    best_ask_qty: Int,
+    spread: Int,
+    mid_price: Int,
+};
+
+pub fn price_level_new(price: Int, qty: Int, count: Int) -> PriceLevel {
+    return PriceLevel {
+        price: price,
+        quantity: qty,
+        order_count: count,
+    };
+}
+
+pub fn orderbook_l2_new(symbol: String, max_depth: Int) -> OrderBookL2 {
+    let bids: List[PriceLevel] = list_new();
+    let asks: List[PriceLevel] = list_new();
+    return OrderBookL2 {
+        symbol: symbol,
+        bids: bids,
+        asks: asks,
+        max_depth: max_depth,
+        last_update_ns: 0,
+    };
+}
+
+pub fn orderbook_l2_update_level(
+    book: &mut OrderBookL2,
+    is_bid: Bool,
+    price: Int,
+    quantity: Int,
+    order_count: Int
+) {
+    if is_bid {
+        let mut new_bids: List[PriceLevel] = list_new();
+        let old_bids: List[PriceLevel] = (book).bids;
+        let n: Int = list_len(old_bids);
+        let mut inserted: Bool = false;
+        let mut i: Int = 0;
+        
+        while i < n {
+            let lvl: PriceLevel = list_get(old_bids, i);
+            if lvl.price == price {
+                if quantity > 0 {
+                    let updated = price_level_new(price, quantity, order_count);
+                    new_bids = list_push(new_bids, updated);
+                }
+                inserted = true;
+            } else if (!inserted) && (price > lvl.price) {
+                if quantity > 0 {
+                    let new_lvl = price_level_new(price, quantity, order_count);
+                    new_bids = list_push(new_bids, new_lvl);
+                }
+                new_bids = list_push(new_bids, lvl);
+                inserted = true;
+            } else {
+                new_bids = list_push(new_bids, lvl);
+            }
+            i = i + 1;
+        }
+        
+        if (!inserted) && (quantity > 0) {
+            let new_lvl = price_level_new(price, quantity, order_count);
+            new_bids = list_push(new_bids, new_lvl);
+        }
+        (book).bids = new_bids;
+    } else {
+        let mut new_asks: List[PriceLevel] = list_new();
+        let old_asks: List[PriceLevel] = (book).asks;
+        let n: Int = list_len(old_asks);
+        let mut inserted: Bool = false;
+        let mut i: Int = 0;
+        
+        while i < n {
+            let lvl: PriceLevel = list_get(old_asks, i);
+            if lvl.price == price {
+                if quantity > 0 {
+                    let updated = price_level_new(price, quantity, order_count);
+                    new_asks = list_push(new_asks, updated);
+                }
+                inserted = true;
+            } else if (!inserted) && (price < lvl.price) {
+                if quantity > 0 {
+                    let new_lvl = price_level_new(price, quantity, order_count);
+                    new_asks = list_push(new_asks, new_lvl);
+                }
+                new_asks = list_push(new_asks, lvl);
+                inserted = true;
+            } else {
+                new_asks = list_push(new_asks, lvl);
+            }
+            i = i + 1;
+        }
+        
+        if (!inserted) && (quantity > 0) {
+            let new_lvl = price_level_new(price, quantity, order_count);
+            new_asks = list_push(new_asks, new_lvl);
+        }
+        (book).asks = new_asks;
+    }
+}
+
+pub fn orderbook_l2_remove_level(book: &mut OrderBookL2, is_bid: Bool, price: Int) {
+    orderbook_l2_update_level(book, is_bid, price, 0, 0);
+}
+
+pub fn orderbook_l2_get_bbo(book: &OrderBookL2) -> Result[BboQuote, String] {
+    let n_bids: Int = list_len((book).bids);
+    let n_asks: Int = list_len((book).asks);
+    if n_bids == 0 {
+        return Err("NO_BIDS_AVAILABLE");
+    }
+    if n_asks == 0 {
+        return Err("NO_ASKS_AVAILABLE");
+    }
+    let top_bid: PriceLevel = list_get((book).bids, 0);
+    let top_ask: PriceLevel = list_get((book).asks, 0);
+    let spread: Int = top_ask.price - top_bid.price;
+    let mid: Int = (top_bid.price + top_ask.price) / 2;
+    
+    return Ok(BboQuote {
+        symbol: (book).symbol,
+        best_bid_price: top_bid.price,
+        best_bid_qty: top_bid.quantity,
+        best_ask_price: top_ask.price,
+        best_ask_qty: top_ask.quantity,
+        spread: spread,
+        mid_price: mid,
+    });
+}
+
+pub fn orderbook_l2_imbalance_ratio(book: &OrderBookL2, levels: Int) -> Float {
+    let n_bids: Int = list_len((book).bids);
+    let n_asks: Int = list_len((book).asks);
+    let mut bid_vol: Float = 0.0;
+    let mut ask_vol: Float = 0.0;
+    
+    let mut i: Int = 0;
+    while (i < levels) && (i < n_bids) {
+        let b: PriceLevel = list_get((book).bids, i);
+        bid_vol = bid_vol + (1.0 * b.quantity);
+        i = i + 1;
+    }
+    
+    let mut j: Int = 0;
+    while (j < levels) && (j < n_asks) {
+        let a: PriceLevel = list_get((book).asks, j);
+        ask_vol = ask_vol + (1.0 * a.quantity);
+        j = j + 1;
+    }
+    
+    let total_vol: Float = bid_vol + ask_vol;
+    if total_vol <= 0.0 {
+        return 0.0;
+    }
+    return (bid_vol - ask_vol) / total_vol;
+}
+
+pub fn orderbook_l2_micro_price(book: &OrderBookL2) -> Float {
+    let bbo_res: Result[BboQuote, String] = orderbook_l2_get_bbo(book);
+    match bbo_res {
+        Ok(bbo) => {
+            let b_qty: Float = 1.0 * bbo.best_bid_qty;
+            let a_qty: Float = 1.0 * bbo.best_ask_qty;
+            let b_px: Float = 1.0 * bbo.best_bid_price;
+            let a_px: Float = 1.0 * bbo.best_ask_price;
+            let total_qty: Float = b_qty + a_qty;
+            if total_qty <= 0.0 {
+                return 1.0 * bbo.mid_price;
+            }
+            // Micro-price = (bid_qty * ask_price + ask_qty * bid_price) / (bid_qty + ask_qty)
+            return ((b_qty * a_px) + (a_qty * b_px)) / total_qty;
+        },
+        Err(e) => {
+            return 0.0;
+        },
+    }
+}
+
+pub fn orderbook_l2_depth_vwap(book: &OrderBookL2, is_bid: Bool, target_qty: Int) -> Float {
+    let mut remaining: Int = target_qty;
+    let mut notional: Float = 0.0;
+    let levels: List[PriceLevel] = if is_bid { (book).bids } else { (book).asks };
+    let n: Int = list_len(levels);
+    let mut i: Int = 0;
+    
+    while (i < n) && (remaining > 0) {
+        let lvl: PriceLevel = list_get(levels, i);
+        let mut take: Int = lvl.quantity;
+        if take > remaining {
+            take = remaining;
+        }
+        notional = notional + (1.0 * lvl.price * take);
+        remaining = remaining - take;
+        i = i + 1;
+    }
+    
+    let filled: Int = target_qty - remaining;
+    if filled <= 0 {
+        return 0.0;
+    }
+    return notional / (1.0 * filled);
+}

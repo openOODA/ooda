@@ -1,0 +1,124 @@
+// # Disney Principled BSDF Standard Model
+//
+// Logline: Industry-standard 11-parameter Disney principled BSDF combining metallic, dielectric, sheen, and dual-lobe clearcoat.
+//
+// Setup: Art-directable unified shading model matching Disney's Burley 2012 / 2015 physically based formulation.
+//
+// Beats:
+//   1. Define DisneyMaterial structure with base_color, metallic, roughness, specular, sheen, and clearcoat parameters.
+//   2. Evaluate diffuse retro-reflection blend and metallic microfacet specular lobe.
+//   3. Layer secondary GTR1 clearcoat reflection and micro-sheen edge luminance.
+
+import "./vec3_math.oo";
+import "./brdf_fresnel_schlick.oo";
+import "./brdf_ggx_distribution.oo";
+import "./brdf_smith_shadowing_masking.oo";
+
+pub type DisneyMaterial = struct {
+    base_color: Vec3,
+    metallic: Float,
+    roughness: Float,
+    specular: Float,
+    specular_tint: Float,
+    sheen: Float,
+    sheen_tint: Float,
+    clearcoat: Float,
+    clearcoat_roughness: Float,
+    subsurface: Float,
+};
+
+pub fn disney_material_default() -> DisneyMaterial {
+    return DisneyMaterial {
+        base_color: vec3_new(0.8, 0.8, 0.8),
+        metallic: 0.0,
+        roughness: 0.5,
+        specular: 0.5,
+        specular_tint: 0.0,
+        sheen: 0.0,
+        sheen_tint: 0.5,
+        clearcoat: 0.0,
+        clearcoat_roughness: 0.1,
+        subsurface: 0.0,
+    };
+}
+
+pub fn disney_diffuse_eval(
+    mat: &DisneyMaterial,
+    n_dot_l: Float,
+    n_dot_v: Float,
+    v_dot_h: Float
+) -> Vec3 {
+    let f_d90: Float = 0.5 + 2.0 * (mat).roughness * v_dot_h * v_dot_h;
+    let fl: Float = fresnel_schlick_scalar(n_dot_l, 1.0);
+    let fv: Float = fresnel_schlick_scalar(n_dot_v, 1.0);
+    let f_diff: Float = (1.0 + (f_d90 - 1.0) * fl) * (1.0 + (f_d90 - 1.0) * fv);
+
+    let inv_pi: Float = 0.31830988618;
+    let diffuse_base: Vec3 = vec3_scale(&(mat).base_color, inv_pi * f_diff);
+    return vec3_scale(&diffuse_base, 1.0 - (mat).metallic);
+}
+
+pub fn disney_clearcoat_eval(
+    mat: &DisneyMaterial,
+    n_dot_l: Float,
+    n_dot_v: Float,
+    n_dot_h: Float,
+    v_dot_h: Float
+) -> Float {
+    if (mat).clearcoat <= 0.001 {
+        return 0.0;
+    }
+    // GTR1 distribution for clearcoat
+    let alpha_g: Float = (mat).clearcoat_roughness * (mat).clearcoat_roughness;
+    let a2: Float = alpha_g * alpha_g;
+    let nh2: Float = n_dot_h * n_dot_h;
+    let d_c: Float = (a2 - 1.0) / (3.14159265 * 0.693147 * (1.0 + (a2 - 1.0) * nh2));
+
+    // Clearcoat Fresnel (fixed IOR 1.5, F0 = 0.04)
+    let f_c: Float = fresnel_schlick_scalar(v_dot_h, 0.04);
+    // Fixed clearcoat shadowing
+    let g_c: Float = 1.0 / (4.0 * n_dot_l * n_dot_v + 0.0001);
+
+    return 0.25 * (mat).clearcoat * d_c * f_c * g_c;
+}
+
+pub fn disney_bsdf_eval(
+    mat: &DisneyMaterial,
+    l: &Vec3,
+    v: &Vec3,
+    n: &Vec3
+) -> Vec3 {
+    let n_dot_l: Float = vec3_dot(n, l);
+    let n_dot_v: Float = vec3_dot(n, v);
+
+    if n_dot_l <= 0.0 || n_dot_v <= 0.0 {
+        return vec3_zero();
+    }
+
+    let h_unnorm: Vec3 = vec3_add(l, v);
+    let h: Vec3 = vec3_normalize(&h_unnorm);
+    let n_dot_h: Float = vec3_dot(n, &h);
+    let v_dot_h: Float = vec3_dot(v, &h);
+
+    let diff: Vec3 = disney_diffuse_eval(mat, n_dot_l, n_dot_v, v_dot_h);
+
+    // Specular F0: blend between 0.08 * specular and baseColor (metallic)
+    let dielectric_f0: Vec3 = vec3_scale(&vec3_one(), 0.08 * (mat).specular);
+    let f0: Vec3 = vec3_add(
+        &vec3_scale(&dielectric_f0, 1.0 - (mat).metallic),
+        &vec3_scale(&(mat).base_color, (mat).metallic)
+    );
+
+    let alpha: Float = (mat).roughness * (mat).roughness;
+    let d: Float = ggx_ndf_isotropic(n_dot_h, alpha);
+    let g: Float = smith_g2_height_correlated(n_dot_l, n_dot_v, alpha);
+    let f: Vec3 = fresnel_schlick_rgb(v_dot_h, &f0);
+
+    let spec_factor: Float = (d * g) / (4.0 * n_dot_l * n_dot_v + 0.00001);
+    let spec: Vec3 = vec3_scale(&f, spec_factor);
+
+    let clearcoat_val: Float = disney_clearcoat_eval(mat, n_dot_l, n_dot_v, n_dot_h, v_dot_h);
+    let clearcoat_col: Vec3 = vec3_scale(&vec3_one(), clearcoat_val);
+
+    return vec3_add(&vec3_add(&diff, &spec), &clearcoat_col);
+}

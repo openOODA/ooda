@@ -1,0 +1,251 @@
+// # Telemetry Multiplexing & Stream Engine
+//
+// Logline: Multiplexes channel measurements into telemetry frames, manages bandwidth, and applies filtering.
+//
+// Setup: Telemetry streaming engine importing telemetry_ops.oo.
+//
+// Beats:
+//   1. Multiplex prioritized telemetry channels into fixed-size transmission frames.
+//   2. Manage channel sampling rates, bandwidth quotas, and frame sequence counters.
+//   3. Demultiplex and route incoming telemetry streams to subsystem handlers.
+
+import "./telemetry_ops.oo";
+
+pub fn packet_header_validate(hdr: PacketHeader) -> Bool {
+    if (hdr).version != 0 {
+        return false;
+    }
+    if (hdr).packet_type < 0 {
+        return false;
+    }
+    if (hdr).packet_type > 1 {
+        return false;
+    }
+    if (hdr).sec_header_flag < 0 {
+        return false;
+    }
+    if (hdr).sec_header_flag > 1 {
+        return false;
+    }
+    if (hdr).apid < 0 {
+        return false;
+    }
+    if (hdr).apid > 2047 {
+        return false;
+    }
+    if (hdr).sequence_flags < 0 {
+        return false;
+    }
+    if (hdr).sequence_flags > 3 {
+        return false;
+    }
+    if (hdr).sequence_count < 0 {
+        return false;
+    }
+    if (hdr).sequence_count > 16383 {
+        return false;
+    }
+    if (hdr).packet_length < 0 {
+        return false;
+    }
+    if (hdr).packet_length > 65535 {
+        return false;
+    }
+    return true;
+}
+
+pub fn packet_header_pack_word1(hdr: PacketHeader) -> Int {
+    let ver: Int = (hdr).version % 8;
+    let p_type: Int = (hdr).packet_type % 2;
+    let sec_flag: Int = (hdr).sec_header_flag % 2;
+    let apid_val: Int = (hdr).apid % 2048;
+    return (ver * 8192) + (p_type * 4096) + (sec_flag * 2048) + apid_val;
+}
+
+pub fn packet_header_pack_word2(hdr: PacketHeader) -> Int {
+    let seq_flags: Int = (hdr).sequence_flags % 4;
+    let seq_cnt: Int = (hdr).sequence_count % 16384;
+    return (seq_flags * 16384) + seq_cnt;
+}
+
+pub fn packet_header_unpack_word1(word1: Int) -> PacketHeader {
+    let ver: Int = (word1 / 8192) % 8;
+    let p_type: Int = (word1 / 4096) % 2;
+    let sec_flag: Int = (word1 / 2048) % 2;
+    let apid_val: Int = word1 % 2048;
+    return PacketHeader {
+        version: ver,
+        packet_type: p_type,
+        sec_header_flag: sec_flag,
+        apid: apid_val,
+        sequence_flags: 3,
+        sequence_count: 0,
+        packet_length: 0,
+    };
+}
+
+pub fn packet_header_unpack_word2(hdr: PacketHeader, word2: Int) -> PacketHeader {
+    let seq_flags: Int = (word2 / 16384) % 4;
+    let seq_cnt: Int = word2 % 16384;
+    return PacketHeader {
+        version: (hdr).version,
+        packet_type: (hdr).packet_type,
+        sec_header_flag: (hdr).sec_header_flag,
+        apid: (hdr).apid,
+        sequence_flags: seq_flags,
+        sequence_count: seq_cnt,
+        packet_length: (hdr).packet_length,
+    };
+}
+
+// 5. CCSDS Packet Utilities & Classification
+
+pub fn ccsds_packet_get_total_length(pkt: CcsdsPacket) -> Int {
+    // Total CCSDS packet size = 6 primary header bytes + (packet_length + 1)
+    return 6 + ((pkt).header.packet_length + 1);
+}
+
+pub fn ccsds_packet_is_housekeeping(pkt: CcsdsPacket) -> Bool {
+    return (pkt).service_type == 3;
+}
+
+pub fn ccsds_packet_is_event_report(pkt: CcsdsPacket) -> Bool {
+    return (pkt).service_type == 5;
+}
+
+pub fn ccsds_packet_is_command_verification(pkt: CcsdsPacket) -> Bool {
+    return (pkt).service_type == 1;
+}
+
+pub fn ccsds_packet_is_time_management(pkt: CcsdsPacket) -> Bool {
+    return (pkt).service_type == 9;
+}
+
+pub fn ccsds_packet_is_test(pkt: CcsdsPacket) -> Bool {
+    return (pkt).service_type == 17;
+}
+
+/// Calculate gap in sequence count considering 14-bit (16384) counter wrap-around
+pub fn check_sequence_continuity(prev_seq: Int, curr_seq: Int) -> Int {
+    if curr_seq == ((prev_seq + 1) % 16384) {
+        return 0; // Seamless sequence
+    }
+    if curr_seq > prev_seq {
+        return (curr_seq - prev_seq) - 1;
+    }
+    return ((curr_seq + 16384) - prev_seq) - 1;
+}
+
+// 6. Telemetry Transfer Frame Operations
+
+pub fn telemetry_frame_validate(frame: TelemetryFrame) -> Bool {
+    if (frame).version != 0 {
+        return false;
+    }
+    if (frame).spacecraft_id < 0 {
+        return false;
+    }
+    if (frame).spacecraft_id > 1023 {
+        return false;
+    }
+    if (frame).virtual_channel_id < 0 {
+        return false;
+    }
+    if (frame).virtual_channel_id > 7 {
+        return false;
+    }
+    if (frame).master_frame_count < 0 {
+        return false;
+    }
+    if (frame).master_frame_count > 255 {
+        return false;
+    }
+    if (frame).vc_frame_count < 0 {
+        return false;
+    }
+    if (frame).vc_frame_count > 255 {
+        return false;
+    }
+    return true;
+}
+
+pub fn telemetry_frame_check_sync_pattern(sync_word: Int, expected_pattern: Int) -> Bool {
+    return sync_word == expected_pattern;
+}
+
+pub fn telemetry_frame_is_realtime(frame: TelemetryFrame) -> Bool {
+    return (frame).virtual_channel_id == 0;
+}
+
+pub fn telemetry_frame_is_playback(frame: TelemetryFrame) -> Bool {
+    return (frame).virtual_channel_id == 1;
+}
+
+pub fn telemetry_frame_get_payload_capacity(frame: TelemetryFrame) -> Int {
+    let mut overhead: Int = 6; // Transfer Frame Primary Header = 6 bytes
+    if (frame).operational_control_flag {
+        overhead = overhead + 4; // CLCW / OCF field = 4 bytes
+    }
+    overhead = overhead + 2; // Frame Error Control Field (CRC) = 2 bytes
+    if (frame).frame_length <= overhead {
+        return 0;
+    }
+    return (frame).frame_length - overhead;
+}
+
+/// Calculate 8-bit frame counter continuity gap (0..255 wrap-around)
+pub fn check_frame_counter_continuity(prev_mfc: Int, curr_mfc: Int) -> Int {
+    if curr_mfc == ((prev_mfc + 1) % 256) {
+        return 0;
+    }
+    if curr_mfc > prev_mfc {
+        return (curr_mfc - prev_mfc) - 1;
+    }
+    return ((curr_mfc + 256) - prev_mfc) - 1;
+}
+
+// 7. Telemetry Channel Calibration & Alarms
+
+pub fn telemetry_channel_calibrate(raw_val: Int, scale: Float, off: Float) -> Float {
+    return (scale * int_to_float(raw_val)) + off;
+}
+
+pub fn telemetry_channel_calibrate_poly2(raw_val: Int, c0: Float, c1: Float, c2: Float) -> Float {
+    let raw_f: Float = int_to_float(raw_val);
+    return c0 + (c1 * raw_f) + (c2 * (raw_f * raw_f));
+}
+
+pub fn telemetry_channel_update_raw(chan: TelemetryChannel, raw: Int) -> TelemetryChannel {
+    let scale: Float = (chan).scale_factor;
+    let off: Float = (chan).offset;
+    let cal_val: Float = (scale * int_to_float(raw)) + off;
+    let mut alarm: Bool = false;
+    if cal_val < (chan).alarm_low {
+        alarm = true;
+    }
+    if cal_val > (chan).alarm_high {
+        alarm = true;
+    }
+    return TelemetryChannel {
+        channel_id: (chan).channel_id,
+        name: (chan).name,
+        raw_value: raw,
+        eng_value: cal_val,
+        unit: (chan).unit,
+        scale_factor: scale,
+        offset: off,
+        alarm_low: (chan).alarm_low,
+        alarm_high: (chan).alarm_high,
+        in_alarm: alarm,
+    };
+}
+
+pub fn telemetry_channel_clamp(val: Float, min_val: Float, max_val: Float) -> Float {
+    if val < min_val {
+        return min_val;
+    }
+    if val > max_val {
+        return max_val;
+    }
+    return val;
+}

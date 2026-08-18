@@ -1,0 +1,104 @@
+// # Order Flow Imbalance (OFI) and Multi-Level Alpha
+//
+// Logline: Calculates Cont-Kukanov-Stoikov (2014) Order Flow Imbalance (OFI) and multi-level integrated order book flow pressure.
+//
+// Setup: Pure high-frequency alpha signal module tracking bid/ask queue delta contributions across price changes.
+//
+// Beats:
+//   1. Define L1Snapshot, MultiLevelSnapshot, and OfiResult structures.
+//   2. Compute classical level-1 OFI measuring net changes in bid/ask queues given price increments.
+//   3. Compute integrated multi-level OFI aggregating flow momentum across top K price levels.
+
+pub type L1Snapshot = struct {
+    bid_price: Float,
+    bid_size: Float,
+    ask_price: Float,
+    ask_size: Float,
+};
+
+pub type MultiLevelSnapshot = struct {
+    bid_prices: List[Float],
+    bid_sizes: List[Float],
+    ask_prices: List[Float],
+    ask_sizes: List[Float],
+};
+
+pub type OfiResult = struct {
+    delta_bid_flow: Float,
+    delta_ask_flow: Float,
+    net_ofi: Float,
+    predicted_mid_change: Float,
+    signal_strength: Float,
+};
+
+pub fn ofi_l1_compute(
+    prev: &L1Snapshot,
+    curr: &L1Snapshot,
+    beta_impact: Float
+) -> OfiResult {
+    let p_b_prev: Float = (prev).bid_price;
+    let q_b_prev: Float = (prev).bid_size;
+    let p_b_curr: Float = (curr).bid_price;
+    let q_b_curr: Float = (curr).bid_size;
+
+    let p_a_prev: Float = (prev).ask_price;
+    let q_a_prev: Float = (prev).ask_size;
+    let p_a_curr: Float = (curr).ask_price;
+    let q_a_curr: Float = (curr).ask_size;
+
+    // Bid contribution:
+    // If P_b(t) > P_b(t-1) => q_b(t)
+    // If P_b(t) == P_b(t-1) => q_b(t) - q_b(t-1)
+    // If P_b(t) < P_b(t-1) => -q_b(t-1)
+    let mut delta_bid: Float = 0.0;
+    if p_b_curr > p_b_prev {
+        delta_bid = q_b_curr;
+    } else if p_b_curr == p_b_prev {
+        delta_bid = q_b_curr - q_b_prev;
+    } else {
+        delta_bid = 0.0 - q_b_prev;
+    }
+
+    // Ask contribution:
+    // If P_a(t) > P_a(t-1) => -q_a(t-1)
+    // If P_a(t) == P_a(t-1) => q_a(t) - q_a(t-1)
+    // If P_a(t) < P_a(t-1) => q_a(t)
+    let mut delta_ask: Float = 0.0;
+    if p_a_curr > p_a_prev {
+        delta_ask = 0.0 - q_a_prev;
+    } else if p_a_curr == p_a_prev {
+        delta_ask = q_a_curr - q_a_prev;
+    } else {
+        delta_ask = q_a_curr;
+    }
+
+    // Net OFI = delta_bid - delta_ask
+    let net_ofi_val: Float = delta_bid - delta_ask;
+    let exp_dp: Float = beta_impact * net_ofi_val;
+    let sig: Float = if net_ofi_val > 100.0 { 1.0 } else if net_ofi_val < (0.0 - 100.0) { 0.0 - 1.0 } else { net_ofi_val / 100.0 };
+
+    return OfiResult {
+        delta_bid_flow: delta_bid,
+        delta_ask_flow: delta_ask,
+        net_ofi: net_ofi_val,
+        predicted_mid_change: exp_dp,
+        signal_strength: sig,
+    };
+}
+
+pub fn ofi_multi_level_aggregate(
+    level_ofis: &List[Float],
+    weights: &List[Float]
+) -> Float {
+    let n: Int = list_len(*level_ofis);
+    let mut integrated_ofi: Float = 0.0;
+    let mut i: Int = 0;
+
+    while i < n {
+        let ofi_k: Float = list_get(*level_ofis, i);
+        let w_k: Float = if i < list_len(*weights) { list_get(*weights, i) } else { 1.0 };
+        integrated_ofi = integrated_ofi + (ofi_k * w_k);
+        i = i + 1;
+    }
+    return integrated_ofi;
+}

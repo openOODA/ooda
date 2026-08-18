@@ -1,0 +1,150 @@
+// # Liquidation Engine & Debt Cascade Risk Model
+//
+// Logline: Models maintenance margin thresholds, step liquidation auctions, bad debt socialized losses, and insurance fund absorption.
+//
+// Setup: Pure quantitative risk module implementing liquidation cascades for leveraged perpetual derivatives.
+//
+// Beats:
+//   1. Define LiquidationAccount, LiquidationTier, CascadeState, and LiquidationExecutionResult.
+//   2. Compute maintenance margin requirement across tiered leverage and detect underwater margin breaches.
+//   3. Execute partial/full liquidations, allocate liquidation penalty bonuses, and draw down the insurance fund.
+
+pub type LiquidationTier = struct {
+    bracket_id: Int,
+    max_notional: Float,
+    maintenance_margin_ratio: Float,
+    initial_margin_ratio: Float,
+    max_leverage: Float,
+};
+
+pub type LiquidationAccount = struct {
+    account_id: String,
+    collateral_usd: Float,
+    position_size: Float,
+    entry_price: Float,
+    mark_price: Float,
+    unrealized_pnl: Float,
+    maintenance_margin_req: Float,
+};
+
+pub type CascadeState = struct {
+    insurance_fund_balance: Float,
+    total_socialized_loss: Float,
+    liquidated_positions_count: Int,
+    total_liquidation_volume: Float,
+};
+
+pub type LiquidationExecutionResult = struct {
+    account_id: String,
+    liquidated_size: Float,
+    fill_price: Float,
+    penalty_fee_usd: Float,
+    insurance_fund_delta: Float,
+    bad_debt_usd: Float,
+    is_fully_liquidated: Bool,
+};
+
+pub fn liquidation_tier_default() -> LiquidationTier {
+    return LiquidationTier {
+        bracket_id: 1,
+        max_notional: 50000.0,
+        maintenance_margin_ratio: 0.005, // 0.5% (200x max)
+        initial_margin_ratio: 0.01,      // 1.0% (100x max)
+        max_leverage: 100.0,
+    };
+}
+
+pub fn cascade_state_new(initial_insurance_fund: Float) -> CascadeState {
+    return CascadeState {
+        insurance_fund_balance: initial_insurance_fund,
+        total_socialized_loss: 0.0,
+        liquidated_positions_count: 0,
+        total_liquidation_volume: 0.0,
+    };
+}
+
+pub fn calc_unrealized_pnl(pos_size: Float, entry_px: Float, mark_px: Float) -> Float {
+    return pos_size * (mark_px - entry_px);
+}
+
+pub fn calc_margin_ratio(account: &LiquidationAccount) -> Float {
+    let mut abs_pos: Float = (account).position_size;
+    if abs_pos < 0.0 {
+        abs_pos = 0.0 - abs_pos;
+    }
+    let notional: Float = abs_pos * (account).mark_price;
+    if notional <= 0.0 {
+        return 1.0;
+    }
+    let total_equity: Float = (account).collateral_usd + (account).unrealized_pnl;
+    return total_equity / notional;
+}
+
+pub fn is_liquidation_eligible(
+    account: &LiquidationAccount,
+    mm_ratio: Float
+) -> Bool {
+    let current_ratio: Float = calc_margin_ratio(account);
+    return current_ratio <= mm_ratio;
+}
+
+pub fn calc_bankruptcy_price(
+    collateral: Float,
+    pos_size: Float,
+    entry_px: Float
+) -> Float {
+    if pos_size == 0.0 {
+        return 0.0;
+    }
+    return entry_px - (collateral / pos_size);
+}
+
+pub fn execute_liquidation(
+    account: &LiquidationAccount,
+    cascade: &mut CascadeState,
+    tier: &LiquidationTier,
+    penalty_rate: Float
+) -> LiquidationExecutionResult {
+    let mut abs_pos: Float = (account).position_size;
+    if abs_pos < 0.0 {
+        abs_pos = 0.0 - abs_pos;
+    }
+    let notional: Float = abs_pos * (account).mark_price;
+    let equity: Float = (account).collateral_usd + (account).unrealized_pnl;
+    let penalty: Float = notional * penalty_rate;
+
+    let mut bad_debt: Float = 0.0;
+    let mut fund_delta: Float = 0.0;
+
+    if equity <= 0.0 {
+        let deficit: Float = 0.0 - equity;
+        if (cascade).insurance_fund_balance >= deficit {
+            (cascade).insurance_fund_balance = (cascade).insurance_fund_balance - deficit;
+            fund_delta = 0.0 - deficit;
+        } else {
+            bad_debt = deficit - (cascade).insurance_fund_balance;
+            fund_delta = 0.0 - (cascade).insurance_fund_balance;
+            (cascade).insurance_fund_balance = 0.0;
+            (cascade).total_socialized_loss = (cascade).total_socialized_loss + bad_debt;
+        }
+    } else {
+        let surplus: Float = equity - penalty;
+        if surplus > 0.0 {
+            (cascade).insurance_fund_balance = (cascade).insurance_fund_balance + penalty;
+            fund_delta = penalty;
+        }
+    }
+
+    (cascade).liquidated_positions_count = (cascade).liquidated_positions_count + 1;
+    (cascade).total_liquidation_volume = (cascade).total_liquidation_volume + notional;
+
+    return LiquidationExecutionResult {
+        account_id: (account).account_id,
+        liquidated_size: (account).position_size,
+        fill_price: (account).mark_price,
+        penalty_fee_usd: penalty,
+        insurance_fund_delta: fund_delta,
+        bad_debt_usd: bad_debt,
+        is_fully_liquidated: true,
+    };
+}

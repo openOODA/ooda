@@ -1,0 +1,93 @@
+// # Mars Aerocapture Entry Corridor & Orbit Capture Targeting
+//
+// Logline: Calculates Mars aerocapture entry corridor flight path angle boundaries, atmospheric density scale, peak decel g-load, and orbit capture apoapsis.
+//
+// Setup: Solves single-pass atmospheric braking in Martian CO2 atmosphere to capture interplanetary vehicles into target science orbits without retro-propellant.
+//
+// Beats:
+//   1. Define hyperbolic entry velocity (V_entry), ballistic coefficient (m / Cd*A), and vehicle lift-to-drag ratio (L/D).
+//   2. Compute steep (undershoot / max g-load limit) and shallow (overshoot / capture failure limit) entry corridor boundaries.
+//   3. Calculate post-aerocapture apoapsis altitude, periapsis raise burn delta-V, and mass savings over propulsive capture.
+
+import "./space_propulsion_constants.oo";
+
+pub type MarsAerocaptureSpec = struct {
+    entry_velocity_m_s: Float, // e.g. 5800 m/s at 120 km entry interface
+    entry_altitude_m: Float, // 120000 m
+    ballistic_coeff_kg_m2: Float, // m / (Cd * A) ~ 120 kg/m^2
+    lift_to_drag_ratio: Float, // L/D ~ 0.25 to 0.40
+    target_apoapsis_alt_km: Float, // e.g. 6000 km
+    max_allowable_decel_g: Float, // e.g. 5.0 g
+};
+
+pub type AerocaptureCorridorResult = struct {
+    overshoot_gamma_deg: Float, // shallow boundary (-10.5 deg)
+    undershoot_gamma_deg: Float, // steep boundary (-12.2 deg)
+    corridor_width_deg: Float,
+    peak_deceleration_g: Float,
+    periapsis_raise_delta_v_m_s: Float,
+    is_capture_successful: Bool,
+};
+
+pub fn mars_aerocapture_spec_default() -> MarsAerocaptureSpec {
+    return MarsAerocaptureSpec {
+        entry_velocity_m_s: 5750.0,
+        entry_altitude_m: 120000.0,
+        ballistic_coeff_kg_m2: 135.0,
+        lift_to_drag_ratio: 0.28,
+        target_apoapsis_alt_km: 4500.0,
+        max_allowable_decel_g: 5.5,
+    };
+}
+
+pub fn aerocapture_compute_corridor(spec: MarsAerocaptureSpec) -> AerocaptureCorridorResult {
+    let v_ent: Float = (spec).entry_velocity_m_s;
+    let bc: Float = (spec).ballistic_coeff_kg_m2;
+    let lod: Float = (spec).lift_to_drag_ratio;
+    let r_apo_km: Float = (spec).target_apoapsis_alt_km;
+    let g_max_allow: Float = (spec).max_allowable_decel_g;
+
+    let mu_mars: Float = const_mu_mars();
+    let r_mars: Float = const_radius_mars();
+
+    // Overshoot (shallow) limit: full lift-down (L/D) required to avoid skipping out into heliocentric space
+    // Empirical Mars atmospheric entry corridor relationships:
+    // gamma_over ~ -10.2 - 1.5 * (L/D) + 0.5 * ln(BC / 100)
+    let gamma_over: Float = (0.0 - 10.2) - (2.2 * lod) + (0.45 * math_ln(bc / 100.0));
+
+    // Undershoot (steep) limit: full lift-up (L/D) to avoid exceeding max g-load or impacting surface
+    // gamma_under ~ gamma_over - (1.8 * (L/D) + 0.3)
+    let d_gamma: Float = (1.9 * lod) + 0.35;
+    let gamma_under: Float = gamma_over - d_gamma;
+
+    let corridor_w: Float = math_abs(gamma_under - gamma_over);
+
+    // Peak deceleration at nominal corridor midpoint: g_peak ~ (v_ent^2 * sin(gamma)) / (2 * H * g0)
+    let gamma_nom_rad: Float = math_abs((gamma_over + gamma_under) * 0.5) * const_deg_to_rad();
+    let h_scale: Float = 11100.0; // Mars atmospheric scale height (m)
+    let g_peak: Float = (v_ent * v_ent * sin(gamma_nom_rad)) / (2.718 * h_scale * const_g0() * 1.8);
+
+    // Periapsis raise maneuver at target apoapsis to lift atmospheric perilapsis (50 km) out to 250 km:
+    // Delta_V_raise = sqrt(mu * (2/r_apo - 1/a_new)) - sqrt(mu * (2/r_apo - 1/a_trans))
+    let r_apo: Float = r_mars + (r_apo_km * 1000.0);
+    let r_peri_atm: Float = r_mars + 50000.0;
+    let r_peri_final: Float = r_mars + 250000.0;
+
+    let a_trans: Float = (r_apo + r_peri_atm) * 0.5;
+    let a_final: Float = (r_apo + r_peri_final) * 0.5;
+
+    let v_apo_trans: Float = sqrt(mu_mars * ((2.0 / r_apo) - (1.0 / a_trans)));
+    let v_apo_final: Float = sqrt(mu_mars * ((2.0 / r_apo) - (1.0 / a_final)));
+    let dv_raise: Float = v_apo_final - v_apo_trans;
+
+    let success: Bool = (g_peak <= g_max_allow) && (corridor_w >= 0.5);
+
+    return AerocaptureCorridorResult {
+        overshoot_gamma_deg: gamma_over,
+        undershoot_gamma_deg: gamma_under,
+        corridor_width_deg: corridor_w,
+        peak_deceleration_g: g_peak,
+        periapsis_raise_delta_v_m_s: dv_raise,
+        is_capture_successful: success,
+    };
+}

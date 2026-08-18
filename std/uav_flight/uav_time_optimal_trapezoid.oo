@@ -1,0 +1,173 @@
+// # UAV Time-Optimal Trapezoidal Velocity Profiler
+//
+// Logline: Accel / cruise / decel switch times, then sample p,v,a. Int destub.
+//
+// Setup: Flattened 1D profile; triangle when dist < v^2/a.
+//
+// Beats:
+//   1. Limits vmax, amax.
+//   2. d_crit = vmax^2 / amax; t_acc = vmax / amax.
+//   3. Triangle v_peak = isqrt(dist * a) when dist < d_crit.
+//   4. Evaluate phase 1/2/3 at query time t.
+
+type TrapezoidProfile1D = struct {
+    p_start_mm: Int,
+    p_target_mm: Int,
+    v_cruise_mm_s: Int,
+    t_acc_s: Int,
+    t_cruise_s: Int,
+    t_dec_s: Int,
+    t_total_s: Int,
+    direction: Int
+};
+
+type TrapezoidSample = struct {
+    pos_mm: Int,
+    vel_mm_s: Int,
+    acc_mm_s2: Int
+};
+
+pub fn trap_isqrt_seed(n: Int, g: Int) -> Int {
+    let g2: Int = g * 2;
+    if g2 <= 0 {
+        return g;
+    }
+    if (g2 * g2) > n {
+        return g;
+    }
+    if g2 <= g {
+        return g;
+    }
+    return trap_isqrt_seed(n, g2);
+}
+
+pub fn trap_isqrt_iter(n: Int, guess: Int, steps: Int) -> Int {
+    if steps <= 0 {
+        return guess;
+    }
+    if guess <= 0 {
+        return 0;
+    }
+    let next: Int = (guess + (n / guess)) / 2;
+    let diff: Int = next - guess;
+    if diff == 0 {
+        return next;
+    }
+    if diff < 0 {
+        if (0 - diff) <= 1 {
+            return next;
+        }
+        return trap_isqrt_iter(n, next, steps - 1);
+    }
+    if diff <= 1 {
+        return guess;
+    }
+    return trap_isqrt_iter(n, next, steps - 1);
+}
+
+pub fn trap_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if n < 4 {
+        return 1;
+    }
+    let seed: Int = trap_isqrt_seed(n, 1);
+    return trap_isqrt_iter(n, seed, 8);
+}
+
+pub fn plan_trapezoid_1d(
+    p_start_mm: Int,
+    p_target_mm: Int,
+    max_vel_mm_s: Int,
+    max_acc_mm_s2: Int
+) -> TrapezoidProfile1D {
+    let delta_p: Int = p_target_mm - p_start_mm;
+    let dist: Int = if delta_p < 0 { 0 - delta_p } else { delta_p };
+    let dir: Int = if delta_p >= 0 { 1 } else { 0 - 1 };
+    let a_max: Int = if max_acc_mm_s2 < 1 { 1 } else { max_acc_mm_s2 };
+    let v_max: Int = if max_vel_mm_s < 1 { 1 } else { max_vel_mm_s };
+    let d_crit: Int = (v_max * v_max) / a_max;
+    if dist >= d_crit {
+        let t_acc: Int = v_max / a_max;
+        let d_cruise: Int = dist - d_crit;
+        let t_cruise: Int = d_cruise / v_max;
+        return TrapezoidProfile1D {
+            p_start_mm: p_start_mm,
+            p_target_mm: p_target_mm,
+            v_cruise_mm_s: v_max,
+            t_acc_s: t_acc,
+            t_cruise_s: t_cruise,
+            t_dec_s: t_acc,
+            t_total_s: t_acc + t_cruise + t_acc,
+            direction: dir
+        };
+    }
+    let v_peak: Int = trap_isqrt(dist * a_max);
+    let t_acc_tri: Int = v_peak / a_max;
+    return TrapezoidProfile1D {
+        p_start_mm: p_start_mm,
+        p_target_mm: p_target_mm,
+        v_cruise_mm_s: v_peak,
+        t_acc_s: t_acc_tri,
+        t_cruise_s: 0,
+        t_dec_s: t_acc_tri,
+        t_total_s: t_acc_tri + t_acc_tri,
+        direction: dir
+    };
+}
+
+pub fn eval_trapezoid_1d(
+    prof: TrapezoidProfile1D,
+    t_s: Int,
+    max_acc_mm_s2: Int
+) -> TrapezoidSample {
+    let a_signed: Int = max_acc_mm_s2 * prof.direction;
+    let v_peak: Int = prof.v_cruise_mm_s * prof.direction;
+    if t_s <= 0 {
+        return TrapezoidSample {
+            pos_mm: prof.p_start_mm,
+            vel_mm_s: 0,
+            acc_mm_s2: 0
+        };
+    }
+    if t_s >= prof.t_total_s {
+        return TrapezoidSample {
+            pos_mm: prof.p_target_mm,
+            vel_mm_s: 0,
+            acc_mm_s2: 0
+        };
+    }
+    let t1: Int = prof.t_acc_s;
+    let t2: Int = t1 + prof.t_cruise_s;
+    if t_s < t1 {
+        return TrapezoidSample {
+            pos_mm: prof.p_start_mm + ((a_signed * t_s * t_s) / 2),
+            vel_mm_s: a_signed * t_s,
+            acc_mm_s2: a_signed
+        };
+    }
+    let p1: Int = prof.p_start_mm + ((a_signed * t1 * t1) / 2);
+    if t_s < t2 {
+        return TrapezoidSample {
+            pos_mm: p1 + (v_peak * (t_s - t1)),
+            vel_mm_s: v_peak,
+            acc_mm_s2: 0
+        };
+    }
+    let p2: Int = p1 + (v_peak * prof.t_cruise_s);
+    let dt_dec: Int = t_s - t2;
+    return TrapezoidSample {
+        pos_mm: (p2 + (v_peak * dt_dec)) - ((a_signed * dt_dec * dt_dec) / 2),
+        vel_mm_s: v_peak - (a_signed * dt_dec),
+        acc_mm_s2: 0 - a_signed
+    };
+}
+
+pub fn trap_total_s(p: TrapezoidProfile1D) -> Int {
+    return p.t_total_s;
+}
+
+pub fn trap_v_cruise(p: TrapezoidProfile1D) -> Int {
+    return p.v_cruise_mm_s;
+}

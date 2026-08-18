@@ -1,0 +1,199 @@
+// # RTOS Event Flags & Event Groups
+//
+// Logline: 32-bit synchronized event flags, wait-for-any, wait-for-all, auto-clear on exit, and task notifications.
+//
+// Setup: Multi-bit synchronization mechanism for coordinating tasks across concurrent event triggers.
+//
+// Beats:
+//   1. Define event group structures, 32-bit flag bitmaps, and waiter criteria.
+//   2. Implement bitwise flag setting, clearing, and atomic condition checks.
+//   3. Support wait-for-all and wait-for-any matching logic with auto-clear flags.
+//   4. Evaluate waiting task conditions and notify unblocked task recipients.
+
+type RtosEventWaiter = struct {
+    task_id: Int,
+    flags_to_wait_for: Int,
+    wait_all: Bool,
+    clear_on_exit: Bool,
+};
+
+type RtosEventGroup = struct {
+    group_id: Int,
+    current_flags: Int,
+    waiters: List[RtosEventWaiter],
+    last_unblocked: List[Int],
+    last_ok: Bool,
+    last_old_flags: Int,
+};
+
+pub fn rtos_event_group_new(id: Int, initial_flags: Int) -> RtosEventGroup {
+    let empty_waiters: List[RtosEventWaiter] = list_new();
+    let empty_ids: List[Int] = list_new();
+    return RtosEventGroup {
+        group_id: id,
+        current_flags: initial_flags,
+        waiters: empty_waiters,
+        last_unblocked: empty_ids,
+        last_ok: true,
+        last_old_flags: initial_flags,
+    };
+}
+
+fn bitwise_or(a: Int, b: Int) -> Int {
+    let mut res: Int = 0;
+    let mut m: Int = 1;
+    let mut bit: Int = 0;
+    while bit < 32 {
+        let ba: Int = (a / m) % 2;
+        let bb: Int = (b / m) % 2;
+        if ba == 1 {
+            res = res + m;
+        } else {
+            if bb == 1 {
+                res = res + m;
+            }
+        }
+        m = m * 2;
+        bit = bit + 1;
+    }
+    return res;
+}
+
+fn bitwise_and(a: Int, b: Int) -> Int {
+    let mut res: Int = 0;
+    let mut m: Int = 1;
+    let mut bit: Int = 0;
+    while bit < 32 {
+        let ba: Int = (a / m) % 2;
+        let bb: Int = (b / m) % 2;
+        if ba == 1 {
+            if bb == 1 {
+                res = res + m;
+            }
+        }
+        m = m * 2;
+        bit = bit + 1;
+    }
+    return res;
+}
+
+fn bitwise_clear(a: Int, mask: Int) -> Int {
+    let mut res: Int = 0;
+    let mut m: Int = 1;
+    let mut bit: Int = 0;
+    while bit < 32 {
+        let ba: Int = (a / m) % 2;
+        let bm: Int = (mask / m) % 2;
+        if ba == 1 {
+            if bm == 0 {
+                res = res + m;
+            }
+        }
+        m = m * 2;
+        bit = bit + 1;
+    }
+    return res;
+}
+
+pub fn rtos_event_group_set_bits(group: RtosEventGroup, bits_to_set: Int) -> RtosEventGroup {
+    let mut flags: Int = bitwise_or((group).current_flags, bits_to_set);
+
+    let mut unblocked_tasks: List[Int] = list_new();
+    let mut remaining_waiters: List[RtosEventWaiter] = list_new();
+    let len: Int = list_len((group).waiters);
+    let mut i: Int = 0;
+
+    while i < len {
+        let w: RtosEventWaiter = list_get((group).waiters, i);
+        let intersection: Int = bitwise_and(flags, (w).flags_to_wait_for);
+        let mut matched: Bool = false;
+
+        if (w).wait_all {
+            matched = (intersection == (w).flags_to_wait_for);
+        } else {
+            matched = (intersection != 0);
+        }
+
+        if matched {
+            unblocked_tasks = list_push(unblocked_tasks, (w).task_id);
+            if (w).clear_on_exit {
+                flags = bitwise_clear(flags, (w).flags_to_wait_for);
+            }
+        } else {
+            remaining_waiters = list_push(remaining_waiters, w);
+        }
+        i = i + 1;
+    }
+
+    return RtosEventGroup {
+        group_id: (group).group_id,
+        current_flags: flags,
+        waiters: remaining_waiters,
+        last_unblocked: unblocked_tasks,
+        last_ok: true,
+        last_old_flags: (group).current_flags,
+    };
+}
+
+pub fn rtos_event_group_clear_bits(group: RtosEventGroup, bits_to_clear: Int) -> RtosEventGroup {
+    let old_flags: Int = (group).current_flags;
+    return RtosEventGroup {
+        group_id: (group).group_id,
+        current_flags: bitwise_clear((group).current_flags, bits_to_clear),
+        waiters: (group).waiters,
+        last_unblocked: (group).last_unblocked,
+        last_ok: true,
+        last_old_flags: old_flags,
+    };
+}
+
+pub fn rtos_event_group_get_bits(group: RtosEventGroup) -> Int {
+    return (group).current_flags;
+}
+
+pub fn rtos_event_group_wait_bits(
+    group: RtosEventGroup,
+    task_id: Int,
+    bits_to_wait_for: Int,
+    wait_all: Bool,
+    clear_on_exit: Bool
+) -> RtosEventGroup {
+    let intersection: Int = bitwise_and((group).current_flags, bits_to_wait_for);
+    let mut matched: Bool = false;
+
+    if wait_all {
+        matched = (intersection == bits_to_wait_for);
+    } else {
+        matched = (intersection != 0);
+    }
+
+    if matched {
+        let mut flags: Int = (group).current_flags;
+        if clear_on_exit {
+            flags = bitwise_clear(flags, bits_to_wait_for);
+        }
+        return RtosEventGroup {
+            group_id: (group).group_id,
+            current_flags: flags,
+            waiters: (group).waiters,
+            last_unblocked: (group).last_unblocked,
+            last_ok: true,
+            last_old_flags: (group).current_flags,
+        };
+    }
+
+    let waiter: RtosEventWaiter = RtosEventWaiter {
+        task_id: task_id,
+        flags_to_wait_for: bits_to_wait_for,
+        wait_all: wait_all,
+        clear_on_exit: clear_on_exit,
+    };
+    return RtosEventGroup {
+        group_id: (group).group_id,
+        current_flags: (group).current_flags,
+        waiters: list_push((group).waiters, waiter),
+        last_unblocked: (group).last_unblocked,
+        last_ok: false,
+        last_old_flags: (group).current_flags,
+    };
+}

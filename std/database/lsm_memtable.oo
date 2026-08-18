@@ -1,0 +1,217 @@
+// # LSM-Tree In-Memory Table (MemTable)
+//
+// Logline: Manages active and frozen in-memory sorted write buffers with sequence numbers and tombstones.
+//
+// Setup: Pure sorted memory buffer for Log-Structured Merge-tree storage.
+//
+// Beats:
+//   1. Define MemTable entries with sequence numbers, timestamps, and deletion markers.
+//   2. Insert, update, and tombstone key-value pairs maintaining sorted key order.
+//   3. Provide point lookups, bounded range scans, capacity tracking, and freeze lifecycle.
+
+pub type MemTableEntry = struct {
+    key: String,
+    value: String,
+    seq_num: Int,
+    is_tombstone: Bool,
+    timestamp: Int,
+};
+
+pub type MemTable = struct {
+    table_id: Int,
+    entries: List[MemTableEntry],
+    byte_size: Int,
+    max_byte_size: Int,
+    is_frozen: Bool,
+    min_seq: Int,
+    max_seq: Int,
+};
+
+pub fn memtable_entry_create(
+    key: String,
+    val: String,
+    seq: Int,
+    tombstone: Bool,
+    ts: Int
+) -> MemTableEntry {
+    return MemTableEntry {
+        key: key,
+        value: val,
+        seq_num: seq,
+        is_tombstone: tombstone,
+        timestamp: ts,
+    };
+}
+
+pub fn memtable_create(table_id: Int, max_byte_size: Int) -> MemTable {
+    let empty_entries: List[MemTableEntry] = list_new();
+    return MemTable {
+        table_id: table_id,
+        entries: empty_entries,
+        byte_size: 0,
+        max_byte_size: max_byte_size,
+        is_frozen: false,
+        min_seq: 0,
+        max_seq: 0,
+    };
+}
+
+pub fn memtable_is_full(mem: &MemTable) -> Bool {
+    let cur_size: Int = (mem).byte_size;
+    let max_size: Int = (mem).max_byte_size;
+    return cur_size >= max_size;
+}
+
+pub fn memtable_freeze(mem: &mut MemTable) {
+    (mem).is_frozen = true;
+}
+
+pub fn memtable_entry_count(mem: &MemTable) -> Int {
+    return list_len((mem).entries);
+}
+
+pub fn memtable_put(
+    mem: &mut MemTable,
+    key: String,
+    val: String,
+    seq: Int,
+    ts: Int
+) -> Bool {
+    if (mem).is_frozen {
+        return false;
+    }
+
+    let entry: MemTableEntry = memtable_entry_create(key, val, seq, false, ts);
+    let cur_entries: List[MemTableEntry] = (mem).entries;
+    let n: Int = list_len(cur_entries);
+    let mut new_entries: List[MemTableEntry] = list_new();
+    let mut inserted: Bool = false;
+
+    let mut i: Int = 0;
+    while i < n {
+        let item: MemTableEntry = list_get(cur_entries, i);
+        if inserted == false {
+            if (item).key >= key {
+                new_entries = list_push(new_entries, entry);
+                inserted = true;
+            }
+        }
+        new_entries = list_push(new_entries, item);
+        i = i + 1;
+    }
+
+    if inserted == false {
+        new_entries = list_push(new_entries, entry);
+    }
+
+    (mem).entries = new_entries;
+    let k_len: Int = key.len();
+    let v_len: Int = val.len();
+    let entry_bytes: Int = k_len + v_len + 32;
+    (mem).byte_size = (mem).byte_size + entry_bytes;
+
+    if (mem).min_seq == 0 {
+        (mem).min_seq = seq;
+    }
+    if seq > (mem).max_seq {
+        (mem).max_seq = seq;
+    }
+
+    return true;
+}
+
+pub fn memtable_delete(
+    mem: &mut MemTable,
+    key: String,
+    seq: Int,
+    ts: Int
+) -> Bool {
+    if (mem).is_frozen {
+        return false;
+    }
+
+    let entry: MemTableEntry = memtable_entry_create(key, "", seq, true, ts);
+    let cur_entries: List[MemTableEntry] = (mem).entries;
+    let n: Int = list_len(cur_entries);
+    let mut new_entries: List[MemTableEntry] = list_new();
+    let mut inserted: Bool = false;
+
+    let mut i: Int = 0;
+    while i < n {
+        let item: MemTableEntry = list_get(cur_entries, i);
+        if inserted == false {
+            if (item).key >= key {
+                new_entries = list_push(new_entries, entry);
+                inserted = true;
+            }
+        }
+        new_entries = list_push(new_entries, item);
+        i = i + 1;
+    }
+
+    if inserted == false {
+        new_entries = list_push(new_entries, entry);
+    }
+
+    (mem).entries = new_entries;
+    let k_len: Int = key.len();
+    let entry_bytes: Int = k_len + 32;
+    (mem).byte_size = (mem).byte_size + entry_bytes;
+
+    if seq > (mem).max_seq {
+        (mem).max_seq = seq;
+    }
+
+    return true;
+}
+
+pub fn memtable_get(mem: &MemTable, key: String) -> Option[String] {
+    let cur_entries: List[MemTableEntry] = (mem).entries;
+    let n: Int = list_len(cur_entries);
+    let mut i: Int = 0;
+    let mut latest_val: Option[String] = None;
+    let mut highest_seq: Int = -1;
+
+    while i < n {
+        let item: MemTableEntry = list_get(cur_entries, i);
+        if (item).key == key {
+            if (item).seq_num > highest_seq {
+                highest_seq = (item).seq_num;
+                if (item).is_tombstone {
+                    latest_val = None;
+                } else {
+                    latest_val = Some((item).value);
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    return latest_val;
+}
+
+pub fn memtable_scan(
+    mem: &MemTable,
+    min_key: String,
+    max_key: String
+) -> List[MemTableEntry] {
+    let cur_entries: List[MemTableEntry] = (mem).entries;
+    let n: Int = list_len(cur_entries);
+    let mut results: List[MemTableEntry] = list_new();
+    let mut i: Int = 0;
+
+    while i < n {
+        let item: MemTableEntry = list_get(cur_entries, i);
+        let k: String = (item).key;
+        if k >= min_key {
+            if k <= max_key {
+                if (item).is_tombstone == false {
+                    results = list_push(results, item);
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    return results;
+}

@@ -1,0 +1,78 @@
+// # Latency Arbitrage and Stale Quote Detection
+//
+// Logline: Detects latency arbitrage exposure by monitoring SIP vs direct exchange proprietary multicast feed divergence and stale quote windows.
+//
+// Setup: Pure ultra-low-latency market microstructure module tracking feed timestamp differentials and vulnerable quote states.
+//
+// Beats:
+//   1. Define DirectFeedQuote, SipQuote, and LatencyArbitrageWarning structures.
+//   2. Identify stale resting quotes when the direct exchange feed price changes ahead of consolidated tape.
+//   3. Compute race window duration in microseconds and recommend emergency quote cancellation or widening.
+
+pub type DirectFeedQuote = struct {
+    exchange_id: String,
+    price: Float,
+    size: Float,
+    exchange_timestamp_ns: Int,
+    local_received_ns: Int,
+};
+
+pub type SipQuote = struct {
+    consolidated_price: Float,
+    sip_timestamp_ns: Int,
+    local_received_ns: Int,
+};
+
+pub type LatencyArbitrageWarning = struct {
+    is_quote_stale: Bool,
+    price_discrepancy: Float,
+    latency_gap_microseconds: Float,
+    sniping_risk_score: Float,
+    should_emergency_cancel: Bool,
+};
+
+pub fn latency_detect_stale_quote(
+    direct: &DirectFeedQuote,
+    sip: &SipQuote,
+    resting_bid: Float,
+    resting_ask: Float
+) -> LatencyArbitrageWarning {
+    let d_px: Float = (direct).price;
+    let s_px: Float = (sip).consolidated_price;
+    let diff: Float = d_px - s_px;
+    let abs_diff: Float = if diff < 0.0 { 0.0 - diff } else { diff };
+
+    // Latency gap in microseconds: (local_sip - local_direct) / 1000
+    let ns_gap: Int = (sip).local_received_ns - (direct).local_received_ns;
+    let mut gap_f: Float = 0.0;
+    let mut cnt: Int = ns_gap;
+    if cnt < 0 { cnt = 0 - cnt; }
+    while cnt >= 10000 { gap_f = gap_f + 10000.0; cnt = cnt - 10000; }
+    while cnt >= 1000 { gap_f = gap_f + 1000.0; cnt = cnt - 1000; }
+    while cnt >= 100 { gap_f = gap_f + 100.0; cnt = cnt - 100; }
+    while cnt >= 10 { gap_f = gap_f + 10.0; cnt = cnt - 10; }
+    while cnt >= 1 { gap_f = gap_f + 1.0; cnt = cnt - 1; }
+    let gap_us: Float = gap_f / 1000.0;
+
+    let mut stale: Bool = false;
+    let mut emergency: Bool = false;
+    let mut risk: Float = 0.0;
+
+    // Vulnerable if our resting quote is crosses the updated direct feed
+    if d_px < resting_bid || d_px > resting_ask || abs_diff > 0.01 {
+        stale = true;
+        emergency = true;
+        risk = 0.95;
+    } else if abs_diff > 0.001 {
+        stale = true;
+        risk = 0.50;
+    }
+
+    return LatencyArbitrageWarning {
+        is_quote_stale: stale,
+        price_discrepancy: abs_diff,
+        latency_gap_microseconds: gap_us,
+        sniping_risk_score: risk,
+        should_emergency_cancel: emergency,
+    };
+}

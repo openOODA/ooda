@@ -1,0 +1,206 @@
+// # Grid Frequency Inertia & Swing Dynamics
+//
+// Logline: Calculates frequency deviations, virtual inertia response, and swing equation time steps.
+//
+// Setup: Pure frequency tracking and kinetic energy simulation (by-value).
+//
+// Beats:
+//   1. Update frequency telemetry and operational stability boundaries.
+//   2. Calculate stored kinetic energy and per-unit deviations.
+//   3. Compute virtual/synthetic inertia power response from IBR resources.
+//   4. Solve the swing equation for rate of change of frequency (RoCoF).
+//   5. Step grid frequency simulation over discrete time intervals.
+
+type GridFrequency = struct {
+    nominal_hz: Float,
+    current_hz: Float,
+    delta_f: Float,
+    rocof_hz_per_sec: Float,
+    timestamp_sec: Float,
+    deadband_hz: Float,
+    warning_threshold_hz: Float,
+    emergency_threshold_hz: Float,
+    status: Int
+};
+
+type InertialResponse = struct {
+    system_inertia_h: Float,
+    rated_capacity_mva: Float,
+    damping_factor_d: Float,
+    virtual_inertia_h: Float,
+    kinetic_energy_mwsec: Float,
+    virtual_power_mw: Float
+};
+
+type InertialStep = struct {
+    resp: InertialResponse,
+    freq: GridFrequency
+};
+
+pub fn freq_math_abs(val: Float) -> Float {
+    if val < 0.0 {
+        return 0.0 - val;
+    }
+    return val;
+}
+
+pub fn freq_math_clamp(val: Float, lo: Float, hi: Float) -> Float {
+    if val < lo {
+        return lo;
+    }
+    if val > hi {
+        return hi;
+    }
+    return val;
+}
+
+pub fn grid_frequency_new(nominal_hz: Float, current_hz: Float) -> GridFrequency {
+    let dev: Float = current_hz - nominal_hz;
+    return GridFrequency {
+        nominal_hz: nominal_hz,
+        current_hz: current_hz,
+        delta_f: dev,
+        rocof_hz_per_sec: 0.0,
+        timestamp_sec: 0.0,
+        deadband_hz: 0.036,
+        warning_threshold_hz: 0.5,
+        emergency_threshold_hz: 1.0,
+        status: 0
+    };
+}
+
+pub fn grid_frequency_default() -> GridFrequency {
+    return grid_frequency_new(60.0, 60.0);
+}
+
+/// Update grid frequency telemetry, recalculating deviation, RoCoF, and operational status.
+pub fn grid_frequency_update(freq: GridFrequency, new_hz: Float, dt_sec: Float) -> GridFrequency {
+    let old_hz: Float = freq.current_hz;
+    let nom_hz: Float = freq.nominal_hz;
+    let dev: Float = new_hz - nom_hz;
+    let abs_dev: Float = freq_math_abs(dev);
+    let mut rocof: Float = 0.0;
+    if dt_sec > 0.0 {
+        rocof = (new_hz - old_hz) / dt_sec;
+    }
+    let mut status: Int = 1;
+    if abs_dev < freq.deadband_hz {
+        status = 0;
+    } else {
+        if abs_dev < freq.warning_threshold_hz {
+            status = 1;
+        } else {
+            if dev < (0.0 - freq.emergency_threshold_hz) {
+                status = 2;
+            } else {
+                if dev > freq.emergency_threshold_hz {
+                    status = 3;
+                } else {
+                    status = 1;
+                }
+            }
+        }
+    }
+    if abs_dev >= 3.0 {
+        status = 4;
+    }
+    return GridFrequency {
+        nominal_hz: freq.nominal_hz,
+        current_hz: new_hz,
+        delta_f: dev,
+        rocof_hz_per_sec: rocof,
+        timestamp_sec: freq.timestamp_sec + dt_sec,
+        deadband_hz: freq.deadband_hz,
+        warning_threshold_hz: freq.warning_threshold_hz,
+        emergency_threshold_hz: freq.emergency_threshold_hz,
+        status: status
+    };
+}
+
+pub fn grid_frequency_is_stable(freq: GridFrequency) -> Bool {
+    let abs_dev: Float = freq_math_abs(freq.delta_f);
+    let abs_rocof: Float = freq_math_abs(freq.rocof_hz_per_sec);
+    if abs_dev > freq.warning_threshold_hz {
+        return false;
+    }
+    if abs_rocof > 1.0 {
+        return false;
+    }
+    return true;
+}
+
+pub fn grid_frequency_deviation_pu(freq: GridFrequency) -> Float {
+    if freq.nominal_hz <= 0.0 {
+        return 0.0;
+    }
+    return freq.delta_f / freq.nominal_hz;
+}
+
+pub fn inertial_response_calc_kinetic_energy(h_sec: Float, s_mva: Float) -> Float {
+    return h_sec * s_mva;
+}
+
+pub fn inertial_response_new(h_sec: Float, s_mva: Float, damping: Float, h_virt: Float) -> InertialResponse {
+    return InertialResponse {
+        system_inertia_h: h_sec,
+        rated_capacity_mva: s_mva,
+        damping_factor_d: damping,
+        virtual_inertia_h: h_virt,
+        kinetic_energy_mwsec: h_sec * s_mva,
+        virtual_power_mw: 0.0
+    };
+}
+
+/// P_virt = -2 * H_virt * (S_mva / f0) * RoCoF
+pub fn inertial_response_calc_virtual_inertia_power(resp: InertialResponse, freq: GridFrequency) -> Float {
+    let v_h: Float = resp.virtual_inertia_h;
+    if v_h <= 0.0 {
+        return 0.0;
+    }
+    let f0: Float = freq.nominal_hz;
+    if f0 <= 0.0 {
+        return 0.0;
+    }
+    let rocof: Float = freq.rocof_hz_per_sec;
+    let s_mva: Float = resp.rated_capacity_mva;
+    return 0.0 - (2.0 * v_h * (s_mva / f0) * rocof);
+}
+
+/// Swing equation: df/dt = (f0 / (2 * (H_sys + H_virt) * S_mva)) * (P_mismatch - D * delta_f)
+pub fn inertial_response_calc_swing_rocof(resp: InertialResponse, freq: GridFrequency, power_mismatch_mw: Float) -> Float {
+    let h_total: Float = resp.system_inertia_h + resp.virtual_inertia_h;
+    let s_mva: Float = resp.rated_capacity_mva;
+    let f0: Float = freq.nominal_hz;
+    if h_total <= 0.0 {
+        return 0.0;
+    }
+    if s_mva <= 0.0 {
+        return 0.0;
+    }
+    if f0 <= 0.0 {
+        return 0.0;
+    }
+    let damping_load_mw: Float = resp.damping_factor_d * freq.delta_f;
+    let net_accel_power_mw: Float = power_mismatch_mw - damping_load_mw;
+    let denominator: Float = 2.0 * h_total * s_mva;
+    return (f0 * net_accel_power_mw) / denominator;
+}
+
+pub fn inertial_response_step_frequency(resp: InertialResponse, freq: GridFrequency, power_mismatch_mw: Float, dt_sec: Float) -> InertialStep {
+    if dt_sec <= 0.0 {
+        return InertialStep { resp: resp, freq: freq };
+    }
+    let rocof: Float = inertial_response_calc_swing_rocof(resp, freq, power_mismatch_mw);
+    let new_hz: Float = freq.current_hz + (rocof * dt_sec);
+    let v_power: Float = inertial_response_calc_virtual_inertia_power(resp, freq);
+    let next_resp: InertialResponse = InertialResponse {
+        system_inertia_h: resp.system_inertia_h,
+        rated_capacity_mva: resp.rated_capacity_mva,
+        damping_factor_d: resp.damping_factor_d,
+        virtual_inertia_h: resp.virtual_inertia_h,
+        kinetic_energy_mwsec: resp.kinetic_energy_mwsec,
+        virtual_power_mw: v_power
+    };
+    let next_freq: GridFrequency = grid_frequency_update(freq, new_hz, dt_sec);
+    return InertialStep { resp: next_resp, freq: next_freq };
+}

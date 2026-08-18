@@ -1,0 +1,123 @@
+// # Swarm Dispatch Engine
+//
+// Logline: Submit, round-robin select, route, and completion telemetry.
+// residual: &mut destubbed to by-value.
+
+import "./dispatch_worker.oo";
+
+pub fn dispatcher_submit(dispatcher: SwarmDispatcher, priority: Int, payload: Int, timestamp_ms: Int) -> SwarmDispatcher {
+    return SwarmDispatcher {
+        config: dispatcher.config,
+        total_submitted: dispatcher.total_submitted + 1,
+        total_completed: dispatcher.total_completed,
+        total_failed: dispatcher.total_failed,
+        total_cancelled: dispatcher.total_cancelled,
+        rr_cursor: dispatcher.rr_cursor,
+        next_task_id: dispatcher.next_task_id + 1,
+        active_worker_count: dispatcher.active_worker_count
+    };
+}
+
+pub fn dispatcher_last_task(dispatcher: SwarmDispatcher, priority: Int, payload: Int, timestamp_ms: Int) -> SwarmTask {
+    let tid: Int = dispatcher.next_task_id;
+    let max_r: Int = dispatcher.config.max_retries;
+    return swarm_task_create(tid, priority, payload, max_r, timestamp_ms);
+}
+
+pub fn dispatcher_select_worker_rr(dispatcher: SwarmDispatcher, worker_count: Int) -> SwarmDispatcher {
+    if worker_count <= 0 {
+        return SwarmDispatcher {
+            config: dispatcher.config,
+            total_submitted: dispatcher.total_submitted,
+            total_completed: dispatcher.total_completed,
+            total_failed: dispatcher.total_failed,
+            total_cancelled: dispatcher.total_cancelled,
+            rr_cursor: dispatcher.rr_cursor,
+            next_task_id: dispatcher.next_task_id,
+            active_worker_count: 0 - 1
+        };
+    }
+    let current_cursor: Int = dispatcher.rr_cursor;
+    let next_cursor: Int = (current_cursor + 1) % worker_count;
+    return SwarmDispatcher {
+        config: dispatcher.config,
+        total_submitted: dispatcher.total_submitted,
+        total_completed: dispatcher.total_completed,
+        total_failed: dispatcher.total_failed,
+        total_cancelled: dispatcher.total_cancelled,
+        rr_cursor: next_cursor,
+        next_task_id: dispatcher.next_task_id,
+        active_worker_count: current_cursor
+    };
+}
+
+pub fn dispatcher_select_worker_least_loaded(w1_load: Int, w1_cap: Int, w2_load: Int, w2_cap: Int) -> Int {
+    let w1_avail: Int = w1_cap - w1_load;
+    let w2_avail: Int = w2_cap - w2_load;
+    if w1_avail >= w2_avail {
+        return 1;
+    }
+    return 2;
+}
+
+pub fn dispatcher_route_task(dispatcher: SwarmDispatcher, task: SwarmTask, worker: WorkerNode) -> WorkerNode {
+    if task_is_terminal(task) {
+        return WorkerNode {
+            worker_id: worker.worker_id,
+            status: worker.status,
+            active_tasks: worker.active_tasks,
+            capacity: worker.capacity,
+            completed_count: worker.completed_count,
+            failed_count: worker.failed_count,
+            last_heartbeat_ms: worker.last_heartbeat_ms,
+            last_ok: 0
+        };
+    }
+    return worker_node_assign(worker);
+}
+
+pub fn dispatcher_process_completion(dispatcher: SwarmDispatcher, success: Bool) -> SwarmDispatcher {
+    let mut completed: Int = dispatcher.total_completed;
+    let mut failed: Int = dispatcher.total_failed;
+    if success {
+        completed = completed + 1;
+    } else {
+        failed = failed + 1;
+    }
+    return SwarmDispatcher {
+        config: dispatcher.config,
+        total_submitted: dispatcher.total_submitted,
+        total_completed: completed,
+        total_failed: failed,
+        total_cancelled: dispatcher.total_cancelled,
+        rr_cursor: dispatcher.rr_cursor,
+        next_task_id: dispatcher.next_task_id,
+        active_worker_count: dispatcher.active_worker_count
+    };
+}
+
+pub fn dispatcher_calculate_throughput(dispatcher: SwarmDispatcher, duration_ms: Int) -> Int {
+    if duration_ms <= 0 {
+        return 0;
+    }
+    return (dispatcher.total_completed * 1000) / duration_ms;
+}
+
+pub fn dispatcher_get_pending_slot_count(dispatcher: SwarmDispatcher, current_queue_len: Int) -> Int {
+    let max_q: Int = dispatcher.config.max_queue_depth;
+    if current_queue_len >= max_q {
+        return 0;
+    }
+    return max_q - current_queue_len;
+}
+
+pub fn dispatcher_is_healthy(dispatcher: SwarmDispatcher) -> Bool {
+    let total: Int = dispatcher.total_submitted;
+    if total == 0 {
+        return true;
+    }
+    if (dispatcher.total_failed * 100) / total > 50 {
+        return false;
+    }
+    return true;
+}

@@ -1,0 +1,93 @@
+// # UAV Nonlinear Backstepping Flight Controller
+//
+// Logline: Recursive Lyapunov backstepping controller stabilizing position, translational velocity, and angular attitude dynamics.
+//
+// Setup: Systematic non-linear synthesis designing virtual control stabilizing functions across cascading integrator subsystems.
+//
+// Beats:
+//   1. Define Backstepping Gains (c1 position gain, c2 velocity gain, c3 attitude gain, c4 angular rate gain).
+//   2. Compute position error z1 = p - p_des and virtual velocity control alpha1 = -c1*z1 + v_des.
+//   3. Compute velocity error z2 = v - alpha1 and total virtual force command u_f = -z1 - c2*z2 + a_des - [0, 0, g].
+//   4. Extract desired attitude and recursively stabilize attitude subsystem via angular backstepping.
+
+import "./uav_coordinate_frames.oo";
+import "./uav_so3_rotation_matrix.oo";
+
+pub type BacksteppingGains = struct {
+    c1_pos: Float,
+    c2_vel: Float,
+    c3_att: Float,
+    c4_rate: Float,
+};
+
+pub type BacksteppingOutput = struct {
+    thrust_cmd: Float,
+    tilt_roll_des: Float,
+    tilt_pitch_des: Float,
+    lyapunov_v: Float,
+};
+
+pub fn backstepping_gains_default() -> BacksteppingGains {
+    return BacksteppingGains {
+        c1_pos: 1.8,
+        c2_vel: 2.4,
+        c3_att: 6.0,
+        c4_rate: 1.5,
+    };
+}
+
+pub fn backstepping_position_step(
+    gains: &BacksteppingGains,
+    mass_kg: Float,
+    p_curr: &Vector3D,
+    v_curr: &Vector3D,
+    p_des: &Vector3D,
+    v_des: &Vector3D,
+    a_des: &Vector3D,
+    yaw_rad: Float
+) -> BacksteppingOutput {
+    let gravity: Float = 9.80665;
+
+    // Step 1: Position error z1 = p_curr - p_des
+    let z1_x: Float = (p_curr).x - (p_des).x;
+    let z1_y: Float = (p_curr).y - (p_des).y;
+    let z1_z: Float = (p_curr).z - (p_des).z;
+
+    // Step 2: Virtual velocity control alpha1 = -c1*z1 + v_des
+    let alpha1_x: Float = (0.0 - ((gains).c1_pos * z1_x)) + (v_des).x;
+    let alpha1_y: Float = (0.0 - ((gains).c1_pos * z1_y)) + (v_des).y;
+    let alpha1_z: Float = (0.0 - ((gains).c1_pos * z1_z)) + (v_des).z;
+
+    // Step 3: Velocity error z2 = v_curr - alpha1
+    let z2_x: Float = (v_curr).x - alpha1_x;
+    let z2_y: Float = (v_curr).y - alpha1_y;
+    let z2_z: Float = (v_curr).z - alpha1_z;
+
+    // Step 4: Virtual acceleration / specific force u_f = -z1 - c2*z2 + a_des + [0, 0, g]
+    let uf_x: Float = (0.0 - z1_x) - ((gains).c2_vel * z2_x) + (a_des).x;
+    let uf_y: Float = (0.0 - z1_y) - ((gains).c2_vel * z2_y) + (a_des).y;
+    let uf_z: Float = (0.0 - z1_z) - ((gains).c2_vel * z2_z) + (a_des).z + gravity;
+
+    // Total thrust magnitude T = m * ||u_f||
+    let thrust: Float = mass_kg * sqrt((uf_x * uf_x) + (uf_y * uf_y) + (uf_z * uf_z));
+
+    // Desired roll and pitch extracted from projection on heading yaw
+    let cos_psi: Float = cos(yaw_rad);
+    let sin_psi: Float = sin(yaw_rad);
+
+    let norm_uf: Float = sqrt((uf_x * uf_x) + (uf_y * uf_y) + (uf_z * uf_z));
+    let safe_norm: Float = if norm_uf < 0.001 { 0.001 } else { norm_uf };
+
+    let des_pitch: Float = ((uf_x * cos_psi) + (uf_y * sin_psi)) / safe_norm;
+    let des_roll: Float = ((uf_x * sin_psi) - (uf_y * cos_psi)) / safe_norm;
+
+    // Lyapunov candidate function V = 0.5*(z1^2 + z2^2)
+    let v_lyap: Float = 0.5 * ((z1_x * z1_x) + (z1_y * z1_y) + (z1_z * z1_z) + (z2_x * z2_x) + (z2_y * z2_y) + (z2_z * z2_z));
+
+    return BacksteppingOutput {
+        thrust_cmd: thrust,
+        tilt_roll_des: des_roll,
+        tilt_pitch_des: des_pitch,
+        lyapunov_v: v_lyap,
+    };
+}

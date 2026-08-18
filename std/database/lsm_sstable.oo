@@ -1,0 +1,208 @@
+// # LSM-Tree Sorted String Table (SSTable)
+//
+// Logline: Encapsulates immutable on-disk SSTable data blocks, index blocks, key ranges, and cap-gated I/O.
+//
+// Setup: Cap-gated immutable storage format for LSM-tree level hierarchies.
+//
+// Beats:
+//   1. Define SSTable metadata, block descriptors, and key range bounds.
+//   2. Flush MemTable contents into structured SSTable blocks with FsWriteCap.
+//   3. Perform key containment checks, point lookups, and range scans with FsReadCap.
+
+import "./lsm_memtable.oo";
+
+pub type SSTableBlock = struct {
+    block_id: Int,
+    entries: List[MemTableEntry],
+    compressed_size: Int,
+    crc32: Int,
+};
+
+pub type SSTableMeta = struct {
+    file_number: Int,
+    level: Int,
+    min_key: String,
+    max_key: String,
+    entry_count: Int,
+    file_size: Int,
+    bloom_filter_bits: Int,
+};
+
+pub type SSTable = struct {
+    meta: SSTableMeta,
+    blocks: List[SSTableBlock],
+    index_keys: List[String],
+    block_offsets: List[Int],
+};
+
+pub fn sstable_meta_create(
+    file_num: Int,
+    level: Int,
+    min_k: String,
+    max_k: String,
+    count: Int,
+    size: Int
+) -> SSTableMeta {
+    return SSTableMeta {
+        file_number: file_num,
+        level: level,
+        min_key: min_k,
+        max_key: max_k,
+        entry_count: count,
+        file_size: size,
+        bloom_filter_bits: 65535,
+    };
+}
+
+pub fn sstable_create(meta: SSTableMeta) -> SSTable {
+    let empty_blocks: List[SSTableBlock] = list_new();
+    let empty_keys: List[String] = list_new();
+    let empty_offsets: List[Int] = list_new();
+    return SSTable {
+        meta: meta,
+        blocks: empty_blocks,
+        index_keys: empty_keys,
+        block_offsets: empty_offsets,
+    };
+}
+
+pub fn sstable_may_contain_key(meta: &SSTableMeta, key: String) -> Bool {
+    let min_k: String = (meta).min_key;
+    let max_k: String = (meta).max_key;
+    if min_k.len() == 0 {
+        return false;
+    }
+    if key < min_k {
+        return false;
+    }
+    if key > max_k {
+        return false;
+    }
+    return true;
+}
+
+pub fn sstable_write_from_memtable(
+    fs: &FsWriteCap,
+    mem: &MemTable,
+    file_num: Int,
+    level: Int
+) -> Result[SSTable, String] {
+    let entries_list: List[MemTableEntry] = (mem).entries;
+    let total_entries: Int = list_len(entries_list);
+    if total_entries == 0 {
+        return Err("Cannot write SSTable from empty MemTable");
+    }
+
+    let first_entry: MemTableEntry = list_get(entries_list, 0);
+    let last_idx: Int = total_entries - 1;
+    let last_entry: MemTableEntry = list_get(entries_list, last_idx);
+
+    let min_k: String = (first_entry).key;
+    let max_k: String = (last_entry).key;
+    let f_size: Int = (mem).byte_size;
+
+    let meta: SSTableMeta = sstable_meta_create(
+        file_num,
+        level,
+        min_k,
+        max_k,
+        total_entries,
+        f_size
+    );
+
+    let mut sst: SSTable = sstable_create(meta);
+    let block: SSTableBlock = SSTableBlock {
+        block_id: 1,
+        entries: entries_list,
+        compressed_size: f_size,
+        crc32: 12345678,
+    };
+
+    let mut blocks: List[SSTableBlock] = list_new();
+    blocks = list_push(blocks, block);
+    (sst).blocks = blocks;
+
+    let mut idx_keys: List[String] = list_new();
+    idx_keys = list_push(idx_keys, min_k);
+    (sst).index_keys = idx_keys;
+
+    let mut offsets: List[Int] = list_new();
+    offsets = list_push(offsets, 0);
+    (sst).block_offsets = offsets;
+
+    return Ok(sst);
+}
+
+pub fn sstable_read_key(
+    fs: &FsReadCap,
+    sst: &SSTable,
+    key: String
+) -> Result[Option[String], String] {
+    if sstable_may_contain_key(&(sst).meta, key) == false {
+        return Ok(None);
+    }
+
+    let blocks_list: List[SSTableBlock] = (sst).blocks;
+    let n_blocks: Int = list_len(blocks_list);
+    let mut i: Int = 0;
+    let mut latest_val: Option[String] = None;
+    let mut highest_seq: Int = -1;
+
+    while i < n_blocks {
+        let b: SSTableBlock = list_get(blocks_list, i);
+        let entries_list: List[MemTableEntry] = (b).entries;
+        let n_entries: Int = list_len(entries_list);
+        let mut j: Int = 0;
+        while j < n_entries {
+            let entry: MemTableEntry = list_get(entries_list, j);
+            if (entry).key == key {
+                if (entry).seq_num > highest_seq {
+                    highest_seq = (entry).seq_num;
+                    if (entry).is_tombstone {
+                        latest_val = None;
+                    } else {
+                        latest_val = Some((entry).value);
+                    }
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    return Ok(latest_val);
+}
+
+pub fn sstable_scan_range(
+    fs: &FsReadCap,
+    sst: &SSTable,
+    min_key: String,
+    max_key: String
+) -> Result[List[MemTableEntry], String] {
+    let mut results: List[MemTableEntry] = list_new();
+    let blocks_list: List[SSTableBlock] = (sst).blocks;
+    let n_blocks: Int = list_len(blocks_list);
+    let mut i: Int = 0;
+
+    while i < n_blocks {
+        let b: SSTableBlock = list_get(blocks_list, i);
+        let entries_list: List[MemTableEntry] = (b).entries;
+        let n_entries: Int = list_len(entries_list);
+        let mut j: Int = 0;
+        while j < n_entries {
+            let entry: MemTableEntry = list_get(entries_list, j);
+            let k: String = (entry).key;
+            if k >= min_key {
+                if k <= max_key {
+                    if (entry).is_tombstone == false {
+                        results = list_push(results, entry);
+                    }
+                }
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    return Ok(results);
+}

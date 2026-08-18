@@ -1,0 +1,96 @@
+// # Service Mesh Retry Policy & Exponential Backoff with Jitter
+//
+// Logline: Calculates bounded exponential retry delays with decorrelated full jitter and retry budget budgets.
+//
+// Setup: Fault-tolerant retry decision engine preventing thundering herds and cascading upstream failures.
+//
+// Beats:
+//   1. Check HTTP response status codes against retryable error classes (5xx, 429, reset).
+//   2. Compute exponential backoff delay (`base_delay * 2^attempt`) bounded by max backoff.
+//   3. Apply full jitter randomization and track remaining retry attempts against budget quota.
+
+pub type RetryPolicy = struct {
+    max_retries: Int,
+    base_interval_ms: Int,
+    max_interval_ms: Int,
+    retry_on_5xx: Bool,
+    retry_on_reset: Bool,
+    retry_on_rate_limit: Bool,
+};
+
+pub type RetryState = struct {
+    policy: RetryPolicy,
+    attempts_made: Int,
+    total_retries_executed: Int,
+    exhausted_retries: Int,
+};
+
+pub fn retry_policy_default() -> RetryPolicy {
+    return RetryPolicy {
+        max_retries: 3,
+        base_interval_ms: 25,
+        max_interval_ms: 1000,
+        retry_on_5xx: true,
+        retry_on_reset: true,
+        retry_on_rate_limit: true,
+    };
+}
+
+pub fn retry_state_new(policy: RetryPolicy) -> RetryState {
+    return RetryState {
+        policy: policy,
+        attempts_made: 0,
+        total_retries_executed: 0,
+        exhausted_retries: 0,
+    };
+}
+
+pub fn retry_is_retryable(policy: &RetryPolicy, status_code: Int) -> Bool {
+    if (policy).retry_on_5xx && status_code >= 500 && status_code <= 599 {
+        return true;
+    }
+    if (policy).retry_on_rate_limit && status_code == 429 {
+        return true;
+    }
+    return false;
+}
+
+pub fn retry_calc_backoff_ms(
+    state: &mut RetryState,
+    status_code: Int,
+    jitter_seed: Int
+) -> Int {
+    if !retry_is_retryable(&(state).policy, status_code) {
+        return 0; // Not retryable
+    }
+
+    if (state).attempts_made >= (state).policy.max_retries {
+        (state).exhausted_retries = (state).exhausted_retries + 1;
+        return 0; // Quota exceeded
+    }
+
+    (state).attempts_made = (state).attempts_made + 1;
+    (state).total_retries_executed = (state).total_retries_executed + 1;
+
+    // 2^(attempts-1)
+    let mut multiplier: Int = 1;
+    let mut i: Int = 1;
+    while i < (state).attempts_made {
+        multiplier = multiplier * 2;
+        i = i + 1;
+    }
+
+    let mut exp_delay: Int = (state).policy.base_interval_ms * multiplier;
+    if exp_delay > (state).policy.max_interval_ms {
+        exp_delay = (state).policy.max_interval_ms;
+    }
+
+    // Full jitter: random between base_interval and exp_delay
+    let jitter_range: Int = exp_delay - (state).policy.base_interval_ms;
+    let mut actual_delay: Int = exp_delay;
+    if jitter_range > 0 {
+        actual_delay = (state).policy.base_interval_ms + (jitter_seed % jitter_range);
+    }
+
+    return actual_delay;
+}

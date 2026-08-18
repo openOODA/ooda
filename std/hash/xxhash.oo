@@ -1,0 +1,195 @@
+// # XXH32 facade + XXH64
+//
+// Logline: Re-export one-shot xxhash32; XXH64 mixes 64-bit lanes as 32-bit halves.
+//
+// Setup: 32-bit impl lives in perf/xxhash32.oo. XXH64 is local. Seed argument.
+//
+// Beats:
+//   1. Import the perf implementation.
+//   2. 32-byte stripes, 8/4/1-byte tail, official primes and avalanche.
+//   3. xxhash64_hex returns 16 lowercase chars (empty has the high bit set).
+
+import "std/perf/xxhash32.oo";
+
+type Xh64 = struct {
+    hi: Int,
+    lo: Int
+};
+
+fn xh_mask(x: Int) -> Int {
+    return x & 4294967295;
+}
+
+fn xh_xor(a: Int, b: Int) -> Int {
+    return (a | b) - (a & b);
+}
+
+fn xh_xor64(a: Xh64, b: Xh64) -> Xh64 {
+    return Xh64 { hi: xh_xor(a.hi, b.hi), lo: xh_xor(a.lo, b.lo) };
+}
+
+fn xh_add(a: Xh64, b: Xh64) -> Xh64 {
+    let sum_lo: Int = a.lo + b.lo;
+    let carry: Int = sum_lo >> 32;
+    return Xh64 { hi: xh_mask(a.hi + b.hi + carry), lo: xh_mask(sum_lo) };
+}
+
+fn xh_rotl(a: Xh64, r: Int) -> Xh64 {
+    let sh: Int = 32 - r;
+    return Xh64 {
+        hi: xh_mask((a.hi << r) | (a.lo >> sh)),
+        lo: xh_mask((a.lo << r) | (a.hi >> sh))
+    };
+}
+
+fn xh_shr(a: Xh64, r: Int) -> Xh64 {
+    if r == 32 {
+        return Xh64 { hi: 0, lo: a.hi };
+    }
+    if r == 33 {
+        return Xh64 { hi: 0, lo: a.hi >> 1 };
+    }
+    let sh: Int = 32 - r;
+    return Xh64 { hi: a.hi >> r, lo: xh_mask((a.lo >> r) | (a.hi << sh)) };
+}
+
+fn xh_mul32(a: Int, b: Int) -> Xh64 {
+    let a0: Int = a & 65535;
+    let a1: Int = (a >> 16) & 65535;
+    let b0: Int = b & 65535;
+    let b1: Int = (b >> 16) & 65535;
+    let p00: Int = a0 * b0;
+    let p01: Int = a0 * b1;
+    let p10: Int = a1 * b0;
+    let p11: Int = a1 * b1;
+    let s1: Int = (p00 >> 16) + (p01 & 65535) + (p10 & 65535);
+    let s2: Int = (s1 >> 16) + (p01 >> 16) + (p10 >> 16) + (p11 & 65535);
+    let s3: Int = (s2 >> 16) + (p11 >> 16);
+    return Xh64 { hi: (s2 & 65535) + ((s3 & 65535) << 16), lo: (p00 & 65535) + ((s1 & 65535) << 16) };
+}
+
+fn xh_mul(a: Xh64, b: Xh64) -> Xh64 {
+    let ll: Xh64 = xh_mul32(a.lo, b.lo);
+    let lh: Xh64 = xh_mul32(a.lo, b.hi);
+    let hl: Xh64 = xh_mul32(a.hi, b.lo);
+    return Xh64 { hi: xh_mask(ll.hi + lh.lo + hl.lo), lo: ll.lo };
+}
+
+fn xh_round(acc: Xh64, input: Xh64) -> Xh64 {
+    let p2: Xh64 = Xh64 { hi: 3266489917, lo: 668265295 };
+    let p1: Xh64 = Xh64 { hi: 2654435761, lo: 2246822535 };
+    return xh_mul(xh_rotl(xh_add(acc, xh_mul(input, p2)), 31), p1);
+}
+
+fn xh_merge(acc: Xh64, val: Xh64) -> Xh64 {
+    let z: Xh64 = Xh64 { hi: 0, lo: 0 };
+    let p1: Xh64 = Xh64 { hi: 2654435761, lo: 2246822535 };
+    let p4: Xh64 = Xh64 { hi: 2246822519, lo: 3266489955 };
+    return xh_add(xh_mul(xh_xor64(acc, xh_round(z, val)), p1), p4);
+}
+
+fn xh_avalanche(h0: Xh64) -> Xh64 {
+    let p2: Xh64 = Xh64 { hi: 3266489917, lo: 668265295 };
+    let p3: Xh64 = Xh64 { hi: 374761393, lo: 2654435833 };
+    let mut h: Xh64 = xh_xor64(h0, xh_shr(h0, 33));
+    h = xh_mul(h, p2);
+    h = xh_xor64(h, xh_shr(h, 29));
+    h = xh_mul(h, p3);
+    return xh_xor64(h, xh_shr(h, 32));
+}
+
+fn xh_le64(data: String, off: Int) -> Xh64 {
+    let b0: Int = byte_at(data, off);
+    let b1: Int = byte_at(data, off + 1);
+    let b2: Int = byte_at(data, off + 2);
+    let b3: Int = byte_at(data, off + 3);
+    let b4: Int = byte_at(data, off + 4);
+    let b5: Int = byte_at(data, off + 5);
+    let b6: Int = byte_at(data, off + 6);
+    let b7: Int = byte_at(data, off + 7);
+    return Xh64 {
+        hi: b4 + (b5 << 8) + (b6 << 16) + (b7 << 24),
+        lo: b0 + (b1 << 8) + (b2 << 16) + (b3 << 24)
+    };
+}
+
+fn xh_digest(data: String, seed: Int) -> Xh64 {
+    let sd: Xh64 = Xh64 { hi: xh_mask(seed >> 32), lo: xh_mask(seed) };
+    let p1: Xh64 = Xh64 { hi: 2654435761, lo: 2246822535 };
+    let p2: Xh64 = Xh64 { hi: 3266489917, lo: 668265295 };
+    let p3: Xh64 = Xh64 { hi: 374761393, lo: 2654435833 };
+    let p4: Xh64 = Xh64 { hi: 2246822519, lo: 3266489955 };
+    let p5: Xh64 = Xh64 { hi: 668265263, lo: 374761413 };
+    let n: Int = data.len();
+    let mut pos: Int = 0;
+    let mut h: Xh64 = Xh64 { hi: 0, lo: 0 };
+    if n >= 32 {
+        let mut v1: Xh64 = xh_add(xh_add(sd, p1), p2);
+        let mut v2: Xh64 = xh_add(sd, p2);
+        let mut v3: Xh64 = sd;
+        let ones: Xh64 = Xh64 { hi: 4294967295, lo: 4294967295 };
+        let mut v4: Xh64 = xh_add(sd, xh_add(xh_xor64(p1, ones), Xh64 { hi: 0, lo: 1 }));
+        let limit: Int = n - 32;
+        while pos <= limit {
+            v1 = xh_round(v1, xh_le64(data, pos));
+            v2 = xh_round(v2, xh_le64(data, pos + 8));
+            v3 = xh_round(v3, xh_le64(data, pos + 16));
+            v4 = xh_round(v4, xh_le64(data, pos + 24));
+            pos = pos + 32;
+        }
+        h = xh_add(xh_add(xh_rotl(v1, 1), xh_rotl(v2, 7)), xh_add(xh_rotl(v3, 12), xh_rotl(v4, 18)));
+        h = xh_merge(h, v1);
+        h = xh_merge(h, v2);
+        h = xh_merge(h, v3);
+        h = xh_merge(h, v4);
+    } else {
+        h = xh_add(sd, p5);
+    }
+    h = xh_add(h, Xh64 { hi: xh_mask(n >> 32), lo: xh_mask(n) });
+    let z: Xh64 = Xh64 { hi: 0, lo: 0 };
+    while pos + 8 <= n {
+        h = xh_xor64(h, xh_round(z, xh_le64(data, pos)));
+        h = xh_add(xh_mul(xh_rotl(h, 27), p1), p4);
+        pos = pos + 8;
+    }
+    if pos + 4 <= n {
+        let b0: Int = byte_at(data, pos);
+        let b1: Int = byte_at(data, pos + 1);
+        let b2: Int = byte_at(data, pos + 2);
+        let b3: Int = byte_at(data, pos + 3);
+        let w4: Xh64 = Xh64 { hi: 0, lo: b0 + (b1 << 8) + (b2 << 16) + (b3 << 24) };
+        h = xh_xor64(h, xh_mul(w4, p1));
+        h = xh_add(xh_mul(xh_rotl(h, 23), p2), p3);
+        pos = pos + 4;
+    }
+    while pos < n {
+        let wb: Xh64 = Xh64 { hi: 0, lo: byte_at(data, pos) };
+        h = xh_xor64(h, xh_mul(wb, p5));
+        h = xh_mul(xh_rotl(h, 11), p1);
+        pos = pos + 1;
+    }
+    return xh_avalanche(h);
+}
+
+fn xh_hex8(w: Int) -> String {
+    let hex: String = "0123456789abcdef";
+    let v: Int = xh_mask(w);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < 8 {
+        let d: Int = (v >> (28 - (i * 4))) & 15;
+        out = out + char_at(hex, d);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn xxhash64(data: String, seed: Int) -> Int {
+    let h: Xh64 = xh_digest(data, seed);
+    return (h.hi << 32) + h.lo;
+}
+
+pub fn xxhash64_hex(data: String, seed: Int) -> String {
+    let h: Xh64 = xh_digest(data, seed);
+    return xh_hex8(h.hi) + xh_hex8(h.lo);
+}

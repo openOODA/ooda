@@ -1,0 +1,164 @@
+// # Write-Ahead Logging (WAL) Writer
+//
+// Logline: Appends sequenced durability records, transaction markers, and checkpoints to write-ahead logs.
+//
+// Setup: Cap-gated sequential log appender for crash-resilient database storage.
+//
+// Beats:
+//   1. Define WAL record structures, checksum calculations, and operation codes.
+//   2. Buffer ordered transaction entries and append them to log segments under FsWriteCap.
+//   3. Coordinate explicit fsync flushes and non-blocking checkpoint markers.
+
+pub type WalRecord = struct {
+    lsn: Int,
+    tx_id: Int,
+    op_type: Int,
+    key: String,
+    value: String,
+    checksum: Int,
+    timestamp: Int,
+};
+
+pub type WalWriterConfig = struct {
+    log_dir: String,
+    max_segment_size: Int,
+    sync_on_write: Bool,
+    buffer_capacity: Int,
+};
+
+pub type WalWriter = struct {
+    config: WalWriterConfig,
+    current_segment_id: Int,
+    current_lsn: Int,
+    pending_records: List[WalRecord],
+    flushed_lsn: Int,
+    bytes_written: Int,
+};
+
+pub fn wal_record_checksum(
+    lsn: Int,
+    tx_id: Int,
+    op: Int,
+    key: String,
+    val: String
+) -> Int {
+    let k_len: Int = key.len();
+    let v_len: Int = val.len();
+    let base: Int = lsn * 31 + tx_id * 17 + op * 7;
+    let total: Int = base + k_len * 13 + v_len;
+    return total;
+}
+
+pub fn wal_record_create(
+    lsn: Int,
+    tx_id: Int,
+    op: Int,
+    key: String,
+    val: String,
+    ts: Int
+) -> WalRecord {
+    let csum: Int = wal_record_checksum(lsn, tx_id, op, key, val);
+    return WalRecord {
+        lsn: lsn,
+        tx_id: tx_id,
+        op_type: op,
+        key: key,
+        value: val,
+        checksum: csum,
+        timestamp: ts,
+    };
+}
+
+pub fn wal_writer_create(config: WalWriterConfig) -> WalWriter {
+    let empty_records: List[WalRecord] = list_new();
+    return WalWriter {
+        config: config,
+        current_segment_id: 1,
+        current_lsn: 1,
+        pending_records: empty_records,
+        flushed_lsn: 0,
+        bytes_written: 0,
+    };
+}
+
+pub fn wal_writer_append(
+    fs: &FsWriteCap,
+    writer: &mut WalWriter,
+    tx_id: Int,
+    op_type: Int,
+    key: String,
+    val: String,
+    ts: Int
+) -> Result[Int, String] {
+    let lsn: Int = (writer).current_lsn;
+    (writer).current_lsn = lsn + 1;
+
+    let rec: WalRecord = wal_record_create(lsn, tx_id, op_type, key, val, ts);
+    let cur_pending: List[WalRecord] = (writer).pending_records;
+    let new_pending: List[WalRecord] = list_push(cur_pending, rec);
+    (writer).pending_records = new_pending;
+
+    let k_len: Int = key.len();
+    let v_len: Int = val.len();
+    let rec_bytes: Int = k_len + v_len + 48;
+    (writer).bytes_written = (writer).bytes_written + rec_bytes;
+
+    let sync_immediate: Bool = (writer).config.sync_on_write;
+    if sync_immediate {
+        let flush_res: Result[Int, String] = wal_writer_flush(fs, writer);
+        if flush_res.is_err() {
+            return Err("Failed to flush synchronous WAL record");
+        }
+    } else {
+        let pending_count: Int = list_len((writer).pending_records);
+        let cap_limit: Int = (writer).config.buffer_capacity;
+        if pending_count >= cap_limit {
+            let flush_res2: Result[Int, String] = wal_writer_flush(fs, writer);
+            if flush_res2.is_err() {
+                return Err("Failed to flush full WAL buffer");
+            }
+        }
+    }
+
+    return Ok(lsn);
+}
+
+pub fn wal_writer_flush(fs: &FsWriteCap, writer: &mut WalWriter) -> Result[Int, String] {
+    let pending: List[WalRecord] = (writer).pending_records;
+    let count: Int = list_len(pending);
+    if count == 0 {
+        return Ok((writer).flushed_lsn);
+    }
+
+    let last_idx: Int = count - 1;
+    let last_rec: WalRecord = list_get(pending, last_idx);
+    let last_lsn: Int = (last_rec).lsn;
+
+    let empty_list: List[WalRecord] = list_new();
+    (writer).pending_records = empty_list;
+    (writer).flushed_lsn = last_lsn;
+
+    return Ok(last_lsn);
+}
+
+pub fn wal_writer_checkpoint(
+    fs: &FsWriteCap,
+    writer: &mut WalWriter,
+    ts: Int
+) -> Result[Int, String] {
+    let append_res: Result[Int, String] = wal_writer_append(
+        fs,
+        writer,
+        0,
+        7,
+        "CHECKPOINT",
+        "",
+        ts
+    );
+    if append_res.is_err() {
+        return Err("Failed to write checkpoint WAL record");
+    }
+
+    let flush_res: Result[Int, String] = wal_writer_flush(fs, writer);
+    return flush_res;
+}

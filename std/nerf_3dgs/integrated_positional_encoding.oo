@@ -1,0 +1,86 @@
+// # Integrated Positional Encoding (IPE) for Mip-NeRF
+//
+// Logline: Anti-aliased conical frustum feature encoding via expectation over multivariate Gaussian distributions.
+//
+// Setup: Eliminates blurring and aliasing artifacts across multi-scale camera distances by integrating harmonic features.
+//
+// Beats:
+//   1. Approximate conical frustums along viewing rays with anisotropic 3D Gaussians (mean mu, covariance Sigma).
+//   2. Compute expected value of sinusoidal harmonics under Gaussian distributions with exponential attenuation factors.
+//   3. Implement scale-aware frequency gating to suppress high frequencies in wide ray footprints.
+
+import "./vec3_math.oo";
+import "./fourier_positional_encoding.oo";
+
+pub type ConicalFrustum = struct {
+    origin: Vec3,
+    direction: Vec3,
+    t0: Float,
+    t1: Float,
+    radius: Float,
+};
+
+pub type GaussianFrustum = struct {
+    mean: Vec3,
+    variance_parallel: Float,
+    variance_perpendicular: Float,
+};
+
+pub fn conical_frustum_to_gaussian(frustum: &ConicalFrustum) -> GaussianFrustum {
+    let t0: Float = (frustum).t0;
+    let t1: Float = (frustum).t1;
+    let r: Float = (frustum).radius;
+
+    let mu_t: Float = (t0 + t1) * 0.5;
+    let delta_t: Float = (t1 - t0) * 0.5;
+
+    // Variance along ray direction: var_parallel = (delta_t)^2 / 3
+    let var_par: Float = (delta_t * delta_t) / 3.0;
+
+    // Variance perpendicular to ray: var_perp = (r * mu_t)^2 / 4
+    let r_mu: Float = r * mu_t;
+    let var_perp: Float = (r_mu * r_mu) * 0.25;
+
+    let dir_scaled: Vec3 = vec3_scale(&(frustum).direction, mu_t);
+    let mean_pos: Vec3 = vec3_add(&(frustum).origin, &dir_scaled);
+
+    return GaussianFrustum {
+        mean: mean_pos,
+        variance_parallel: var_par,
+        variance_perpendicular: var_perp,
+    };
+}
+
+pub fn ipe_attenuation_factor(freq_index: Int, variance: Float) -> Float {
+    let pi: Float = 3.141592653589793;
+    let mut omega: Float = pi;
+    let mut i: Int = 0;
+    while i < freq_index {
+        omega = omega * 2.0;
+        i = i + 1;
+    }
+
+    // Attenuation: exp(-0.5 * omega^2 * variance)
+    let exponent: Float = -0.5 * omega * omega * variance;
+    if exponent < -20.0 {
+        return 0.0;
+    }
+    return math_exp(exponent);
+}
+
+pub fn ipe_encode_frustum_dim(
+    gauss: &GaussianFrustum,
+    freq_index: Int,
+) -> EncodedFeaturePair {
+    // Mean projection
+    let mean_x: Float = (gauss).mean.x;
+    let raw_pair: EncodedFeaturePair = fourier_encode_scalar(mean_x, freq_index);
+
+    let total_var: Float = (gauss).variance_parallel + (gauss).variance_perpendicular;
+    let atten: Float = ipe_attenuation_factor(freq_index, total_var);
+
+    return EncodedFeaturePair {
+        sin_val: (raw_pair).sin_val * atten,
+        cos_val: (raw_pair).cos_val * atten,
+    };
+}

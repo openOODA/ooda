@@ -1,0 +1,84 @@
+// # UAV Magnetometer Hard/Soft-Iron Calibration & Declination
+//
+// Logline: Corrects 3-axis magnetometer measurements for hard-iron bias offsets, soft-iron ellipsoidal distortions, and magnetic declination.
+//
+// Setup: Pre-filters magnetic field raw sensor vector into true magnetic North reference vector.
+//
+// Beats:
+//   1. Define Magnetometer Calibration Parameters (hard-iron offset vector V_hard, soft-iron matrix W_soft).
+//   2. Apply affine transformation B_calibrated = W_soft * (B_raw - V_hard).
+//   3. Compute tilt-compensated magnetic heading using roll and pitch Euler angles.
+//   4. Apply geographic magnetic declination offset to compute true geodetic North heading.
+
+import "./uav_coordinate_frames.oo";
+import "./uav_so3_rotation_matrix.oo";
+
+pub type MagCalibParams = struct {
+    hard_iron_offset: Vector3D,
+    soft_iron_matrix: Matrix3x3,
+    declination_rad: Float,
+    field_norm_expected_ut: Float,
+};
+
+pub type MagHeadingResult = struct {
+    calibrated_field_ut: Vector3D,
+    magnetic_heading_rad: Float,
+    true_heading_rad: Float,
+    is_field_valid: Bool,
+};
+
+pub fn mag_calib_params_default() -> MagCalibParams {
+    return MagCalibParams {
+        hard_iron_offset: vector3d_zero(),
+        soft_iron_matrix: mat3_identity(),
+        declination_rad: 0.165, // ~9.4 degrees east
+        field_norm_expected_ut: 48.0, // Standard microTesla
+    };
+}
+
+pub fn calibrate_magnetometer(
+    raw_mag: &Vector3D,
+    params: &MagCalibParams,
+    roll_rad: Float,
+    pitch_rad: Float
+) -> MagHeadingResult {
+    // 1. Remove hard-iron bias: B_unb = B_raw - V_hard
+    let unb_b: Vector3D = vector3d_sub(raw_mag, &(params).hard_iron_offset);
+
+    // 2. Soft-iron matrix correction: B_cal = W_soft * B_unb
+    let b_cal: Vector3D = mat3_multiply_vec(&(params).soft_iron_matrix, &unb_b);
+
+    // Field norm check
+    let b_norm: Float = vector3d_norm(&b_cal);
+    let exp_norm: Float = (params).field_norm_expected_ut;
+    let norm_ratio: Float = b_norm / exp_norm;
+    let is_valid: Bool = (norm_ratio > 0.65) && (norm_ratio < 1.35);
+
+    // 3. Tilt compensation to level horizontal plane
+    let cr: Float = cos(roll_rad);
+    let sr: Float = sin(roll_rad);
+    let cp: Float = cos(pitch_rad);
+    let sp: Float = sin(pitch_rad);
+
+    let bh_x: Float = (b_cal.x * cp) + (b_cal.y * sr * sp) + (b_cal.z * cr * sp);
+    let bh_y: Float = (b_cal.y * cr) - (b_cal.z * sr);
+
+    // 4. Magnetic Heading = atan2(-By, Bx)
+    let mag_head: Float = uav_atan2_approx(0.0 - bh_y, bh_x);
+
+    // True heading = Magnetic heading + Declination
+    let mut true_head: Float = mag_head + (params).declination_rad;
+    let pi_val: Float = 3.141592653589793;
+    if true_head > pi_val {
+        true_head = true_head - (2.0 * pi_val);
+    } else if true_head < (0.0 - pi_val) {
+        true_head = true_head + (2.0 * pi_val);
+    }
+
+    return MagHeadingResult {
+        calibrated_field_ut: b_cal,
+        magnetic_heading_rad: mag_head,
+        true_heading_rad: true_head,
+        is_field_valid: is_valid,
+    };
+}

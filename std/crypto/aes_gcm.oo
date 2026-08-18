@@ -1,0 +1,112 @@
+// # AES-128-GCM AEAD
+//
+// Logline: Seal and open AES-128-GCM with a 12-byte nonce and a 16-byte tag.
+//
+// Setup: Block cipher is crypto_aes_encrypt_internal. GHASH lives in aes_gcm_ghash.oo.
+//
+// Beats:
+//   1. Build H = AES(0) and J0 = nonce || 0x00000001.
+//   2. Encrypt with GCTR(inc32(J0)); GHASH AAD, ciphertext, and bit lengths.
+//   3. Tag is GCTR(J0, S). Decrypt returns empty on a tag mismatch.
+//
+// residual: 96-bit nonce only. No 8-bit or 32-bit tag.
+
+import "aes_gcm_ghash.oo";
+
+fn gcm_aes(key: String, block: String) -> String {
+    return gcm_unhex(crypto_aes_encrypt_internal(key, block));
+}
+
+fn gcm_j0(nonce: String) -> String {
+    let mut buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < 12 {
+        buf = bytes_push(buf, byte_at(nonce, i));
+        i = i + 1;
+    }
+    buf = bytes_push(buf, 0);
+    buf = bytes_push(buf, 0);
+    buf = bytes_push(buf, 0);
+    buf = bytes_push(buf, 1);
+    return bytes_to_str(buf);
+}
+
+fn gcm_inc32(blk: String) -> String {
+    let mut buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < 12 {
+        buf = bytes_push(buf, byte_at(blk, i));
+        i = i + 1;
+    }
+    let n: Int = (byte_at(blk, 12) << 24) + (byte_at(blk, 13) << 16) + (byte_at(blk, 14) << 8) + byte_at(blk, 15);
+    let w: Int = (n + 1) & 4294967295;
+    buf = bytes_push(buf, (w >> 24) & 255);
+    buf = bytes_push(buf, (w >> 16) & 255);
+    buf = bytes_push(buf, (w >> 8) & 255);
+    buf = bytes_push(buf, w & 255);
+    return bytes_to_str(buf);
+}
+
+fn gcm_gctr(key: String, icb: String, x: String) -> String {
+    let n: Int = bytes_len(x);
+    if n == 0 {
+        return "";
+    }
+    let mut out: List[Int] = bytes_new();
+    let mut cb: String = icb;
+    let mut off: Int = 0;
+    while off < n {
+        let ks: String = gcm_aes(key, cb);
+        let mut left: Int = n - off;
+        if left > 16 {
+            left = 16;
+        }
+        let mut j: Int = 0;
+        while j < left {
+            out = bytes_push(out, gcm_xor_byte(byte_at(x, off + j), byte_at(ks, j)));
+            j = j + 1;
+        }
+        cb = gcm_inc32(cb);
+        off = off + left;
+    }
+    return bytes_to_str(out);
+}
+
+pub fn aes_gcm_encrypt(key: String, nonce: String, ptext: String, aad: String) -> String {
+    if bytes_len(key) != 16 {
+        process_exit(1);
+        return "";
+    }
+    if bytes_len(nonce) != 12 {
+        process_exit(1);
+        return "";
+    }
+    let h: String = gcm_aes(key, gcm_z16());
+    let j0: String = gcm_j0(nonce);
+    let ct: String = gcm_gctr(key, gcm_inc32(j0), ptext);
+    let s: String = gcm_ghash(h, aad, ct);
+    let tag: String = gcm_gctr(key, j0, s);
+    return gcm_hex(ct) + gcm_hex(tag);
+}
+
+pub fn aes_gcm_decrypt(key: String, nonce: String, ctext: String, tag: String, aad: String) -> String {
+    if bytes_len(key) != 16 {
+        process_exit(1);
+        return "";
+    }
+    if bytes_len(nonce) != 12 {
+        process_exit(1);
+        return "";
+    }
+    if bytes_len(tag) != 16 {
+        return "";
+    }
+    let h: String = gcm_aes(key, gcm_z16());
+    let j0: String = gcm_j0(nonce);
+    let s: String = gcm_ghash(h, aad, ctext);
+    let expect: String = gcm_gctr(key, j0, s);
+    if gcm_hex(expect) != gcm_hex(tag) {
+        return "";
+    }
+    return gcm_gctr(key, gcm_inc32(j0), ctext);
+}

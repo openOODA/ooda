@@ -1,0 +1,139 @@
+// # Idempotency Key Store & Result Cache
+//
+// Logline: Implements idempotency key deduplication, execution locks, and cached response replaying.
+//
+// Setup: Distributed idempotency layer ensuring at-most-once execution semantics for serverless transactions.
+//
+// Beats:
+//   1. Register incoming idempotency key and lock execution state to IN_PROGRESS.
+//   2. Prevent duplicate concurrent requests with matching keys from executing concurrently.
+//   3. Store completed response payload and return cached results for subsequent identical requests.
+//
+// Int-floor destub: keys and payloads are Int; parallel List[Int] slots.
+// last_status: 0 ACQUIRED, 1 IN_PROGRESS, 2 COMPLETED. expires_at = now_ms + ttl_seconds * 1000.
+// Expired rows (expires_at <= now) are ignored on acquire and a new row is appended.
+
+type IdempotencyStore = struct {
+    ttl_seconds: Int,
+    keys: List[Int],
+    statuses: List[Int],
+    payloads: List[Int],
+    expires_at: List[Int],
+    duplicate_hits: Int,
+    last_status: Int,
+    last_payload: Int,
+    last_ok: Int
+};
+
+pub fn idempotency_store_new(ttl_sec: Int) -> IdempotencyStore {
+    let empty_keys: List[Int] = list_new();
+    let empty_st: List[Int] = list_new();
+    let empty_pay: List[Int] = list_new();
+    let empty_exp: List[Int] = list_new();
+    return IdempotencyStore {
+        ttl_seconds: ttl_sec,
+        keys: empty_keys,
+        statuses: empty_st,
+        payloads: empty_pay,
+        expires_at: empty_exp,
+        duplicate_hits: 0,
+        last_status: 0,
+        last_payload: 0,
+        last_ok: 0
+    };
+}
+
+pub fn idempotency_try_acquire(
+    store: IdempotencyStore,
+    key: Int,
+    now_ms: Int
+) -> IdempotencyStore {
+    let n: Int = list_len(store.keys);
+    let mut i: Int = 0;
+    while i < n {
+        let rec_key: Int = list_get(store.keys, i);
+        let exp: Int = list_get(store.expires_at, i);
+        if rec_key == key {
+            if exp > now_ms {
+                let rec_st: Int = list_get(store.statuses, i);
+                let rec_pay: Int = list_get(store.payloads, i);
+                if rec_st == 2 {
+                    return IdempotencyStore {
+                        ttl_seconds: store.ttl_seconds,
+                        keys: store.keys,
+                        statuses: store.statuses,
+                        payloads: store.payloads,
+                        expires_at: store.expires_at,
+                        duplicate_hits: store.duplicate_hits + 1,
+                        last_status: 2,
+                        last_payload: rec_pay,
+                        last_ok: 1
+                    };
+                }
+                return IdempotencyStore {
+                    ttl_seconds: store.ttl_seconds,
+                    keys: store.keys,
+                    statuses: store.statuses,
+                    payloads: store.payloads,
+                    expires_at: store.expires_at,
+                    duplicate_hits: store.duplicate_hits + 1,
+                    last_status: 1,
+                    last_payload: rec_pay,
+                    last_ok: 1
+                };
+            }
+        }
+        i = i + 1;
+    }
+    return IdempotencyStore {
+        ttl_seconds: store.ttl_seconds,
+        keys: list_push(store.keys, key),
+        statuses: list_push(store.statuses, 1),
+        payloads: list_push(store.payloads, 0),
+        expires_at: list_push(store.expires_at, now_ms + (store.ttl_seconds * 1000)),
+        duplicate_hits: store.duplicate_hits,
+        last_status: 0,
+        last_payload: 0,
+        last_ok: 1
+    };
+}
+
+pub fn idempotency_save_result(
+    store: IdempotencyStore,
+    key: Int,
+    response: Int
+) -> IdempotencyStore {
+    let n: Int = list_len(store.keys);
+    let mut i: Int = 0;
+    let mut next_keys: List[Int] = list_new();
+    let mut next_st: List[Int] = list_new();
+    let mut next_pay: List[Int] = list_new();
+    let mut next_exp: List[Int] = list_new();
+    let mut found: Int = 0;
+    while i < n {
+        let rec_key: Int = list_get(store.keys, i);
+        let exp: Int = list_get(store.expires_at, i);
+        next_keys = list_push(next_keys, rec_key);
+        next_exp = list_push(next_exp, exp);
+        if rec_key == key {
+            next_st = list_push(next_st, 2);
+            next_pay = list_push(next_pay, response);
+            found = 1;
+        } else {
+            next_st = list_push(next_st, list_get(store.statuses, i));
+            next_pay = list_push(next_pay, list_get(store.payloads, i));
+        }
+        i = i + 1;
+    }
+    return IdempotencyStore {
+        ttl_seconds: store.ttl_seconds,
+        keys: next_keys,
+        statuses: next_st,
+        payloads: next_pay,
+        expires_at: next_exp,
+        duplicate_hits: store.duplicate_hits,
+        last_status: store.last_status,
+        last_payload: store.last_payload,
+        last_ok: found
+    };
+}

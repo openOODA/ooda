@@ -1,0 +1,96 @@
+// # Thermal Domain Pseudo-Bond Graph Modeling
+//
+// Logline: Pseudo-bond graph thermal energy modeling with temperature efforts, heat rate flows, conductive/convective resistances, and lumped capacitances.
+//
+// Setup: Solves multi-node thermal RC networks and heat exchanger NTU effectiveness for digital twin thermal management.
+//
+// Beats:
+//   1. Define ThermalNode, ConductionConvectionResistor, and HeatExchanger structures.
+//   2. Calculate Fourier conduction, Newton cooling convection, and linearized Stefan-Boltzmann radiation resistances.
+//   3. Step forward lumped thermal capacitance node temperatures dT/dt = sum(Q_in) / C_th.
+
+pub type ThermalNode = struct {
+    node_id: Int,
+    temperature_k: Float,
+    heat_capacity_j_per_k: Float, // C_th = mass * c_p
+    ambient_temp_k: Float,
+};
+
+pub type ThermalResistance = struct {
+    res_id: Int,
+    from_node: Int,
+    to_node: Int,
+    r_val_k_per_w: Float, // R_th = K / W
+};
+
+pub type HeatExchangerNTU = struct {
+    c_min_w_per_k: Float,
+    c_max_w_per_k: Float,
+    overall_ua_w_per_k: Float,
+    effectiveness: Float,
+};
+
+pub fn thermal_conduction_resistance(length_m: Float, thermal_cond_w_m_k: Float, area_m2: Float) -> Float {
+    // R_cond = L / (k * A)
+    let denom: Float = thermal_cond_w_m_k * area_m2;
+    if denom <= 0.0 { return 1000000.0; }
+    return length_m / denom;
+}
+
+pub fn thermal_convection_resistance(heat_transfer_coeff_w_m2_k: Float, area_m2: Float) -> Float {
+    // R_conv = 1 / (h * A)
+    let denom: Float = heat_transfer_coeff_w_m2_k * area_m2;
+    if denom <= 0.0 { return 1000000.0; }
+    return 1.0 / denom;
+}
+
+pub fn thermal_radiation_resistance_linearized(emissivity: Float, area_m2: Float, t_avg_k: Float) -> Float {
+    // R_rad = 1 / (4 * sigma * epsilon * A * T_avg^3)
+    let sigma: Float = 0.00000005670374; // Stefan-Boltzmann constant
+    let t3: Float = t_avg_k * t_avg_k * t_avg_k;
+    let denom: Float = 4.0 * sigma * emissivity * area_m2 * t3;
+    if denom <= 0.0 { return 1000000.0; }
+    return 1.0 / denom;
+}
+
+pub fn thermal_step_node(node: &ThermalNode, q_in_w: Float, dt: Float) -> ThermalNode {
+    let c_th: Float = (node).heat_capacity_j_per_k;
+    if c_th <= 0.0 { return *node; }
+    let delta_t: Float = (q_in_w / c_th) * dt;
+    return ThermalNode {
+        node_id: (node).node_id,
+        temperature_k: (node).temperature_k + delta_t,
+        heat_capacity_j_per_k: c_th,
+        ambient_temp_k: (node).ambient_temp_k,
+    };
+}
+
+pub fn thermal_calc_heat_flow(t_from: Float, t_to: Float, r_th: Float) -> Float {
+    if r_th <= 0.0 { return 0.0; }
+    return (t_from - t_to) / r_th;
+}
+
+pub fn heat_exchanger_eval_ntu(ua: Float, c_min: Float, c_max: Float) -> HeatExchangerNTU {
+    if c_min <= 0.0 || c_max <= 0.0 {
+        return HeatExchangerNTU {
+            c_min_w_per_k: c_min,
+            c_max_w_per_k: c_max,
+            overall_ua_w_per_k: ua,
+            effectiveness: 0.0,
+        };
+    }
+    let ntu: Float = ua / c_min;
+    let c_r: Float = c_min / c_max;
+    // Counter-flow approx: eps = (1 - exp(-NTU*(1-Cr))) / (1 - Cr*exp(-NTU*(1-Cr)))
+    // First order Taylor expansion for numerical robustness:
+    let exp_term: Float = 1.0 / (1.0 + (ntu * (1.0 - c_r)));
+    let eff: Float = (1.0 - exp_term) / (1.0 - (c_r * exp_term) + 0.0001);
+    let bounded_eff: Float = if eff > 0.99 { 0.99 } else { if eff < 0.0 { 0.0 } else { eff } };
+
+    return HeatExchangerNTU {
+        c_min_w_per_k: c_min,
+        c_max_w_per_k: c_max,
+        overall_ua_w_per_k: ua,
+        effectiveness: bounded_eff,
+    };
+}

@@ -1,0 +1,107 @@
+// # MEV Sandwich Attack Protection Guard
+//
+// Logline: Evaluates transaction susceptibility to front-running/back-running sandwich attacks and calculates tight dynamic slippage bounds.
+//
+// Setup: Pure DeFi security module with mempool pending transaction analysis.
+//
+// Beats:
+//   1. Define PendingTx, SandwichRiskProfile, and ProtectionAdvice structures.
+//   2. Estimate maximum extractable victim loss given target pool depth and user swap size.
+//   3. Compute strict minimum acceptable output and recommend private RPC/Flashbots bundle routing.
+
+pub type PendingTx = struct {
+    tx_hash: String,
+    gas_price_gwei: Int,
+    swap_amount_in: Int,
+    pool_reserve_in: Int,
+    pool_reserve_out: Int,
+};
+
+pub type SandwichRiskProfile = struct {
+    victim_amount_in: Int,
+    pool_depth_usd: Int,
+    swap_to_depth_ratio_bps: Int,
+    estimated_attacker_profit_usd: Int,
+    risk_level: String, // "LOW", "MEDIUM", "HIGH", "CRITICAL"
+};
+
+pub type ProtectionAdvice = struct {
+    safe_min_amount_out: Int,
+    recommended_slippage_bps: Int,
+    use_private_mempool: Bool,
+    max_frontrun_impact_bps: Int,
+};
+
+pub fn mev_evaluate_sandwich_risk(
+    victim_in: Int,
+    reserve_in: Int,
+    reserve_out: Int,
+    token_price_usd: Int
+) -> SandwichRiskProfile {
+    if reserve_in <= 0 || victim_in <= 0 {
+        return SandwichRiskProfile {
+            victim_amount_in: victim_in,
+            pool_depth_usd: 0,
+            swap_to_depth_ratio_bps: 0,
+            estimated_attacker_profit_usd: 0,
+            risk_level: "LOW",
+        };
+    }
+
+    let ratio_bps: Int = (victim_in * 10000) / reserve_in;
+    let pool_depth_usd: Int = (reserve_in * token_price_usd) / 1000000;
+
+    let mut risk_str: String = "LOW";
+    let mut est_profit_usd: Int = 0;
+
+    if ratio_bps > 500 {
+        risk_str = "CRITICAL";
+        est_profit_usd = (victim_in * token_price_usd * 300) / 10000000000;
+    } else {
+        if ratio_bps > 200 {
+            risk_str = "HIGH";
+            est_profit_usd = (victim_in * token_price_usd * 100) / 10000000000;
+        } else {
+            if ratio_bps > 50 {
+                risk_str = "MEDIUM";
+            }
+        }
+    }
+
+    return SandwichRiskProfile {
+        victim_amount_in: victim_in,
+        pool_depth_usd: pool_depth_usd,
+        swap_to_depth_ratio_bps: ratio_bps,
+        estimated_attacker_profit_usd: est_profit_usd,
+        risk_level: risk_str,
+    };
+}
+
+pub fn mev_generate_protection_advice(
+    risk: &SandwichRiskProfile,
+    theoretical_amount_out: Int
+) -> ProtectionAdvice {
+    let ratio: Int = (risk).swap_to_depth_ratio_bps;
+
+    let mut slip_bps: Int = 50; // default 0.5%
+    let mut priv_rpc: Bool = false;
+
+    if ratio > 500 {
+        slip_bps = 15; // ultra-tight 0.15% to revert on front-running
+        priv_rpc = true;
+    } else {
+        if ratio > 200 {
+            slip_bps = 25;
+            priv_rpc = true;
+        }
+    }
+
+    let min_out: Int = (theoretical_amount_out * (10000 - slip_bps)) / 10000;
+
+    return ProtectionAdvice {
+        safe_min_amount_out: min_out,
+        recommended_slippage_bps: slip_bps,
+        use_private_mempool: priv_rpc,
+        max_frontrun_impact_bps: ratio / 2,
+    };
+}

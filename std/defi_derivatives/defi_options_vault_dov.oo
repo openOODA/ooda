@@ -1,0 +1,150 @@
+// # DeFi Options Vault (DOV) Automated Yield Engine
+//
+// Logline: Automates systematic weekly covered call and cash-secured put option writing vaults with delta-targeted strike selection and auto-compounding.
+//
+// Setup: Pure quantitative DeFi protocol module modeling Ribbon / Thetanuts style decentralized option vaults.
+//
+// Beats:
+//   1. Define DovVaultConfig, DovEpochState, and DovExecutionSummary structures.
+//   2. Target out-of-the-money delta thresholds (e.g., 10-delta weekly) for optimal risk-adjusted premium harvest.
+//   3. Settle weekly epochs, deduce performance management fees, and compound accumulated yield.
+
+pub type DovVaultConfig = struct {
+    underlying_asset: String,
+    target_delta_otm: Float,    // e.g. 0.10 (10-delta)
+    epoch_duration_days: Float, // e.g. 7.0 days
+    management_fee_annual: Float,
+    performance_fee_pct: Float, // e.g. 0.10 (10% of premiums)
+    is_covered_call: Bool,
+};
+
+pub type DovEpochState = struct {
+    epoch_id: Int,
+    total_assets_deposited: Float,
+    strike_price: Float,
+    options_minted_count: Float,
+    premium_collected_usd: Float,
+    start_spot_price: Float,
+    expiry_timestamp_sec: Int,
+    is_settled: Bool,
+};
+
+pub type DovExecutionSummary = struct {
+    epoch_id: Int,
+    strike_price: Float,
+    gross_yield_usd: Float,
+    performance_fee_usd: Float,
+    net_epoch_yield_usd: Float,
+    annualized_apy: Float,
+    new_total_vault_assets: Float,
+};
+
+pub fn dov_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn dov_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (dov_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn dov_bs_call(s: Float, k: Float, t: Float, r: Float, vol: Float) -> Float {
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    let df: Float = exp((0.0 - r) * t);
+    return (s * dov_norm_cdf(d1)) - (k * df * dov_norm_cdf(d2));
+}
+
+pub fn dov_config_eth_covered_call() -> DovVaultConfig {
+    return DovVaultConfig {
+        underlying_asset: "WETH",
+        target_delta_otm: 0.10,
+        epoch_duration_days: 7.0,
+        management_fee_annual: 0.02,
+        performance_fee_pct: 0.10,
+        is_covered_call: true,
+    };
+}
+
+pub fn dov_select_strike(
+    spot: Float,
+    vol: Float,
+    r: Float,
+    cfg: &DovVaultConfig
+) -> Float {
+    let t: Float = (cfg).epoch_duration_days / 365.0;
+    // Approximate strike for 10-delta: S * exp(1.28 * sigma * sqrt(T))
+    let move_factor: Float = 1.28155 * vol * sqrt(t);
+    if (cfg).is_covered_call {
+        return spot * exp(move_factor);
+    }
+    return spot * exp(0.0 - move_factor);
+}
+
+pub fn start_dov_epoch(
+    epoch_id: Int,
+    total_assets: Float,
+    spot_px: Float,
+    vol: Float,
+    r: Float,
+    cfg: &DovVaultConfig
+) -> DovEpochState {
+    let strike: Float = dov_select_strike(spot_px, vol, r, cfg);
+    let t: Float = (cfg).epoch_duration_days / 365.0;
+    let single_premium: Float = dov_bs_call(spot_px, strike, t, r, vol);
+    let total_prem: Float = total_assets * single_premium;
+
+    return DovEpochState {
+        epoch_id: epoch_id,
+        total_assets_deposited: total_assets,
+        strike_price: strike,
+        options_minted_count: total_assets,
+        premium_collected_usd: total_prem,
+        start_spot_price: spot_px,
+        expiry_timestamp_sec: 604800,
+        is_settled: false,
+    };
+}
+
+pub fn settle_dov_epoch(
+    epoch: &mut DovEpochState,
+    terminal_spot: Float,
+    cfg: &DovVaultConfig
+) -> DovExecutionSummary {
+    let gross_prem: Float = (epoch).premium_collected_usd;
+    let perf_fee: Float = gross_prem * (cfg).performance_fee_pct;
+    let net_yield: Float = gross_prem - perf_fee;
+
+    // Check if options expired ITM
+    let mut payout: Float = 0.0;
+    if (cfg).is_covered_call {
+        if terminal_spot > (epoch).strike_price {
+            payout = (epoch).options_minted_count * (terminal_spot - (epoch).strike_price);
+        }
+    }
+
+    let net_change: Float = net_yield - payout;
+    let new_assets: Float = (epoch).total_assets_deposited + (net_change / terminal_spot);
+
+    let weekly_rate: Float = net_yield / ((epoch).total_assets_deposited * terminal_spot + 0.0001);
+    let apy: Float = exp(weekly_rate * 52.0) - 1.0;
+
+    (epoch).is_settled = true;
+
+    return DovExecutionSummary {
+        epoch_id: (epoch).epoch_id,
+        strike_price: (epoch).strike_price,
+        gross_yield_usd: gross_prem,
+        performance_fee_usd: perf_fee,
+        net_epoch_yield_usd: net_change,
+        annualized_apy: apy,
+        new_total_vault_assets: new_assets,
+    };
+}

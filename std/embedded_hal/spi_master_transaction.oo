@@ -1,0 +1,168 @@
+// # SPI Master Bus Controller
+//
+// Logline: SPI master bus transaction management, CPOL/CPHA clock modes, CS assertion, and full-duplex transfers.
+//
+// Setup: Hardware abstraction for SPI master communications with synchronous peripherals.
+//
+// Beats:
+//   1. Define SPI bus configuration parameters, clock polarity/phase modes, and bit orders.
+//   2. Manage Chip Select (CS) active-low assertion, hold times, and release lifecycle.
+//   3. Implement synchronous byte exchanges and multi-byte full-duplex transactions.
+//   4. Provide high-level command-address-data transaction wrappers for SPI devices.
+
+type SpiConfig = struct {
+    bus_id: Int,
+    clock_mode: Int,
+    baud_prescaler: Int,
+    msb_first: Bool,
+    data_size_bits: Int,
+    cs_port: Int,
+    cs_pin: Int,
+    cs_active_low: Bool,
+};
+
+type SpiTransaction = struct {
+    config: SpiConfig,
+    cs_asserted: Bool,
+    total_bytes_transferred: Int,
+    is_busy: Bool,
+    last_byte: Int,
+    last_read: List[Int],
+};
+
+pub fn spi_config_new(bus_id: Int, mode: Int, prescaler: Int, cs_port: Int, cs_pin: Int) -> SpiConfig {
+    return SpiConfig {
+        bus_id: bus_id,
+        clock_mode: mode % 4,
+        baud_prescaler: prescaler,
+        msb_first: true,
+        data_size_bits: 8,
+        cs_port: cs_port,
+        cs_pin: cs_pin,
+        cs_active_low: true,
+    };
+}
+
+pub fn spi_transaction_new(config: SpiConfig) -> SpiTransaction {
+    let empty: List[Int] = list_new();
+    return SpiTransaction {
+        config: config,
+        cs_asserted: false,
+        total_bytes_transferred: 0,
+        is_busy: false,
+        last_byte: 0,
+        last_read: empty,
+    };
+}
+
+pub fn spi_assert_cs(tx: SpiTransaction) -> SpiTransaction {
+    return SpiTransaction {
+        config: (tx).config,
+        cs_asserted: true,
+        total_bytes_transferred: (tx).total_bytes_transferred,
+        is_busy: (tx).is_busy,
+        last_byte: (tx).last_byte,
+        last_read: (tx).last_read,
+    };
+}
+
+pub fn spi_deassert_cs(tx: SpiTransaction) -> SpiTransaction {
+    return SpiTransaction {
+        config: (tx).config,
+        cs_asserted: false,
+        total_bytes_transferred: (tx).total_bytes_transferred,
+        is_busy: (tx).is_busy,
+        last_byte: (tx).last_byte,
+        last_read: (tx).last_read,
+    };
+}
+
+pub fn spi_transfer_byte(tx: SpiTransaction, tx_byte: Int, simulated_miso_byte: Int) -> SpiTransaction {
+    return SpiTransaction {
+        config: (tx).config,
+        cs_asserted: (tx).cs_asserted,
+        total_bytes_transferred: (tx).total_bytes_transferred + 1,
+        is_busy: (tx).is_busy,
+        last_byte: simulated_miso_byte % 256,
+        last_read: (tx).last_read,
+    };
+}
+
+pub fn spi_transfer_buffer(
+    tx: SpiTransaction,
+    tx_data: List[Int],
+    simulated_rx: List[Int]
+) -> SpiTransaction {
+    let mut acc: SpiTransaction = tx;
+    let mut rx_out: List[Int] = list_new();
+    let tx_len: Int = list_len(tx_data);
+    let rx_len: Int = list_len(simulated_rx);
+    let mut i: Int = 0;
+
+    while i < tx_len {
+        let b_tx: Int = list_get(tx_data, i);
+        let b_rx_sim: Int = if i < rx_len { list_get(simulated_rx, i) } else { 0 };
+        acc = spi_transfer_byte(acc, b_tx, b_rx_sim);
+        rx_out = list_push(rx_out, (acc).last_byte);
+        i = i + 1;
+    }
+    return SpiTransaction {
+        config: (acc).config,
+        cs_asserted: (acc).cs_asserted,
+        total_bytes_transferred: (acc).total_bytes_transferred,
+        is_busy: (acc).is_busy,
+        last_byte: (acc).last_byte,
+        last_read: rx_out,
+    };
+}
+
+pub fn spi_write_command(tx: SpiTransaction, cmd: Int, payload: List[Int]) -> SpiTransaction {
+    let mut acc: SpiTransaction = spi_assert_cs(tx);
+    acc = spi_transfer_byte(acc, cmd, 0);
+
+    let len: Int = list_len(payload);
+    let mut i: Int = 0;
+    while i < len {
+        let b: Int = list_get(payload, i);
+        acc = spi_transfer_byte(acc, b, 0);
+        i = i + 1;
+    }
+    return spi_deassert_cs(acc);
+}
+
+pub fn spi_read_register(
+    tx: SpiTransaction,
+    reg_addr: Int,
+    rx_len: Int,
+    simulated_data: List[Int]
+) -> SpiTransaction {
+    let mut acc: SpiTransaction = spi_assert_cs(tx);
+    acc = spi_transfer_byte(acc, reg_addr, 0);
+
+    let mut out: List[Int] = list_new();
+    let sim_len: Int = list_len(simulated_data);
+    let mut i: Int = 0;
+    while i < rx_len {
+        let sim_byte: Int = if i < sim_len { list_get(simulated_data, i) } else { 0 };
+        acc = spi_transfer_byte(acc, 0, sim_byte);
+        out = list_push(out, (acc).last_byte);
+        i = i + 1;
+    }
+    acc = spi_deassert_cs(acc);
+    return SpiTransaction {
+        config: (acc).config,
+        cs_asserted: (acc).cs_asserted,
+        total_bytes_transferred: (acc).total_bytes_transferred,
+        is_busy: (acc).is_busy,
+        last_byte: (acc).last_byte,
+        last_read: out,
+    };
+}
+
+pub fn spi_is_cs_active(tx: SpiTransaction) -> Bool {
+    return (tx).cs_asserted;
+}
+
+pub fn spi_get_bytes_count(tx: SpiTransaction) -> Int {
+    return (tx).total_bytes_transferred;
+}

@@ -1,0 +1,236 @@
+// # ZK-STARK Prover, Verifier, and Batch Verification Engine
+//
+// Logline: Coordinates STARK proof generation, individual verification, and batch proof processing.
+//
+// Setup: Imports zkstark_ops.oo for AIR constraint evaluation and FRI proof validators.
+//
+// Beats:
+//   1. Import ZK-STARK operational functions and types.
+//   2. Initialize and configure STARK provers and proof generation lifecycles.
+//   3. Instantiate verifiers, strict mode governance, and capability verification.
+//   4. Coordinate batch verification engines and calculate telemetry metrics.
+
+import "./zkstark_ops.oo";
+
+pub fn stark_prover_init(
+    prover_id: String,
+    air: StarkAir,
+    security_bits: Int,
+    blowup_factor: Int,
+    num_queries: Int
+) -> StarkProver {
+    let mut active: Bool = air.is_active;
+    if security_bits <= 0 {
+        active = false;
+    }
+    return StarkProver {
+        prover_id: prover_id,
+        air: air,
+        security_bits: security_bits,
+        blowup_factor: blowup_factor,
+        num_queries: num_queries,
+        proofs_generated: 0,
+        is_active: active,
+    };
+}
+
+pub fn stark_prover_set_active(mut_prover: &mut StarkProver, active: Bool) {
+    (mut_prover).is_active = active;
+}
+
+pub fn stark_prover_generate_proof(
+    mut_prover: &mut StarkProver,
+    trace: StarkTrace,
+    public_inputs: List[Int],
+    mod_val: Int
+) -> StarkProof {
+    let empty_fri: FriProof = fri_proof_create("ERR_FRI", 0, list_new(), list_new(), 0);
+    if (mut_prover).is_active == false {
+        return StarkProof {
+            proof_id: "ERR_INACTIVE_PROVER",
+            trace_root: 0,
+            constraint_root: 0,
+            fri_proof: empty_fri,
+            trace_length: 0,
+            num_queries: 0,
+            security_level: (mut_prover).security_bits,
+            public_inputs: public_inputs,
+            is_verified: false,
+        };
+    }
+
+    let air_ref: StarkAir = (mut_prover).air;
+    let trace_valid: Bool = stark_air_validate_trace(&air_ref, trace, mod_val);
+    let t_steps: Int = trace.num_steps;
+    let sec_bits: Int = (mut_prover).security_bits;
+    let prv_id: String = (mut_prover).prover_id;
+    let tr_hash: Int = trace.state_hash;
+
+    if trace_valid == false {
+        return StarkProof {
+            proof_id: "ERR_INVALID_TRACE",
+            trace_root: 0,
+            constraint_root: 0,
+            fri_proof: empty_fri,
+            trace_length: t_steps,
+            num_queries: 0,
+            security_level: sec_bits,
+            public_inputs: public_inputs,
+            is_verified: false,
+        };
+    }
+
+    let t_root: Int = stark_hash_query(1, tr_hash, mod_val);
+    let c_root: Int = stark_hash_query(2, tr_hash + 99, mod_val);
+    let mut fri_comms: List[Int] = list_new();
+    let mut fri_evals: List[Int] = list_new();
+    let mut r: Int = 1;
+    while r <= 4 {
+        fri_comms = list_push(fri_comms, stark_hash_query(r * 10, t_root + r, mod_val));
+        fri_evals = list_push(fri_evals, stark_hash_query(r * 20, c_root + r, mod_val));
+        r = r + 1;
+    }
+
+    let p_cnt: Int = (mut_prover).proofs_generated + 1;
+    (mut_prover).proofs_generated = p_cnt;
+    let prf_id: String = prv_id + "_stark_proof_" + p_cnt.to_string();
+    let generated_fri: FriProof = fri_proof_create(prf_id + "_fri", 4, fri_comms, fri_evals, 2);
+
+    return stark_proof_create(prf_id, t_root, c_root, generated_fri, t_steps, (mut_prover).num_queries, sec_bits, public_inputs);
+}
+
+pub fn stark_verifier_init(
+    verifier_id: String,
+    air: StarkAir,
+    security_bits: Int
+) -> StarkVerifier {
+    let mut active: Bool = air.is_active;
+    if security_bits <= 0 {
+        active = false;
+    }
+    return StarkVerifier {
+        verifier_id: verifier_id,
+        air: air,
+        security_bits: security_bits,
+        proofs_verified: 0,
+        proofs_rejected: 0,
+        strict_mode: true,
+        is_active: active,
+    };
+}
+
+pub fn stark_verifier_set_strict_mode(mut_verifier: &mut StarkVerifier, strict: Bool) {
+    (mut_verifier).strict_mode = strict;
+}
+
+pub fn stark_verifier_set_active(mut_verifier: &mut StarkVerifier, active: Bool) {
+    (mut_verifier).is_active = active;
+}
+
+pub fn stark_verifier_verify_proof(
+    mut_verifier: &mut StarkVerifier,
+    proof: StarkProof,
+    mod_val: Int
+) -> Bool {
+    if (mut_verifier).is_active == false || proof.is_verified == false {
+        (mut_verifier).proofs_rejected = (mut_verifier).proofs_rejected + 1;
+        return false;
+    }
+    if proof.trace_root <= 0 || proof.constraint_root <= 0 {
+        (mut_verifier).proofs_rejected = (mut_verifier).proofs_rejected + 1;
+        return false;
+    }
+    let sec_req: Int = (mut_verifier).security_bits;
+    if proof.security_level < sec_req {
+        (mut_verifier).proofs_rejected = (mut_verifier).proofs_rejected + 1;
+        return false;
+    }
+    let fri: FriProof = proof.fri_proof;
+    if fri_proof_verify(fri, sec_req) == false {
+        (mut_verifier).proofs_rejected = (mut_verifier).proofs_rejected + 1;
+        return false;
+    }
+    if (mut_verifier).strict_mode {
+        let air_ref: StarkAir = (mut_verifier).air;
+        if proof.trace_length != air_ref.trace_length {
+            (mut_verifier).proofs_rejected = (mut_verifier).proofs_rejected + 1;
+            return false;
+        }
+    }
+    (mut_verifier).proofs_verified = (mut_verifier).proofs_verified + 1;
+    return true;
+}
+
+pub fn stark_verifier_verify_with_capability(
+    sys: &SysCap,
+    mut_verifier: &mut StarkVerifier,
+    proof: StarkProof,
+    mod_val: Int
+) -> Result[Bool, String] {
+    if stark_verifier_verify_proof(mut_verifier, proof, mod_val) {
+        return Ok(true);
+    }
+    return Err("STARK_VERIFICATION_FAILED: Proof failed AIR or FRI evaluation check");
+}
+
+pub fn stark_batch_verifier_init(batch_id: String) -> StarkBatchVerifier {
+    return StarkBatchVerifier {
+        batch_id: batch_id,
+        proofs: list_new(),
+        verified_count: 0,
+        failed_count: 0,
+        is_completed: false,
+    };
+}
+
+pub fn stark_batch_verifier_add(
+    mut_batch: &mut StarkBatchVerifier,
+    proof: StarkProof
+) {
+    if (mut_batch).is_completed {
+        return;
+    }
+    let cur_p: List[StarkProof] = (mut_batch).proofs;
+    (mut_batch).proofs = list_push(cur_p, proof);
+}
+
+pub fn stark_batch_verifier_verify_all(
+    mut_verifier: &mut StarkVerifier,
+    mut_batch: &mut StarkBatchVerifier,
+    mod_val: Int
+) -> Bool {
+    if (mut_batch).is_completed {
+        return (mut_batch).failed_count == 0;
+    }
+    let p_list: List[StarkProof] = (mut_batch).proofs;
+    let p_count: Int = list_len(p_list);
+    let mut i: Int = 0;
+    let mut pass_cnt: Int = 0;
+    let mut fail_cnt: Int = 0;
+
+    while i < p_count {
+        let p_item: StarkProof = list_get(p_list, i);
+        if stark_verifier_verify_proof(mut_verifier, p_item, mod_val) {
+            pass_cnt = pass_cnt + 1;
+        } else {
+            fail_cnt = fail_cnt + 1;
+        }
+        i = i + 1;
+    }
+    (mut_batch).verified_count = pass_cnt;
+    (mut_batch).failed_count = fail_cnt;
+    (mut_batch).is_completed = true;
+    return fail_cnt == 0;
+}
+
+pub fn stark_proof_to_string(proof: StarkProof) -> String {
+    let t_root: String = proof.trace_root.to_string();
+    let c_root: String = proof.constraint_root.to_string();
+    let t_len: String = proof.trace_length.to_string();
+    let sec_str: String = proof.security_level.to_string();
+    return "StarkProof[" + proof.proof_id + "] TraceRoot:" + t_root + " ConstRoot:" + c_root + " TraceLen:" + t_len + " SecBits:" + sec_str;
+}
+
+pub fn stark_do_work(prover: &StarkProver, verifier: &StarkVerifier) -> Int {
+    return ((prover).proofs_generated * 10) + ((verifier).proofs_verified * 5) + (verifier).proofs_rejected;
+}

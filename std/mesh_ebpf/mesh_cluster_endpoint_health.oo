@@ -1,0 +1,125 @@
+// # Service Mesh Cluster Endpoint Health Checker & Drain Manager
+//
+// Logline: Executes active health checking and graceful draining state transitions for upstream endpoints.
+//
+// Setup: Endpoint lifecycle manager tracking active probing, health status, and connection draining.
+//
+// Beats:
+//   1. Track consecutive successful/failed health checks against threshold criteria.
+//   2. Transition endpoint health states: HEALTHY, UNHEALTHY, DRAINING, TERMINATED.
+//   3. Coordinate zero-downtime endpoint draining during rolling deployments.
+
+pub type HealthState = struct {
+    endpoint_id: String,
+    status: Int, // 1: HEALTHY, 2: UNHEALTHY, 3: DRAINING, 4: TERMINATED
+    consecutive_successes: Int,
+    consecutive_failures: Int,
+    active_connections: Int,
+};
+
+pub type EndpointHealthManager = struct {
+    endpoints: List[HealthState],
+    healthy_threshold: Int,
+    unhealthy_threshold: Int,
+    total_checks: Int,
+};
+
+pub fn endpoint_health_manager_new(h_th: Int, u_th: Int) -> EndpointHealthManager {
+    let empty_eps: List[HealthState] = list_new();
+    return EndpointHealthManager {
+        endpoints: empty_eps,
+        healthy_threshold: h_th,
+        unhealthy_threshold: u_th,
+        total_checks: 0,
+    };
+}
+
+pub fn endpoint_register(manager: &mut EndpointHealthManager, id: String) {
+    let ep = HealthState {
+        endpoint_id: id,
+        status: 1, // HEALTHY
+        consecutive_successes: 0,
+        consecutive_failures: 0,
+        active_connections: 0,
+    };
+    (manager).endpoints = list_push((manager).endpoints, ep);
+}
+
+pub fn endpoint_record_check(
+    manager: &mut EndpointHealthManager,
+    id: String,
+    is_success: Bool
+) -> Int {
+    (manager).total_checks = (manager).total_checks + 1;
+    let n: Int = list_len((manager).endpoints);
+    let mut updated: List[HealthState] = list_new();
+    let mut final_status: Int = 1;
+    let mut i: Int = 0;
+
+    while i < n {
+        let ep: HealthState = list_get((manager).endpoints, i);
+        if (ep).endpoint_id == id {
+            let mut st: Int = (ep).status;
+            let mut succ: Int = (ep).consecutive_successes;
+            let mut fail: Int = (ep).consecutive_failures;
+
+            if is_success {
+                succ = succ + 1;
+                fail = 0;
+                if succ >= (manager).healthy_threshold && st == 2 {
+                    st = 1; // Mark HEALTHY
+                }
+            } else {
+                fail = fail + 1;
+                succ = 0;
+                if fail >= (manager).unhealthy_threshold && st == 1 {
+                    st = 2; // Mark UNHEALTHY
+                }
+            }
+
+            final_status = st;
+            let mod_ep = HealthState {
+                endpoint_id: (ep).endpoint_id,
+                status: st,
+                consecutive_successes: succ,
+                consecutive_failures: fail,
+                active_connections: (ep).active_connections,
+            };
+            updated = list_push(updated, mod_ep);
+        } else {
+            updated = list_push(updated, ep);
+        }
+        i = i + 1;
+    }
+
+    (manager).endpoints = updated;
+    return final_status;
+}
+
+pub fn endpoint_start_drain(manager: &mut EndpointHealthManager, id: String) -> Bool {
+    let n: Int = list_len((manager).endpoints);
+    let mut updated: List[HealthState] = list_new();
+    let mut found: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let ep: HealthState = list_get((manager).endpoints, i);
+        if (ep).endpoint_id == id {
+            let mod_ep = HealthState {
+                endpoint_id: (ep).endpoint_id,
+                status: 3, // DRAINING
+                consecutive_successes: (ep).consecutive_successes,
+                consecutive_failures: (ep).consecutive_failures,
+                active_connections: (ep).active_connections,
+            };
+            updated = list_push(updated, mod_ep);
+            found = true;
+        } else {
+            updated = list_push(updated, ep);
+        }
+        i = i + 1;
+    }
+
+    (manager).endpoints = updated;
+    return found;
+}

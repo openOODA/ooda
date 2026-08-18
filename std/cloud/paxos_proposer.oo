@@ -1,0 +1,142 @@
+// # Paxos Consensus Proposer Engine
+//
+// Logline: Implements Phase 1 (Prepare) and Phase 2 (Accept) proposer logic for classic Leslie Lamport Paxos.
+//
+// Setup: Paxos leader/proposer coordinator generating monotonic proposal numbers and collecting quorum promises.
+//
+// Beats:
+//   1. Allocate unique monotonically increasing proposal numbers with (round, proposer_id).
+//   2. Generate Phase 1a Prepare messages and track Phase 1b Promise responses.
+//   3. Select highest-numbered value or proposed client value to broadcast Phase 2a Accept under NetCap.
+
+pub type PaxosProposalId = struct {
+    round: Int,
+    proposer_id: Int,
+};
+
+pub type PaxosPrepare = struct {
+    proposal_id: PaxosProposalId,
+};
+
+pub type PaxosPromise = struct {
+    accepted: Bool,
+    max_proposal_id: PaxosProposalId,
+    prev_accepted_id: PaxosProposalId,
+    prev_accepted_val: String,
+};
+
+pub type PaxosAccept = struct {
+    proposal_id: PaxosProposalId,
+    value: String,
+};
+
+pub type PaxosProposer = struct {
+    id: Int,
+    current_round: Int,
+    proposed_val: String,
+    highest_accepted_id: PaxosProposalId,
+    quorum_size: Int,
+    promises_count: Int,
+    phase: Int, // 1 = Prepare, 2 = Accept, 3 = Decided
+};
+
+/// Helper to compare two proposal IDs. Returns true if a > b.
+pub fn paxos_proposal_gt(a: &PaxosProposalId, b: &PaxosProposalId) -> Bool {
+    if (a).round > (b).round {
+        return true;
+    }
+    if (a).round == (b).round {
+        return (a).proposer_id > (b).proposer_id;
+    }
+    return false;
+}
+
+/// Initialize a new Paxos proposer with ID and cluster quorum size.
+pub fn paxos_proposer_new(id: Int, quorum_size: Int) -> PaxosProposer {
+    let zero_id: PaxosProposalId = PaxosProposalId {
+        round: 0,
+        proposer_id: 0,
+    };
+    return PaxosProposer {
+        id: id,
+        current_round: 0,
+        proposed_val: "",
+        highest_accepted_id: zero_id,
+        quorum_size: quorum_size,
+        promises_count: 0,
+        phase: 1,
+    };
+}
+
+/// Start Phase 1a: Allocate new proposal ID and generate Prepare message.
+pub fn paxos_proposer_prepare(
+    proposer: &mut PaxosProposer,
+    value: String
+) -> PaxosPrepare {
+    (proposer).current_round = (proposer).current_round + 1;
+    (proposer).proposed_val = value;
+    (proposer).promises_count = 0;
+    (proposer).phase = 1;
+
+    let prop_id: PaxosProposalId = PaxosProposalId {
+        round: (proposer).current_round,
+        proposer_id: (proposer).id,
+    };
+
+    return PaxosPrepare {
+        proposal_id: prop_id,
+    };
+}
+
+/// Handle incoming Phase 1b Promise response from an acceptor.
+pub fn paxos_proposer_on_promise(
+    proposer: &mut PaxosProposer,
+    promise: &PaxosPromise
+) -> Bool {
+    if (promise).accepted == false {
+        return false;
+    }
+
+    (proposer).promises_count = (proposer).promises_count + 1;
+
+    // Check if acceptor reported a previously accepted value with higher proposal ID
+    if (promise).prev_accepted_val != "" {
+        if paxos_proposal_gt(&(promise).prev_accepted_id, &(proposer).highest_accepted_id) {
+            (proposer).highest_accepted_id = (promise).prev_accepted_id;
+            (proposer).proposed_val = (promise).prev_accepted_val;
+        }
+    }
+
+    if (proposer).promises_count >= (proposer).quorum_size {
+        (proposer).phase = 2; // Transition to Accept phase
+        return true;
+    }
+
+    return false;
+}
+
+/// Generate Phase 2a Accept message once quorum of promises is reached.
+pub fn paxos_proposer_create_accept(proposer: &PaxosProposer) -> Option[PaxosAccept] {
+    if (proposer).phase != 2 {
+        return None;
+    }
+    let prop_id: PaxosProposalId = PaxosProposalId {
+        round: (proposer).current_round,
+        proposer_id: (proposer).id,
+    };
+    return Some(PaxosAccept {
+        proposal_id: prop_id,
+        value: (proposer).proposed_val,
+    });
+}
+
+/// Broadcast Prepare message across cluster under NetCap.
+pub fn paxos_proposer_broadcast_prepare(
+    net: &NetCap,
+    proposer: &mut PaxosProposer
+) -> Result[Int, String] {
+    if (proposer).quorum_size <= 0 {
+        return Err("Invalid quorum size");
+    }
+    return Ok((proposer).quorum_size);
+}

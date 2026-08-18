@@ -1,0 +1,104 @@
+// # Power Perpetual (Squeeth $ETH^2$) Derivatives Engine
+//
+// Logline: Prices quadratic power perpetual contracts ($S^2$), computing continuous gamma yields, funding decay drag, and mark-to-index basis.
+//
+// Setup: Pure quantitative DeFi derivatives module modeling Paradigm / Opyn Squeeth power perpetual dynamics.
+//
+// Beats:
+//   1. Define PowerPerpConfig, PowerPerpPosition, and PowerPerpMetrics structures.
+//   2. Compute index fair value $Index = S^2 / \text{Scale}$ and expected continuous variance funding rate.
+//   3. Model non-linear quadratic payoffs, constant pure gamma exposure without strike selection, and daily decay.
+
+pub type PowerPerpConfig = struct {
+    normalization_factor: Float, // e.g. 10000.0 (Scale factor to normalize $ETH^2$)
+    funding_period_days: Float,  // e.g. 1.0 day or 0.333 days
+    implied_volatility: Float,   // Annualized implied variance driver
+    risk_free_rate: Float,
+};
+
+pub type PowerPerpPosition = struct {
+    position_size: Float,
+    entry_index_price: Float,
+    current_spot_price: Float,
+    deposited_collateral_usd: Float,
+    is_long: Bool,
+};
+
+pub type PowerPerpMetrics = struct {
+    index_fair_value: Float,
+    mark_price: Float,
+    funding_rate_daily_pct: Float,
+    annualized_funding_apr: Float,
+    position_delta_usd: Float,
+    position_gamma_usd: Float,
+    unrealized_pnl_usd: Float,
+    daily_decay_drag_usd: Float,
+};
+
+pub fn power_perp_config_default() -> PowerPerpConfig {
+    return PowerPerpConfig {
+        normalization_factor: 10000.0,
+        funding_period_days: 1.0,
+        implied_volatility: 0.80, // 80% annual vol
+        risk_free_rate: 0.05,
+    };
+}
+
+pub fn power_perp_calc_index(spot: Float, scale: Float) -> Float {
+    if scale <= 0.0 {
+        return 0.0;
+    }
+    return (spot * spot) / scale;
+}
+
+pub fn power_perp_calc_fair_mark(
+    spot: Float,
+    cfg: &PowerPerpConfig
+) -> Float {
+    let index: Float = power_perp_calc_index(spot, (cfg).normalization_factor);
+    let var_t: Float = ((cfg).implied_volatility * (cfg).implied_volatility) * ((cfg).funding_period_days / 365.0);
+    // Fair mark = Index * exp(sigma^2 * t + 2r * t)
+    return index * exp(var_t + (2.0 * (cfg).risk_free_rate * ((cfg).funding_period_days / 365.0)));
+}
+
+pub fn evaluate_power_perp(
+    pos: &PowerPerpPosition,
+    cfg: &PowerPerpConfig
+) -> PowerPerpMetrics {
+    let s: Float = (pos).current_spot_price;
+    let scale: Float = (cfg).normalization_factor;
+    let index_val: Float = power_perp_calc_index(s, scale);
+    let mark_val: Float = power_perp_calc_fair_mark(s, cfg);
+
+    // Continuous funding rate: premium = Mark - Index = Index * (exp(vol^2 * t) - 1) approx vol^2 * t
+    let vol_sq: Float = (cfg).implied_volatility * (cfg).implied_volatility;
+    let daily_funding_pct: Float = vol_sq / 365.0;
+    let annual_apr: Float = vol_sq;
+
+    let mut abs_size: Float = (pos).position_size;
+    if abs_size < 0.0 {
+        abs_size = 0.0 - abs_size;
+    }
+
+    // Delta of S^2 / scale with respect to S = 2 * S / scale
+    let delta_per_unit: Float = (2.0 * s) / scale;
+    let total_delta: Float = (pos).position_size * delta_per_unit * s; // Delta in USD
+
+    // Gamma of S^2 / scale with respect to S = 2 / scale (CONSTANT GAMMA!)
+    let gamma_per_unit: Float = 2.0 / scale;
+    let total_gamma: Float = (pos).position_size * gamma_per_unit * s * s;
+
+    let upnl: Float = (pos).position_size * (mark_val - (pos).entry_index_price);
+    let daily_decay: Float = abs_size * mark_val * daily_funding_pct;
+
+    return PowerPerpMetrics {
+        index_fair_value: index_val,
+        mark_price: mark_val,
+        funding_rate_daily_pct: daily_funding_pct,
+        annualized_funding_apr: annual_apr,
+        position_delta_usd: total_delta,
+        position_gamma_usd: total_gamma,
+        unrealized_pnl_usd: upnl,
+        daily_decay_drag_usd: daily_decay,
+    };
+}

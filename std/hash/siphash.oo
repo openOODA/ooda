@@ -1,0 +1,223 @@
+// # SipHash-2-4
+//
+// Logline: One-shot SipHash-2-4 over a byte string and two little-endian key words.
+//
+// Setup: Pure Int 32-bit halves (add/xor/rotl). Official Aumasson/Bernstein 2-4. No caps.
+//
+// Beats:
+//   1. Load 8-byte LE blocks and run two compression rounds each.
+//   2. Mix the tail and length byte, then four finalization rounds.
+//   3. Incremental hasher and SipHash-1-3 stay residual.
+
+type Sip64 = struct {
+    hi: Int,
+    lo: Int
+};
+
+type SipState = struct {
+    v0h: Int,
+    v0l: Int,
+    v1h: Int,
+    v1l: Int,
+    v2h: Int,
+    v2l: Int,
+    v3h: Int,
+    v3l: Int
+};
+
+fn sip_mask(x: Int) -> Int {
+    return x & 4294967295;
+}
+
+fn sip_xor(a: Int, b: Int) -> Int {
+    return (a | b) - (a & b);
+}
+
+fn sip_add(a: Sip64, b: Sip64) -> Sip64 {
+    let sum_lo: Int = a.lo + b.lo;
+    let carry: Int = sum_lo >> 32;
+    let nlo: Int = sip_mask(sum_lo);
+    let nhi: Int = sip_mask(a.hi + b.hi + carry);
+    return Sip64 { hi: nhi, lo: nlo };
+}
+
+fn sip_xor64(a: Sip64, b: Sip64) -> Sip64 {
+    return Sip64 { hi: sip_xor(a.hi, b.hi), lo: sip_xor(a.lo, b.lo) };
+}
+
+fn sip_rotl(a: Sip64, r: Int) -> Sip64 {
+    if r == 32 {
+        return Sip64 { hi: a.lo, lo: a.hi };
+    }
+    let sh: Int = 32 - r;
+    let nhi: Int = sip_mask((a.hi << r) | (a.lo >> sh));
+    let nlo: Int = sip_mask((a.lo << r) | (a.hi >> sh));
+    return Sip64 { hi: nhi, lo: nlo };
+}
+
+fn sip_get(s: SipState, which: Int) -> Sip64 {
+    if which == 0 {
+        return Sip64 { hi: s.v0h, lo: s.v0l };
+    }
+    if which == 1 {
+        return Sip64 { hi: s.v1h, lo: s.v1l };
+    }
+    if which == 2 {
+        return Sip64 { hi: s.v2h, lo: s.v2l };
+    }
+    return Sip64 { hi: s.v3h, lo: s.v3l };
+}
+
+fn sip_set(s: SipState, which: Int, w: Sip64) -> SipState {
+    if which == 0 {
+        return SipState { v0h: w.hi, v0l: w.lo, v1h: s.v1h, v1l: s.v1l, v2h: s.v2h, v2l: s.v2l, v3h: s.v3h, v3l: s.v3l };
+    }
+    if which == 1 {
+        return SipState { v0h: s.v0h, v0l: s.v0l, v1h: w.hi, v1l: w.lo, v2h: s.v2h, v2l: s.v2l, v3h: s.v3h, v3l: s.v3l };
+    }
+    if which == 2 {
+        return SipState { v0h: s.v0h, v0l: s.v0l, v1h: s.v1h, v1l: s.v1l, v2h: w.hi, v2l: w.lo, v3h: s.v3h, v3l: s.v3l };
+    }
+    return SipState { v0h: s.v0h, v0l: s.v0l, v1h: s.v1h, v1l: s.v1l, v2h: s.v2h, v2l: s.v2l, v3h: w.hi, v3l: w.lo };
+}
+
+fn sip_round(s0: SipState) -> SipState {
+    let mut s: SipState = s0;
+    let a0: Sip64 = sip_add(sip_get(s, 0), sip_get(s, 1));
+    s = sip_set(s, 0, a0);
+    let r1: Sip64 = sip_rotl(sip_get(s, 1), 13);
+    s = sip_set(s, 1, sip_xor64(r1, sip_get(s, 0)));
+    s = sip_set(s, 0, sip_rotl(sip_get(s, 0), 32));
+    let a2: Sip64 = sip_add(sip_get(s, 2), sip_get(s, 3));
+    s = sip_set(s, 2, a2);
+    let r3: Sip64 = sip_rotl(sip_get(s, 3), 16);
+    s = sip_set(s, 3, sip_xor64(r3, sip_get(s, 2)));
+    s = sip_set(s, 0, sip_add(sip_get(s, 0), sip_get(s, 3)));
+    let r3b: Sip64 = sip_rotl(sip_get(s, 3), 21);
+    s = sip_set(s, 3, sip_xor64(r3b, sip_get(s, 0)));
+    s = sip_set(s, 2, sip_add(sip_get(s, 2), sip_get(s, 1)));
+    let r1b: Sip64 = sip_rotl(sip_get(s, 1), 17);
+    s = sip_set(s, 1, sip_xor64(r1b, sip_get(s, 2)));
+    s = sip_set(s, 2, sip_rotl(sip_get(s, 2), 32));
+    return s;
+}
+
+fn sip_rounds(s0: SipState, n: Int) -> SipState {
+    let mut s: SipState = s0;
+    let mut i: Int = 0;
+    while i < n {
+        s = sip_round(s);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn sip_le64(data: String, off: Int) -> Sip64 {
+    let b0: Int = byte_at(data, off);
+    let b1: Int = byte_at(data, off + 1);
+    let b2: Int = byte_at(data, off + 2);
+    let b3: Int = byte_at(data, off + 3);
+    let b4: Int = byte_at(data, off + 4);
+    let b5: Int = byte_at(data, off + 5);
+    let b6: Int = byte_at(data, off + 6);
+    let b7: Int = byte_at(data, off + 7);
+    let lo: Int = b0 + (b1 << 8) + (b2 << 16) + (b3 << 24);
+    let hi: Int = b4 + (b5 << 8) + (b6 << 16) + (b7 << 24);
+    return Sip64 { hi: hi, lo: lo };
+}
+
+fn sip_word(key: Int) -> Sip64 {
+    return Sip64 { hi: sip_mask(key >> 32), lo: sip_mask(key) };
+}
+
+fn sip_join(w: Sip64) -> Int {
+    return (w.hi << 32) + w.lo;
+}
+
+pub fn siphash24(data: String, key0: Int, key1: Int) -> Int {
+    let k0: Sip64 = sip_word(key0);
+    let k1: Sip64 = sip_word(key1);
+    let iv0: Sip64 = Sip64 { hi: 1936682341, lo: 1886610805 };
+    let iv1: Sip64 = Sip64 { hi: 1685025377, lo: 1852075885 };
+    let iv2: Sip64 = Sip64 { hi: 1819895653, lo: 1852142177 };
+    let iv3: Sip64 = Sip64 { hi: 1952801890, lo: 2037671283 };
+    let mut s: SipState = SipState {
+        v0h: 0,
+        v0l: 0,
+        v1h: 0,
+        v1l: 0,
+        v2h: 0,
+        v2l: 0,
+        v3h: 0,
+        v3l: 0
+    };
+    s = sip_set(s, 0, sip_xor64(iv0, k0));
+    s = sip_set(s, 1, sip_xor64(iv1, k1));
+    s = sip_set(s, 2, sip_xor64(iv2, k0));
+    s = sip_set(s, 3, sip_xor64(iv3, k1));
+    let n: Int = data.len();
+    let nblocks: Int = n / 8;
+    let mut i: Int = 0;
+    while i < nblocks {
+        let m: Sip64 = sip_le64(data, i * 8);
+        s = sip_set(s, 3, sip_xor64(sip_get(s, 3), m));
+        s = sip_rounds(s, 2);
+        s = sip_set(s, 0, sip_xor64(sip_get(s, 0), m));
+        i = i + 1;
+    }
+    let tail: Int = nblocks * 8;
+    let rem: Int = n - tail;
+    let mut bhi: Int = (n & 255) << 24;
+    let mut blo: Int = 0;
+    if rem >= 7 {
+        bhi = bhi + (byte_at(data, tail + 6) << 16);
+    }
+    if rem >= 6 {
+        bhi = bhi + (byte_at(data, tail + 5) << 8);
+    }
+    if rem >= 5 {
+        bhi = bhi + byte_at(data, tail + 4);
+    }
+    if rem >= 4 {
+        blo = blo + (byte_at(data, tail + 3) << 24);
+    }
+    if rem >= 3 {
+        blo = blo + (byte_at(data, tail + 2) << 16);
+    }
+    if rem >= 2 {
+        blo = blo + (byte_at(data, tail + 1) << 8);
+    }
+    if rem >= 1 {
+        blo = blo + byte_at(data, tail);
+    }
+    let b: Sip64 = Sip64 { hi: bhi, lo: blo };
+    s = sip_set(s, 3, sip_xor64(sip_get(s, 3), b));
+    s = sip_rounds(s, 2);
+    s = sip_set(s, 0, sip_xor64(sip_get(s, 0), b));
+    let ff: Sip64 = Sip64 { hi: 0, lo: 255 };
+    s = sip_set(s, 2, sip_xor64(sip_get(s, 2), ff));
+    s = sip_rounds(s, 4);
+    let x01: Sip64 = sip_xor64(sip_get(s, 0), sip_get(s, 1));
+    let x23: Sip64 = sip_xor64(sip_get(s, 2), sip_get(s, 3));
+    return sip_join(sip_xor64(x01, x23));
+}
+
+pub fn siphash13(data: String, key0: Int, key1: Int) -> Int {
+    process_exit(1);
+    return 0;
+}
+
+pub fn init_siphasher(key_0: Int, key_1: Int) -> Int {
+    process_exit(1);
+    return 0;
+}
+
+pub fn siphash_update(hasher: Int, data: String) -> Int {
+    process_exit(1);
+    return 0;
+}
+
+pub fn siphash_finish(hasher: Int) -> Int {
+    process_exit(1);
+    return 0;
+}

@@ -1,0 +1,92 @@
+// # Kernel Networking WireGuard Noise_IK Handshake & Session Key Indexer
+//
+// Logline: Implements WireGuard Noise_IK cryptographic state machine, handshake initiation, and session key indexing.
+//
+// Setup: Kernel-level cryptographic VPN state machine securing point-to-point mesh traffic.
+//
+// Beats:
+//   1. Model Noise_IK handshake message states (HANDSHAKE_INIT, HANDSHAKE_RESP, SESSION_DATA).
+//   2. Allocate local 32-bit sender receiver session indices for fast lookup.
+//   3. Track session key rotation intervals (Rekey-After-Time: 120s, Rekey-After-Messages: 2^64).
+
+pub type WireGuardSession = struct {
+    local_index: Int,
+    remote_index: Int,
+    peer_public_key_hash: Int,
+    session_state: Int, // 1: INIT_SENT, 2: ESTABLISHED, 3: REKEYING
+    packets_sent: Int,
+    created_at_sec: Int,
+    rekey_at_sec: Int,
+};
+
+pub type WireGuardPeerManager = struct {
+    sessions: List[WireGuardSession],
+    next_index: Int,
+    handshakes_completed: Int,
+};
+
+pub fn wireguard_manager_new() -> WireGuardPeerManager {
+    let empty_sessions: List[WireGuardSession] = list_new();
+    return WireGuardPeerManager {
+        sessions: empty_sessions,
+        next_index: 1000,
+        handshakes_completed: 0,
+    };
+}
+
+pub fn wireguard_initiate_handshake(
+    mgr: &mut WireGuardPeerManager,
+    peer_pubkey_hash: Int,
+    now_sec: Int
+) -> Int {
+    let idx: Int = (mgr).next_index;
+    (mgr).next_index = (mgr).next_index + 1;
+
+    let sess = WireGuardSession {
+        local_index: idx,
+        remote_index: 0,
+        peer_public_key_hash: peer_pubkey_hash,
+        session_state: 1, // INIT_SENT
+        packets_sent: 0,
+        created_at_sec: now_sec,
+        rekey_at_sec: now_sec + 120, // 120s rekey interval
+    };
+
+    (mgr).sessions = list_push((mgr).sessions, sess);
+    return idx;
+}
+
+pub fn wireguard_complete_handshake(
+    mgr: &mut WireGuardPeerManager,
+    local_idx: Int,
+    remote_idx: Int
+) -> Bool {
+    let n: Int = list_len((mgr).sessions);
+    let mut updated: List[WireGuardSession] = list_new();
+    let mut found: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let s: WireGuardSession = list_get((mgr).sessions, i);
+        if (s).local_index == local_idx {
+            let mod_s = WireGuardSession {
+                local_index: (s).local_index,
+                remote_index: remote_idx,
+                peer_public_key_hash: (s).peer_public_key_hash,
+                session_state: 2, // ESTABLISHED
+                packets_sent: 0,
+                created_at_sec: (s).created_at_sec,
+                rekey_at_sec: (s).rekey_at_sec,
+            };
+            updated = list_push(updated, mod_s);
+            found = true;
+            (mgr).handshakes_completed = (mgr).handshakes_completed + 1;
+        } else {
+            updated = list_push(updated, s);
+        }
+        i = i + 1;
+    }
+
+    (mgr).sessions = updated;
+    return found;
+}

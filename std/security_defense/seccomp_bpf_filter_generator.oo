@@ -1,0 +1,162 @@
+// # Seccomp-BPF Syscall Filter Bytecode Generator
+//
+// Logline: Compiles declarative system call access policies into classic Berkeley Packet Filter (cBPF) instruction sequences.
+//
+// Setup: Generates architecture-aware BPF bytecode with default action fallbacks.
+//
+// Beats:
+//   1. Define BPF instruction opcodes, jump conditions, and seccomp return actions.
+//   2. Model syscall filters with argument inspection and comparison operators.
+//   3. Emit optimized linear BPF instruction streams with audit logging flags.
+
+pub type BpfInstruction = struct {
+    code: Int,
+    jt: Int,
+    jf: Int,
+    k: Int,
+};
+
+pub type SeccompAction = struct {
+    action_type: Int,
+    errno_val: Int,
+};
+
+pub type SyscallRule = struct {
+    syscall_nr: Int,
+    action: SeccompAction,
+    inspect_arg: Bool,
+    arg_index: Int,
+    arg_val: Int,
+    arg_op: Int,
+};
+
+pub type SeccompFilter = struct {
+    arch: Int,
+    default_action: SeccompAction,
+    rules: List[SyscallRule],
+    rule_count: Int,
+    instructions: List[BpfInstruction],
+    insn_count: Int,
+    is_generated: Bool,
+};
+
+pub fn seccomp_action_allow() -> SeccompAction {
+    return SeccompAction { action_type: 5, errno_val: 0 };
+}
+
+pub fn seccomp_action_kill() -> SeccompAction {
+    return SeccompAction { action_type: 0, errno_val: 0 };
+}
+
+pub fn seccomp_action_errno(err: Int) -> SeccompAction {
+    return SeccompAction { action_type: 2, errno_val: err };
+}
+
+pub fn seccomp_filter_new(arch: Int, def_action: SeccompAction) -> SeccompFilter {
+    let empty_rules: List[SyscallRule] = list_new();
+    let empty_insns: List[BpfInstruction] = list_new();
+    return SeccompFilter {
+        arch: arch,
+        default_action: def_action,
+        rules: empty_rules,
+        rule_count: 0,
+        instructions: empty_insns,
+        insn_count: 0,
+        is_generated: false,
+    };
+}
+
+pub fn seccomp_filter_add_rule(
+    filter: &mut SeccompFilter,
+    sys_nr: Int,
+    action: SeccompAction
+) -> Bool {
+    if (filter).is_generated {
+        return false;
+    }
+    let rule = SyscallRule {
+        syscall_nr: sys_nr,
+        action: action,
+        inspect_arg: false,
+        arg_index: 0,
+        arg_val: 0,
+        arg_op: 0,
+    };
+    (filter).rules = list_push((filter).rules, rule);
+    (filter).rule_count = (filter).rule_count + 1;
+    return true;
+}
+
+pub fn seccomp_action_to_ret_val(act: &SeccompAction) -> Int {
+    let at: Int = (act).action_type;
+    if at == 0 { return 0; }
+    if at == 1 { return 196608; }
+    if at == 2 { return 327680 | ((act).errno_val & 65535); }
+    if at == 3 { return 458752; }
+    if at == 4 { return 1879048192; }
+    return 2147418112;
+}
+
+pub fn seccomp_filter_generate(filter: &mut SeccompFilter) -> Bool {
+    let mut insns: List[BpfInstruction] = list_new();
+    let mut count: Int = 0;
+
+    let insn_ld_arch = BpfInstruction { code: 32, jt: 0, jf: 0, k: 4 };
+    insns = list_push(insns, insn_ld_arch);
+    count = count + 1;
+
+    let insn_chk_arch = BpfInstruction { code: 21, jt: 1, jf: 0, k: (filter).arch };
+    insns = list_push(insns, insn_chk_arch);
+    count = count + 1;
+
+    let insn_kill = BpfInstruction { code: 6, jt: 0, jf: 0, k: 0 };
+    insns = list_push(insns, insn_kill);
+    count = count + 1;
+
+    let insn_ld_nr = BpfInstruction { code: 32, jt: 0, jf: 0, k: 0 };
+    insns = list_push(insns, insn_ld_nr);
+    count = count + 1;
+
+    let r_len: Int = (filter).rule_count;
+    let mut i: Int = 0;
+    while i < r_len {
+        let r: SyscallRule = list_get((filter).rules, i);
+        let act_code: Int = seccomp_action_to_ret_val(&r.action);
+        let insn_cmp = BpfInstruction { code: 21, jt: 0, jf: 1, k: r.syscall_nr };
+        insns = list_push(insns, insn_cmp);
+        count = count + 1;
+        let insn_ret = BpfInstruction { code: 6, jt: 0, jf: 0, k: act_code };
+        insns = list_push(insns, insn_ret);
+        count = count + 1;
+        i = i + 1;
+    }
+
+    let def_code: Int = seccomp_action_to_ret_val(&(filter).default_action);
+    let insn_def = BpfInstruction { code: 6, jt: 0, jf: 0, k: def_code };
+    insns = list_push(insns, insn_def);
+    count = count + 1;
+
+    (filter).instructions = insns;
+    (filter).insn_count = count;
+    (filter).is_generated = true;
+    return true;
+}
+
+pub fn seccomp_filter_eval(filter: &SeccompFilter, sys_nr: Int, arch: Int) -> Int {
+    if (filter).is_generated == false {
+        return 0;
+    }
+    if (filter).arch != arch {
+        return 0;
+    }
+    let r_len: Int = (filter).rule_count;
+    let mut i: Int = 0;
+    while i < r_len {
+        let r: SyscallRule = list_get((filter).rules, i);
+        if r.syscall_nr == sys_nr {
+            return seccomp_action_to_ret_val(&r.action);
+        }
+        i = i + 1;
+    }
+    return seccomp_action_to_ret_val(&(filter).default_action);
+}

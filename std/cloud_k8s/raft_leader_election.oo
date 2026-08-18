@@ -1,0 +1,126 @@
+// # Raft Leader Election State Machine
+//
+// Logline: Implements Raft term management, randomized election timeouts, candidate campaigning, and quorum voting.
+//
+// Setup: Consensus protocol role transitions (Follower, Candidate, Leader) ensuring single-leader safety.
+//
+// Beats:
+//   1. Maintain node state, current term, voted-for tracking, and election timer deadlines.
+//   2. Transition from Follower to Candidate on election timeout, incrementing term and self-voting.
+//   3. Handle RequestVote RPCs, grant votes based on term/log freshness, and tally quorum to crown leader.
+
+pub type RaftRole = Int; // 0=Follower, 1=Candidate, 2=Leader
+
+pub type RaftElectionState = struct {
+    node_id: String,
+    role: Int,
+    current_term: Int,
+    voted_for: String,
+    votes_received: Int,
+    cluster_size: Int,
+    election_timeout_ms: Int,
+    last_heartbeat_ms: Int,
+};
+
+pub type VoteRequest = struct {
+    term: Int,
+    candidate_id: String,
+    last_log_index: Int,
+    last_log_term: Int,
+};
+
+pub type VoteResponse = struct {
+    term: Int,
+    vote_granted: Bool,
+};
+
+/// Initialize Raft election state for a node.
+pub fn raft_election_init(node_id: String, cluster_size: Int, timeout_ms: Int, now_ms: Int) -> RaftElectionState {
+    return RaftElectionState {
+        node_id: node_id,
+        role: 0, // Follower
+        current_term: 0,
+        voted_for: "",
+        votes_received: 0,
+        cluster_size: cluster_size,
+        election_timeout_ms: timeout_ms,
+        last_heartbeat_ms: now_ms,
+    };
+}
+
+/// Check if election timeout has elapsed, triggering candidate election.
+pub fn raft_election_tick(state: &mut RaftElectionState, now_ms: Int) -> Bool {
+    let elapsed: Int = now_ms - (state).last_heartbeat_ms;
+    if (state).role != 2 && elapsed >= (state).election_timeout_ms {
+        // Start election
+        (state).role = 1; // Candidate
+        (state).current_term = (state).current_term + 1;
+        (state).voted_for = (state).node_id;
+        (state).votes_received = 1; // Vote for self
+        (state).last_heartbeat_ms = now_ms;
+        return true;
+    }
+    return false;
+}
+
+/// Process incoming RequestVote RPC.
+pub fn raft_election_handle_vote_request(
+    state: &mut RaftElectionState,
+    req: &VoteRequest,
+    my_last_index: Int,
+    my_last_term: Int
+) -> VoteResponse {
+    let cur_term: Int = (state).current_term;
+    if (req).term < cur_term {
+        return VoteResponse {
+            term: cur_term,
+            vote_granted: false,
+        };
+    }
+
+    if (req).term > cur_term {
+        (state).current_term = (req).term;
+        (state).role = 0; // Step down to follower
+        (state).voted_for = "";
+        (state).votes_received = 0;
+    }
+
+    let can_vote: Bool = (state).voted_for == "" || (state).voted_for == (req).candidate_id;
+    let log_ok: Bool = (req).last_log_term > my_last_term ||
+        ((req).last_log_term == my_last_term && (req).last_log_index >= my_last_index);
+
+    if can_vote && log_ok {
+        (state).voted_for = (req).candidate_id;
+        return VoteResponse {
+            term: (state).current_term,
+            vote_granted: true,
+        };
+    }
+
+    return VoteResponse {
+        term: (state).current_term,
+        vote_granted: false,
+    };
+}
+
+/// Register a granted vote from a peer; crown as leader if majority quorum is reached.
+pub fn raft_election_record_vote(state: &mut RaftElectionState, term: Int) -> Bool {
+    if (state).role == 1 && term == (state).current_term {
+        (state).votes_received = (state).votes_received + 1;
+        let quorum: Int = ((state).cluster_size / 2) + 1;
+        if (state).votes_received >= quorum {
+            (state).role = 2; // Leader
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Step down from leader or candidate when higher term is detected.
+pub fn raft_election_step_down(state: &mut RaftElectionState, higher_term: Int, now_ms: Int) {
+    (state).current_term = higher_term;
+    (state).role = 0;
+    (state).voted_for = "";
+    (state).votes_received = 0;
+    (state).last_heartbeat_ms = now_ms;
+}

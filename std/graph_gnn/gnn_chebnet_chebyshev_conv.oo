@@ -1,0 +1,110 @@
+// # ChebNet Chebyshev Spectral Graph Convolution
+//
+// Logline: Implements fast spectral graph convolutions via truncated Chebyshev polynomial expansions of graph Laplacians.
+//
+// Setup: Spectral graph filter avoiding explicit eigendecomposition by approximating filter responses with K-order orthogonal polynomials.
+//
+// Beats:
+//   1. Scale graph Laplacian into spectral domain [-1, 1]: L_tilde = (2 / lambda_max) * L - I_N.
+//   2. Evaluate recurrence relations T_0(x) = x, T_1(x) = L_tilde * x, T_k(x) = 2 * L_tilde * T_{k-1}(x) - T_{k-2}(x).
+//   3. Learn polynomial coefficient matrices Theta_k across filter order K.
+
+pub type ChebNetConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    k_order: Int, // Chebyshev polynomial expansion order (e.g. K=3)
+    lambda_max: Float,
+};
+
+pub type ChebNetLayer = struct {
+    config: ChebNetConfig,
+    weights: List[Float], // k_order * (in_features * out_features)
+    bias: List[Float],    // out_features
+};
+
+pub fn chebnet_config_new(
+    in_f: Int,
+    out_f: Int,
+    k: Int,
+    l_max: Float
+) -> ChebNetConfig {
+    return ChebNetConfig {
+        in_features: in_f,
+        out_features: out_f,
+        k_order: k,
+        lambda_max: l_max,
+    };
+}
+
+pub fn chebnet_layer_init(config: ChebNetConfig, seed: Int) -> ChebNetLayer {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let k_order: Int = (config).k_order;
+    let total_w: Int = k_order * in_f * out_f;
+    let mut w_mat: List[Float] = list_new();
+    let mut state: Int = seed;
+
+    let scale: Float = sqrt(2.0 / ((in_f + out_f) as Float));
+    let mut i: Int = 0;
+    while i < total_w {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        w_mat = list_push(w_mat, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale);
+        i = i + 1;
+    }
+
+    let mut b_vec: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < out_f {
+        b_vec = list_push(b_vec, 0.0);
+        j = j + 1;
+    }
+
+    return ChebNetLayer {
+        config: config,
+        weights: w_mat,
+        bias: b_vec,
+    };
+}
+
+// Compute Chebyshev polynomial combination for a node given k-th order basis values
+pub fn chebnet_combine_polynomials(
+    layer: &ChebNetLayer,
+    cheb_bases: List[Float], // k_order * in_features
+    node_id: Int
+) -> List[Float] {
+    let cfg: ChebNetConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let out_f: Int = (cfg).out_features;
+    let k_order: Int = (cfg).k_order;
+
+    let mut out_feat: List[Float] = list_new();
+    let mut o: Int = 0;
+    while o < out_f {
+        let b: Float = list_get((*layer).bias, o);
+        let mut accum: Float = b;
+
+        let mut k: Int = 0;
+        while k < k_order {
+            let w_off: Int = (k * in_f * out_f) + o;
+            let basis_off: Int = k * in_f;
+
+            let mut dot: Float = 0.0;
+            let mut c: Int = 0;
+            while c < in_f {
+                let tx: Float = list_get(cheb_bases, basis_off + c);
+                let w: Float = list_get((*layer).weights, (k * in_f * out_f) + (c * out_f) + o);
+                dot = dot + (tx * w);
+                c = c + 1;
+            }
+            accum = accum + dot;
+            k = k + 1;
+        }
+
+        // ReLU activation
+        let act: Float = if accum > 0.0 { accum } else { 0.0 };
+        out_feat = list_push(out_feat, act);
+        o = o + 1;
+    }
+    return out_feat;
+}

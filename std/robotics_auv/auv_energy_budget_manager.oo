@@ -1,0 +1,138 @@
+// # Subsea Battery State-of-Charge & Mission Energy Budget
+//
+// Logline: Coulomb-count hotel/payload/propulsion drain. Int milli destub.
+//
+// Setup: Energy executive; remaining Wh, SoC, OCV sag, endurance.
+//
+// Beats:
+//   1. Pack: capacity, voltage, ESR, hotel, payload.
+//   2. Discharge: E_used = P * dt / 3600.
+//   3. Voc linear in SoC; V_term = Voc - I R.
+//   4. U_opt = (P_hotel / (2 k))^(1/3).
+
+type BatteryPackConfig = struct {
+    nominal_capacity_mwh: Int,
+    nominal_voltage_mv: Int,
+    internal_resistance_mohm: Int,
+    hotel_power_mw: Int,
+    payload_power_mw: Int,
+    min_safe_voltage_mv: Int
+};
+
+type EnergyBudgetState = struct {
+    remaining_energy_mwh: Int,
+    soc_milli: Int,
+    current_voltage_mv: Int,
+    total_power_drain_mw: Int,
+    estimated_endurance_s: Int
+};
+
+pub fn battery_config_default_auv() -> BatteryPackConfig {
+    return BatteryPackConfig {
+        nominal_capacity_mwh: 1200000,
+        nominal_voltage_mv: 14800,
+        internal_resistance_mohm: 50,
+        hotel_power_mw: 18000,
+        payload_power_mw: 25000,
+        min_safe_voltage_mv: 12000
+    };
+}
+
+pub fn ebud_clamp_int(v: Int, lo: Int, hi: Int) -> Int {
+    if v < lo {
+        return lo;
+    }
+    if v > hi {
+        return hi;
+    }
+    return v;
+}
+
+pub fn energy_budget_init(cfg: BatteryPackConfig) -> EnergyBudgetState {
+    let hotel_pay: Int = cfg.hotel_power_mw + cfg.payload_power_mw;
+    let safe_p: Int = if hotel_pay < 1 { 1 } else { hotel_pay };
+    let endurance: Int = (cfg.nominal_capacity_mwh * 3600) / safe_p;
+    return EnergyBudgetState {
+        remaining_energy_mwh: cfg.nominal_capacity_mwh,
+        soc_milli: 1000,
+        current_voltage_mv: cfg.nominal_voltage_mv,
+        total_power_drain_mw: hotel_pay,
+        estimated_endurance_s: endurance
+    };
+}
+
+pub fn cube_root_newton(target_u3: Int, guess: Int, steps: Int) -> Int {
+    if steps <= 0 {
+        return guess;
+    }
+    if guess <= 0 {
+        return 0;
+    }
+    let u2: Int = guess * guess;
+    let u3: Int = u2 * guess;
+    let denom: Int = 3 * u2;
+    if denom <= 0 {
+        return guess;
+    }
+    let next: Int = if u3 > target_u3 {
+        guess - ((u3 - target_u3) / denom)
+    } else {
+        guess + ((target_u3 - u3) / denom)
+    };
+    if next <= 0 {
+        return guess;
+    }
+    return cube_root_newton(target_u3, next, steps - 1);
+}
+
+pub fn compute_optimal_range_speed_mm_s(
+    hotel_plus_payload_mw: Int,
+    drag_coeff_milli: Int,
+    prop_efficiency_milli: Int
+) -> Int {
+    let eff: Int = if prop_efficiency_milli < 100 { 100 } else { prop_efficiency_milli };
+    let k_milli: Int = (drag_coeff_milli * 1000) / eff;
+    if k_milli <= 1 {
+        return 1500;
+    }
+    let two_k: Int = 2 * k_milli;
+    if hotel_plus_payload_mw <= 0 {
+        return 1000;
+    }
+    let term_u3: Int = (1000000000 * hotel_plus_payload_mw) / two_k;
+    if term_u3 <= 0 {
+        return 1000;
+    }
+    let u_est: Int = cube_root_newton(term_u3, 1500, 6);
+    return ebud_clamp_int(u_est, 500, 3000);
+}
+
+pub fn energy_budget_step(
+    cfg: BatteryPackConfig,
+    state: EnergyBudgetState,
+    propulsion_power_mw: Int,
+    dt_s: Int
+) -> EnergyBudgetState {
+    let total_power: Int = cfg.hotel_power_mw + cfg.payload_power_mw + propulsion_power_mw;
+    let dt_use: Int = if dt_s < 0 { 0 } else { dt_s };
+    let energy_used: Int = (total_power * dt_use) / 3600;
+    let raw_energy: Int = state.remaining_energy_mwh - energy_used;
+    let new_energy: Int = if raw_energy < 0 { 0 } else { raw_energy };
+    let cap: Int = if cfg.nominal_capacity_mwh < 1 { 1 } else { cfg.nominal_capacity_mwh };
+    let soc: Int = (new_energy * 1000) / cap;
+    let span_mv: Int = cfg.nominal_voltage_mv - cfg.min_safe_voltage_mv;
+    let voc: Int = cfg.min_safe_voltage_mv + ((soc * span_mv) / 1000);
+    let safe_voc: Int = if voc < 1 { 1 } else { voc };
+    let current_ma: Int = (total_power * 1000) / safe_voc;
+    let drop_mv: Int = (current_ma * cfg.internal_resistance_mohm) / 1000;
+    let v_term: Int = voc - drop_mv;
+    let safe_power: Int = if total_power < 1 { 1 } else { total_power };
+    let endurance: Int = (new_energy * 3600) / safe_power;
+    return EnergyBudgetState {
+        remaining_energy_mwh: new_energy,
+        soc_milli: soc,
+        current_voltage_mv: v_term,
+        total_power_drain_mw: total_power,
+        estimated_endurance_s: endurance
+    };
+}

@@ -1,0 +1,101 @@
+// # Model Predictive Control (MPC) Receding Horizon Trajectory Tracker
+//
+// Logline: Solves discrete-time linear quadratic predictive control horizons subject to thruster thrust and rate limits.
+//
+// Setup: Receding horizon optimization predicting future vehicle trajectory states and penalizing control effort and tracking deviations.
+//
+// Beats:
+//   1. Define MPC horizon parameters (prediction horizon N, state weights Q, input weights R).
+//   2. Formulate linearized discrete prediction dynamics x_{k+1} = A_d * x_k + B_d * u_k.
+//   3. Compute optimal unconstrained feedback control law step u_0*.
+//   4. Apply actuator maximum thrust and slew rate saturation bounds.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type MpcHorizonConfig = struct {
+    horizon_steps: Int,
+    sample_time_s: Float,
+    q_pos_weight: Float,
+    q_vel_weight: Float,
+    r_thrust_weight: Float,
+    max_thrust_n: Float,
+    max_thrust_rate_n_s: Float,
+};
+
+pub type MpcTrackingState = struct {
+    last_thrust_surge_n: Float,
+    last_thrust_yaw_nm: Float,
+};
+
+pub type MpcControlOutput = struct {
+    thrust_surge_n: Float,
+    thrust_yaw_nm: Float,
+    predicted_pos_error_m: Float,
+};
+
+pub type MpcStepResult = struct {
+    new_state: MpcTrackingState,
+    output: MpcControlOutput,
+};
+
+pub fn mpc_horizon_config_default() -> MpcHorizonConfig {
+    return MpcHorizonConfig {
+        horizon_steps: 10,
+        sample_time_s: 0.1,
+        q_pos_weight: 10.0,
+        q_vel_weight: 2.0,
+        r_thrust_weight: 0.05,
+        max_thrust_n: 80.0,
+        max_thrust_rate_n_s: 200.0,
+    };
+}
+
+pub fn mpc_tracking_state_init() -> MpcTrackingState {
+    return MpcTrackingState {
+        last_thrust_surge_n: 0.0,
+        last_thrust_yaw_nm: 0.0,
+    };
+}
+
+pub fn mpc_tracker_step(
+    cfg: &MpcHorizonConfig,
+    state: &MpcTrackingState,
+    current_x: Float,
+    current_u: Float,
+    ref_x: Float,
+    ref_u: Float,
+    dt: Float
+) -> MpcStepResult {
+    let pos_err: Float = current_x - ref_x;
+    let vel_err: Float = current_u - ref_u;
+
+    // Linear quadratic feedback gain approx for mass m ~ 30kg, damping d ~ 15
+    let k_p: Float = sqrt((cfg).q_pos_weight / (cfg).r_thrust_weight);
+    let k_d: Float = sqrt((cfg).q_vel_weight / (cfg).r_thrust_weight) + 2.0;
+
+    let target_f_raw: Float = 0.0 - ((k_p * pos_err) + (k_d * vel_err));
+
+    // Slew rate limiting
+    let max_rate_step: Float = (cfg).max_thrust_rate_n_s * dt;
+    let f_diff: Float = target_f_raw - (state).last_thrust_surge_n;
+    let clamped_diff: Float = math_clamp(f_diff, 0.0 - max_rate_step, max_rate_step);
+
+    let new_f_surge: Float = math_clamp(
+        (state).last_thrust_surge_n + clamped_diff,
+        0.0 - (cfg).max_thrust_n,
+        (cfg).max_thrust_n
+    );
+
+    return MpcStepResult {
+        new_state: MpcTrackingState {
+            last_thrust_surge_n: new_f_surge,
+            last_thrust_yaw_nm: (state).last_thrust_yaw_nm,
+        },
+        output: MpcControlOutput {
+            thrust_surge_n: new_f_surge,
+            thrust_yaw_nm: 0.0,
+            predicted_pos_error_m: pos_err,
+        },
+    };
+}

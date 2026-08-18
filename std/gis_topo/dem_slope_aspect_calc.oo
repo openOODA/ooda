@@ -1,0 +1,89 @@
+// # DEM Slope Gradient & Aspect Azimuth Topographic Analysis
+//
+// Logline: Calculates terrain slope gradient (degrees/percent) and aspect azimuth direction using Horn's 3x3 finite-difference kernel.
+//
+// Setup: Digital elevation raster grids, 3x3 convolution neighborhoods, and directional partial derivative estimators.
+//
+// Beats:
+//   1. Define SlopeAspectResult struct containing slope degrees, slope percent, and aspect azimuth.
+//   2. Convolve 3x3 local elevation neighborhood with Horn's weighting kernel (dz/dx, dz/dy).
+//   3. Compute surface gradient magnitude and compass aspect angle [0, 360) degrees.
+
+import "./geotiff_elevation_raster.oo";
+
+pub type SlopeAspectResult = struct {
+    slope_deg: Float,
+    slope_percent: Float,
+    aspect_deg: Float, // 0-360 clockwise from North, or -1 for flat
+};
+
+// Horn's 3x3 algorithm for partial derivatives dz/dx and dz/dy
+// Neighborhood layout:
+// [ z_nw, z_n, z_ne ]
+// [ z_w,  z_c, z_e  ]
+// [ z_sw, z_s, z_se ]
+pub fn dem_calc_slope_aspect_horn(
+    grid: &DemRasterGrid,
+    col: Int,
+    row: Int
+) -> SlopeAspectResult {
+    let z_nw: Float = dem_raster_get_value(grid, col - 1, row - 1);
+    let z_n:  Float = dem_raster_get_value(grid, col,     row - 1);
+    let z_ne: Float = dem_raster_get_value(grid, col + 1, row - 1);
+    let z_w:  Float = dem_raster_get_value(grid, col - 1, row);
+    let z_e:  Float = dem_raster_get_value(grid, col + 1, row);
+    let z_sw: Float = dem_raster_get_value(grid, col - 1, row + 1);
+    let z_s:  Float = dem_raster_get_value(grid, col,     row + 1);
+    let z_se: Float = dem_raster_get_value(grid, col + 1, row + 1);
+
+    let cell_x: Float = (grid).pixel_size_x;
+    let cell_y: Float = (grid).pixel_size_y;
+
+    // dz/dx = ((z_ne + 2*z_e + z_se) - (z_nw + 2*z_w + z_sw)) / (8 * cell_x)
+    let dz_dx: Float = ((z_ne + (2.0 * z_e) + z_se) - (z_nw + (2.0 * z_w) + z_sw)) / (8.0 * cell_x);
+
+    // dz/dy = ((z_sw + 2*z_s + z_se) - (z_nw + 2*z_n + z_ne)) / (8 * cell_y)
+    let dz_dy: Float = ((z_sw + (2.0 * z_s) + z_se) - (z_nw + (2.0 * z_n) + z_ne)) / (8.0 * cell_y);
+
+    // Slope rise/run
+    let rise_run: Float = sqrt((dz_dx * dz_dx) + (dz_dy * dz_dy));
+    let slope_percent: Float = rise_run * 100.0;
+
+    // Small angle approximation or arctan: tan(slope) = rise_run
+    // For small slopes, slope_rad ~= rise_run / sqrt(1 + rise_run^2)
+    let slope_rad: Float = rise_run / sqrt(1.0 + (rise_run * rise_run));
+    let slope_deg: Float = slope_rad * 57.295779513;
+
+    // Aspect azimuth: angle from north
+    let mut aspect_deg: Float = -1.0;
+    if rise_run > 0.00001 {
+        // Approximate aspect angle using dz_dx and dz_dy
+        let mut angle_deg: Float = 0.0;
+        if dz_dx > 0.0 {
+            angle_deg = 90.0 - (dz_dy * 57.29578);
+        } else if dz_dx < 0.0 {
+            angle_deg = 270.0 - (dz_dy * 57.29578);
+        } else {
+            angle_deg = if dz_dy > 0.0 { 180.0 } else { 0.0 };
+        }
+
+        while angle_deg < 0.0 {
+            angle_deg = angle_deg + 360.0;
+        }
+        while angle_deg >= 360.0 {
+            angle_deg = angle_deg - 360.0;
+        }
+        aspect_deg = angle_deg;
+    }
+
+    return SlopeAspectResult {
+        slope_deg: slope_deg,
+        slope_percent: slope_percent,
+        aspect_deg: aspect_deg,
+    };
+}
+
+// Check if terrain slope is hazardous for avalanche/landslide (e.g. > 30 degrees)
+pub fn dem_is_steep_terrain(res: &SlopeAspectResult, threshold_deg: Float) -> Bool {
+    return (res).slope_deg >= threshold_deg;
+}

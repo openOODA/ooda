@@ -1,0 +1,210 @@
+// # DC Motor Modeling & Control
+//
+// Logline: Direct current motor models, H-bridge drive control, and closed-loop speed regulation.
+//
+// Setup: DC motor configuration, telemetry tracking, and voltage drive algorithms.
+//
+// Beats:
+//   1. Define DC motor physical properties and state container.
+//   2. Initialize and configure DC motor instances.
+//   3. Implement forward/reverse speed control and voltage drive calculations.
+//   4. Process encoder feedback and thermal protection updates.
+
+import "./motors_ops.oo";
+
+type DcMotor = struct {
+    id: Int,
+    max_voltage: Float,
+    max_rpm: Float,
+    max_current: Float,
+    pwm: PwmConfig,
+    encoder: EncoderState,
+    pid_vel: MotorPid,
+    pid_pos: MotorPid,
+    thermal: MotorThermalModel,
+    mode: Int,
+    target_val: Float,
+    current_duty: Float,
+    enabled: Bool,
+};
+
+pub fn dc_motor_init(id: Int, max_voltage: Float, max_rpm: Float, cpr: Float, gear_ratio: Float) -> DcMotor {
+    return DcMotor {
+        id: id,
+        max_voltage: max_voltage,
+        max_rpm: max_rpm,
+        max_current: 10.0,
+        pwm: pwm_config_new(20000.0, 0.0, false),
+        encoder: encoder_init(cpr, gear_ratio),
+        pid_vel: motor_pid_init(0.1, 0.01, 0.001, 1.0),
+        pid_pos: motor_pid_init(1.5, 0.05, 0.02, 1.0),
+        thermal: thermal_init(0.5, 50.0, 100.0),
+        mode: 0,
+        target_val: 0.0,
+        current_duty: 0.0,
+        enabled: false,
+    };
+}
+
+pub fn dc_motor_enable(dc: DcMotor) -> DcMotor {
+    return DcMotor {
+        id: (dc).id,
+        max_voltage: (dc).max_voltage,
+        max_rpm: (dc).max_rpm,
+        max_current: (dc).max_current,
+        pwm: (dc).pwm,
+        encoder: (dc).encoder,
+        pid_vel: (dc).pid_vel,
+        pid_pos: (dc).pid_pos,
+        thermal: (dc).thermal,
+        mode: (dc).mode,
+        target_val: (dc).target_val,
+        current_duty: (dc).current_duty,
+        enabled: true,
+    };
+}
+
+pub fn dc_motor_disable(dc: DcMotor) -> DcMotor {
+    let freq_val: Float = (dc).pwm.frequency_hz;
+    let inv_val: Bool = (dc).pwm.inverted;
+    return DcMotor {
+        id: (dc).id,
+        max_voltage: (dc).max_voltage,
+        max_rpm: (dc).max_rpm,
+        max_current: (dc).max_current,
+        pwm: pwm_config_new(freq_val, 0.0, inv_val),
+        encoder: (dc).encoder,
+        pid_vel: (dc).pid_vel,
+        pid_pos: (dc).pid_pos,
+        thermal: (dc).thermal,
+        mode: (dc).mode,
+        target_val: (dc).target_val,
+        current_duty: 0.0,
+        enabled: false,
+    };
+}
+
+pub fn dc_motor_set_mode(dc: DcMotor, mode: Int) -> DcMotor {
+    return DcMotor {
+        id: (dc).id,
+        max_voltage: (dc).max_voltage,
+        max_rpm: (dc).max_rpm,
+        max_current: (dc).max_current,
+        pwm: (dc).pwm,
+        encoder: (dc).encoder,
+        pid_vel: motor_pid_reset((dc).pid_vel),
+        pid_pos: motor_pid_reset((dc).pid_pos),
+        thermal: (dc).thermal,
+        mode: mode,
+        target_val: (dc).target_val,
+        current_duty: (dc).current_duty,
+        enabled: (dc).enabled,
+    };
+}
+
+pub fn dc_motor_set_target(dc: DcMotor, target: Float) -> DcMotor {
+    return DcMotor {
+        id: (dc).id,
+        max_voltage: (dc).max_voltage,
+        max_rpm: (dc).max_rpm,
+        max_current: (dc).max_current,
+        pwm: (dc).pwm,
+        encoder: (dc).encoder,
+        pid_vel: (dc).pid_vel,
+        pid_pos: (dc).pid_pos,
+        thermal: (dc).thermal,
+        mode: (dc).mode,
+        target_val: target,
+        current_duty: (dc).current_duty,
+        enabled: (dc).enabled,
+    };
+}
+
+pub fn dc_motor_step(dc: DcMotor, dt: Float, new_encoder_ticks: Float, current_amps: Float) -> DcMotor {
+    if (dc).enabled == false {
+        let freq_val: Float = (dc).pwm.frequency_hz;
+        let inv_val: Bool = (dc).pwm.inverted;
+        return DcMotor {
+            id: (dc).id,
+            max_voltage: (dc).max_voltage,
+            max_rpm: (dc).max_rpm,
+            max_current: (dc).max_current,
+            pwm: pwm_config_new(freq_val, 0.0, inv_val),
+            encoder: (dc).encoder,
+            pid_vel: (dc).pid_vel,
+            pid_pos: (dc).pid_pos,
+            thermal: (dc).thermal,
+            mode: (dc).mode,
+            target_val: (dc).target_val,
+            current_duty: 0.0,
+            enabled: false,
+        };
+    }
+
+    let enc: EncoderState = encoder_update((dc).encoder, new_encoder_ticks, dt);
+    let thm: MotorThermalModel = thermal_update((dc).thermal, current_amps, dt);
+
+    if thermal_is_overheated(thm) {
+        let freq_val: Float = (dc).pwm.frequency_hz;
+        let inv_val: Bool = (dc).pwm.inverted;
+        return DcMotor {
+            id: (dc).id,
+            max_voltage: (dc).max_voltage,
+            max_rpm: (dc).max_rpm,
+            max_current: (dc).max_current,
+            pwm: pwm_config_new(freq_val, 0.0, inv_val),
+            encoder: enc,
+            pid_vel: (dc).pid_vel,
+            pid_pos: (dc).pid_pos,
+            thermal: thm,
+            mode: (dc).mode,
+            target_val: (dc).target_val,
+            current_duty: 0.0,
+            enabled: false,
+        };
+    }
+
+    let tgt_val: Float = (dc).target_val;
+    let duty_open: Float = clamp_float(tgt_val, 0.0 - 1.0, 1.0);
+    let pid_vel: MotorPid = if (dc).mode == 1 { motor_pid_compute((dc).pid_vel, tgt_val, enc.velocity_rad_s, dt) } else { (dc).pid_vel };
+    let pid_pos: MotorPid = if (dc).mode == 2 { motor_pid_compute((dc).pid_pos, tgt_val, enc.position_rad, dt) } else { (dc).pid_pos };
+    let duty_vel: Float = motor_pid_last_output(pid_vel);
+    let duty_pos: Float = motor_pid_last_output(pid_pos);
+    let duty_closed: Float = if (dc).mode == 1 { duty_vel } else { if (dc).mode == 2 { duty_pos } else { (dc).current_duty } };
+    let duty: Float = if (dc).mode == 0 { duty_open } else { duty_closed };
+
+    let duty_abs: Float = math_abs(duty);
+    let freq_val: Float = (dc).pwm.frequency_hz;
+    let inv_val: Bool = (dc).pwm.inverted;
+    return DcMotor {
+        id: (dc).id,
+        max_voltage: (dc).max_voltage,
+        max_rpm: (dc).max_rpm,
+        max_current: (dc).max_current,
+        pwm: pwm_config_new(freq_val, duty_abs, inv_val),
+        encoder: enc,
+        pid_vel: pid_vel,
+        pid_pos: pid_pos,
+        thermal: thm,
+        mode: (dc).mode,
+        target_val: (dc).target_val,
+        current_duty: duty,
+        enabled: true,
+    };
+}
+
+pub fn dc_motor_get_duty(dc_ref: DcMotor) -> Float {
+    return (dc_ref).current_duty;
+}
+
+pub fn dc_motor_get_speed_rpm(dc_ref: DcMotor) -> Float {
+    return encoder_get_rpm((dc_ref).encoder);
+}
+
+pub fn dc_motor_get_position_rad(dc_ref: DcMotor) -> Float {
+    return (dc_ref).encoder.position_rad;
+}
+
+pub fn dc_motor_is_active(dc_ref: DcMotor) -> Bool {
+    return (dc_ref).enabled;
+}

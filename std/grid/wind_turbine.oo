@@ -1,0 +1,267 @@
+// # Wind Turbine Facility State & Operational Model
+//
+// Logline: Simulates wind turbine power output, operational states, mechanical stresses, and telemetry.
+//
+// Setup: Wind turbine electromechanical modeling importing wind_curve.oo and wind_pitch.oo.
+//
+// Beats:
+//   1. Define WindTurbine and TurbineTelemetry data structures.
+//   2. Construct WindTurbine models with site power curves and pitch controllers.
+//   3. Step turbine generator simulation across changing environmental conditions.
+//   4. Verify wind turbine operational safety boundaries and extract telemetry.
+
+import "./wind_curve.oo";
+import "./wind_pitch.oo";
+
+type WindTurbine = struct {
+    id: Int,
+    rated_power_kw: Float,
+    hub_height_m: Float,
+    power_curve: PowerCurve,
+    pitch_controller: PitchController,
+    wind_speed_ms: Float,
+    wind_direction_deg: Float,
+    rotor_rpm: Float,
+    generator_rpm: Float,
+    gearbox_ratio: Float,
+    output_power_kw: Float,
+    yaw_angle_deg: Float,
+    nacelle_temp_c: Float,
+    status: Int
+};
+
+type TurbineTelemetry = struct {
+    turbine_id: Int,
+    wind_speed_ms: Float,
+    pitch_deg: Float,
+    rotor_rpm: Float,
+    power_kw: Float,
+    efficiency_pct: Float,
+    is_fault: Bool
+};
+
+pub fn wind_turbine_new(
+    id: Int,
+    hub_height: Float,
+    rated_power: Float,
+    gearbox_ratio: Float
+) -> WindTurbine {
+    return WindTurbine {
+        id: id,
+        rated_power_kw: rated_power,
+        hub_height_m: hub_height,
+        power_curve: power_curve_default(),
+        pitch_controller: pitch_controller_default(),
+        wind_speed_ms: 0.0,
+        wind_direction_deg: 0.0,
+        rotor_rpm: 0.0,
+        generator_rpm: 0.0,
+        gearbox_ratio: gearbox_ratio,
+        output_power_kw: 0.0,
+        yaw_angle_deg: 0.0,
+        nacelle_temp_c: 25.0,
+        status: 0
+    };
+}
+
+pub fn wind_turbine_default(id: Int) -> WindTurbine {
+    return wind_turbine_new(id, 100.0, 3000.0, 90.0);
+}
+
+pub fn wind_turbine_trigger_fault(turbine: WindTurbine) -> WindTurbine {
+    let pitched: PitchController = pitch_controller_feather(turbine.pitch_controller);
+    let stopped: PitchController = PitchController {
+        current_pitch_deg: pitched.current_pitch_deg,
+        min_pitch_deg: pitched.min_pitch_deg,
+        max_pitch_deg: pitched.max_pitch_deg,
+        pitch_rate_deg_per_sec: pitched.pitch_rate_deg_per_sec,
+        kp: pitched.kp,
+        ki: pitched.ki,
+        kd: pitched.kd,
+        integral_error: pitched.integral_error,
+        prev_error: pitched.prev_error,
+        target_rpm: pitched.target_rpm,
+        is_feathered: pitched.is_feathered,
+        emergency_stop_triggered: true
+    };
+    return WindTurbine {
+        id: turbine.id,
+        rated_power_kw: turbine.rated_power_kw,
+        hub_height_m: turbine.hub_height_m,
+        power_curve: turbine.power_curve,
+        pitch_controller: stopped,
+        wind_speed_ms: turbine.wind_speed_ms,
+        wind_direction_deg: turbine.wind_direction_deg,
+        rotor_rpm: 0.0,
+        generator_rpm: 0.0,
+        gearbox_ratio: turbine.gearbox_ratio,
+        output_power_kw: 0.0,
+        yaw_angle_deg: turbine.yaw_angle_deg,
+        nacelle_temp_c: turbine.nacelle_temp_c,
+        status: 4
+    };
+}
+
+pub fn wind_turbine_update_wind(
+    turbine: WindTurbine,
+    wind_speed_ms: Float,
+    wind_dir_deg: Float,
+    air_density: Float,
+    dt_sec: Float
+) -> WindTurbine {
+    if turbine.status == 4 {
+        return WindTurbine {
+            id: turbine.id,
+            rated_power_kw: turbine.rated_power_kw,
+            hub_height_m: turbine.hub_height_m,
+            power_curve: turbine.power_curve,
+            pitch_controller: turbine.pitch_controller,
+            wind_speed_ms: turbine.wind_speed_ms,
+            wind_direction_deg: turbine.wind_direction_deg,
+            rotor_rpm: 0.0,
+            generator_rpm: 0.0,
+            gearbox_ratio: turbine.gearbox_ratio,
+            output_power_kw: 0.0,
+            yaw_angle_deg: turbine.yaw_angle_deg,
+            nacelle_temp_c: turbine.nacelle_temp_c,
+            status: 4
+        };
+    }
+    let yaw_diff: Float = math_abs(turbine.yaw_angle_deg - wind_dir_deg);
+    let mut yaw_factor: Float = 1.0;
+    if yaw_diff > 5.0 {
+        let rad: Float = deg_to_rad(yaw_diff);
+        let cos_val: Float = math_clamp(1.0 - (0.5 * rad * rad), 0.0, 1.0);
+        yaw_factor = math_pow3(cos_val);
+    }
+    let effective_wind: Float = wind_speed_ms * yaw_factor;
+    let v_cut_in: Float = turbine.power_curve.cut_in_speed_ms;
+    let v_rated: Float = turbine.power_curve.rated_speed_ms;
+    let v_cut_out: Float = turbine.power_curve.cut_out_speed_ms;
+    if effective_wind < v_cut_in {
+        return WindTurbine {
+            id: turbine.id,
+            rated_power_kw: turbine.rated_power_kw,
+            hub_height_m: turbine.hub_height_m,
+            power_curve: turbine.power_curve,
+            pitch_controller: turbine.pitch_controller,
+            wind_speed_ms: wind_speed_ms,
+            wind_direction_deg: wind_dir_deg,
+            rotor_rpm: 0.0,
+            generator_rpm: 0.0,
+            gearbox_ratio: turbine.gearbox_ratio,
+            output_power_kw: 0.0,
+            yaw_angle_deg: turbine.yaw_angle_deg,
+            nacelle_temp_c: turbine.nacelle_temp_c,
+            status: 0
+        };
+    }
+    if effective_wind > v_cut_out {
+        let feathered: PitchController = pitch_controller_feather(turbine.pitch_controller);
+        return WindTurbine {
+            id: turbine.id,
+            rated_power_kw: turbine.rated_power_kw,
+            hub_height_m: turbine.hub_height_m,
+            power_curve: turbine.power_curve,
+            pitch_controller: feathered,
+            wind_speed_ms: wind_speed_ms,
+            wind_direction_deg: wind_dir_deg,
+            rotor_rpm: 0.0,
+            generator_rpm: 0.0,
+            gearbox_ratio: turbine.gearbox_ratio,
+            output_power_kw: 0.0,
+            yaw_angle_deg: turbine.yaw_angle_deg,
+            nacelle_temp_c: turbine.nacelle_temp_c,
+            status: 3
+        };
+    }
+    let curve: PowerCurve = turbine.power_curve;
+    let base_power: Float = power_curve_calculate_power(&curve, effective_wind, air_density);
+    let radius: Float = turbine.power_curve.rotor_diameter_m / 2.0;
+    let target_rot_speed_rad_s: Float = (8.0 * effective_wind) / radius;
+    let current_rot_rpm: Float = (target_rot_speed_rad_s * 60.0) / (2.0 * math_pi());
+    let rotor_rpm: Float = math_clamp(current_rot_rpm, 0.0, 20.0);
+    let gen_rpm: Float = rotor_rpm * turbine.gearbox_ratio;
+    let mut status: Int = 1;
+    let mut pitch: PitchController = turbine.pitch_controller;
+    if effective_wind >= v_rated {
+        status = 2;
+        pitch = pitch_controller_update(turbine.pitch_controller, rotor_rpm, dt_sec);
+    }
+    let load_pct: Float = base_power / turbine.rated_power_kw;
+    let thermal_rise: Float = load_pct * 15.0;
+    let target_temp: Float = 25.0 + thermal_rise;
+    let next_temp: Float = turbine.nacelle_temp_c + ((target_temp - turbine.nacelle_temp_c) * 0.05);
+    let next: WindTurbine = WindTurbine {
+        id: turbine.id,
+        rated_power_kw: turbine.rated_power_kw,
+        hub_height_m: turbine.hub_height_m,
+        power_curve: turbine.power_curve,
+        pitch_controller: pitch,
+        wind_speed_ms: wind_speed_ms,
+        wind_direction_deg: wind_dir_deg,
+        rotor_rpm: rotor_rpm,
+        generator_rpm: gen_rpm,
+        gearbox_ratio: turbine.gearbox_ratio,
+        output_power_kw: base_power,
+        yaw_angle_deg: turbine.yaw_angle_deg,
+        nacelle_temp_c: next_temp,
+        status: status
+    };
+    if next_temp > 85.0 {
+        return wind_turbine_trigger_fault(next);
+    }
+    return next;
+}
+
+pub fn wind_turbine_yaw_align(turbine: WindTurbine, target_wind_dir_deg: Float, dt_sec: Float) -> WindTurbine {
+    let diff: Float = target_wind_dir_deg - turbine.yaw_angle_deg;
+    if math_abs(diff) < 1.0 {
+        return turbine;
+    }
+    let max_yaw_step: Float = 0.5 * dt_sec;
+    let step: Float = math_clamp(diff, 0.0 - max_yaw_step, max_yaw_step);
+    return WindTurbine {
+        id: turbine.id,
+        rated_power_kw: turbine.rated_power_kw,
+        hub_height_m: turbine.hub_height_m,
+        power_curve: turbine.power_curve,
+        pitch_controller: turbine.pitch_controller,
+        wind_speed_ms: turbine.wind_speed_ms,
+        wind_direction_deg: turbine.wind_direction_deg,
+        rotor_rpm: turbine.rotor_rpm,
+        generator_rpm: turbine.generator_rpm,
+        gearbox_ratio: turbine.gearbox_ratio,
+        output_power_kw: turbine.output_power_kw,
+        yaw_angle_deg: turbine.yaw_angle_deg + step,
+        nacelle_temp_c: turbine.nacelle_temp_c,
+        status: turbine.status
+    };
+}
+
+pub fn wind_turbine_is_safe(turbine: WindTurbine, max_temp_c: Float) -> Bool {
+    if turbine.status == 4 {
+        return false;
+    }
+    if turbine.nacelle_temp_c >= max_temp_c {
+        return false;
+    }
+    return true;
+}
+
+pub fn turbine_telemetry_extract(turbine: WindTurbine) -> TurbineTelemetry {
+    let mut eff: Float = 0.0;
+    if turbine.rated_power_kw > 0.0 {
+        eff = (turbine.output_power_kw / turbine.rated_power_kw) * 100.0;
+    }
+    let fault: Bool = turbine.status == 4;
+    return TurbineTelemetry {
+        turbine_id: turbine.id,
+        wind_speed_ms: turbine.wind_speed_ms,
+        pitch_deg: turbine.pitch_controller.current_pitch_deg,
+        rotor_rpm: turbine.rotor_rpm,
+        power_kw: turbine.output_power_kw,
+        efficiency_pct: eff,
+        is_fault: fault
+    };
+}

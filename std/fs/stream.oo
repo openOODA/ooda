@@ -1,0 +1,233 @@
+// # Buffered FD stream
+//
+// Logline: Read and write through a fixed-size buffer over an integer fd and an owned store.
+//
+// Setup: Packed string state so emit ARC cannot drop store or wbuf on struct return.
+//
+// Beats:
+//   1. Open a stream on an fd with a write-buffer cap.
+//   2. Write flushes full buffer blocks into the store.
+//   3. Flush, rewind, and read slices of the store.
+//
+// residual: virtual fd + owned store, not a kernel file descriptor.
+
+type FdStream = String;
+type FdRead = String;
+
+fn fd_cap(cap: Int) -> Int {
+    if cap <= 0 {
+        return 4096;
+    }
+    return cap;
+}
+
+fn fd_i2s(val: Int) -> String {
+    if val == 0 {
+        return "0";
+    }
+    let mut v: Int = val;
+    let mut neg: Bool = false;
+    if v < 0 {
+        neg = true;
+        v = 0 - v;
+    }
+    let digits: String = "0123456789";
+    let mut rev: String = "";
+    while v > 0 {
+        rev = rev + char_at(digits, v % 10);
+        v = v / 10;
+    }
+    let mut out: String = "";
+    if neg {
+        out = "-";
+    }
+    let mut k: Int = chars_len(rev) - 1;
+    while k >= 0 {
+        out = out + char_at(rev, k);
+        k = k - 1;
+    }
+    return out;
+}
+
+fn fd_s2i(s: String) -> Int {
+    let n: Int = chars_len(s);
+    let mut i: Int = 0;
+    let mut sign: Int = 1;
+    if n > 0 {
+        if char_at(s, 0) == "-" {
+            sign = 0 - 1;
+            i = 1;
+        }
+    }
+    let digits: String = "0123456789";
+    let mut v: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        let mut k: Int = 0;
+        let mut found: Int = 0 - 1;
+        while k < 10 {
+            if char_at(digits, k) == c {
+                found = k;
+            }
+            k = k + 1;
+        }
+        if found < 0 {
+            return sign * v;
+        }
+        v = v * 10 + found;
+        i = i + 1;
+    }
+    return sign * v;
+}
+
+fn fd_find(hay: String, needle: String) -> Int {
+    let hn: Int = chars_len(hay);
+    let nn: Int = chars_len(needle);
+    if nn <= 0 {
+        return 0;
+    }
+    if nn > hn {
+        return -1;
+    }
+    let mut i: Int = 0;
+    while i + nn <= hn {
+        if str_slice(hay, i, i + nn) == needle {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn fd_pack(fd: Int, store: String, wbuf: String, rpos: Int, cap: Int) -> FdStream {
+    return fd_i2s(fd) + "\t" + fd_i2s(chars_len(store)) + "\t" + store + fd_i2s(chars_len(wbuf)) + "\t" + wbuf + fd_i2s(rpos) + "\t" + fd_i2s(cap);
+}
+
+fn fd_get_fd(s: FdStream) -> Int {
+    let t: Int = fd_find(s, "\t");
+    if t < 0 {
+        return 0;
+    }
+    return fd_s2i(str_slice(s, 0, t));
+}
+
+fn fd_after_fd(s: FdStream) -> String {
+    let t: Int = fd_find(s, "\t");
+    return str_slice(s, t + 1, chars_len(s));
+}
+
+fn fd_get_store(s: FdStream) -> String {
+    let rest: String = fd_after_fd(s);
+    let t: Int = fd_find(rest, "\t");
+    let ln: Int = fd_s2i(str_slice(rest, 0, t));
+    return str_slice(rest, t + 1, t + 1 + ln);
+}
+
+fn fd_after_store(s: FdStream) -> String {
+    let rest: String = fd_after_fd(s);
+    let t: Int = fd_find(rest, "\t");
+    let ln: Int = fd_s2i(str_slice(rest, 0, t));
+    return str_slice(rest, t + 1 + ln, chars_len(rest));
+}
+
+fn fd_get_wbuf(s: FdStream) -> String {
+    let rest: String = fd_after_store(s);
+    let t: Int = fd_find(rest, "\t");
+    let ln: Int = fd_s2i(str_slice(rest, 0, t));
+    return str_slice(rest, t + 1, t + 1 + ln);
+}
+
+fn fd_after_wbuf(s: FdStream) -> String {
+    let rest: String = fd_after_store(s);
+    let t: Int = fd_find(rest, "\t");
+    let ln: Int = fd_s2i(str_slice(rest, 0, t));
+    return str_slice(rest, t + 1 + ln, chars_len(rest));
+}
+
+fn fd_get_rpos(s: FdStream) -> Int {
+    let rest: String = fd_after_wbuf(s);
+    let t: Int = fd_find(rest, "\t");
+    return fd_s2i(str_slice(rest, 0, t));
+}
+
+fn fd_get_cap(s: FdStream) -> Int {
+    let rest: String = fd_after_wbuf(s);
+    let t: Int = fd_find(rest, "\t");
+    return fd_s2i(str_slice(rest, t + 1, chars_len(rest)));
+}
+
+fn fd_read_pack(stream: FdStream, data: String) -> FdRead {
+    return fd_i2s(chars_len(stream)) + "\t" + stream + data;
+}
+
+pub fn fd_read_stream(r: FdRead) -> FdStream {
+    let t: Int = fd_find(r, "\t");
+    let ln: Int = fd_s2i(str_slice(r, 0, t));
+    return str_slice(r, t + 1, t + 1 + ln);
+}
+
+pub fn fd_read_data(r: FdRead) -> String {
+    let t: Int = fd_find(r, "\t");
+    let ln: Int = fd_s2i(str_slice(r, 0, t));
+    return str_slice(r, t + 1 + ln, chars_len(r));
+}
+
+pub fn fd_stream_open(fd: Int, cap: Int) -> FdStream {
+    return fd_pack(fd, "", "", 0, fd_cap(cap));
+}
+
+pub fn fd_stream_from_store(fd: Int, store: String, cap: Int) -> FdStream {
+    return fd_pack(fd, store, "", 0, fd_cap(cap));
+}
+
+pub fn fd_stream_write(s: FdStream, data: String) -> FdStream {
+    let mut w: String = fd_get_wbuf(s) + data;
+    let mut store: String = fd_get_store(s);
+    let cap: Int = fd_cap(fd_get_cap(s));
+    while chars_len(w) >= cap {
+        store = store + str_slice(w, 0, cap);
+        w = str_slice(w, cap, chars_len(w));
+    }
+    return fd_pack(fd_get_fd(s), store, w, fd_get_rpos(s), cap);
+}
+
+pub fn fd_stream_flush(s: FdStream) -> FdStream {
+    let w: String = fd_get_wbuf(s);
+    if chars_len(w) == 0 {
+        return s;
+    }
+    return fd_pack(fd_get_fd(s), fd_get_store(s) + w, "", fd_get_rpos(s), fd_get_cap(s));
+}
+
+pub fn fd_stream_rewind(s: FdStream) -> FdStream {
+    let f: FdStream = fd_stream_flush(s);
+    return fd_pack(fd_get_fd(f), fd_get_store(f), "", 0, fd_get_cap(f));
+}
+
+pub fn fd_stream_read(s: FdStream, n: Int) -> FdRead {
+    let f: FdStream = fd_stream_flush(s);
+    let slen: Int = chars_len(fd_get_store(f));
+    let rp: Int = fd_get_rpos(f);
+    if rp >= slen || n <= 0 {
+        return fd_read_pack(f, "");
+    }
+    let mut end: Int = rp + n;
+    if end > slen {
+        end = slen;
+    }
+    let chunk: String = str_slice(fd_get_store(f), rp, end);
+    let next: FdStream = fd_pack(fd_get_fd(f), fd_get_store(f), "", end, fd_get_cap(f));
+    return fd_read_pack(next, chunk);
+}
+
+pub fn fd_stream_store(s: FdStream) -> String {
+    return fd_get_store(s);
+}
+
+pub fn fd_stream_pending(s: FdStream) -> Int {
+    return chars_len(fd_get_wbuf(s));
+}
+
+pub fn fd_stream_fd(s: FdStream) -> Int {
+    return fd_get_fd(s);
+}

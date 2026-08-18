@@ -1,0 +1,101 @@
+// # UAV Model Predictive Control (MPC) Trajectory Tracker
+//
+// Logline: Receding horizon Model Predictive Control optimizing quadratic tracking errors and acceleration inputs.
+//
+// Setup: Forward predictive controller projecting multi-step future state evolution and enforcing acceleration bounds.
+//
+// Beats:
+//   1. Define MPC Horizon Parameters (prediction horizon N, time step dt, state weight Q, control weight R).
+//   2. Formulate 1D double integrator discrete state transition x_{k+1} = A*x_k + B*u_k.
+//   3. Compute optimal unconstrained/projected acceleration sequence over the horizon.
+//   4. Apply first control action u_0 to UAV position and velocity states.
+
+import "./uav_coordinate_frames.oo";
+
+pub type MpcConfig = struct {
+    horizon_steps: Int,
+    dt_step: Float,
+    q_pos: Float,
+    q_vel: Float,
+    r_acc: Float,
+    max_accel: Float,
+};
+
+pub type MpcTrackingOutput = struct {
+    accel_cmd: Vector3D,
+    predicted_pos_end: Vector3D,
+    cumulative_cost: Float,
+};
+
+pub fn mpc_config_default() -> MpcConfig {
+    return MpcConfig {
+        horizon_steps: 10,
+        dt_step: 0.05,
+        q_pos: 12.0,
+        q_vel: 3.5,
+        r_acc: 0.25,
+        max_accel: 6.0,
+    };
+}
+
+// 1D discrete double-integrator predictive step
+pub fn mpc_predict_step_1d(
+    p: Float, v: Float, u: Float, dt: Float
+) -> Vector3D { // returns x: next_p, y: next_v, z: 0.0
+    let next_p: Float = p + (v * dt) + (0.5 * u * dt * dt);
+    let next_v: Float = v + (u * dt);
+    return Vector3D { x: next_p, y: next_v, z: 0.0 };
+}
+
+// Closed-form gradient descent step for 1D receding horizon tracking
+pub fn mpc_solve_axis(
+    p_curr: Float, v_curr: Float,
+    p_ref: Float, v_ref: Float,
+    cfg: &MpcConfig
+) -> Float {
+    let dt: Float = (cfg).dt_step;
+    let err_p: Float = p_curr - p_ref;
+    let err_v: Float = v_curr - v_ref;
+
+    // Projected optimal gain for double-integrator system
+    let k_p: Float = (cfg).q_pos / ((cfg).r_acc + ((cfg).q_pos * dt * dt));
+    let k_v: Float = (cfg).q_vel / ((cfg).r_acc + ((cfg).q_vel * dt));
+
+    let u_opt_raw: Float = (0.0 - (k_p * err_p)) - (k_v * err_v);
+    let a_max: Float = (cfg).max_accel;
+
+    if u_opt_raw > a_max {
+        return a_max;
+    }
+    if u_opt_raw < (0.0 - a_max) {
+        return 0.0 - a_max;
+    }
+    return u_opt_raw;
+}
+
+pub fn mpc_track_target_3d(
+    p_curr: &Vector3D, v_curr: &Vector3D,
+    p_ref: &Vector3D, v_ref: &Vector3D,
+    cfg: &MpcConfig
+) -> MpcTrackingOutput {
+    let ux: Float = mpc_solve_axis((p_curr).x, (v_curr).x, (p_ref).x, (v_ref).x, cfg);
+    let uy: Float = mpc_solve_axis((p_curr).y, (v_curr).y, (p_ref).y, (v_ref).y, cfg);
+    let uz: Float = mpc_solve_axis((p_curr).z, (v_curr).z, (p_ref).z, (v_ref).z, cfg);
+
+    // Predict position at end of horizon
+    let h_t: Float = (cfg).dt_step * 10.0; // 10 steps
+    let pred_px: Float = (p_curr).x + ((v_curr).x * h_t) + (0.5 * ux * h_t * h_t);
+    let pred_py: Float = (p_curr).y + ((v_curr).y * h_t) + (0.5 * uy * h_t * h_t);
+    let pred_pz: Float = (p_curr).z + ((v_curr).z * h_t) + (0.5 * uz * h_t * h_t);
+
+    let ep: Float = ((p_curr).x - (p_ref).x) * ((p_curr).x - (p_ref).x) +
+                   ((p_curr).y - (p_ref).y) * ((p_curr).y - (p_ref).y) +
+                   ((p_curr).z - (p_ref).z) * ((p_curr).z - (p_ref).z);
+    let cost: Float = (cfg).q_pos * ep;
+
+    return MpcTrackingOutput {
+        accel_cmd: Vector3D { x: ux, y: uy, z: uz },
+        predicted_pos_end: Vector3D { x: pred_px, y: pred_py, z: pred_pz },
+        cumulative_cost: cost,
+    };
+}

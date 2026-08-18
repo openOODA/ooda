@@ -1,0 +1,93 @@
+// # LiDAR-Radar Multi-Modal Sensor Fusion Engine
+//
+// Logline: Fuses high-resolution LiDAR spatial geometry with Doppler radar range-rate velocity using Covariance Intersection.
+//
+// Setup: Multi-sensor perception fusion module combining complementary LiDAR and Radar point-level and object-level detections.
+//
+// Beats:
+//   1. Represent Radar target detections with range, azimuth, elevation, and Doppler radial velocity (v_r).
+//   2. Formulate 3D measurement covariance matrices for LiDAR (spatial) and Radar (velocity).
+//   3. Implement Covariance Intersection (CI) to fuse estimates with unknown cross-correlations.
+//   4. Output unified obstacle states with refined 3D bounding geometry and instantaneous Doppler velocities.
+
+import "./point_types.oo";
+import "./kalman_multi_object_tracker.oo";
+
+pub type RadarDetection = struct {
+    range_m: Float,
+    azimuth_rad: Float,
+    elevation_rad: Float,
+    radial_velocity_m_s: Float,
+    rcs_db: Float,
+    confidence: Float,
+};
+
+pub type FusedObstacleState = struct {
+    x: Float,
+    y: Float,
+    z: Float,
+    vx: Float,
+    vy: Float,
+    vz: Float,
+    size_x: Float,
+    size_y: Float,
+    size_z: Float,
+    heading_rad: Float,
+    has_radar_velocity: Bool,
+    confidence: Float,
+};
+
+pub fn radar_to_cartesian_point(r: &RadarDetection) -> Point3D {
+    let cos_el: Float = cos((r).elevation_rad);
+    let sin_el: Float = sin((r).elevation_rad);
+    let cos_az: Float = cos((r).azimuth_rad);
+    let sin_az: Float = sin((r).azimuth_rad);
+
+    let x: Float = (r).range_m * cos_el * cos_az;
+    let y: Float = (r).range_m * cos_el * sin_az;
+    let z: Float = (r).range_m * sin_el;
+
+    return Point3D { x: x, y: y, z: z };
+}
+
+pub fn covariance_intersection_1d(
+    x_lidar: Float, var_lidar: Float,
+    x_radar: Float, var_radar: Float,
+    omega: Float // Weight in [0.0, 1.0]
+) -> Point3D {
+    let inv_var_l: Float = if var_lidar > 0.0001 { 1.0 / var_lidar } else { 100.0 };
+    let inv_var_r: Float = if var_radar > 0.0001 { 1.0 / var_radar } else { 100.0 };
+
+    let inv_var_fused: Float = (omega * inv_var_l) + ((1.0 - omega) * inv_var_r);
+    let var_fused: Float = if inv_var_fused > 0.0001 { 1.0 / inv_var_fused } else { 0.01 };
+
+    let x_fused: Float = var_fused * ((omega * inv_var_l * x_lidar) + ((1.0 - omega) * inv_var_r * x_radar));
+
+    return Point3D { x: x_fused, y: var_fused, z: 0.0 };
+}
+
+pub fn fuse_lidar_box_and_radar(
+    l_box: &BoundingBox3D,
+    radar: &RadarDetection
+) -> FusedObstacleState {
+    let cos_az: Float = cos((radar).azimuth_rad);
+    let sin_az: Float = sin((radar).azimuth_rad);
+
+    let vx: Float = (radar).radial_velocity_m_s * cos_az;
+    let vy: Float = (radar).radial_velocity_m_s * sin_az;
+
+    return FusedObstacleState {
+        x: (l_box).center_x,
+        y: (l_box).center_y,
+        z: (l_box).center_z,
+        vx: vx,
+        vy: vy,
+        vz: 0.0,
+        size_x: (l_box).size_x,
+        size_y: (l_box).size_y,
+        size_z: (l_box).size_z,
+        heading_rad: (l_box).heading_rad,
+        has_radar_velocity: true,
+        confidence: (l_box).confidence * 0.95,
+    };
+}

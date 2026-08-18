@@ -1,0 +1,83 @@
+// # Max-Min Driving Force (MDF) Pathway Thermodynamics
+//
+// Logline: Identifies thermodynamic bottlenecks, unfavorable Delta-G reactions, and minimum driving force across pathway steps.
+//
+// Setup: Thermodynamic optimization framework (Noor et al. MDF) evaluating metabolite concentration bounds and reaction Delta-rG'.
+//
+// Beats:
+//   1. Define ThermodynamicReaction, PathwayProfileParams, and MdfEvaluationResult data structures.
+//   2. Compute transformed Gibbs free energy Delta-rG' = Delta-rG'0 + R*T*sum(nu_i * ln[C_i]).
+//   3. Calculate pathway Max-Min Driving Force (MDF) score and flag thermodynamically bottlenecked steps.
+
+pub type ThermodynamicReaction = struct {
+    reaction_name: String,
+    standard_dg_prime_kcal: Float,
+    is_reversible: Bool,
+    reactant_count: Int,
+    product_count: Int,
+};
+
+pub type PathwayProfileParams = struct {
+    temperature_k: Float,
+    min_metabolite_conc_m: Float, // e.g. 1 uM = 0.000001 M
+    max_metabolite_conc_m: Float, // e.g. 10 mM = 0.01 M
+    gas_constant_r: Float, // 0.001987 kcal/(mol*K)
+};
+
+pub type MdfEvaluationResult = struct {
+    mdf_score_kcal_per_mol: Float,
+    bottleneck_reaction_index: Int,
+    is_thermodynamically_feasible: Bool,
+    total_pathway_driving_force: Float,
+};
+
+pub fn thermo_calc_apparent_dg(
+    std_dg: Float,
+    p: &PathwayProfileParams,
+    sub_conc: Float,
+    prod_conc: Float,
+) -> Float {
+    let s = if sub_conc < (p).min_metabolite_conc_m { (p).min_metabolite_conc_m } else { sub_conc };
+    let pr = if prod_conc > (p).max_metabolite_conc_m { (p).max_metabolite_conc_m } else { prod_conc };
+
+    let ratio = pr / s;
+    // Approximating ln(ratio)
+    let ln_q = if ratio <= 0.001 { -6.9 } else if ratio >= 1000.0 { 6.9 } else if ratio > 1.0 { 2.3 } else { -2.3 };
+
+    let rt = (p).gas_constant_r * (p).temperature_k;
+    return std_dg + (rt * ln_q);
+}
+
+pub fn thermo_evaluate_pathway_mdf(
+    reactions: &List[ThermodynamicReaction],
+    p: &PathwayProfileParams,
+) -> MdfEvaluationResult {
+    let n = list_len(reactions);
+    let mut min_driving_force: Float = 999.0;
+    let mut bottleneck_idx = 0;
+    let mut sum_dg: Float = 0.0;
+
+    let mut i = 0;
+    while i < n {
+        let rxn = list_get(reactions, i);
+        // Ideal driving force: forward direction Delta-G < 0
+        let dg_app = thermo_calc_apparent_dg((rxn).standard_dg_prime_kcal, p, (p).max_metabolite_conc_m, (p).min_metabolite_conc_m);
+        let driving_force = -dg_app; // Positive driving force means favorable forward flux
+
+        sum_dg = sum_dg + dg_app;
+        if driving_force < min_driving_force {
+            min_driving_force = driving_force;
+            bottleneck_idx = i;
+        }
+        i = i + 1;
+    }
+
+    let feasible = min_driving_force > 0.5; // At least 0.5 kcal/mol driving force per step
+
+    return MdfEvaluationResult {
+        mdf_score_kcal_per_mol: min_driving_force,
+        bottleneck_reaction_index: bottleneck_idx,
+        is_thermodynamically_feasible: feasible,
+        total_pathway_driving_force: -sum_dg,
+    };
+}

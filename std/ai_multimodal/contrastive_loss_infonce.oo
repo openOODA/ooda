@@ -1,0 +1,139 @@
+// # Symmetric InfoNCE Contrastive Loss
+//
+// Logline: Computes bidirectional cross-entropy contrastive loss with temperature scaling for multi-modal embedding alignment.
+//
+// Setup: Canonical objective for CLIP and dual-encoder architectures maximizing diagonal similarity in batch matrices.
+//
+// Beats:
+//   1. Define InfoNCEConfig and InfoNCELossOutput structs.
+//   2. Compute normalized pairwise cosine similarity matrix with temperature scaling.
+//   3. Calculate symmetric image-to-text and text-to-image categorical cross-entropy losses.
+
+pub type InfoNCEConfig = struct {
+    temperature: Float,
+    learnable_temp: Bool,
+    max_temp_clamp: Float,
+};
+
+pub type InfoNCELossOutput = struct {
+    total_loss: Float,
+    i2t_loss: Float,
+    t2i_loss: Float,
+    batch_size: Int,
+};
+
+pub fn infonce_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn infonce_config_new(temp: Float, learnable: Bool) -> InfoNCEConfig {
+    return InfoNCEConfig {
+        temperature: temp,
+        learnable_temp: learnable,
+        max_temp_clamp: 100.0,
+    };
+}
+
+pub fn infonce_loss_forward(
+    cfg: &InfoNCEConfig,
+    image_embeds: List[Float],
+    text_embeds: List[Float],
+    batch_size: Int,
+    embed_dim: Int
+) -> InfoNCELossOutput {
+    let temp: Float = (cfg).temperature;
+    let scale: Float = 1.0 / (if temp > 0.0001 { temp } else { 0.07 });
+
+    // 1. Build similarity matrix (batch_size x batch_size)
+    let mut sim_matrix: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < batch_size {
+        let mut j: Int = 0;
+        while j < batch_size {
+            let mut dot: Float = 0.0;
+            let mut d: Int = 0;
+            while d < embed_dim {
+                let img_val: Float = list_get(image_embeds, (i * embed_dim) + d);
+                let txt_val: Float = list_get(text_embeds, (j * embed_dim) + d);
+                dot = dot + (img_val * txt_val);
+                d = d + 1;
+            }
+            sim_matrix = list_push(sim_matrix, dot * scale);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    // 2. Image-to-Text Cross Entropy
+    let mut i2t_sum: Float = 0.0;
+    i = 0;
+    while i < batch_size {
+        let mut sum_exp: Float = 0.0;
+        let mut max_logit: Float = 0.0 - 100000.0;
+        let mut j: Int = 0;
+        while j < batch_size {
+            let logit: Float = list_get(sim_matrix, (i * batch_size) + j);
+            if logit > max_logit { max_logit = logit; }
+            j = j + 1;
+        }
+        j = 0;
+        while j < batch_size {
+            let logit: Float = list_get(sim_matrix, (i * batch_size) + j);
+            sum_exp = sum_exp + exp(logit - max_logit);
+            j = j + 1;
+        }
+        let pos_logit: Float = list_get(sim_matrix, (i * batch_size) + i);
+        let log_prob: Float = (pos_logit - max_logit) - ln(if sum_exp > 0.00001 { sum_exp } else { 1.0 });
+        i2t_sum = i2t_sum - log_prob;
+        i = i + 1;
+    }
+
+    // 3. Text-to-Image Cross Entropy
+    let mut t2i_sum: Float = 0.0;
+    let mut j_idx: Int = 0;
+    while j_idx < batch_size {
+        let mut sum_exp: Float = 0.0;
+        let mut max_logit: Float = 0.0 - 100000.0;
+        i = 0;
+        while i < batch_size {
+            let logit: Float = list_get(sim_matrix, (i * batch_size) + j_idx);
+            if logit > max_logit { max_logit = logit; }
+            i = i + 1;
+        }
+        i = 0;
+        while i < batch_size {
+            let logit: Float = list_get(sim_matrix, (i * batch_size) + j_idx);
+            sum_exp = sum_exp + exp(logit - max_logit);
+            i = i + 1;
+        }
+        let pos_logit: Float = list_get(sim_matrix, (j_idx * batch_size) + j_idx);
+        let log_prob: Float = (pos_logit - max_logit) - ln(if sum_exp > 0.00001 { sum_exp } else { 1.0 });
+        t2i_sum = t2i_sum - log_prob;
+        j_idx = j_idx + 1;
+    }
+
+    let b_f: Float = infonce_int_to_float(batch_size);
+    let loss_i2t: Float = if b_f > 0.0 { i2t_sum / b_f } else { 0.0 };
+    let loss_t2i: Float = if b_f > 0.0 { t2i_sum / b_f } else { 0.0 };
+    let total: Float = 0.5 * (loss_i2t + loss_t2i);
+
+    return InfoNCELossOutput {
+        total_loss: total,
+        i2t_loss: loss_i2t,
+        t2i_loss: loss_t2i,
+        batch_size: batch_size,
+    };
+}
+
+pub fn contrastive_loss_infonce_marker() -> Int {
+    return 1;
+}

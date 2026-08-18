@@ -1,0 +1,247 @@
+// # MQTT Client Session Management & Dispatch
+//
+// Logline: Manages MQTT connection lifecycles, keep-alive timers, QoS inflight tracking, and NetCap-gated packet dispatch.
+//
+// Setup: NetCap-gated client state machine implementing MQTT 3.1.1 protocol handshakes and transactions.
+//
+// Beats:
+//   1. Maintain client connection states, subscriptions, and unique packet identifier sequences.
+//   2. Construct CONNECT, SUBSCRIBE, and PUBLISH packets with QoS guarantees.
+//   3. Dispatch network requests and keep-alive heartbeats under &NetCap authorization.
+
+import "./mqtt_packet.oo";
+
+pub type MqttClientSession = struct {
+    client_id: String,
+    host: String,
+    port: Int,
+    keep_alive_sec: Int,
+    clean_session: Bool,
+    status: Int,
+    next_packet_id: Int,
+    inflight_publishes: Int,
+    subscriptions: List[String],
+    last_ping_ms: Int,
+    messages_sent: Int,
+    messages_received: Int,
+};
+
+/// Initialize a new MqttClientSession structure.
+pub fn mqtt_client_new(client_id: String, host: String, port: Int) -> MqttClientSession {
+    let subs: List[String] = list_new();
+    return MqttClientSession {
+        client_id: client_id,
+        host: host,
+        port: port,
+        keep_alive_sec: 60,
+        clean_session: true,
+        status: 0, // 0 = Disconnected
+        next_packet_id: 1,
+        inflight_publishes: 0,
+        subscriptions: subs,
+        last_ping_ms: 0,
+        messages_sent: 0,
+        messages_received: 0,
+    };
+}
+
+/// Allocate next unique 16-bit packet identifier for QoS > 0 packets.
+pub fn mqtt_client_alloc_packet_id(client: &mut MqttClientSession) -> Int {
+    let pid: Int = (client).next_packet_id;
+    (client).next_packet_id = ((client).next_packet_id + 1) % 65536;
+    if (client).next_packet_id == 0 {
+        (client).next_packet_id = 1;
+    }
+    return pid;
+}
+
+/// Build and send CONNECT packet under &NetCap authorization.
+pub fn mqtt_client_connect(
+    net: &NetCap,
+    client: &mut MqttClientSession
+) -> Result<List[Int], String> {
+    (client).status = 1; // 1 = Connecting
+
+    let mut var_header: List[Int] = list_new();
+    // Protocol Name "MQTT"
+    var_header = list_push(var_header, 0);
+    var_header = list_push(var_header, 4);
+    var_header = list_push(var_header, 77); // 'M'
+    var_header = list_push(var_header, 81); // 'Q'
+    var_header = list_push(var_header, 84); // 'T'
+    var_header = list_push(var_header, 84); // 'T'
+    // Protocol Level 4 (v3.1.1)
+    var_header = list_push(var_header, 4);
+
+    // Connect Flags: Clean Session
+    let mut flags: Int = 0;
+    if (client).clean_session {
+        flags = flags + 2;
+    }
+    var_header = list_push(var_header, flags);
+
+    // Keep Alive
+    let ka: Int = (client).keep_alive_sec;
+    var_header = list_push(var_header, (ka / 256) % 256);
+    var_header = list_push(var_header, ka % 256);
+
+    // Payload: Client ID
+    let payload_bytes: List[Int] = mqtt_encode_string((client).client_id);
+
+    let v_len: Int = list_len(var_header);
+    let p_len: Int = list_len(payload_bytes);
+    let total_rem: Int = v_len + p_len;
+
+    let hdr: MqttFixedHeader = MqttFixedHeader {
+        packet_type: 1, // CONNECT
+        dup: false,
+        qos: 0,
+        retain: false,
+        remaining_length: total_rem,
+    };
+
+    let mut full_packet: List[Int] = mqtt_encode_fixed_header(&hdr);
+    let mut i: Int = 0;
+    while i < v_len {
+        full_packet = list_push(full_packet, list_get(var_header, i));
+        i = i + 1;
+    }
+    let mut j: Int = 0;
+    while j < p_len {
+        full_packet = list_push(full_packet, list_get(payload_bytes, j));
+        j = j + 1;
+    }
+
+    (client).status = 2; // 2 = Connected
+    return Ok(full_packet);
+}
+
+/// Publish a message to a topic under &NetCap authorization.
+pub fn mqtt_client_publish(
+    net: &NetCap,
+    client: &mut MqttClientSession,
+    topic: String,
+    payload: String,
+    qos: Int,
+    retain: Bool
+) -> Result<List[Int], String> {
+    if (client).status != 2 {
+        return Err("MQTT client not connected");
+    }
+
+    let mut var_header: List[Int] = mqtt_encode_string(topic);
+    let mut pkt_id: Int = 0;
+    if qos > 0 {
+        pkt_id = mqtt_client_alloc_packet_id(client);
+        var_header = list_push(var_header, (pkt_id / 256) % 256);
+        var_header = list_push(var_header, pkt_id % 256);
+        (client).inflight_publishes = (client).inflight_publishes + 1;
+    }
+
+    let p_len: Int = payload.len();
+    let mut payload_bytes: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < p_len {
+        payload_bytes = list_push(payload_bytes, byte_at(payload, i));
+        i = i + 1;
+    }
+
+    let v_len: Int = list_len(var_header);
+    let tot_len: Int = v_len + p_len;
+
+    let hdr: MqttFixedHeader = MqttFixedHeader {
+        packet_type: 3, // PUBLISH
+        dup: false,
+        qos: qos,
+        retain: retain,
+        remaining_length: tot_len,
+    };
+
+    let mut full_packet: List[Int] = mqtt_encode_fixed_header(&hdr);
+    let mut j: Int = 0;
+    while j < v_len {
+        full_packet = list_push(full_packet, list_get(var_header, j));
+        j = j + 1;
+    }
+    let mut k: Int = 0;
+    while k < p_len {
+        full_packet = list_push(full_packet, list_get(payload_bytes, k));
+        k = k + 1;
+    }
+
+    (client).messages_sent = (client).messages_sent + 1;
+    return Ok(full_packet);
+}
+
+/// Subscribe to a topic filter with requested QoS under &NetCap.
+pub fn mqtt_client_subscribe(
+    net: &NetCap,
+    client: &mut MqttClientSession,
+    topic_filter: String,
+    qos: Int
+) -> Result<List[Int], String> {
+    if (client).status != 2 {
+        return Err("MQTT client not connected");
+    }
+
+    let pid: Int = mqtt_client_alloc_packet_id(client);
+    let mut var_header: List[Int] = list_new();
+    var_header = list_push(var_header, (pid / 256) % 256);
+    var_header = list_push(var_header, pid % 256);
+
+    let mut payload_bytes: List[Int] = mqtt_encode_string(topic_filter);
+    payload_bytes = list_push(payload_bytes, qos % 4);
+
+    let v_len: Int = list_len(var_header);
+    let p_len: Int = list_len(payload_bytes);
+    let tot_len: Int = v_len + p_len;
+
+    let hdr: MqttFixedHeader = MqttFixedHeader {
+        packet_type: 8, // SUBSCRIBE
+        dup: false,
+        qos: 1,         // Always 1 for SUBSCRIBE
+        retain: false,
+        remaining_length: tot_len,
+    };
+
+    let mut full_packet: List[Int] = mqtt_encode_fixed_header(&hdr);
+    let mut j: Int = 0;
+    while j < v_len {
+        full_packet = list_push(full_packet, list_get(var_header, j));
+        j = j + 1;
+    }
+    let mut k: Int = 0;
+    while k < p_len {
+        full_packet = list_push(full_packet, list_get(payload_bytes, k));
+        k = k + 1;
+    }
+
+    (client).subscriptions = list_push((client).subscriptions, topic_filter);
+    return Ok(full_packet);
+}
+
+/// Send PINGREQ keepalive packet under &NetCap authorization.
+pub fn mqtt_client_ping(
+    net: &NetCap,
+    client: &mut MqttClientSession,
+    now_ms: Int
+) -> List[Int] {
+    (client).last_ping_ms = now_ms;
+    return mqtt_build_pingreq_packet();
+}
+
+/// Disconnect MQTT client cleanly.
+pub fn mqtt_client_disconnect(
+    net: &NetCap,
+    client: &mut MqttClientSession
+) -> List[Int] {
+    (client).status = 0; // Disconnected
+    let hdr: MqttFixedHeader = MqttFixedHeader {
+        packet_type: 14, // DISCONNECT
+        dup: false,
+        qos: 0,
+        retain: false,
+        remaining_length: 0,
+    };
+    return mqtt_encode_fixed_header(&hdr);
+}

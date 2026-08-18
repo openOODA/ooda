@@ -1,0 +1,95 @@
+// # Subsea Pipeline Tracking & Image-Based Visual Servoing (IBVS)
+//
+// Logline: Tracks seabed pipelines and telecom cables using downward visual image Jacobian error minimization.
+//
+// Setup: Image-based visual servoing (IBVS) controller generating sway and yaw rate corrections to center pipeline in camera frame.
+//
+// Beats:
+//   1. Define camera intrinsic parameters (focal length f, image resolution, optical center).
+//   2. Extract pipeline visual features (normalized horizontal offset u_err, heading orientation error theta_err).
+//   3. Invert 2D image interaction Jacobian matrix L_s for visual servoing.
+//   4. Calculate closed-loop sway velocity v_cmd and yaw rate r_cmd commands.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type VisualServoingConfig = struct {
+    camera_focal_length_px: Float,
+    image_width_px: Float,
+    image_height_px: Float,
+    target_altitude_m: Float,
+    gain_sway_kp: Float,
+    gain_yaw_kp: Float,
+    max_sway_speed_m_s: Float,
+    max_yaw_rate_rad_s: Float,
+};
+
+pub type PipelineVisualFeatures = struct {
+    center_u_px: Float,
+    center_v_px: Float,
+    orientation_angle_rad: Float,
+    detection_confidence: Float,
+};
+
+pub type VisualServoingOutput = struct {
+    sway_speed_cmd_m_s: Float,
+    yaw_rate_cmd_rad_s: Float,
+    normalized_lateral_error: Float,
+    is_pipeline_tracked: Bool,
+};
+
+pub fn visual_servoing_config_default() -> VisualServoingConfig {
+    return VisualServoingConfig {
+        camera_focal_length_px: 800.0,
+        image_width_px: 1920.0,
+        image_height_px: 1080.0,
+        target_altitude_m: 2.5,
+        gain_sway_kp: 0.8,
+        gain_yaw_kp: 1.2,
+        max_sway_speed_m_s: 0.4,
+        max_yaw_rate_rad_s: 0.25,
+    };
+}
+
+pub fn pipeline_visual_servoing_step(
+    cfg: &VisualServoingConfig,
+    features: &PipelineVisualFeatures,
+    current_altitude_m: Float
+) -> VisualServoingOutput {
+    if (features).detection_confidence < 0.4 {
+        return VisualServoingOutput {
+            sway_speed_cmd_m_s: 0.0,
+            yaw_rate_cmd_rad_s: 0.0,
+            normalized_lateral_error: 0.0,
+            is_pipeline_tracked: false,
+        };
+    }
+
+    let cx: Float = (cfg).image_width_px * 0.5;
+    let u_px: Float = (features).center_u_px;
+    let err_u: Float = (u_px - cx) / cx; // Normalized [-1.0, 1.0]
+
+    let th_err: Float = (features).orientation_angle_rad; // Angle of pipe in image
+
+    // Visual servoing law: v_sway = - K_sway * (Z_alt / f) * err_u
+    let mut safe_alt: Float = current_altitude_m;
+    if safe_alt < 0.5 {
+        safe_alt = 0.5;
+    }
+
+    let sway_raw: Float = (cfg).gain_sway_kp * err_u * safe_alt;
+    let max_sway: Float = (cfg).max_sway_speed_m_s;
+    let v_cmd: Float = math_clamp(sway_raw, 0.0 - max_sway, max_sway);
+
+    // Yaw rate aligning vehicle heading parallel to pipeline orientation
+    let yaw_raw: Float = 0.0 - ((cfg).gain_yaw_kp * th_err);
+    let max_r: Float = (cfg).max_yaw_rate_rad_s;
+    let r_cmd: Float = math_clamp(yaw_raw, 0.0 - max_r, max_r);
+
+    return VisualServoingOutput {
+        sway_speed_cmd_m_s: v_cmd,
+        yaw_rate_cmd_rad_s: r_cmd,
+        normalized_lateral_error: err_u,
+        is_pipeline_tracked: true,
+    };
+}

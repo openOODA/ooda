@@ -1,0 +1,170 @@
+// # Verlet-Based Discrete Rope & Cable Simulation
+//
+// Logline: Models 1D flexible ropes and cables using chained mass points, distance relaxation passes, and bending stiffness.
+//
+// Setup: Position-based dynamics and Jakobsen relaxation for discrete 1D kinematic cables.
+//
+// Beats:
+//   1. Define RopeParticle and RopeState data structures.
+//   2. Apply gravitational forces and Verlet numerical position integration across rope nodes.
+//   3. Perform iterative distance constraint relaxation passes to enforce inelastic cable length.
+
+pub type RopeParticle = struct {
+    x: Float,
+    y: Float,
+    z: Float,
+    old_x: Float,
+    old_y: Float,
+    old_z: Float,
+    inv_mass: Float,
+    is_pinned: Int,
+};
+
+pub type RopeSegment = struct {
+    p0: RopeParticle,
+    p1: RopeParticle,
+    rest_length: Float,
+    stiffness: Float,
+};
+
+pub type RopeState = struct {
+    gravity_y: Float,
+    damping: Float,
+    iterations: Int,
+    segment_rest_length: Float,
+};
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn rope_particle_new(x: Float, y: Float, z: Float, mass: Float) -> RopeParticle {
+    let mut inv_m = 0.0;
+    if mass > 0.000001 {
+        inv_m = 1.0 / mass;
+    }
+    return RopeParticle {
+        x: x, y: y, z: z,
+        old_x: x, old_y: y, old_z: z,
+        inv_mass: inv_m,
+        is_pinned: 0,
+    };
+}
+
+pub fn rope_state_default() -> RopeState {
+    return RopeState {
+        gravity_y: -9.81,
+        damping: 0.995,
+        iterations: 6,
+        segment_rest_length: 0.5,
+    };
+}
+
+// -------------------------------------------------------------------
+// Verlet Kinematics & Relaxation
+// -------------------------------------------------------------------
+
+pub fn rope_particle_step_verlet(
+    p: RopeParticle,
+    gx: Float, gy: Float, gz: Float,
+    damping: Float,
+    dt: Float
+) -> RopeParticle {
+    if (p).is_pinned != 0 || (p).inv_mass <= 0.0 {
+        return p;
+    }
+
+    let dt_sq = dt * dt;
+    let curr_x = (p).x;
+    let curr_y = (p).y;
+    let curr_z = (p).z;
+
+    // x_{n+1} = x_n + (x_n - x_{n-1}) * damping + a * dt^2
+    let nx = curr_x + ((curr_x - (p).old_x) * damping) + (gx * dt_sq);
+    let ny = curr_y + ((curr_y - (p).old_y) * damping) + (gy * dt_sq);
+    let nz = curr_z + ((curr_z - (p).old_z) * damping) + (gz * dt_sq);
+
+    return RopeParticle {
+        x: nx, y: ny, z: nz,
+        old_x: curr_x, old_y: curr_y, old_z: curr_z,
+        inv_mass: (p).inv_mass,
+        is_pinned: (p).is_pinned,
+    };
+}
+
+/// Enforce distance constraint between two rope nodes: C(p1, p2) = |p1 - p2| - rest_length = 0
+pub fn rope_relax_distance_pair(
+    p1: RopeParticle,
+    p2: RopeParticle,
+    rest_length: Float,
+    stiffness: Float
+) -> RopeSegment {
+    let dx = (p2).x - (p1).x;
+    let dy = (p2).y - (p1).y;
+    let dz = (p2).z - (p1).z;
+
+    let dist = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+    if dist < 0.000001 {
+        return RopeSegment {
+            p0: p1, p1: p2,
+            rest_length: rest_length,
+            stiffness: stiffness,
+        };
+    }
+
+    let diff = (dist - rest_length) / dist;
+    let w1 = (p1).inv_mass;
+    let w2 = (p2).inv_mass;
+    let w_sum = w1 + w2;
+
+    if w_sum < 0.000001 {
+        return RopeSegment {
+            p0: p1, p1: p2,
+            rest_length: rest_length,
+            stiffness: stiffness,
+        };
+    }
+
+    let factor1 = (w1 / w_sum) * diff * stiffness;
+    let factor2 = (w2 / w_sum) * diff * stiffness;
+
+    let mut n1_x = (p1).x;
+    let mut n1_y = (p1).y;
+    let mut n1_z = (p1).z;
+
+    let mut n2_x = (p2).x;
+    let mut n2_y = (p2).y;
+    let mut n2_z = (p2).z;
+
+    if (p1).is_pinned == 0 && w1 > 0.0 {
+        n1_x = (p1).x + (dx * factor1);
+        n1_y = (p1).y + (dy * factor1);
+        n1_z = (p1).z + (dz * factor1);
+    }
+
+    if (p2).is_pinned == 0 && w2 > 0.0 {
+        n2_x = (p2).x - (dx * factor2);
+        n2_y = (p2).y - (dy * factor2);
+        n2_z = (p2).z - (dz * factor2);
+    }
+
+    let res1 = RopeParticle {
+        x: n1_x, y: n1_y, z: n1_z,
+        old_x: (p1).old_x, old_y: (p1).old_y, old_z: (p1).old_z,
+        inv_mass: (p1).inv_mass,
+        is_pinned: (p1).is_pinned,
+    };
+
+    let res2 = RopeParticle {
+        x: n2_x, y: n2_y, z: n2_z,
+        old_x: (p2).old_x, old_y: (p2).old_y, old_z: (p2).old_z,
+        inv_mass: (p2).inv_mass,
+        is_pinned: (p2).is_pinned,
+    };
+
+    return RopeSegment {
+        p0: res1, p1: res2,
+        rest_length: rest_length,
+        stiffness: stiffness,
+    };
+}

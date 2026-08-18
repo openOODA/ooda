@@ -1,0 +1,126 @@
+// # QLoRA NormalFloat4 (NF4) Block Quantization & Double Dequantization
+//
+// Logline: Compresses float weights into 16-level information-theoretically optimal NF4 representations with block-wise scale quantization.
+//
+// Setup: Quantization algorithm implementing 16-point NormalFloat codebook mapping and dequantization.
+//
+// Beats:
+//   1. Define NF4Codebook 16-point Gaussian quantile table and QuantizedNF4Tensor descriptors.
+//   2. Quantize float blocks to 4-bit indices via minimum distance codebook lookup.
+//   3. Dequantize NF4 indices back to full precision floating-point activations.
+
+pub type QuantizedNF4Tensor = struct {
+    indices: List[Int],
+    scales: List[Float],
+    block_size: Int,
+    total_elements: Int,
+};
+
+pub fn nf4_codebook_get(idx: Int) -> Float {
+    if idx == 0 { return 0.0 - 1.0; }
+    if idx == 1 { return 0.0 - 0.6961928; }
+    if idx == 2 { return 0.0 - 0.5250731; }
+    if idx == 3 { return 0.0 - 0.3949175; }
+    if idx == 4 { return 0.0 - 0.2844414; }
+    if idx == 5 { return 0.0 - 0.1847734; }
+    if idx == 6 { return 0.0 - 0.0910500; }
+    if idx == 7 { return 0.0; }
+    if idx == 8 { return 0.0795803; }
+    if idx == 9 { return 0.1609302; }
+    if idx == 10 { return 0.2461123; }
+    if idx == 11 { return 0.3379152; }
+    if idx == 12 { return 0.4407098; }
+    if idx == 13 { return 0.5626170; }
+    if idx == 14 { return 0.7229568; }
+    return 1.0;
+}
+
+pub fn nf4_find_closest_index(norm_val: Float) -> Int {
+    let mut best_idx: Int = 0;
+    let mut best_diff: Float = 999.0;
+    let mut i: Int = 0;
+    while i < 16 {
+        let code: Float = nf4_codebook_get(i);
+        let mut diff: Float = norm_val - code;
+        if diff < 0.0 { diff = 0.0 - diff; }
+        if diff < best_diff {
+            best_diff = diff;
+            best_idx = i;
+        }
+        i = i + 1;
+    }
+    return best_idx;
+}
+
+pub fn qlora_quantize_tensor(
+    data: List[Float],
+    block_size: Int
+) -> QuantizedNF4Tensor {
+    let total: Int = list_len(data);
+    let mut indices_out: List[Int] = list_new();
+    let mut scales_out: List[Float] = list_new();
+
+    let mut b_start: Int = 0;
+    while b_start < total {
+        let mut max_abs: Float = 0.000001;
+        let mut b_i: Int = 0;
+        while b_i < block_size && (b_start + b_i) < total {
+            let v: Float = list_get(data, b_start + b_i);
+            let mut abs_v: Float = v;
+            if abs_v < 0.0 { abs_v = 0.0 - abs_v; }
+            if abs_v > max_abs {
+                max_abs = abs_v;
+            }
+            b_i = b_i + 1;
+        }
+
+        scales_out = list_push(scales_out, max_abs);
+
+        let mut b_j: Int = 0;
+        while b_j < block_size && (b_start + b_j) < total {
+            let v2: Float = list_get(data, b_start + b_j);
+            let norm_val: Float = v2 / max_abs;
+            let code_idx: Int = nf4_find_closest_index(norm_val);
+            indices_out = list_push(indices_out, code_idx);
+            b_j = b_j + 1;
+        }
+
+        b_start = b_start + block_size;
+    }
+
+    return QuantizedNF4Tensor {
+        indices: indices_out,
+        scales: scales_out,
+        block_size: block_size,
+        total_elements: total,
+    };
+}
+
+pub fn qlora_dequantize_tensor(
+    q_tensor: &QuantizedNF4Tensor
+) -> List[Float] {
+    let total: Int = (q_tensor).total_elements;
+    let b_size: Int = (q_tensor).block_size;
+    let mut out: List[Float] = list_new();
+
+    let mut i: Int = 0;
+    while i < total {
+        let block_idx: Int = i / b_size;
+        let scale: Float = if block_idx < list_len((q_tensor).scales) {
+            list_get((q_tensor).scales, block_idx)
+        } else {
+            1.0
+        };
+
+        let code_idx: Int = list_get((q_tensor).indices, i);
+        let base_val: Float = nf4_codebook_get(code_idx);
+        out = list_push(out, base_val * scale);
+        i = i + 1;
+    }
+
+    return out;
+}
+
+pub fn qlora_nf4_quantize_marker() -> Int {
+    return 1;
+}

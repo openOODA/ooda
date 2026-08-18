@@ -1,0 +1,84 @@
+// # Non-Linear Energy Operator (NEO) Spike Detector
+//
+// Logline: Detects extracellular action potential onset times using instantaneous Teager-Kaiser energy weighting.
+//
+// Setup: High-sensitivity spike detection filter accentuating high-frequency, high-amplitude spikes over background noise.
+//
+// Beats:
+//   1. Compute discrete Teager-Kaiser Energy Operator: Psi(x[n]) = x[n]^2 - x[n-1]*x[n+1].
+//   2. Calculate smoothed running energy baseline and adaptive noise threshold.
+//   3. Trigger threshold crossing spike events with refractory lockout window.
+
+pub type NEODetectorConfig = struct {
+    threshold_multiplier_c: Float, // Multiplier C for threshold = C * mean(Psi) (default 4.5)
+    refractory_samples: Int,       // Lockout samples after spike detection (default 15)
+};
+
+pub type NEODetectorState = struct {
+    running_energy_mean: Float,
+    lockout_remaining: Int,
+};
+
+pub fn neo_config_default() -> NEODetectorConfig {
+    return NEODetectorConfig {
+        threshold_multiplier_c: 4.5,
+        refractory_samples: 15,
+    };
+}
+
+pub fn neo_state_initial(initial_energy_mean: Float) -> NEODetectorState {
+    return NEODetectorState {
+        running_energy_mean: if initial_energy_mean <= 0.0 { 1.0 } else { initial_energy_mean },
+        lockout_remaining: 0,
+    };
+}
+
+pub fn neo_compute_point_energy(x_prev: Float, x_curr: Float, x_next: Float) -> Float {
+    // Psi(x[n]) = x[n]^2 - x[n-1] * x[n+1]
+    let energy = (x_curr * x_curr) - (x_prev * x_next);
+    if energy < 0.0 { return 0.0; }
+    return energy;
+}
+
+pub type NEODetectionResult = struct {
+    next_state: NEODetectorState,
+    spike_detected: Bool,
+    instantaneous_energy: Float,
+    current_threshold: Float,
+};
+
+pub fn neo_process_sample(
+    x_prev: Float,
+    x_curr: Float,
+    x_next: Float,
+    state: &NEODetectorState,
+    config: &NEODetectorConfig
+) -> NEODetectionResult {
+    let energy = neo_compute_point_energy(x_prev, x_curr, x_next);
+    let thresh = (config).threshold_multiplier_c * (state).running_energy_mean;
+
+    let mut lockout = (state).lockout_remaining;
+    let mut detected = false;
+
+    if lockout > 0 {
+        lockout = lockout - 1;
+    } else {
+        if energy > thresh {
+            detected = true;
+            lockout = (config).refractory_samples;
+        }
+    }
+
+    // Update running mean energy with exponential moving average (alpha = 0.01)
+    let new_mean = (0.99 * (state).running_energy_mean) + (0.01 * energy);
+
+    return NEODetectionResult {
+        next_state: NEODetectorState {
+            running_energy_mean: new_mean,
+            lockout_remaining: lockout,
+        },
+        spike_detected: detected,
+        instantaneous_energy: energy,
+        current_threshold: thresh,
+    };
+}

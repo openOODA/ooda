@@ -1,0 +1,89 @@
+// # 2D Projective Covariance & Screen-Space EWA Splatting
+//
+// Logline: Projects 3D spatial Gaussian covariances to 2D image plane ellipse parameters via perspective Jacobian J.
+//
+// Setup: Core geometric projection mapping 3D Gaussians to 2D screen-space rasterization primitives.
+//
+// Beats:
+//   1. Compute perspective projection Jacobian matrix J at camera-space mean position.
+//   2. Transform 3D covariance to 2D screen covariance Sigma_2D = J W Sigma W^T J^T.
+//   3. Apply 2D low-pass anti-aliasing filter (0.3 pixel variance) and compute 2D ellipse bounding radius.
+
+import "./vec3_math.oo";
+import "./camera_pinhole_intrinsics.oo";
+import "./gaussian_covariance_3d.oo";
+
+pub type Covariance2D = struct {
+    cov_xx: Float,
+    cov_xy: Float,
+    cov_yy: Float,
+};
+
+pub type ProjectedGaussian2D = struct {
+    screen_x: Float,
+    screen_y: Float,
+    depth: Float,
+    cov2d: Covariance2D,
+    radius: Float,
+};
+
+pub fn project_gaussian_to_2d(
+    pt_cam: &Vec3,
+    cov3d: &Covariance3D,
+    cam: &CameraIntrinsics,
+) -> ProjectedGaussian2D {
+    let z: Float = (pt_cam).z;
+    if z <= 0.001 {
+        return ProjectedGaussian2D {
+            screen_x: -100.0,
+            screen_y: -100.0,
+            depth: z,
+            cov2d: Covariance2D { cov_xx: 0.0, cov_xy: 0.0, cov_yy: 0.0 },
+            radius: 0.0,
+        };
+    }
+
+    let inv_z: Float = 1.0 / z;
+    let inv_z2: Float = inv_z * inv_z;
+
+    let fx: Float = (cam).fx;
+    let fy: Float = (cam).fy;
+
+    // Jacobian J components
+    let j00: Float = fx * inv_z;
+    let j02: Float = -fx * (pt_cam).x * inv_z2;
+    let j11: Float = fy * inv_z;
+    let j12: Float = -fy * (pt_cam).y * inv_z2;
+
+    // Projected 2D covariance Sigma_2D = J * Sigma_3D * J^T
+    let xx: Float = j00 * j00 * (cov3d).cov_xx + 2.0 * j00 * j02 * (cov3d).cov_xz + j02 * j02 * (cov3d).cov_zz;
+    let xy: Float = j00 * j11 * (cov3d).cov_xy + j00 * j12 * (cov3d).cov_xz + j11 * j02 * (cov3d).cov_yz + j02 * j12 * (cov3d).cov_zz;
+    let yy: Float = j11 * j11 * (cov3d).cov_yy + 2.0 * j11 * j12 * (cov3d).cov_yz + j12 * j12 * (cov3d).cov_zz;
+
+    // Apply low-pass filter (0.3 pixel variance) for anti-aliasing
+    let cov_xx_filtered: Float = xx + 0.3;
+    let cov_yy_filtered: Float = yy + 0.3;
+
+    // Compute bounding radius (3-sigma extent)
+    let det: Float = cov_xx_filtered * cov_yy_filtered - xy * xy;
+    let mut radius: Float = 0.0;
+    if det > 0.0 {
+        let mid: Float = 0.5 * (cov_xx_filtered + cov_yy_filtered);
+        let lambda1: Float = mid + math_sqrt(math_clamp(mid * mid - det, 0.0, 100000.0));
+        radius = 3.0 * math_sqrt(math_clamp(lambda1, 0.0, 100000.0));
+    }
+
+    let screen_pt: Vec3 = camera_project_point(cam, pt_cam);
+
+    return ProjectedGaussian2D {
+        screen_x: (screen_pt).x,
+        screen_y: (screen_pt).y,
+        depth: z,
+        cov2d: Covariance2D {
+            cov_xx: cov_xx_filtered,
+            cov_xy: xy,
+            cov_yy: cov_yy_filtered,
+        },
+        radius: radius,
+    };
+}

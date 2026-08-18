@@ -1,0 +1,154 @@
+// # PE/COFF Binary Header Parser
+//
+// Logline: Portable Executable and Common Object File Format (PE/COFF) 64-bit PE32+ header and section parser.
+//
+// Setup: Parses DOS MZ stub, PE signature (0x50 0x45 0x00 0x00), COFF File Header, Optional Header, and Section Headers.
+//
+// Beats:
+//   1. Define CoffFileHeader, OptionalHeader64, and CoffSectionHeader structures.
+//   2. Compute Relative Virtual Address (RVA) to file offset conversions.
+//   3. Extract characteristics flags (IMAGE_FILE_EXECUTABLE_IMAGE, IMAGE_SCN_MEM_EXECUTE, IMAGE_SCN_MEM_READ, IMAGE_SCN_MEM_WRITE).
+
+pub type CoffFileHeader = struct {
+    machine: Int, // 0x8664: AMD64, 0xAA64: ARM64
+    number_of_sections: Int,
+    time_date_stamp: Int,
+    pointer_to_symbol_table: Int,
+    number_of_symbols: Int,
+    size_of_optional_header: Int,
+    characteristics: Int,
+};
+
+pub type OptionalHeader64 = struct {
+    magic: Int, // 0x20B: PE32+ (64-bit)
+    major_linker_version: Int,
+    minor_linker_version: Int,
+    size_of_code: Int,
+    size_of_initialized_data: Int,
+    size_of_uninitialized_data: Int,
+    address_of_entry_point: Int,
+    base_of_code: Int,
+    image_base: Int,
+    section_alignment: Int,
+    file_alignment: Int,
+    size_of_image: Int,
+    size_of_headers: Int,
+    subsystem: Int, // 2: GUI, 3: CUI (Console)
+    dll_characteristics: Int,
+};
+
+pub type CoffSectionHeader = struct {
+    name: String,
+    virtual_size: Int,
+    virtual_address: Int, // RVA
+    size_of_raw_data: Int,
+    pointer_to_raw_data: Int,
+    characteristics: Int,
+};
+
+pub type PeCoffFile = struct {
+    file_header: CoffFileHeader,
+    optional_header: OptionalHeader64,
+    sections: List[CoffSectionHeader],
+    section_count: Int,
+};
+
+// -------------------------------------------------------------------
+// Constants
+// -------------------------------------------------------------------
+
+pub fn pe_machine_amd64() -> Int { return 34404; } // 0x8664
+pub fn pe_machine_arm64() -> Int { return 43620; } // 0xAA64
+pub fn pe_magic_pe32_plus() -> Int { return 523; } // 0x20B
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn coff_file_header_new(machine: Int, n_sections: Int) -> CoffFileHeader {
+    return CoffFileHeader {
+        machine: machine,
+        number_of_sections: n_sections,
+        time_date_stamp: 0,
+        pointer_to_symbol_table: 0,
+        number_of_symbols: 0,
+        size_of_optional_header: 240, // Standard PE32+ optional header size
+        characteristics: 34, // EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+    };
+}
+
+pub fn optional_header_64_new(entry_rva: Int, image_base: Int) -> OptionalHeader64 {
+    return OptionalHeader64 {
+        magic: pe_magic_pe32_plus(),
+        major_linker_version: 14,
+        minor_linker_version: 0,
+        size_of_code: 0,
+        size_of_initialized_data: 0,
+        size_of_uninitialized_data: 0,
+        address_of_entry_point: entry_rva,
+        base_of_code: 4096,
+        image_base: image_base,
+        section_alignment: 4096,
+        file_alignment: 512,
+        size_of_image: 16384,
+        size_of_headers: 1024,
+        subsystem: 3, // Console
+        dll_characteristics: 320, // HIGH_ENTROPY_VA | DYNAMIC_BASE | NX_COMPAT
+    };
+}
+
+pub fn coff_section_header_new(
+    name: String,
+    v_size: Int,
+    rva: Int,
+    raw_size: Int,
+    raw_ptr: Int,
+    chars: Int
+) -> CoffSectionHeader {
+    return CoffSectionHeader {
+        name: name,
+        virtual_size: v_size,
+        virtual_address: rva,
+        size_of_raw_data: raw_size,
+        pointer_to_raw_data: raw_ptr,
+        characteristics: chars,
+    };
+}
+
+pub fn pe_coff_file_new(f_hdr: CoffFileHeader, opt_hdr: OptionalHeader64) -> PeCoffFile {
+    let empty_sections: List[CoffSectionHeader] = list_new();
+    return PeCoffFile {
+        file_header: f_hdr,
+        optional_header: opt_hdr,
+        sections: empty_sections,
+        section_count: 0,
+    };
+}
+
+pub fn pe_coff_add_section(mut file: PeCoffFile, sec: CoffSectionHeader) -> PeCoffFile {
+    let mut s: List[CoffSectionHeader] = (file).sections;
+    s = list_push(s, sec);
+    file.sections = s;
+    file.section_count = (file).section_count + 1;
+    return file;
+}
+
+// -------------------------------------------------------------------
+// RVA to File Offset Conversion
+// -------------------------------------------------------------------
+
+pub fn rva_to_file_offset(file: PeCoffFile, rva: Int) -> Int {
+    let limit: Int = (file).section_count;
+    let mut i: Int = 0;
+    while i < limit {
+        let sec: CoffSectionHeader = list_get((file).sections, i);
+        let sec_rva: Int = (sec).virtual_address;
+        let sec_vsize: Int = (sec).virtual_size;
+        if rva >= sec_rva && rva < (sec_rva + sec_vsize) {
+            let delta: Int = rva - sec_rva;
+            return (sec).pointer_to_raw_data + delta;
+        }
+        i = i + 1;
+    }
+    return -1;
+}

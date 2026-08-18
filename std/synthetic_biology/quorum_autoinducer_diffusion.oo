@@ -1,0 +1,96 @@
+// # Spatial Autoinducer Reaction-Diffusion Modeling
+//
+// Logline: Simulates 1D finite-difference spatial diffusion of quorum-sensing signaling molecules across bacterial colonies.
+//
+// Setup: Reaction-diffusion PDE discretizing intercellular signal propagation, colony edge effects, and signal reach radius.
+//
+// Beats:
+//   1. Define DiffusionGridParams, SpatialSignalProfile, and DiffusionStepResult data structures.
+//   2. Compute 2nd-order central difference Laplacian operator D * d2C/dx2 with Dirichlet / Neumann boundary conditions.
+//   3. Advance spatial concentration profile using explicit Euler PDE stepping and compute critical signaling radius.
+
+pub type DiffusionGridParams = struct {
+    num_grid_points: Int,
+    dx_microns: Float,
+    diffusion_coeff_um2_per_s: Float, // D ~ 10-100 um2/s for small AHLs
+    degradation_rate_per_s: Float,
+    source_production_rate: Float,
+};
+
+pub type SpatialSignalProfile = struct {
+    grid_concentrations: List[Float],
+    source_position_index: Int,
+    time_seconds: Float,
+};
+
+pub type DiffusionStepResult = struct {
+    updated_profile: SpatialSignalProfile,
+    peak_concentration: Float,
+    signaling_radius_microns: Float,
+};
+
+pub fn qdiff_laplacian_1d(
+    grid: &List[Float],
+    idx: Int,
+    n: Int,
+    dx: Float,
+) -> Float {
+    let c_mid = list_get(grid, idx);
+    let c_left = if idx > 0 { list_get(grid, idx - 1) } else { c_mid }; // Neumann zero-flux at boundary
+    let c_right = if idx + 1 < n { list_get(grid, idx + 1) } else { c_mid };
+
+    let dx2 = dx * dx;
+    if dx2 <= 0.000001 { return 0.0; }
+    return (c_left - (2.0 * c_mid) + c_right) / dx2;
+}
+
+pub fn qdiff_advance_step(
+    prof: &SpatialSignalProfile,
+    p: &DiffusionGridParams,
+    dt_seconds: Float,
+) -> DiffusionStepResult {
+    let n = (p).num_grid_points;
+    let mut next_grid: List[Float] = list_new();
+    let mut peak_val: Float = 0.0;
+    let mut radius_pts = 0;
+
+    let mut i = 0;
+    while i < n {
+        let cur_c = list_get(&(prof).grid_concentrations, i);
+        let lap = qdiff_laplacian_1d(&(prof).grid_concentrations, i, n, (p).dx_microns);
+
+        let is_source = (i == (prof).source_position_index);
+        let prod = if is_source { (p).source_production_rate } else { 0.0 };
+        let deg = (p).degradation_rate_per_s * cur_c;
+
+        let dcdt = ((p).diffusion_coeff_um2_per_s * lap) + prod - deg;
+        let next_c = cur_c + (dcdt * dt_seconds);
+        let cl = if next_c < 0.0 { 0.0 } else { next_c };
+
+        if cl > peak_val {
+            peak_val = cl;
+        }
+        if cl > 1.0 { // 1.0 nM induction threshold
+            let dist = if i > (prof).source_position_index { i - (prof).source_position_index } else { (prof).source_position_index - i };
+            if dist > radius_pts {
+                radius_pts = dist;
+            }
+        }
+
+        next_grid = list_push(next_grid, cl);
+        i = i + 1;
+    }
+
+    let rad_um = (radius_pts as Float) * (p).dx_microns;
+    let new_prof = SpatialSignalProfile {
+        grid_concentrations: next_grid,
+        source_position_index: (prof).source_position_index,
+        time_seconds: (prof).time_seconds + dt_seconds,
+    };
+
+    return DiffusionStepResult {
+        updated_profile: new_prof,
+        peak_concentration: peak_val,
+        signaling_radius_microns: rad_um,
+    };
+}

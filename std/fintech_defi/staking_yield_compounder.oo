@@ -1,0 +1,125 @@
+// # Staking Yield Compounder Engine
+//
+// Logline: Implements Synthetix/MasterChef style reward-per-token accumulators, auto-harvest cycles, and yield reinvestment compounding.
+//
+// Setup: Pure DeFi vault module for automated yield optimization.
+//
+// Beats:
+//   1. Define StakingPool, StakerAccount, and HarvestReport structures.
+//   2. Update cumulative rewardPerTokenStored accumulator = stored + (rewardRate * dt * 1e18 / totalStaked).
+//   3. Compute earned rewards, claim/reinvest tokens into primary pool, and adjust staker reward debt.
+
+pub type StakingPool = struct {
+    staked_token: String,
+    reward_token: String,
+    total_staked: Int,
+    reward_rate_per_sec: Int,
+    last_update_timestamp: Int,
+    reward_per_token_stored_scaled: Int,
+    harvest_bounty_bps: Int,
+};
+
+pub type StakerAccount = struct {
+    user: String,
+    staked_amount: Int,
+    reward_debt_scaled: Int,
+    accumulated_rewards: Int,
+};
+
+pub type HarvestReport = struct {
+    total_harvested: Int,
+    reinvested_amount: Int,
+    caller_bounty: Int,
+    new_reward_per_token: Int,
+};
+
+pub fn staking_pool_new(
+    staked_tok: String,
+    reward_tok: String,
+    rate_sec: Int,
+    init_time: Int,
+    bounty_bps: Int
+) -> StakingPool {
+    return StakingPool {
+        staked_token: staked_tok,
+        reward_token: reward_tok,
+        total_staked: 0,
+        reward_rate_per_sec: rate_sec,
+        last_update_timestamp: init_time,
+        reward_per_token_stored_scaled: 0,
+        harvest_bounty_bps: bounty_bps,
+    };
+}
+
+pub fn staker_account_new(user: String) -> StakerAccount {
+    return StakerAccount {
+        user: user,
+        staked_amount: 0,
+        reward_debt_scaled: 0,
+        accumulated_rewards: 0,
+    };
+}
+
+pub fn staking_update_pool(pool: &mut StakingPool, current_timestamp: Int) {
+    if current_timestamp <= (pool).last_update_timestamp {
+        return;
+    }
+
+    if (pool).total_staked > 0 {
+        let dt: Int = current_timestamp - (pool).last_update_timestamp;
+        let scale: Int = 1000000;
+        let added_reward_per_token: Int = ((pool).reward_rate_per_sec * dt * scale) / (pool).total_staked;
+        (pool).reward_per_token_stored_scaled = (pool).reward_per_token_stored_scaled + added_reward_per_token;
+    }
+
+    (pool).last_update_timestamp = current_timestamp;
+}
+
+pub fn staking_earned(staker: &StakerAccount, pool: &StakingPool) -> Int {
+    let scale: Int = 1000000;
+    let earned_from_stake: Int = ((staker).staked_amount * (pool).reward_per_token_stored_scaled) / scale;
+    let mut net_earned: Int = earned_from_stake - (staker).reward_debt_scaled;
+    if net_earned < 0 {
+        net_earned = 0;
+    }
+    return (staker).accumulated_rewards + net_earned;
+}
+
+pub fn staking_deposit(
+    pool: &mut StakingPool,
+    staker: &mut StakerAccount,
+    amount: Int,
+    timestamp: Int
+) {
+    staking_update_pool(pool, timestamp);
+
+    if (staker).staked_amount > 0 {
+        (staker).accumulated_rewards = staking_earned(staker, pool);
+    }
+
+    (staker).staked_amount = (staker).staked_amount + amount;
+    (pool).total_staked = (pool).total_staked + amount;
+
+    let scale: Int = 1000000;
+    (staker).reward_debt_scaled = ((staker).staked_amount * (pool).reward_per_token_stored_scaled) / scale;
+}
+
+pub fn staking_harvest_and_compound(
+    pool: &mut StakingPool,
+    reward_amount: Int,
+    timestamp: Int
+) -> HarvestReport {
+    staking_update_pool(pool, timestamp);
+
+    let bounty: Int = (reward_amount * (pool).harvest_bounty_bps) / 10000;
+    let reinvest: Int = reward_amount - bounty;
+
+    (pool).total_staked = (pool).total_staked + reinvest;
+
+    return HarvestReport {
+        total_harvested: reward_amount,
+        reinvested_amount: reinvest,
+        caller_bounty: bounty,
+        new_reward_per_token: (pool).reward_per_token_stored_scaled,
+    };
+}

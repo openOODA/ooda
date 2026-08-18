@@ -1,0 +1,148 @@
+// # Ed25519 Engine and Key Registry
+//
+// Logline: Keypair registration, engine state lifecycle, batch verifiers, wire formatting, and capability verification.
+//
+// Setup: Stateful engine management and registry dispatch for RFC 8032 Ed25519 schemes.
+//
+// Beats:
+//   1. Implement wire format serialization and binary deserialization for signatures.
+//   2. Initialize engine instances with security policies and key registry tables.
+//   3. Implement keypair secret wiping helpers for forward secrecy.
+//   4. Handle security subsystem capability verification and metrics calculation.
+
+import "./ed25519_types.oo";
+import "./ed25519_ops.oo";
+
+pub fn ed25519_keypair_wipe_secret(mut_kp: &mut Ed25519KeyPair) {
+    let old_sk: Ed25519SecretKey = (mut_kp).secret_key;
+    let wiped_sk: Ed25519SecretKey = ed25519_secret_key_wipe(old_sk);
+    (mut_kp).secret_key = wiped_sk;
+    (mut_kp).is_valid = false;
+}
+
+pub fn ed25519_signature_serialize(sig: &Ed25519Signature) -> String {
+    let sid: String = (sig).sig_id;
+    let kid: String = (sig).key_id;
+    let raw: String = (sig).raw_bytes;
+    let hex_raw: String = ed25519_hex_encode(raw);
+    return "ED25519-SIG:" + sid + ":" + kid + ":" + hex_raw;
+}
+
+pub fn ed25519_signature_deserialize(raw_bytes: String) -> Result[Ed25519Signature, String] {
+    let raw_len: Int = raw_bytes.len();
+    if raw_len != 64 {
+        return Err("INVALID_DESERIALIZE_SIZE: Ed25519 raw signature bytes must be exactly 64 bytes");
+    }
+    let mut r_buf: List[Int] = bytes_new();
+    let mut s_buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    while i < 32 {
+        let b1: Int = byte_at(raw_bytes, i);
+        r_buf = bytes_push(r_buf, b1);
+        i = i + 1;
+    }
+    while i < 64 {
+        let b2: Int = byte_at(raw_bytes, i);
+        s_buf = bytes_push(s_buf, b2);
+        i = i + 1;
+    }
+    let r_str: String = bytes_to_str(r_buf);
+    let s_str: String = bytes_to_str(s_buf);
+    return ed25519_signature_create("deserialized", "unknown", r_str, s_str, 0);
+}
+
+pub fn ed25519_policy_init(require_sys_cap: Bool, fail_closed: Bool) -> Ed25519SecurityPolicy {
+    return Ed25519SecurityPolicy {
+        require_sys_cap: require_sys_cap,
+        fail_closed: fail_closed,
+        allow_legacy_ph: false,
+        is_active: true,
+    };
+}
+
+pub fn ed25519_engine_init(engine_id: String, policy: Ed25519SecurityPolicy) -> Ed25519Engine {
+    let empty_pairs: List[Ed25519KeyPair] = list_new();
+    return Ed25519Engine {
+        engine_id: engine_id,
+        policy: policy,
+        key_pairs: empty_pairs,
+        signed_count: 0,
+        verified_count: 0,
+        rejected_count: 0,
+        strict_mode: true,
+        system_halted: false,
+    };
+}
+
+pub fn ed25519_engine_register_keypair(
+    mut_engine: &mut Ed25519Engine,
+    kp: Ed25519KeyPair
+) -> Result[Bool, String] {
+    let halted: Bool = (mut_engine).system_halted;
+    if halted {
+        return Err("ED25519_ENGINE_ERR: Engine is halted");
+    }
+    let is_val: Bool = ed25519_keypair_validate(&kp);
+    if is_val == false {
+        return Err("ED25519_ENGINE_ERR: Keypair validation failed");
+    }
+    let old_pairs: List[Ed25519KeyPair] = (mut_engine).key_pairs;
+    let new_pairs: List[Ed25519KeyPair] = list_push(old_pairs, kp);
+    (mut_engine).key_pairs = new_pairs;
+    return Ok(true);
+}
+
+pub fn ed25519_engine_find_keypair(
+    engine: &Ed25519Engine,
+    target_key_id: String
+) -> Result[Ed25519KeyPair, String] {
+    let pairs: List[Ed25519KeyPair] = (engine).key_pairs;
+    let count: Int = list_len(pairs);
+    let mut i: Int = 0;
+    while i < count {
+        let item: Ed25519KeyPair = list_get(pairs, i);
+        let kid: String = item.key_id;
+        if kid == target_key_id {
+            return Ok(item);
+        }
+        i = i + 1;
+    }
+    return Err("KEY_NOT_FOUND");
+}
+
+pub fn ed25519_batch_verifier_init(batch_id: String) -> Ed25519BatchVerifier {
+    return Ed25519BatchVerifier {
+        batch_id: batch_id,
+        total_signatures: 0,
+        valid_count: 0,
+        invalid_count: 0,
+        is_completed: false,
+    };
+}
+
+pub fn ed25519_engine_do_work(engine: &Ed25519Engine) -> Int {
+    let sc: Int = (engine).signed_count;
+    let vc: Int = (engine).verified_count;
+    let rc: Int = (engine).rejected_count;
+    let k_list: List[Ed25519KeyPair] = (engine).key_pairs;
+    let k_count: Int = list_len(k_list);
+    let vc2: Int = vc * 2;
+    let rc3: Int = rc * 3;
+    let kc5: Int = k_count * 5;
+    let sum1: Int = sc + vc2;
+    let sum2: Int = sum1 + rc3;
+    return sum2 + kc5;
+}
+
+pub fn ed25519_engine_verify_with_capability(
+    mut_engine: &mut Ed25519Engine,
+    cmd: String
+) -> Result[String, String]
+    requires cmd.len() > 0
+{
+    let halted: Bool = (mut_engine).system_halted;
+    if halted {
+        return Err("ED25519_ENGINE_HALTED: Security subsystem is disabled");
+    }
+    return Ok("ED25519_CAP_EXEC: " + cmd);
+}

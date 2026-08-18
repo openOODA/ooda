@@ -1,0 +1,98 @@
+// # LiDAR RANSAC Ground Plane Estimation & Segmentation
+//
+// Logline: Robustly fits a 3D planar equation (Ax + By + Cz + D = 0) to extract navigable road surfaces and remove ground returns.
+//
+// Setup: Core ground plane segmentation module isolating obstacles from road surface via consensus sampling.
+//
+// Beats:
+//   1. Define 3D Plane equation coefficients (A, B, C, D) and unit surface normal vector.
+//   2. Sample 3-point triplets to construct candidate plane hypotheses.
+//   3. Compute orthogonal Euclidean point-to-plane distance residuals.
+//   4. Classify point clouds into ground inliers and obstacle non-ground returns.
+
+import "./point_types.oo";
+
+pub type Plane3D = struct {
+    a: Float,
+    b: Float,
+    c: Float,
+    d: Float,
+};
+
+pub type RansacGroundConfig = struct {
+    max_iterations: Int,
+    distance_threshold: Float,
+    max_ground_angle_deg: Float,
+    expected_ground_z: Float,
+};
+
+pub type GroundSegmentationResult = struct {
+    plane: Plane3D,
+    inlier_count: Int,
+    is_valid: Bool,
+};
+
+pub fn plane3d_new(a: Float, b: Float, c: Float, d: Float) -> Plane3D {
+    return Plane3D { a: a, b: b, c: c, d: d };
+}
+
+pub fn plane3d_default_ground() -> Plane3D {
+    // Standard horizontal ground plane at Z = -1.75m (sensor height)
+    return Plane3D { a: 0.0, b: 0.0, c: 1.0, d: 1.75 };
+}
+
+pub fn ransac_ground_config_default() -> RansacGroundConfig {
+    return RansacGroundConfig {
+        max_iterations: 100,
+        distance_threshold: 0.2,
+        max_ground_angle_deg: 15.0,
+        expected_ground_z: 0.0 - 1.75,
+    };
+}
+
+pub fn plane3d_from_three_points(p1: &Point3D, p2: &Point3D, p3: &Point3D) -> Plane3D {
+    let v1x: Float = (p2).x - (p1).x;
+    let v1y: Float = (p2).y - (p1).y;
+    let v1z: Float = (p2).z - (p1).z;
+
+    let v2x: Float = (p3).x - (p1).x;
+    let v2y: Float = (p3).y - (p1).y;
+    let v2z: Float = (p3).z - (p1).z;
+
+    let nx: Float = (v1y * v2z) - (v1z * v2y);
+    let ny: Float = (v1z * v2x) - (v1x * v2z);
+    let nz: Float = (v1x * v2y) - (v1y * v2x);
+
+    let norm_sq: Float = (nx * nx) + (ny * ny) + (nz * nz);
+    if norm_sq < 0.000001 {
+        return plane3d_default_ground();
+    }
+
+    let inv_norm: Float = 1.0 / sqrt(norm_sq);
+    let a: Float = nx * inv_norm;
+    let b: Float = ny * inv_norm;
+    let c: Float = nz * inv_norm;
+    let d: Float = 0.0 - ((a * (p1).x) + (b * (p1).y) + (c * (p1).z));
+
+    return Plane3D { a: a, b: b, c: c, d: d };
+}
+
+pub fn point_to_plane_distance(p: &Point3D, plane: &Plane3D) -> Float {
+    let dist_signed: Float = ((plane).a * (p).x) + ((plane).b * (p).y) + ((plane).c * (p).z) + (plane).d;
+    return math_abs(dist_signed);
+}
+
+pub fn is_ground_plane_candidate(plane: &Plane3D, cfg: &RansacGroundConfig) -> Bool {
+    // Normal vector is (a, b, c). Upward angle: cos(theta) = c / |n| (since norm is 1, cos(theta) = |c|)
+    let abs_c: Float = math_abs((plane).c);
+    let min_cos: Float = cos((cfg).max_ground_angle_deg * (math_pi() / 180.0));
+    return abs_c >= min_cos;
+}
+
+pub fn is_point_ground_inlier(
+    p: &Point3D,
+    plane: &Plane3D,
+    threshold: Float
+) -> Bool {
+    return point_to_plane_distance(p, plane) <= threshold;
+}

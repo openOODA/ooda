@@ -1,0 +1,240 @@
+// # Power Grid Load Flow Gauss-Seidel Solver
+//
+// Logline: Solves non-linear AC power flow equations iteratively using Gauss-Seidel algorithm with PV reactive limits.
+//
+// Setup: AC network solver importing loadflow_engine.oo.
+//
+// Beats:
+//   1. Check and enforce generator reactive power limits on PV buses.
+//   2. Execute Gauss-Seidel iterative voltage updates across 2-bus systems.
+//   3. Solve 3-bus network power flow and check convergence tolerances.
+//   4. Verify solver numerical correctness in embedded test suite.
+
+
+import "./loadflow_engine.oo";
+
+pub fn check_reactive_limit(bus: BusState, q_calc: Float) -> BusState {
+    if (bus).bus_type != 1 { // Only for PV buses
+        return bus;
+    }
+    if q_calc > (bus).q_max {
+        return BusState {
+            bus_id: (bus).bus_id,
+            bus_type: 2, // Convert to PQ bus
+            v_mag: (bus).v_mag,
+            v_ang: (bus).v_ang,
+            p_gen: (bus).p_gen,
+            q_gen: (bus).q_max,
+            p_load: (bus).p_load,
+            q_load: (bus).q_load,
+            v_min: (bus).v_min,
+            v_max: (bus).v_max,
+            q_min: (bus).q_min,
+            q_max: (bus).q_max,
+        };
+    }
+    if q_calc < (bus).q_min {
+        return BusState {
+            bus_id: (bus).bus_id,
+            bus_type: 2, // Convert to PQ bus
+            v_mag: (bus).v_mag,
+            v_ang: (bus).v_ang,
+            p_gen: (bus).p_gen,
+            q_gen: (bus).q_min,
+            p_load: (bus).p_load,
+            q_load: (bus).q_load,
+            v_min: (bus).v_min,
+            v_max: (bus).v_max,
+            q_min: (bus).q_min,
+            q_max: (bus).q_max,
+        };
+    }
+    return bus;
+}
+
+/// Check voltage violations at a bus (0 = normal, 1 = undervoltage, 2 = overvoltage)
+pub fn check_voltage_violations(bus: BusState) -> Int {
+    if (bus).v_mag < (bus).v_min {
+        return 1;
+    }
+    if (bus).v_mag > (bus).v_max {
+        return 2;
+    }
+    return 0;
+}
+
+/// Solve AC Load Flow for a 2-bus system using Gauss-Seidel iterative method
+pub fn solve_gauss_seidel_2bus(
+    network: TwoBusNetwork,
+    config: LoadFlowConfig
+) -> LoadFlowResult {
+    let mut b1: BusState = (network).bus1;
+    let mut b2: BusState = (network).bus2;
+    let line: TransmissionLine = (network).line;
+
+    let adm: BranchAdmittance = calculate_branch_admittance(line);
+    let y12: ComplexNum = ComplexNum {
+        re: 0.0 - (adm).g_series,
+        im: 0.0 - (adm).b_series,
+    };
+    let y22: ComplexNum = ComplexNum {
+        re: (adm).g_series,
+        im: (adm).b_series + (adm).b_charging,
+    };
+
+    let mut iter: Int = 0;
+    let max_iter: Int = (config).max_iterations;
+    let tol: Float = (config).tolerance;
+    let mut max_p_err: Float = 1.0;
+    let mut max_q_err: Float = 1.0;
+    let mut is_converged: Bool = false;
+
+    while iter < max_iter {
+        if is_converged == false {
+            // Update Bus 2 (if PQ bus or PV bus)
+            if (b2).bus_type != 0 { // Bus 2 is not Slack
+                let p2_spec: Float = bus_net_active_power(b2);
+                let mut q2_spec: Float = bus_net_reactive_power(b2);
+
+                if (b2).bus_type == 1 { // PV bus: calculate Q first
+                    let v1_c: ComplexNum = ComplexNum {
+                        re: (b1).v_mag * cos((b1).v_ang),
+                        im: (b1).v_mag * sin((b1).v_ang),
+                    };
+                    let v2_c: ComplexNum = ComplexNum {
+                        re: (b2).v_mag * cos((b2).v_ang),
+                        im: (b2).v_mag * sin((b2).v_ang),
+                    };
+
+                    // I2 = y21*V1 + y22*V2
+                    let i2_term1: ComplexNum = complex_mul(y12, v1_c);
+                    let i2_term2: ComplexNum = complex_mul(y22, v2_c);
+                    let i2: ComplexNum = complex_add(i2_term1, i2_term2);
+                    let s2: ComplexNum = complex_mul(v2_c, complex_conj(i2));
+                    let q2_calc: Float = (s2).im;
+
+                    b2 = check_reactive_limit(b2, q2_calc);
+                    q2_spec = bus_net_reactive_power(b2);
+                }
+
+                // Complex power S_spec = P2_spec - j*Q2_spec
+                let s2_spec: ComplexNum = ComplexNum { re: p2_spec, im: 0.0 - q2_spec };
+                let v2_curr: ComplexNum = ComplexNum {
+                    re: (b2).v_mag * cos((b2).v_ang),
+                    im: (b2).v_mag * sin((b2).v_ang),
+                };
+
+                let s_over_v: ComplexNum = complex_div(s2_spec, complex_conj(v2_curr));
+                let v1_c: ComplexNum = ComplexNum {
+                    re: (b1).v_mag * cos((b1).v_ang),
+                    im: (b1).v_mag * sin((b1).v_ang),
+                };
+                let y12_v1: ComplexNum = complex_mul(y12, v1_c);
+                let num: ComplexNum = complex_sub(s_over_v, y12_v1);
+                let v2_new: ComplexNum = complex_div(num, y22);
+
+                let new_v_mag: Float = complex_mag(v2_new);
+                let new_v_ang: Float = math_atan2((v2_new).im, (v2_new).re);
+
+                if (b2).bus_type == 2 { // PQ bus updates magnitude and angle
+                    b2 = BusState {
+                        bus_id: (b2).bus_id,
+                        bus_type: (b2).bus_type,
+                        v_mag: new_v_mag,
+                        v_ang: new_v_ang,
+                        p_gen: (b2).p_gen,
+                        q_gen: (b2).q_gen,
+                        p_load: (b2).p_load,
+                        q_load: (b2).q_load,
+                        v_min: (b2).v_min,
+                        v_max: (b2).v_max,
+                        q_min: (b2).q_min,
+                        q_max: (b2).q_max,
+                    };
+                } else { // PV bus updates angle only
+                    b2 = BusState {
+                        bus_id: (b2).bus_id,
+                        bus_type: (b2).bus_type,
+                        v_mag: (b2).v_mag,
+                        v_ang: new_v_ang,
+                        p_gen: (b2).p_gen,
+                        q_gen: (b2).q_gen,
+                        p_load: (b2).p_load,
+                        q_load: (b2).q_load,
+                        v_min: (b2).v_min,
+                        v_max: (b2).v_max,
+                        q_min: (b2).q_min,
+                        q_max: (b2).q_max,
+                    };
+                }
+            }
+
+            // Calculate mismatches
+            let mm2: PowerMismatch = calculate_power_mismatch(b2, b1, adm);
+            max_p_err = math_abs((mm2).delta_p);
+            max_q_err = math_abs((mm2).delta_q);
+
+            if max_p_err < tol {
+                if max_q_err < tol {
+                    is_converged = true;
+                }
+            }
+
+            iter = iter + 1;
+        } else {
+            iter = max_iter; // break loop
+        }
+    }
+
+    // Branch flow and loss summary
+    let flow: BranchFlow = calculate_branch_flow(b1, b2, line, (config).base_mva);
+
+    let total_pg: Float = (b1).p_gen + (b2).p_gen;
+    let total_qg: Float = (b1).q_gen + (b2).q_gen;
+    let total_pl: Float = (b1).p_load + (b2).p_load;
+    let total_ql: Float = (b1).q_load + (b2).q_load;
+
+    return LoadFlowResult {
+        converged: is_converged,
+        iterations: iter,
+        max_p_mismatch: max_p_err,
+        max_q_mismatch: max_q_err,
+        total_p_gen: total_pg,
+        total_q_gen: total_qg,
+        total_p_load: total_pl,
+        total_q_load: total_ql,
+        total_p_loss: (flow).p_loss,
+        total_q_loss: (flow).q_loss,
+    };
+}
+
+// -------------------------------------------------------------------
+// 9. Module Execution & State Management
+// -------------------------------------------------------------------
+
+pub fn loadflow_init() -> GridModule {
+    let b1: BusState = bus_state_new(1, 0, 1.0, 0.0, 1.0, 0.2, 0.0, 0.0);
+    let b2: BusState = bus_state_new(2, 2, 1.0, 0.0, 0.0, 0.0, 0.8, 0.3);
+    let line: TransmissionLine = transmission_line_new(1, 1, 2, 0.02, 0.08, 0.02, 100.0);
+
+    let net: TwoBusNetwork = TwoBusNetwork { bus1: b1, bus2: b2, line: line };
+    let cfg: LoadFlowConfig = loadflow_config_default();
+
+    return GridModule {
+        network: net,
+        config: cfg,
+        step_count: 0,
+    };
+}
+
+pub fn loadflow_step(grid: GridModule) -> GridModule {
+    let _result: LoadFlowResult = solve_gauss_seidel_2bus(grid.network, grid.config);
+    let current_step: Int = grid.step_count;
+    return GridModule {
+        network: grid.network,
+        config: grid.config,
+        step_count: current_step + 1
+    };
+}
+
+

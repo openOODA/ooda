@@ -1,0 +1,146 @@
+// ===================================================================
+// openOODA Standard Library — ooda::fin::aml_ops
+// Batch evaluation, compliance profile updates, SAR formatting
+// (split from aml.oo, Issue #15)
+// ===================================================================
+
+import "./aml_types.oo";
+import "./aml_risk.oo";
+
+// -------------------------------------------------------------------
+// Batch, Compliance, and Reporting Operations
+// -------------------------------------------------------------------
+
+pub fn aml_format_sar_report(entity_id: String, risk: RiskScore, reason: String) -> String {
+    let score_val: Int = risk.final_score;
+    let final_s: String = score_val.to_string();
+    let level: String = risk.risk_level;
+
+    let part1: String = "SUSPICIOUS ACTIVITY REPORT [SAR]\nEntity ID: " + entity_id;
+    let part2: String = "\nRisk Score: " + final_s;
+    let part3: String = " (" + level;
+    let part4: String = ")\nPrimary Trigger: " + reason;
+    let part5: String = "\nFiling Status: MANDATORY_REVIEW";
+
+    return part1 + part2 + part3 + part4 + part5;
+}
+
+pub fn aml_batch_evaluate_transactions(txs: List[TransactionNode], rule: PatternRule) -> Int {
+    let len: Int = list_len(txs);
+    let mut i: Int = 0;
+    let mut triggered: Int = 0;
+
+    while i < len {
+        let tx: TransactionNode = list_get(txs, i);
+        let match_found: Bool = aml_evaluate_transaction_rule(tx, rule);
+        if match_found {
+            triggered = triggered + 1;
+        }
+        i = i + 1;
+    }
+
+    return triggered;
+}
+
+pub fn aml_update_compliance_profile(
+    profile: ComplianceProfile,
+    tx_amount: Int,
+    is_flagged: Bool
+) -> ComplianceProfile {
+    let old_vol: Int = profile.total_volume;
+    let old_flagged: Int = profile.flagged_count;
+    let mut new_flagged: Int = old_flagged;
+    if is_flagged {
+        new_flagged = new_flagged + 1;
+    }
+
+    let e_id: String = profile.entity_id;
+    let kyc: Bool = profile.kyc_verified;
+    let pep: Bool = profile.pep_status;
+    let mut rating: String = profile.risk_rating;
+
+    if new_flagged > 3 {
+        rating = "CRITICAL";
+    } else {
+        if new_flagged > 1 {
+            rating = "HIGH";
+        }
+    }
+
+    return ComplianceProfile {
+        entity_id: e_id,
+        kyc_verified: kyc,
+        risk_rating: rating,
+        pep_status: pep,
+        total_volume: old_vol + tx_amount,
+        flagged_count: new_flagged,
+    };
+}
+
+// -------------------------------------------------------------------
+// Verification Suite
+// -------------------------------------------------------------------
+
+verify aml {
+    let tx1: TransactionNode = transaction_node_new(
+        "TX1001",
+        "ACC_SENDER_01",
+        "ACC_RECV_02",
+        950000,
+        1700000000,
+        "WIRE",
+        "KY",
+        false
+    );
+
+    assert_eq!(tx1.tx_id, "TX1001");
+    assert_eq!(tx1.amount, 950000);
+    assert_eq!(tx1.country_code, "KY");
+
+    let is_struct: Bool = aml_check_structuring_pattern(9500, 10000);
+    assert_eq!(is_struct, true);
+
+    let is_not_struct: Bool = aml_check_structuring_pattern(5000, 10000);
+    assert_eq!(is_not_struct, false);
+
+    let j_risk: Int = aml_check_jurisdiction_risk("KY");
+    assert_eq!(j_risk, 30);
+
+    let v_risk: Int = aml_calculate_velocity_risk(60, 3600);
+    assert_eq!(v_risk, 25);
+
+    let risk: RiskScore = aml_evaluate_risk_score("ACC_SENDER_01", 10, 45, 30, 25);
+    assert_eq!(risk.final_score, 100);
+    assert_eq!(risk.risk_level, "CRITICAL");
+    assert_eq!(risk.requires_sar, true);
+
+    let rule: PatternRule = pattern_rule_new(
+        "R_LARGE_WIRE",
+        "Large Wire Transfer",
+        500000,
+        86400,
+        5,
+        30,
+        true
+    );
+
+    let rule_triggered: Bool = aml_evaluate_transaction_rule(tx1, rule);
+    assert_eq!(rule_triggered, true);
+
+    let mut tx_list: List[TransactionNode] = list_new();
+    tx_list = list_push(tx_list, tx1);
+
+    let trig_count: Int = aml_batch_evaluate_transactions(tx_list, rule);
+    assert_eq!(trig_count, 1);
+
+    let sanction_match: Bool = aml_check_sanction_match("ACME CORP", "ACME CORP");
+    assert_eq!(sanction_match, true);
+
+    let sar_rep: String = aml_format_sar_report("ACC_SENDER_01", risk, "Structuring & High-Risk Jurisdiction");
+    assert_eq!(sar_rep, "SUSPICIOUS ACTIVITY REPORT [SAR]\nEntity ID: ACC_SENDER_01\nRisk Score: 100 (CRITICAL)\nPrimary Trigger: Structuring & High-Risk Jurisdiction\nFiling Status: MANDATORY_REVIEW");
+
+    let prof: ComplianceProfile = compliance_profile_new("ACC_SENDER_01", true, false);
+    let updated_prof: ComplianceProfile = aml_update_compliance_profile(prof, 950000, true);
+    assert_eq!(updated_prof.total_volume, 950000);
+    assert_eq!(updated_prof.flagged_count, 1);
+}

@@ -1,0 +1,141 @@
+// # Modbus TCP MBAP Header & ADU Protocol
+//
+// Logline: Implements Modbus TCP MBAP header serialization, validation, and Application Data Unit framing.
+//
+// Setup: Pure network framing for Ethernet-based Modbus TCP communications.
+//
+// Beats:
+//   1. Define MBAP header data structures with transaction and protocol identifiers.
+//   2. Encode and decode standard 7-byte MBAP headers with endian safety.
+//   3. Wrap and extract Modbus Protocol Data Units (PDUs) within TCP ADU frames.
+
+pub type ModbusTcpMbap = struct {
+    transaction_id: Int,
+    protocol_id: Int,
+    length: Int,
+    unit_id: Int,
+};
+
+pub type ModbusTcpAdu = struct {
+    mbap: ModbusTcpMbap,
+    function_code: Int,
+    pdu_data: List[Int],
+};
+
+/// Construct a new ModbusTcpMbap header.
+pub fn modbus_mbap_new(tx_id: Int, unit_id: Int, pdu_len: Int) -> ModbusTcpMbap {
+    return ModbusTcpMbap {
+        transaction_id: tx_id % 65536,
+        protocol_id: 0,
+        length: (pdu_len + 1) % 65536, // Length field includes Unit Identifier byte
+        unit_id: unit_id % 256,
+    };
+}
+
+/// Encode MBAP header into standard 7-byte network representation.
+pub fn modbus_mbap_encode(mbap: &ModbusTcpMbap) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let tx: Int = (mbap).transaction_id;
+    let proto: Int = (mbap).protocol_id;
+    let len: Int = (mbap).length;
+    let uid: Int = (mbap).unit_id;
+
+    out = list_push(out, (tx / 256) % 256);
+    out = list_push(out, tx % 256);
+    out = list_push(out, (proto / 256) % 256);
+    out = list_push(out, proto % 256);
+    out = list_push(out, (len / 256) % 256);
+    out = list_push(out, len % 256);
+    out = list_push(out, uid % 256);
+    return out;
+}
+
+/// Decode a 7-byte MBAP header from raw byte stream.
+pub fn modbus_mbap_decode(bytes: &List[Int]) -> Result[ModbusTcpMbap, String] {
+    let size: Int = list_len(*bytes);
+    if size < 7 {
+        return Err("Modbus TCP MBAP header requires at least 7 bytes");
+    }
+
+    let tx_hi: Int = list_get(*bytes, 0);
+    let tx_lo: Int = list_get(*bytes, 1);
+    let proto_hi: Int = list_get(*bytes, 2);
+    let proto_lo: Int = list_get(*bytes, 3);
+    let len_hi: Int = list_get(*bytes, 4);
+    let len_lo: Int = list_get(*bytes, 5);
+    let uid: Int = list_get(*bytes, 6);
+
+    let tx: Int = (tx_hi * 256) + tx_lo;
+    let proto: Int = (proto_hi * 256) + proto_lo;
+    let len: Int = (len_hi * 256) + len_lo;
+
+    if proto != 0 {
+        return Err("Invalid Modbus TCP protocol identifier (must be 0)");
+    }
+    if len < 2 {
+        return Err("Invalid Modbus TCP MBAP length field");
+    }
+
+    return Ok(ModbusTcpMbap {
+        transaction_id: tx,
+        protocol_id: proto,
+        length: len,
+        unit_id: uid,
+    });
+}
+
+/// Build a full Modbus TCP ADU from MBAP header, function code, and PDU data.
+pub fn modbus_tcp_adu_new(tx_id: Int, unit_id: Int, fc: Int, pdu_data: List[Int]) -> ModbusTcpAdu {
+    let pdu_data_len: Int = list_len(pdu_data);
+    let total_pdu_len: Int = pdu_data_len + 1; // Includes function code
+    let mbap: ModbusTcpMbap = modbus_mbap_new(tx_id, unit_id, total_pdu_len);
+
+    return ModbusTcpAdu {
+        mbap: mbap,
+        function_code: fc,
+        pdu_data: pdu_data,
+    };
+}
+
+/// Serialize a ModbusTcpAdu into raw bytes.
+pub fn modbus_tcp_adu_encode(adu: &ModbusTcpAdu) -> List[Int] {
+    let mut out: List[Int] = modbus_mbap_encode(&(adu).mbap);
+    out = list_push(out, (adu).function_code % 256);
+
+    let pdu_len: Int = list_len((adu).pdu_data);
+    let mut i: Int = 0;
+    while i < pdu_len {
+        out = list_push(out, list_get((adu).pdu_data, i) % 256);
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Parse a raw Modbus TCP byte frame into a ModbusTcpAdu.
+pub fn modbus_tcp_adu_decode(bytes: &List[Int]) -> Result[ModbusTcpAdu, String] {
+    let total_len: Int = list_len(*bytes);
+    if total_len < 8 {
+        return Err("Modbus TCP ADU requires at least 8 bytes (7 MBAP + 1 FC)");
+    }
+
+    let mbap_res: Result[ModbusTcpMbap, String] = modbus_mbap_decode(bytes);
+    if !mbap_res.is_ok() {
+        return Err(mbap_res.unwrap_err());
+    }
+
+    let mbap: ModbusTcpMbap = mbap_res.unwrap();
+    let fc: Int = list_get(*bytes, 7);
+
+    let mut pdu_data: List[Int] = list_new();
+    let mut i: Int = 8;
+    while i < total_len {
+        pdu_data = list_push(pdu_data, list_get(*bytes, i));
+        i = i + 1;
+    }
+
+    return Ok(ModbusTcpAdu {
+        mbap: mbap,
+        function_code: fc,
+        pdu_data: pdu_data,
+    });
+}

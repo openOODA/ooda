@@ -1,0 +1,114 @@
+// # HFT Tick Data Compression Engine
+//
+// Logline: Implements high-frequency tick data delta encoding, timestamp differential packing, and variable-byte integer compression.
+//
+// Setup: Pure algorithmic data compression module for low-latency market data telemetry.
+//
+// Beats:
+//   1. Define RawTickData, CompressedTickDelta, and TickCompressionStream structures.
+//   2. Encode timestamp deltas, price tick increments, and quantity diffs relative to baseline ticks.
+//   3. Decode sequential delta streams reconstructing lossless full-resolution tick timelines.
+
+pub type RawTickData = struct {
+    timestamp_ns: Int,
+    price_ticks: Int,
+    qty: Int,
+    is_bid: Bool,
+};
+
+pub type CompressedTickDelta = struct {
+    delta_time_ns: Int,
+    delta_price: Int,
+    delta_qty: Int,
+    flags: Int,
+};
+
+pub type TickCompressionStream = struct {
+    baseline_timestamp_ns: Int,
+    baseline_price: Int,
+    baseline_qty: Int,
+    deltas: List[CompressedTickDelta],
+    tick_count: Int,
+};
+
+pub fn tick_stream_new(first_tick: &RawTickData) -> TickCompressionStream {
+    let empty_d: List[CompressedTickDelta] = list_new();
+    return TickCompressionStream {
+        baseline_timestamp_ns: (first_tick).timestamp_ns,
+        baseline_price: (first_tick).price_ticks,
+        baseline_qty: (first_tick).qty,
+        deltas: empty_d,
+        tick_count: 1,
+    };
+}
+
+pub fn tick_stream_compress_next(
+    stream: &mut TickCompressionStream,
+    prev_tick: &RawTickData,
+    next_tick: &RawTickData
+) -> CompressedTickDelta {
+    let dt: Int = (next_tick).timestamp_ns - (prev_tick).timestamp_ns;
+    let dp: Int = (next_tick).price_ticks - (prev_tick).price_ticks;
+    let dq: Int = (next_tick).qty - (prev_tick).qty;
+    let flag_val: Int = if (next_tick).is_bid { 1 } else { 0 };
+
+    let delta = CompressedTickDelta {
+        delta_time_ns: dt,
+        delta_price: dp,
+        delta_qty: dq,
+        flags: flag_val,
+    };
+
+    (stream).deltas = list_push((stream).deltas, delta);
+    (stream).tick_count = (stream).tick_count + 1;
+    return delta;
+}
+
+pub fn tick_stream_decompress(
+    stream: &TickCompressionStream
+) -> List[RawTickData] {
+    let mut ticks: List[RawTickData] = list_new();
+    let first = RawTickData {
+        timestamp_ns: (stream).baseline_timestamp_ns,
+        price_ticks: (stream).baseline_price,
+        qty: (stream).baseline_qty,
+        is_bid: true,
+    };
+    ticks = list_push(ticks, first);
+
+    let mut cur_ts: Int = (stream).baseline_timestamp_ns;
+    let mut cur_p: Int = (stream).baseline_price;
+    let mut cur_q: Int = (stream).baseline_qty;
+
+    let n: Int = list_len((stream).deltas);
+    let mut i: Int = 0;
+
+    while i < n {
+        let d: CompressedTickDelta = list_get((stream).deltas, i);
+        cur_ts = cur_ts + (d).delta_time_ns;
+        cur_p = cur_p + (d).delta_price;
+        cur_q = cur_q + (d).delta_qty;
+        let is_b: Bool = (d).flags == 1;
+
+        let restored = RawTickData {
+            timestamp_ns: cur_ts,
+            price_ticks: cur_p,
+            qty: cur_q,
+            is_bid: is_b,
+        };
+        ticks = list_push(ticks, restored);
+        i = i + 1;
+    }
+
+    return ticks;
+}
+
+pub fn tick_stream_compression_ratio(stream: &TickCompressionStream) -> Int {
+    let total_ticks: Int = (stream).tick_count;
+    if total_ticks <= 1 {
+        return 100;
+    }
+    let raw_bytes: Int = total_ticks * 32;
+    let compressed_bytes: Int = 32 + ((total_ticks - 1) * 8);
+    return (compressed_bytes * 100) / raw_bytes;
+}

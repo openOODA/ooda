@@ -1,0 +1,181 @@
+// # SPH Fluid Particle Mechanics
+//
+// Logline: Computes particle density summation, equation of state pressure, and inter-particle hydrodynamic forces.
+//
+// Setup: Imports fluid_math.oo for Vec3 vector math and SPH smoothing kernels.
+//
+// Beats:
+//   1. Construct FluidParticle records (position, velocity, density, pressure, mass).
+//   2. Calculate Tait equation of state pressure from local particle density sums.
+//   3. Compute pairwise pressure gradient repulsion and artificial viscosity drag forces.
+
+import "./fluid_math.oo";
+
+pub type FluidParticle = struct {
+    pos: Vec3,
+    vel: Vec3,
+    force: Vec3,
+    density: f64,
+    pressure: f64,
+    mass: f64,
+    viscosity: f64,
+    phase: Int,
+    active: Int,
+};
+
+/// Construct a new fluid particle at given position with given mass.
+pub fn fluid_particle_new(pos: Vec3, vel: Vec3, mass: f64) -> FluidParticle {
+    return FluidParticle {
+        pos: pos,
+        vel: vel,
+        force: vec3_zero(),
+        density: 1000.0,
+        pressure: 0.0,
+        mass: mass,
+        viscosity: 0.001,
+        phase: 0,
+        active: 1,
+    };
+}
+
+/// Create a static boundary particle (does not move under integration).
+pub fn fluid_particle_new_boundary(pos: Vec3) -> FluidParticle {
+    return FluidParticle {
+        pos: pos,
+        vel: vec3_zero(),
+        force: vec3_zero(),
+        density: 1000.0,
+        pressure: 0.0,
+        mass: 1.0,
+        viscosity: 0.001,
+        phase: 2,
+        active: 0,
+    };
+}
+
+/// Reset accumulated force on particle for the next time-step.
+pub fn fluid_particle_reset_forces(p: &mut FluidParticle) {
+    p.force = vec3_zero();
+}
+
+/// Apply force vector (Newtons) to particle.
+pub fn fluid_particle_apply_force(p: &mut FluidParticle, f: Vec3) {
+    p.force = vec3_add((p).force, f);
+}
+
+/// Apply gravitational acceleration g (m/s^2). F_gravity = mass * g.
+pub fn fluid_particle_apply_gravity(p: &mut FluidParticle, g: Vec3) {
+    let fg = vec3_scale(g, (p).mass);
+    fluid_particle_apply_force(p, fg);
+}
+
+/// Apply Archimedes buoyancy force based on ambient fluid density and gravity.
+/// F_buoyancy = (ambient_density - particle_density) * (mass / particle_density) * g.
+pub fn fluid_particle_apply_buoyancy(p: &mut FluidParticle, ambient_density: f64, g: Vec3) {
+    let rho = (p).density;
+    if (rho) < 0.000001 {
+        return;
+    }
+    let vol = ((p).mass) / (rho);
+    let buoyancy_scalar = ((ambient_density) - (rho)) * (vol);
+    let fb = vec3_scale(g, buoyancy_scalar);
+    fluid_particle_apply_force(p, fb);
+}
+
+/// Compute density and pressure for a particle using Tait equation of state.
+/// P = stiffness * (density - rest_density).
+pub fn fluid_particle_compute_density_pressure(p: &mut FluidParticle, neighbor_density_sum: f64, rest_density: f64, stiffness: f64) {
+    let rho = (rest_density) + (neighbor_density_sum);
+    p.density = rho;
+    let mut pres = (stiffness) * ((rho) - (rest_density));
+    if (pres) < 0.0 {
+        pres = 0.0;
+    }
+    p.pressure = pres;
+}
+
+/// Compute pairwise SPH pressure and viscosity forces between p1 and p2.
+pub fn fluid_particle_compute_sph_pair_forces(p1: &mut FluidParticle, p2: &mut FluidParticle, kernel: SPHKernel) {
+    if ((p1).active) == 0 {
+        return;
+    }
+    let r_vec = vec3_sub((p1).pos, (p2).pos);
+    let r = vec3_length(r_vec);
+    let h = (kernel).h;
+
+    if (r) >= (h) {
+        return;
+    }
+    if (r) < 0.000001 {
+        return;
+    }
+
+    let dir = vec3_scale(r_vec, 1.0 / (r));
+
+    // Pressure force component
+    let grad_w = sph_kernel_spiky_grad(r, kernel);
+    let rho2 = (p2).density;
+    if (rho2) < 0.000001 {
+        return;
+    }
+    let avg_pres = (((p1).pressure) + ((p2).pressure)) / 2.0;
+    let p_scalar = (0.0 - ((p2).mass)) * ((avg_pres) / (rho2)) * (grad_w);
+    let f_pressure = vec3_scale(dir, p_scalar);
+
+    // Viscosity force component
+    let lap_w = sph_kernel_visc_lap(r, kernel);
+    let v_diff = vec3_sub((p2).vel, (p1).vel);
+    let visc = ((p1).viscosity) + ((p2).viscosity);
+    let v_scalar = (((p2).mass) * (visc)) / (rho2) * (lap_w);
+    let f_viscosity = vec3_scale(v_diff, v_scalar);
+
+    let f_total = vec3_add(f_pressure, f_viscosity);
+    fluid_particle_apply_force(p1, f_total);
+
+    if ((p2).active) != 0 {
+        let f_opposite = vec3_neg(f_total);
+        fluid_particle_apply_force(p2, f_opposite);
+    }
+}
+
+/// Advance fluid particle by time-step dt using semi-implicit Euler integration.
+pub fn fluid_particle_step(p: &mut FluidParticle, dt: f64, damping: f64) {
+    if ((p).active) == 0 {
+        return;
+    }
+    let m = (p).mass;
+    if (m) < 0.000001 {
+        return;
+    }
+    let inv_m = 1.0 / (m);
+
+    let ax = ((p).force.x) * (inv_m);
+    let ay = ((p).force.y) * (inv_m);
+    let az = ((p).force.z) * (inv_m);
+
+    let damp_factor = 1.0 - (damping);
+
+    let new_vx = (((p).vel.x) + ((ax) * (dt))) * (damp_factor);
+    let new_vy = (((p).vel.y) + ((ay) * (dt))) * (damp_factor);
+    let new_vz = (((p).vel.z) + ((az) * (dt))) * (damp_factor);
+    p.vel = Vec3 { x: new_vx, y: new_vy, z: new_vz };
+
+    let new_px = ((p).pos.x) + (((p).vel.x) * (dt));
+    let new_py = ((p).pos.y) + (((p).vel.y) * (dt));
+    let new_pz = ((p).pos.z) + (((p).vel.z) * (dt));
+    p.pos = Vec3 { x: new_px, y: new_py, z: new_pz };
+
+    fluid_particle_reset_forces(p);
+}
+
+/// Kinetic energy of a fluid particle: 0.5 * mass * velocity^2.
+pub fn fluid_particle_kinetic_energy(p: &FluidParticle) -> f64 {
+    let v_sq = vec3_length_sq((p).vel);
+    return (0.5 * ((p).mass)) * (v_sq);
+}
+
+/// Potential energy of a fluid particle under gravity g: -mass * (g . pos).
+pub fn fluid_particle_potential_energy(p: &FluidParticle, g: Vec3) -> f64 {
+    let dot = vec3_dot(g, (p).pos);
+    return (0.0 - ((p).mass)) * (dot);
+}

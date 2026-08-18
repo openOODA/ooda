@@ -1,0 +1,101 @@
+// # Multi-Collateral Margin Haircut Risk Matrix
+//
+// Logline: Applies asset-specific risk haircuts, concentration penalty curves, and cross-collateral borrowing limits across multi-token portfolios.
+//
+// Setup: Pure quantitative risk module evaluating effective collateral values and borrowing power for margin protocols.
+//
+// Beats:
+//   1. Define CollateralAssetConfig, CollateralDeposit, and BasketRiskSummary structures.
+//   2. Apply base haircuts and concentration scale penalties for large single-asset holdings.
+//   3. Compute aggregate effective borrowing capacity and weighted liquidation thresholds.
+
+pub type CollateralAssetConfig = struct {
+    symbol: String,
+    base_haircut_pct: Float,          // e.g. 0.15 (15% haircut -> 85% LTV)
+    liquidation_threshold_pct: Float, // e.g. 0.90 (90% threshold)
+    concentration_limit_usd: Float,   // e.g. 1000000.0
+    excess_concentration_penalty_pct: Float,
+};
+
+pub type CollateralDeposit = struct {
+    symbol: String,
+    amount: Float,
+    oracle_price_usd: Float,
+    config: CollateralAssetConfig,
+};
+
+pub type BasketRiskSummary = struct {
+    gross_market_value_usd: Float,
+    effective_borrowing_power_usd: Float,
+    weighted_liquidation_threshold_usd: Float,
+    total_haircut_usd: Float,
+    effective_ltv_ratio: Float,
+};
+
+pub fn collateral_config_eth() -> CollateralAssetConfig {
+    return CollateralAssetConfig {
+        symbol: "WETH",
+        base_haircut_pct: 0.15,
+        liquidation_threshold_pct: 0.88,
+        concentration_limit_usd: 5000000.0,
+        excess_concentration_penalty_pct: 0.10,
+    };
+}
+
+pub fn collateral_config_usdc() -> CollateralAssetConfig {
+    return CollateralAssetConfig {
+        symbol: "USDC",
+        base_haircut_pct: 0.02,
+        liquidation_threshold_pct: 0.95,
+        concentration_limit_usd: 20000000.0,
+        excess_concentration_penalty_pct: 0.05,
+    };
+}
+
+pub fn evaluate_collateral_basket(
+    deposits: List[CollateralDeposit]
+) -> BasketRiskSummary {
+    let n: Int = list_len(deposits);
+    let mut total_gross: Float = 0.0;
+    let mut total_borrowing: Float = 0.0;
+    let mut total_liq_thresh: Float = 0.0;
+
+    let mut i: Int = 0;
+    while i < n {
+        let dep: CollateralDeposit = list_get(deposits, i);
+        let mkt_val: Float = (dep).amount * (dep).oracle_price_usd;
+        total_gross = total_gross + mkt_val;
+
+        let cfg: CollateralAssetConfig = (dep).config;
+        let mut effective_haircut: Float = (cfg).base_haircut_pct;
+
+        if mkt_val > (cfg).concentration_limit_usd {
+            let excess: Float = mkt_val - (cfg).concentration_limit_usd;
+            let penalty: Float = (excess / mkt_val) * (cfg).excess_concentration_penalty_pct;
+            effective_haircut = effective_haircut + penalty;
+        }
+
+        let ltv: Float = 1.0 - effective_haircut;
+        let borrow_power: Float = mkt_val * ltv;
+        let liq_cap: Float = mkt_val * (cfg).liquidation_threshold_pct;
+
+        total_borrowing = total_borrowing + borrow_power;
+        total_liq_thresh = total_liq_thresh + liq_cap;
+
+        i = i + 1;
+    }
+
+    let haircut_usd: Float = total_gross - total_borrowing;
+    let mut eff_ltv: Float = 0.0;
+    if total_gross > 0.0 {
+        eff_ltv = total_borrowing / total_gross;
+    }
+
+    return BasketRiskSummary {
+        gross_market_value_usd: total_gross,
+        effective_borrowing_power_usd: total_borrowing,
+        weighted_liquidation_threshold_usd: total_liq_thresh,
+        total_haircut_usd: haircut_usd,
+        effective_ltv_ratio: eff_ltv,
+    };
+}

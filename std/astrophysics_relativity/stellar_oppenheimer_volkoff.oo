@@ -1,0 +1,112 @@
+// # Tolman-Oppenheimer-Volkoff (TOV) Relativistic Stellar Structure
+//
+// Logline: Solves General Relativistic hydrostatic equilibrium equations for compact neutron stars.
+//
+// Setup: Evaluates post-Newtonian correction factors for mass and pressure gradients in strong gravitational fields.
+//
+// Beats:
+//   1. Define TOV state variables: radial coordinate r, enclosed gravitational mass M(r), pressure P(r).
+//   2. Compute relativistic correction terms: (1 + P / (rho * c^2)), (1 + 4*pi*r^3*P / (M*c^2)), and (1 - 2*G*M / (r*c^2))^(-1).
+//   3. Implement RK4 integration step for neutron star internal pressure and mass profiles.
+
+import "./astro_rel_constants.oo";
+
+pub type TovState = struct {
+    radius_m: Float,
+    enclosed_mass_kg: Float,
+    pressure_pa: Float,
+};
+
+pub type TovGradients = struct {
+    dm_dr: Float,
+    dp_dr: Float,
+    is_physical: Bool,
+};
+
+pub fn tov_compute_gradients(state: TovState, density_eos: Float) -> TovGradients {
+    let r: Float = (state).radius_m;
+    let m: Float = (state).enclosed_mass_kg;
+    let p: Float = (state).pressure_pa;
+    let rho: Float = density_eos;
+
+    if r <= 1.0 || rho <= 0.0 || p <= 0.0 {
+        return TovGradients {
+            dm_dr: 0.0,
+            dp_dr: 0.0,
+            is_physical: true,
+        };
+    }
+
+    let g_val: Float = const_g();
+    let c_val: Float = const_c();
+    let c2: Float = c_val * c_val;
+    let pi_val: Float = const_pi();
+
+    // dM/dr = 4 * pi * r^2 * rho
+    let dm_dr: Float = (4.0 * pi_val) * (r * r) * rho;
+
+    // Schwarzschild metric factor: 1 - 2*G*M / (r * c^2)
+    let metric_denom: Float = 1.0 - ((2.0 * g_val * m) / (r * c2));
+    if metric_denom <= 0.00001 {
+        return TovGradients {
+            dm_dr: dm_dr,
+            dp_dr: 0.0,
+            is_physical: false, // Inside event horizon
+        };
+    }
+
+    // TOV Equation:
+    // dP/dr = - (G*M*rho / r^2) * [1 + P/(rho*c^2)] * [1 + 4*pi*r^3*P / (M*c^2)] / [1 - 2*G*M / (r*c^2)]
+    let term1: Float = 1.0 + (p / (rho * c2));
+    let term2: Float = 1.0 + (((4.0 * pi_val) * (r * (r * r)) * p) / (m * c2));
+    let newtonian_grad: Float = (0.0 - g_val) * (m * rho) / (r * r);
+
+    let dp_dr: Float = (newtonian_grad * term1 * term2) / metric_denom;
+
+    return TovGradients {
+        dm_dr: dm_dr,
+        dp_dr: dp_dr,
+        is_physical: true,
+    };
+}
+
+pub fn tov_rk4_step(state: TovState, dr: Float, polytropic_k: Float, polytropic_gamma: Float) -> TovState {
+    let r: Float = (state).radius_m;
+    let m: Float = (state).enclosed_mass_kg;
+    let p: Float = (state).pressure_pa;
+
+    if p <= 0.0 {
+        return state;
+    }
+
+    // Polytropic EOS inversion: rho = (P / K)^(1 / gamma)
+    let rho1: Float = pow(p / polytropic_k, 1.0 / polytropic_gamma);
+    let g1: TovGradients = tov_compute_gradients(state, rho1);
+
+    let m_mid1: Float = m + (0.5 * dr * (g1).dm_dr);
+    let p_mid1: Float = math_max(p + (0.5 * dr * (g1).dp_dr), 0.0);
+    let rho2: Float = pow(p_mid1 / polytropic_k, 1.0 / polytropic_gamma);
+    let state_mid1: TovState = TovState { radius_m: r + (0.5 * dr), enclosed_mass_kg: m_mid1, pressure_pa: p_mid1 };
+    let g2: TovGradients = tov_compute_gradients(state_mid1, rho2);
+
+    let m_mid2: Float = m + (0.5 * dr * (g2).dm_dr);
+    let p_mid2: Float = math_max(p + (0.5 * dr * (g2).dp_dr), 0.0);
+    let rho3: Float = pow(p_mid2 / polytropic_k, 1.0 / polytropic_gamma);
+    let state_mid2: TovState = TovState { radius_m: r + (0.5 * dr), enclosed_mass_kg: m_mid2, pressure_pa: p_mid2 };
+    let g3: TovGradients = tov_compute_gradients(state_mid2, rho3);
+
+    let m_end: Float = m + (dr * (g3).dm_dr);
+    let p_end: Float = math_max(p + (dr * (g3).dp_dr), 0.0);
+    let rho4: Float = pow(p_end / polytropic_k, 1.0 / polytropic_gamma);
+    let state_end: TovState = TovState { radius_m: r + dr, enclosed_mass_kg: m_end, pressure_pa: p_end };
+    let g4: TovGradients = tov_compute_gradients(state_end, rho4);
+
+    let next_m: Float = m + ((dr / 6.0) * ((g1).dm_dr + (2.0 * (g2).dm_dr) + (2.0 * (g3).dm_dr) + (g4).dm_dr));
+    let next_p: Float = math_max(p + ((dr / 6.0) * ((g1).dp_dr + (2.0 * (g2).dp_dr) + (2.0 * (g3).dp_dr) + (g4).dp_dr)), 0.0);
+
+    return TovState {
+        radius_m: r + dr,
+        enclosed_mass_kg: next_m,
+        pressure_pa: next_p,
+    };
+}

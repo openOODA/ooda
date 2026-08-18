@@ -1,0 +1,140 @@
+// # Scale-to-Zero Arbiter & Idle Evictor
+//
+// Logline: Implements idle duration tracking, minimum alive time enforcement, and scale-to-zero triggers.
+//
+// Setup: Resource arbiter terminating completely idle containers after grace windows to achieve zero standby cost.
+//
+// Beats:
+//   1. Track last request timestamp and compute cumulative idle milliseconds per container.
+//   2. Enforce minimum instance lifetime before allowing scale-to-zero termination.
+//   3. Signal container reaping and deallocate reserved hypervisor resources.
+//
+// Int-floor destub: container ids are Int; parallel List[Int] slots.
+// Evict when now >= min_alive_until and (now - last_active) >= idle_timeout_ms.
+
+type ScaleToZeroArbiter = struct {
+    idle_timeout_ms: Int,
+    c_ids: List[Int],
+    last_active: List[Int],
+    min_alive_until: List[Int],
+    evicted: List[Int],
+    evicted_total: Int,
+    last_new_evictions: Int
+};
+
+pub fn scale_to_zero_arbiter_new(idle_timeout_ms: Int) -> ScaleToZeroArbiter {
+    let empty_ids: List[Int] = list_new();
+    let empty_active: List[Int] = list_new();
+    let empty_min: List[Int] = list_new();
+    let empty_evicted: List[Int] = list_new();
+    return ScaleToZeroArbiter {
+        idle_timeout_ms: idle_timeout_ms,
+        c_ids: empty_ids,
+        last_active: empty_active,
+        min_alive_until: empty_min,
+        evicted: empty_evicted,
+        evicted_total: 0,
+        last_new_evictions: 0
+    };
+}
+
+pub fn arbiter_register_container(
+    arbiter: ScaleToZeroArbiter,
+    id: Int,
+    now_ms: Int,
+    min_alive_duration_ms: Int
+) -> ScaleToZeroArbiter {
+    return ScaleToZeroArbiter {
+        idle_timeout_ms: arbiter.idle_timeout_ms,
+        c_ids: list_push(arbiter.c_ids, id),
+        last_active: list_push(arbiter.last_active, now_ms),
+        min_alive_until: list_push(arbiter.min_alive_until, now_ms + min_alive_duration_ms),
+        evicted: list_push(arbiter.evicted, 0),
+        evicted_total: arbiter.evicted_total,
+        last_new_evictions: arbiter.last_new_evictions
+    };
+}
+
+pub fn arbiter_record_activity(
+    arbiter: ScaleToZeroArbiter,
+    id: Int,
+    now_ms: Int
+) -> ScaleToZeroArbiter {
+    let n: Int = list_len(arbiter.c_ids);
+    let mut i: Int = 0;
+    let mut next_ids: List[Int] = list_new();
+    let mut next_active: List[Int] = list_new();
+    let mut next_min: List[Int] = list_new();
+    let mut next_evicted: List[Int] = list_new();
+    while i < n {
+        let cid: Int = list_get(arbiter.c_ids, i);
+        let active: Int = list_get(arbiter.last_active, i);
+        let min_until: Int = list_get(arbiter.min_alive_until, i);
+        next_ids = list_push(next_ids, cid);
+        next_min = list_push(next_min, min_until);
+        if cid == id {
+            next_active = list_push(next_active, now_ms);
+            next_evicted = list_push(next_evicted, 0);
+        } else {
+            next_active = list_push(next_active, active);
+            next_evicted = list_push(next_evicted, list_get(arbiter.evicted, i));
+        }
+        i = i + 1;
+    }
+    return ScaleToZeroArbiter {
+        idle_timeout_ms: arbiter.idle_timeout_ms,
+        c_ids: next_ids,
+        last_active: next_active,
+        min_alive_until: next_min,
+        evicted: next_evicted,
+        evicted_total: arbiter.evicted_total,
+        last_new_evictions: arbiter.last_new_evictions
+    };
+}
+
+pub fn arbiter_evaluate_evictions(
+    arbiter: ScaleToZeroArbiter,
+    now_ms: Int
+) -> ScaleToZeroArbiter {
+    let n: Int = list_len(arbiter.c_ids);
+    let mut i: Int = 0;
+    let mut next_ids: List[Int] = list_new();
+    let mut next_active: List[Int] = list_new();
+    let mut next_min: List[Int] = list_new();
+    let mut next_evicted: List[Int] = list_new();
+    let mut newly_evicted: Int = 0;
+    while i < n {
+        let cid: Int = list_get(arbiter.c_ids, i);
+        let active: Int = list_get(arbiter.last_active, i);
+        let min_until: Int = list_get(arbiter.min_alive_until, i);
+        let already: Int = list_get(arbiter.evicted, i);
+        next_ids = list_push(next_ids, cid);
+        next_active = list_push(next_active, active);
+        next_min = list_push(next_min, min_until);
+        if already == 0 {
+            let idle_ms: Int = now_ms - active;
+            if now_ms >= min_until {
+                if idle_ms >= arbiter.idle_timeout_ms {
+                    next_evicted = list_push(next_evicted, 1);
+                    newly_evicted = newly_evicted + 1;
+                } else {
+                    next_evicted = list_push(next_evicted, 0);
+                }
+            } else {
+                next_evicted = list_push(next_evicted, 0);
+            }
+        } else {
+            next_evicted = list_push(next_evicted, already);
+        }
+        i = i + 1;
+    }
+    return ScaleToZeroArbiter {
+        idle_timeout_ms: arbiter.idle_timeout_ms,
+        c_ids: next_ids,
+        last_active: next_active,
+        min_alive_until: next_min,
+        evicted: next_evicted,
+        evicted_total: arbiter.evicted_total + newly_evicted,
+        last_new_evictions: newly_evicted
+    };
+}

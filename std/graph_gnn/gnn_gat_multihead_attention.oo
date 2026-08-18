@@ -1,0 +1,186 @@
+// # Graph Attention Networks (GAT) Multi-Head Layer
+//
+// Logline: Implements multi-head masked self-attention over graph neighborhoods with anisotropic edge attention weights.
+//
+// Setup: Attention-driven graph convolutional layer computing dynamic parametric coefficients between connected node pairs.
+//
+// Beats:
+//   1. Project input features linearly with weight matrices W per attention head.
+//   2. Compute masked attention coefficients alpha_{ij} with LeakyReLU non-linearities and Softmax normalization.
+//   3. Aggregate multi-head attentive features via concatenation or mean pooling.
+
+pub type GATConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    num_heads: Int,
+    leaky_alpha: Float,
+    concat_heads: Bool,
+};
+
+pub type GATLayer = struct {
+    config: GATConfig,
+    weight_heads: List[Float], // num_heads * (in_features * out_features)
+    attn_src: List[Float],     // num_heads * out_features
+    attn_dst: List[Float],     // num_heads * out_features
+};
+
+pub fn gat_config_new(
+    in_f: Int,
+    out_f: Int,
+    heads: Int,
+    alpha: Float,
+    concat: Bool
+) -> GATConfig {
+    return GATConfig {
+        in_features: in_f,
+        out_features: out_f,
+        num_heads: heads,
+        leaky_alpha: alpha,
+        concat_heads: concat,
+    };
+}
+
+pub fn gat_layer_init(config: GATConfig, seed: Int) -> GATLayer {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let heads: Int = (config).num_heads;
+    let mut state: Int = seed;
+
+    let total_w: Int = heads * in_f * out_f;
+    let mut w_mat: List[Float] = list_new();
+    let scale: Float = sqrt(2.0 / ((in_f + out_f) as Float));
+    let mut i: Int = 0;
+    while i < total_w {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        w_mat = list_push(w_mat, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale);
+        i = i + 1;
+    }
+
+    let total_a: Int = heads * out_f;
+    let mut a_src: List[Float] = list_new();
+    let mut a_dst: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < total_a {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        a_src = list_push(a_src, ((((state % 2000) as Float) / 1000.0) - 1.0) * 0.1);
+
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        a_dst = list_push(a_dst, ((((state % 2000) as Float) / 1000.0) - 1.0) * 0.1);
+        j = j + 1;
+    }
+
+    return GATLayer {
+        config: config,
+        weight_heads: w_mat,
+        attn_src: a_src,
+        attn_dst: a_dst,
+    };
+}
+
+pub fn gat_forward_single_head(
+    layer: &GATLayer,
+    head_idx: Int,
+    node_id: Int,
+    neighbor_ids: List[Int],
+    input_features: List[Float]
+) -> List[Float] {
+    let cfg: GATConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let out_f: Int = (cfg).out_features;
+    let w_off: Int = head_idx * in_f * out_f;
+    let a_off: Int = head_idx * out_f;
+    let num_neighbors: Int = list_len(neighbor_ids);
+
+    // Compute linear projection of node_id (Wh_i)
+    let mut wh_i: List[Float] = list_new();
+    let in_i_off: Int = node_id * in_f;
+    let mut o: Int = 0;
+    while o < out_f {
+        let mut dot: Float = 0.0;
+        let mut c: Int = 0;
+        while c < in_f {
+            let x: Float = list_get(input_features, in_i_off + c);
+            let w: Float = list_get((*layer).weight_heads, w_off + (c * out_f) + o);
+            dot = dot + (x * w);
+            c = c + 1;
+        }
+        wh_i = list_push(wh_i, dot);
+        o = o + 1;
+    }
+
+    // Compute self attention component a_src^T * Wh_i
+    let mut e_src_i: Float = 0.0;
+    let mut k: Int = 0;
+    while k < out_f {
+        let a_s: Float = list_get((*layer).attn_src, a_off + k);
+        let h_val: Float = list_get(wh_i, k);
+        e_src_i = e_src_i + (a_s * h_val);
+        k = k + 1;
+    }
+
+    // Compute unnormalized attention scores for each neighbor
+    let mut unnorm_attn: List[Float] = list_new();
+    let mut sum_exp: Float = 0.0;
+    let mut n_idx: Int = 0;
+    while n_idx < num_neighbors {
+        let n_id: Int = list_get(neighbor_ids, n_idx);
+        let in_j_off: Int = n_id * in_f;
+
+        let mut e_dst_j: Float = 0.0;
+        let mut o2: Int = 0;
+        while o2 < out_f {
+            let mut dot_j: Float = 0.0;
+            let mut c2: Int = 0;
+            while c2 < in_f {
+                let x_j: Float = list_get(input_features, in_j_off + c2);
+                let w_j: Float = list_get((*layer).weight_heads, w_off + (c2 * out_f) + o2);
+                dot_j = dot_j + (x_j * w_j);
+                c2 = c2 + 1;
+            }
+            let a_d: Float = list_get((*layer).attn_dst, a_off + o2);
+            e_dst_j = e_dst_j + (a_d * dot_j);
+            o2 = o2 + 1;
+        }
+
+        let raw_e: Float = e_src_i + e_dst_j;
+        let leaky_e: Float = if raw_e >= 0.0 { raw_e } else { (cfg).leaky_alpha * raw_e };
+        let exp_e: Float = exp(leaky_e);
+        unnorm_attn = list_push(unnorm_attn, exp_e);
+        sum_exp = sum_exp + exp_e;
+        n_idx = n_idx + 1;
+    }
+
+    // Aggregate weighted neighbor projections
+    let mut out_h: List[Float] = list_new();
+    let mut dim_idx: Int = 0;
+    while dim_idx < out_f {
+        let mut accum: Float = 0.0;
+        let mut n_idx2: Int = 0;
+        while n_idx2 < num_neighbors {
+            let n_id2: Int = list_get(neighbor_ids, n_idx2);
+            let in_j_off2: Int = n_id2 * in_f;
+            let alpha_ij: Float = if sum_exp > 0.0 {
+                list_get(unnorm_attn, n_idx2) / sum_exp
+            } else {
+                1.0 / ((num_neighbors as Float) + 0.0001)
+            };
+
+            let mut dot_val: Float = 0.0;
+            let mut c3: Int = 0;
+            while c3 < in_f {
+                let x2: Float = list_get(input_features, in_j_off2 + c3);
+                let w2: Float = list_get((*layer).weight_heads, w_off + (c3 * out_f) + dim_idx);
+                dot_val = dot_val + (x2 * w2);
+                c3 = c3 + 1;
+            }
+            accum = accum + (alpha_ij * dot_val);
+            n_idx2 = n_idx2 + 1;
+        }
+        out_h = list_push(out_h, accum);
+        dim_idx = dim_idx + 1;
+    }
+    return out_h;
+}

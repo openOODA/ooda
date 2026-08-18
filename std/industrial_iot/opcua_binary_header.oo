@@ -1,0 +1,155 @@
+// # OPC UA Binary TCP Header & Frame Encoding
+//
+// Logline: Implements OPC UA binary connection protocol header serialization and sequence framing.
+//
+// Setup: Pure framing algorithms for OPC UA TCP SecureChannel binary transport.
+//
+// Beats:
+//   1. Encode and decode 8-byte OPC UA Message Headers with 3-character message types.
+//   2. Pack and unpack 32-bit little-endian message size and secure channel identifiers.
+//   3. Frame Sequence and Request header structures for secure channel transactions.
+
+pub type OpcUaMessageHeader = struct {
+    msg_type: String,
+    chunk_type: String,
+    message_size: Int,
+    channel_id: Int,
+};
+
+pub type OpcUaSequenceHeader = struct {
+    sequence_number: Int,
+    request_id: Int,
+};
+
+/// Construct a new OPC UA binary message header.
+pub fn opcua_header_new(
+    msg_type: String,
+    chunk_type: String,
+    message_size: Int,
+    channel_id: Int
+) -> OpcUaMessageHeader {
+    return OpcUaMessageHeader {
+        msg_type: msg_type,
+        chunk_type: chunk_type,
+        message_size: message_size,
+        channel_id: channel_id,
+    };
+}
+
+/// Encode standard OPC UA message header into raw byte stream (little-endian length).
+pub fn opcua_header_encode(hdr: &OpcUaMessageHeader) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mtype: String = (hdr).msg_type;
+    let ctype: String = (hdr).chunk_type;
+    let msize: Int = (hdr).message_size;
+
+    // 3 bytes message type
+    out = list_push(out, byte_at(mtype, 0));
+    out = list_push(out, byte_at(mtype, 1));
+    out = list_push(out, byte_at(mtype, 2));
+
+    // 1 byte chunk type ('F', 'C', 'A')
+    out = list_push(out, byte_at(ctype, 0));
+
+    // 4 bytes message size (little-endian)
+    out = list_push(out, msize % 256);
+    out = list_push(out, (msize / 256) % 256);
+    out = list_push(out, (msize / 65536) % 256);
+    out = list_push(out, (msize / 16777216) % 256);
+
+    // If SecureChannel message, append 4 bytes Channel ID
+    if mtype == "OPN" || mtype == "CLO" || mtype == "MSG" {
+        let ch_id: Int = (hdr).channel_id;
+        out = list_push(out, ch_id % 256);
+        out = list_push(out, (ch_id / 256) % 256);
+        out = list_push(out, (ch_id / 65536) % 256);
+        out = list_push(out, (ch_id / 16777216) % 256);
+    }
+    return out;
+}
+
+/// Decode OPC UA message header from raw byte stream.
+pub fn opcua_header_decode(bytes: &List[Int]) -> Result[OpcUaMessageHeader, String] {
+    let size: Int = list_len(*bytes);
+    if size < 8 {
+        return Err("OPC UA header requires at least 8 bytes");
+    }
+
+    let mut mtype_buf: List[Int] = bytes_new();
+    mtype_buf = bytes_push(mtype_buf, list_get(*bytes, 0));
+    mtype_buf = bytes_push(mtype_buf, list_get(*bytes, 1));
+    mtype_buf = bytes_push(mtype_buf, list_get(*bytes, 2));
+    let msg_type_str: String = bytes_to_str(mtype_buf);
+
+    let mut ctype_buf: List[Int] = bytes_new();
+    ctype_buf = bytes_push(ctype_buf, list_get(*bytes, 3));
+    let chunk_type_str: String = bytes_to_str(ctype_buf);
+
+    let b4: Int = list_get(*bytes, 4);
+    let b5: Int = list_get(*bytes, 5);
+    let b6: Int = list_get(*bytes, 6);
+    let b7: Int = list_get(*bytes, 7);
+    let total_size: Int = b4 + (b5 * 256) + (b6 * 65536) + (b7 * 16777216);
+
+    let mut ch_id: Int = 0;
+    if msg_type_str == "OPN" || msg_type_str == "CLO" || msg_type_str == "MSG" {
+        if size < 12 {
+            return Err("OPC UA channel message requires at least 12 bytes");
+        }
+        let c0: Int = list_get(*bytes, 8);
+        let c1: Int = list_get(*bytes, 9);
+        let c2: Int = list_get(*bytes, 10);
+        let c3: Int = list_get(*bytes, 11);
+        ch_id = c0 + (c1 * 256) + (c2 * 65536) + (c3 * 16777216);
+    }
+
+    return Ok(OpcUaMessageHeader {
+        msg_type: msg_type_str,
+        chunk_type: chunk_type_str,
+        message_size: total_size,
+        channel_id: ch_id,
+    });
+}
+
+/// Encode OPC UA Sequence Header (8 bytes little-endian).
+pub fn opcua_seq_header_encode(seq: &OpcUaSequenceHeader) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let sn: Int = (seq).sequence_number;
+    let req: Int = (seq).request_id;
+
+    out = list_push(out, sn % 256);
+    out = list_push(out, (sn / 256) % 256);
+    out = list_push(out, (sn / 65536) % 256);
+    out = list_push(out, (sn / 16777216) % 256);
+
+    out = list_push(out, req % 256);
+    out = list_push(out, (req / 256) % 256);
+    out = list_push(out, (req / 65536) % 256);
+    out = list_push(out, (req / 16777216) % 256);
+    return out;
+}
+
+/// Decode OPC UA Sequence Header starting from offset.
+pub fn opcua_seq_header_decode(bytes: &List[Int], offset: Int) -> Result[OpcUaSequenceHeader, String] {
+    let size: Int = list_len(*bytes);
+    if size < (offset + 8) {
+        return Err("Buffer too short for OPC UA Sequence Header");
+    }
+
+    let s0: Int = list_get(*bytes, offset);
+    let s1: Int = list_get(*bytes, offset + 1);
+    let s2: Int = list_get(*bytes, offset + 2);
+    let s3: Int = list_get(*bytes, offset + 3);
+    let sn: Int = s0 + (s1 * 256) + (s2 * 65536) + (s3 * 16777216);
+
+    let r0: Int = list_get(*bytes, offset + 4);
+    let r1: Int = list_get(*bytes, offset + 5);
+    let r2: Int = list_get(*bytes, offset + 6);
+    let r3: Int = list_get(*bytes, offset + 7);
+    let req: Int = r0 + (r1 * 256) + (r2 * 65536) + (r3 * 16777216);
+
+    return Ok(OpcUaSequenceHeader {
+        sequence_number: sn,
+        request_id: req,
+    });
+}

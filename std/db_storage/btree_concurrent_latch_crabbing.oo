@@ -1,0 +1,109 @@
+// # B+Tree Concurrent Latch Crabbing & Coupling
+//
+// Logline: Implements fine-grained B+Tree latch crabbing protocol for concurrent reads, inserts, and structural modifications.
+//
+// Setup: Protects tree traversal invariants using Shared (S) and Exclusive (X) latch coupling down tree paths.
+//
+// Beats:
+//   1. Define LatchMode, PageLatchState, and LatchCrabContext structures.
+//   2. Implement read-mode lock coupling releasing parent latch upon acquiring child latch.
+//   3. Implement write-mode latch crabbing holding parent latches until node is proven safe against splits/merges.
+
+pub type PageLatch = struct {
+    page_id: Int,
+    shared_count: Int,
+    exclusive_holder_tx: Int,
+    is_exclusive: Bool,
+};
+
+pub type LatchCrabContext = struct {
+    tx_id: Int,
+    is_write_op: Bool,
+    held_latches: List[PageLatch],
+};
+
+pub fn page_latch_new(pid: Int) -> PageLatch {
+    return PageLatch {
+        page_id: pid,
+        shared_count: 0,
+        exclusive_holder_tx: 0,
+        is_exclusive: false,
+    };
+}
+
+pub fn latch_crab_context_new(tx: Int, is_write: Bool) -> LatchCrabContext {
+    let empty_latches: List[PageLatch] = list_new();
+    return LatchCrabContext {
+        tx_id: tx,
+        is_write_op: is_write,
+        held_latches: empty_latches,
+    };
+}
+
+pub fn acquire_shared_latch(ctx: LatchCrabContext, latch: PageLatch) -> Option[LatchCrabContext] {
+    if (latch).is_exclusive {
+        return None;
+    }
+    let updated_latch: PageLatch = PageLatch {
+        page_id: (latch).page_id,
+        shared_count: (latch).shared_count + 1,
+        exclusive_holder_tx: 0,
+        is_exclusive: false,
+    };
+
+    let mut current_latches: List[PageLatch] = list_new();
+    if !(ctx).is_write_op {
+        current_latches = list_push(current_latches, updated_latch);
+    } else {
+        current_latches = list_push((ctx).held_latches, updated_latch);
+    }
+
+    return Some(LatchCrabContext {
+        tx_id: (ctx).tx_id,
+        is_write_op: (ctx).is_write_op,
+        held_latches: current_latches,
+    });
+}
+
+pub fn acquire_exclusive_latch(ctx: LatchCrabContext, latch: PageLatch) -> Option[LatchCrabContext] {
+    if (latch).is_exclusive || (latch).shared_count > 0 {
+        return None;
+    }
+    let updated_latch: PageLatch = PageLatch {
+        page_id: (latch).page_id,
+        shared_count: 0,
+        exclusive_holder_tx: (ctx).tx_id,
+        is_exclusive: true,
+    };
+
+    let updated_list: List[PageLatch] = list_push((ctx).held_latches, updated_latch);
+    return Some(LatchCrabContext {
+        tx_id: (ctx).tx_id,
+        is_write_op: (ctx).is_write_op,
+        held_latches: updated_list,
+    });
+}
+
+pub fn is_node_safe_for_insert(current_keys_count: Int, max_keys: Int) -> Bool {
+    return current_keys_count < (max_keys - 1);
+}
+
+pub fn is_node_safe_for_delete(current_keys_count: Int, min_keys: Int) -> Bool {
+    return current_keys_count > min_keys;
+}
+
+pub fn release_ancestor_latches_if_safe(ctx: LatchCrabContext, is_safe: Bool) -> LatchCrabContext {
+    if !is_safe || list_len((ctx).held_latches) <= 1 {
+        return ctx;
+    }
+    let held: List[PageLatch] = (ctx).held_latches;
+    let last_latch: PageLatch = list_get(held, list_len(held) - 1);
+    let mut new_held: List[PageLatch] = list_new();
+    new_held = list_push(new_held, last_latch);
+
+    return LatchCrabContext {
+        tx_id: (ctx).tx_id,
+        is_write_op: (ctx).is_write_op,
+        held_latches: new_held,
+    };
+}

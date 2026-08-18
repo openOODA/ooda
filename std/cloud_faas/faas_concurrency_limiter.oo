@@ -1,0 +1,170 @@
+// # FaaS Concurrency Limiter & Throttler
+//
+// Logline: Implements per-function reserved and unreserved concurrency limits with fast 429 throttling.
+//
+// Setup: Execution governor bounding maximum concurrent function activations across regional worker fleets.
+//
+// Beats:
+//   1. Configure reserved concurrency limits and track regional unreserved pool allocations.
+//   2. Atomically acquire execution permits or reject excess traffic with TooManyRequestsException.
+//   3. Release concurrency tokens on invocation termination or execution timeout.
+//
+// Int-floor destub: function ids are Int; parallel List[Int] slots.
+// last_ok: 1 acquired/registered, 0 rejected or unknown function.
+
+type RegionalConcurrencyPool = struct {
+    region_id: Int,
+    total_account_limit: Int,
+    unreserved_pool: Int,
+    fn_ids: List[Int],
+    reserved: List[Int],
+    in_flight: List[Int],
+    throttled: List[Int],
+    completed: List[Int],
+    last_ok: Int
+};
+
+pub fn regional_concurrency_pool_new(region_id: Int, total_limit: Int) -> RegionalConcurrencyPool {
+    let empty_ids: List[Int] = list_new();
+    let empty_reserved: List[Int] = list_new();
+    let empty_flight: List[Int] = list_new();
+    let empty_throttled: List[Int] = list_new();
+    let empty_completed: List[Int] = list_new();
+    return RegionalConcurrencyPool {
+        region_id: region_id,
+        total_account_limit: total_limit,
+        unreserved_pool: total_limit,
+        fn_ids: empty_ids,
+        reserved: empty_reserved,
+        in_flight: empty_flight,
+        throttled: empty_throttled,
+        completed: empty_completed,
+        last_ok: 0
+    };
+}
+
+pub fn concurrency_pool_register_function(
+    pool: RegionalConcurrencyPool,
+    fn_id: Int,
+    reserved_limit: Int
+) -> RegionalConcurrencyPool {
+    if reserved_limit > pool.unreserved_pool {
+        return RegionalConcurrencyPool {
+            region_id: pool.region_id,
+            total_account_limit: pool.total_account_limit,
+            unreserved_pool: pool.unreserved_pool,
+            fn_ids: pool.fn_ids,
+            reserved: pool.reserved,
+            in_flight: pool.in_flight,
+            throttled: pool.throttled,
+            completed: pool.completed,
+            last_ok: 0
+        };
+    }
+    return RegionalConcurrencyPool {
+        region_id: pool.region_id,
+        total_account_limit: pool.total_account_limit,
+        unreserved_pool: pool.unreserved_pool - reserved_limit,
+        fn_ids: list_push(pool.fn_ids, fn_id),
+        reserved: list_push(pool.reserved, reserved_limit),
+        in_flight: list_push(pool.in_flight, 0),
+        throttled: list_push(pool.throttled, 0),
+        completed: list_push(pool.completed, 0),
+        last_ok: 1
+    };
+}
+
+pub fn concurrency_pool_acquire_permit(
+    pool: RegionalConcurrencyPool,
+    fn_id: Int
+) -> RegionalConcurrencyPool {
+    let n: Int = list_len(pool.fn_ids);
+    let mut i: Int = 0;
+    let mut next_ids: List[Int] = list_new();
+    let mut next_reserved: List[Int] = list_new();
+    let mut next_flight: List[Int] = list_new();
+    let mut next_throttled: List[Int] = list_new();
+    let mut next_completed: List[Int] = list_new();
+    let mut acquired: Int = 0;
+    while i < n {
+        let fid: Int = list_get(pool.fn_ids, i);
+        let lim: Int = list_get(pool.reserved, i);
+        let flight: Int = list_get(pool.in_flight, i);
+        let thr: Int = list_get(pool.throttled, i);
+        let done: Int = list_get(pool.completed, i);
+        next_ids = list_push(next_ids, fid);
+        next_reserved = list_push(next_reserved, lim);
+        next_completed = list_push(next_completed, done);
+        if fid == fn_id {
+            if flight < lim {
+                next_flight = list_push(next_flight, flight + 1);
+                next_throttled = list_push(next_throttled, thr);
+                acquired = 1;
+            } else {
+                next_flight = list_push(next_flight, flight);
+                next_throttled = list_push(next_throttled, thr + 1);
+            }
+        } else {
+            next_flight = list_push(next_flight, flight);
+            next_throttled = list_push(next_throttled, thr);
+        }
+        i = i + 1;
+    }
+    return RegionalConcurrencyPool {
+        region_id: pool.region_id,
+        total_account_limit: pool.total_account_limit,
+        unreserved_pool: pool.unreserved_pool,
+        fn_ids: next_ids,
+        reserved: next_reserved,
+        in_flight: next_flight,
+        throttled: next_throttled,
+        completed: next_completed,
+        last_ok: acquired
+    };
+}
+
+pub fn concurrency_pool_release_permit(
+    pool: RegionalConcurrencyPool,
+    fn_id: Int
+) -> RegionalConcurrencyPool {
+    let n: Int = list_len(pool.fn_ids);
+    let mut i: Int = 0;
+    let mut next_ids: List[Int] = list_new();
+    let mut next_reserved: List[Int] = list_new();
+    let mut next_flight: List[Int] = list_new();
+    let mut next_throttled: List[Int] = list_new();
+    let mut next_completed: List[Int] = list_new();
+    while i < n {
+        let fid: Int = list_get(pool.fn_ids, i);
+        let lim: Int = list_get(pool.reserved, i);
+        let flight: Int = list_get(pool.in_flight, i);
+        let thr: Int = list_get(pool.throttled, i);
+        let done: Int = list_get(pool.completed, i);
+        next_ids = list_push(next_ids, fid);
+        next_reserved = list_push(next_reserved, lim);
+        next_throttled = list_push(next_throttled, thr);
+        if fid == fn_id {
+            let mut new_flight: Int = flight - 1;
+            if new_flight < 0 {
+                new_flight = 0;
+            }
+            next_flight = list_push(next_flight, new_flight);
+            next_completed = list_push(next_completed, done + 1);
+        } else {
+            next_flight = list_push(next_flight, flight);
+            next_completed = list_push(next_completed, done);
+        }
+        i = i + 1;
+    }
+    return RegionalConcurrencyPool {
+        region_id: pool.region_id,
+        total_account_limit: pool.total_account_limit,
+        unreserved_pool: pool.unreserved_pool,
+        fn_ids: next_ids,
+        reserved: next_reserved,
+        in_flight: next_flight,
+        throttled: next_throttled,
+        completed: next_completed,
+        last_ok: pool.last_ok
+    };
+}

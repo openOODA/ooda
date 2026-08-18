@@ -1,0 +1,121 @@
+// # RAG Cross-Encoder Sequence Reranker
+//
+// Logline: Scores (query, passage) candidate pairs using cross-attention representations, sigmoid relevance calibration, and top-N ranking.
+//
+// Setup: Ranking algorithm for retrieval-augmented generation context filtering.
+//
+// Beats:
+//   1. Define RerankerConfig, PassageCandidate, and RerankedResult structures.
+//   2. Compute relevance scores and sigmoid calibration.
+//   3. Sort and filter candidates down to top-N reranked passages.
+
+pub type RerankerConfig = struct {
+    top_n: Int,
+    score_threshold: Float,
+    temperature: Float,
+};
+
+pub type PassageCandidate = struct {
+    doc_id: Int,
+    text: String,
+    raw_score: Float,
+    calibrated_score: Float,
+};
+
+pub type RerankedResult = struct {
+    passages: List[PassageCandidate],
+    total_evaluated: Int,
+};
+
+pub fn reranker_config_new(
+    top_n: Int,
+    threshold: Float,
+    temp: Float
+) -> RerankerConfig {
+    return RerankerConfig {
+        top_n: top_n,
+        score_threshold: threshold,
+        temperature: temp,
+    };
+}
+
+pub fn reranker_calibrate_score(raw_logit: Float, temp: Float) -> Float {
+    let t: Float = if temp > 0.0001 { temp } else { 1.0 };
+    let scaled: Float = raw_logit / t;
+    if scaled > 40.0 { return 1.0; }
+    if scaled < (0.0 - 40.0) { return 0.0; }
+    return 1.0 / (1.0 + exp(0.0 - scaled));
+}
+
+pub fn reranker_sort_and_filter(
+    candidates: List[PassageCandidate],
+    cfg: &RerankerConfig
+) -> RerankedResult {
+    let total: Int = list_len(candidates);
+    let top_n: Int = (cfg).top_n;
+    let threshold: Float = (cfg).score_threshold;
+
+    let mut calibrated_list: List[PassageCandidate] = list_new();
+    let mut i: Int = 0;
+    while i < total {
+        let cand: PassageCandidate = list_get(candidates, i);
+        let cal_score: Float = reranker_calibrate_score((cand).raw_score, (cfg).temperature);
+        let updated: PassageCandidate = PassageCandidate {
+            doc_id: (cand).doc_id,
+            text: (cand).text,
+            raw_score: (cand).raw_score,
+            calibrated_score: cal_score,
+        };
+        calibrated_list = list_push(calibrated_list, updated);
+        i = i + 1;
+    }
+
+    let mut used: List[Bool] = list_new();
+    let mut u_i: Int = 0;
+    while u_i < total { used = list_push(used, false); u_i = u_i + 1; }
+
+    let mut filtered_out: List[PassageCandidate] = list_new();
+    let mut picked: Int = 0;
+
+    while picked < top_n && picked < total {
+        let mut best_idx: Int = 0 - 1;
+        let mut best_score: Float = 0.0 - 1.0;
+        let mut scan: Int = 0;
+        while scan < total {
+            if !(list_get(used, scan)) {
+                let cand_item: PassageCandidate = list_get(calibrated_list, scan);
+                if (cand_item).calibrated_score > best_score {
+                    best_score = (cand_item).calibrated_score;
+                    best_idx = scan;
+                }
+            }
+            scan = scan + 1;
+        }
+
+        if best_idx >= 0 && best_score >= threshold {
+            filtered_out = list_push(filtered_out, list_get(calibrated_list, best_idx));
+
+            let mut next_used: List[Bool] = list_new();
+            let mut s_i: Int = 0;
+            while s_i < total {
+                if s_i == best_idx {
+                    next_used = list_push(next_used, true);
+                } else {
+                    next_used = list_push(next_used, list_get(used, s_i));
+                }
+                s_i = s_i + 1;
+            }
+            used = next_used;
+        }
+        picked = picked + 1;
+    }
+
+    return RerankedResult {
+        passages: filtered_out,
+        total_evaluated: total,
+    };
+}
+
+pub fn rag_chunk_reranker_marker() -> Int {
+    return 1;
+}

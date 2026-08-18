@@ -1,0 +1,112 @@
+// # Multi-AUV Acoustic Inter-Vehicle Ranging
+//
+// Logline: TWTT / OWTT time-of-flight ranges. Int microsecond destub.
+//
+// Setup: Inter-vehicle acoustic ranging for GPS-denied swarm constraints.
+//
+// Beats:
+//   1. Sound speed, modem turnaround, max range, CSAC drift.
+//   2. TWTT: d = c * (t_reply - t_tx - turnaround) / 2.
+//   3. OWTT: d = c * (t_arr - t_tx - drift * t_mission).
+//   4. Valid if 1 m .. max range.
+
+type SwarmRangingConfig = struct {
+    sound_speed_mm_s: Int,
+    modem_turnaround_us: Int,
+    max_ranging_distance_mm: Int,
+    csac_drift_e10: Int,
+    range_variance_mm2: Int
+};
+
+type TwttRangingTransaction = struct {
+    initiator_id: Int,
+    responder_id: Int,
+    t_interrogate_us: Int,
+    t_reply_received_us: Int
+};
+
+type OwttRangingTransaction = struct {
+    sender_id: Int,
+    receiver_id: Int,
+    t_transmit_sync_us: Int,
+    t_arrival_sync_us: Int,
+    mission_elapsed_s: Int
+};
+
+type SwarmRangeMeasurement = struct {
+    peer_id: Int,
+    measured_distance_mm: Int,
+    estimated_variance_mm2: Int,
+    is_valid: Bool
+};
+
+pub fn swarm_ranging_config_default() -> SwarmRangingConfig {
+    return SwarmRangingConfig {
+        sound_speed_mm_s: 1500000,
+        modem_turnaround_us: 50000,
+        max_ranging_distance_mm: 2000000,
+        csac_drift_e10: 1,
+        range_variance_mm2: 250000
+    };
+}
+
+pub fn solve_twtt_range(cfg: SwarmRangingConfig, tx: TwttRangingTransaction) -> SwarmRangeMeasurement {
+    let total_elapsed: Int = tx.t_reply_received_us - tx.t_interrogate_us;
+    let tof_two_way: Int = total_elapsed - cfg.modem_turnaround_us;
+    if tof_two_way <= 0 {
+        return SwarmRangeMeasurement {
+            peer_id: tx.responder_id,
+            measured_distance_mm: 0,
+            estimated_variance_mm2: 99000000,
+            is_valid: false
+        };
+    }
+    let dist: Int = (cfg.sound_speed_mm_s * tof_two_way) / 2000000;
+    let is_ok: Bool = if dist < 1000 {
+        false
+    } else {
+        if dist > cfg.max_ranging_distance_mm {
+            false
+        } else {
+            true
+        }
+    };
+    return SwarmRangeMeasurement {
+        peer_id: tx.responder_id,
+        measured_distance_mm: dist,
+        estimated_variance_mm2: cfg.range_variance_mm2,
+        is_valid: is_ok
+    };
+}
+
+pub fn solve_owtt_range(cfg: SwarmRangingConfig, tx: OwttRangingTransaction) -> SwarmRangeMeasurement {
+    let tof_raw_us: Int = tx.t_arrival_sync_us - tx.t_transmit_sync_us;
+    let clock_err_ns: Int = (cfg.csac_drift_e10 * tx.mission_elapsed_s) / 10;
+    let tof_corr_ns: Int = (tof_raw_us * 1000) - clock_err_ns;
+    if tof_corr_ns <= 0 {
+        return SwarmRangeMeasurement {
+            peer_id: tx.sender_id,
+            measured_distance_mm: 0,
+            estimated_variance_mm2: 99000000,
+            is_valid: false
+        };
+    }
+    let dist: Int = (cfg.sound_speed_mm_s * tof_corr_ns) / 1000000000;
+    let is_ok: Bool = if dist < 1000 {
+        false
+    } else {
+        if dist > cfg.max_ranging_distance_mm {
+            false
+        } else {
+            true
+        }
+    };
+    let err_mm: Int = (cfg.sound_speed_mm_s * clock_err_ns) / 1000000000;
+    let extra_var: Int = err_mm * err_mm;
+    return SwarmRangeMeasurement {
+        peer_id: tx.sender_id,
+        measured_distance_mm: dist,
+        estimated_variance_mm2: cfg.range_variance_mm2 + extra_var,
+        is_valid: is_ok
+    };
+}

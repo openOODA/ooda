@@ -1,0 +1,180 @@
+// # 2D Occupancy Grid Map & Bayesian Log-Odds Mapper
+//
+// Logline: Maintains 2D spatial occupancy grid maps with recursive Bayesian log-odds updates and raycasting.
+//
+// Setup: Probabilistic grid representation of obstacle environments for robotic mapping and navigation.
+//
+// Beats:
+//   1. Convert between metric continuous world coordinates and discrete 2D grid cell indices.
+//   2. Compute log-odds updates for free space traversal and obstacle hit endpoints.
+//   3. Extract posterior occupancy probabilities from bounded log-odds cell buffers.
+
+pub type GridMapConfig = struct {
+    width_cells: Int,
+    height_cells: Int,
+    resolution: Float,
+    origin_x: Float,
+    origin_y: Float,
+    l_free: Float,
+    l_occ: Float,
+    l_prior: Float,
+};
+
+pub type OccupancyGridMap2D = struct {
+    config: GridMapConfig,
+    cells: List[Float],
+};
+
+/// Construct default 2D grid configuration.
+pub fn grid_map_config_default(width: Int, height: Int, resolution: Float) -> GridMapConfig {
+    return GridMapConfig {
+        width_cells: width,
+        height_cells: height,
+        resolution: resolution,
+        origin_x: 0.0,
+        origin_y: 0.0,
+        l_free: 0.0 - 0.4,
+        l_occ: 0.85,
+        l_prior: 0.0,
+    };
+}
+
+/// Initialize a new occupancy grid map initialized with prior log-odds.
+pub fn occupancy_grid_map_new(cfg: GridMapConfig) -> OccupancyGridMap2D {
+    let total_cells: Int = (cfg).width_cells * (cfg).height_cells;
+    let mut initial_cells: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < total_cells {
+        initial_cells = list_push(initial_cells, (cfg).l_prior);
+        i = i + 1;
+    }
+    return OccupancyGridMap2D {
+        config: cfg,
+        cells: initial_cells,
+    };
+}
+
+/// Convert world coordinate X to grid cell index.
+pub fn grid_world_to_map_x(grid: &OccupancyGridMap2D, wx: Float) -> Int {
+    let res: Float = (grid).config.resolution;
+    if res <= 0.0 {
+        return 0;
+    }
+    let rel_x: Float = wx - (grid).config.origin_x;
+    let idx_f: Float = rel_x / res;
+    let mut idx: Int = 0;
+    if idx_f >= 0.0 {
+        let mut rem: Float = idx_f;
+        while rem >= 1.0 {
+            idx = idx + 1;
+            rem = rem - 1.0;
+        }
+    }
+    return idx;
+}
+
+/// Convert world coordinate Y to grid cell index.
+pub fn grid_world_to_map_y(grid: &OccupancyGridMap2D, wy: Float) -> Int {
+    let res: Float = (grid).config.resolution;
+    if res <= 0.0 {
+        return 0;
+    }
+    let rel_y: Float = wy - (grid).config.origin_y;
+    let idx_f: Float = rel_y / res;
+    let mut idx: Int = 0;
+    if idx_f >= 0.0 {
+        let mut rem: Float = idx_f;
+        while rem >= 1.0 {
+            idx = idx + 1;
+            rem = rem - 1.0;
+        }
+    }
+    return idx;
+}
+
+/// Convert map grid index X to continuous world coordinate X.
+pub fn grid_map_to_world_x(grid: &OccupancyGridMap2D, mx: Int) -> Float {
+    let mut mx_f: Float = 0.0;
+    let mut i: Int = 0;
+    while i < mx {
+        mx_f = mx_f + 1.0;
+        i = i + 1;
+    }
+    return (grid).config.origin_x + ((mx_f + 0.5) * (grid).config.resolution);
+}
+
+/// Convert map grid index Y to continuous world coordinate Y.
+pub fn grid_map_to_world_y(grid: &OccupancyGridMap2D, my: Int) -> Float {
+    let mut my_f: Float = 0.0;
+    let mut i: Int = 0;
+    while i < my {
+        my_f = my_f + 1.0;
+        i = i + 1;
+    }
+    return (grid).config.origin_y + ((my_f + 0.5) * (grid).config.resolution);
+}
+
+/// Check if cell indices fall within the map dimensions.
+pub fn grid_is_in_bounds(grid: &OccupancyGridMap2D, mx: Int, my: Int) -> Bool {
+    return mx >= 0 && mx < (grid).config.width_cells &&
+           my >= 0 && my < (grid).config.height_cells;
+}
+
+/// Get log-odds value of a specific cell.
+pub fn grid_get_log_odds(grid: &OccupancyGridMap2D, mx: Int, my: Int) -> Float {
+    if !grid_is_in_bounds(grid, mx, my) {
+        return 0.0;
+    }
+    let index: Int = (my * (grid).config.width_cells) + mx;
+    return list_get((grid).cells, index);
+}
+
+/// Set log-odds value of a specific cell.
+pub fn grid_set_log_odds(grid: &mut OccupancyGridMap2D, mx: Int, my: Int, val: Float) -> Bool {
+    if !grid_is_in_bounds(grid, mx, my) {
+        return false;
+    }
+    let target_idx: Int = (my * (grid).config.width_cells) + mx;
+    let old_cells: List[Float] = (grid).cells;
+    let n: Int = list_len(old_cells);
+    let mut new_cells: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        if i == target_idx {
+            new_cells = list_push(new_cells, val);
+        } else {
+            new_cells = list_push(new_cells, list_get(old_cells, i));
+        }
+        i = i + 1;
+    }
+    (grid).cells = new_cells;
+    return true;
+}
+
+/// Update a single cell with log-odds increment, bounded in [-5.0, 5.0].
+pub fn grid_update_cell_log_odds(grid: &mut OccupancyGridMap2D, mx: Int, my: Int, delta: Float) -> Bool {
+    if !grid_is_in_bounds(grid, mx, my) {
+        return false;
+    }
+    let cur: Float = grid_get_log_odds(grid, mx, my);
+    let mut updated: Float = cur + delta;
+    if updated > 5.0 {
+        updated = 5.0;
+    }
+    let min_limit: Float = 0.0 - 5.0;
+    if updated < min_limit {
+        updated = min_limit;
+    }
+    return grid_set_log_odds(grid, mx, my, updated);
+}
+
+/// Calculate probability P(occ) = 1 - 1 / (1 + exp(l)) from log-odds.
+pub fn grid_get_probability(grid: &OccupancyGridMap2D, mx: Int, my: Int) -> Float {
+    let l: Float = grid_get_log_odds(grid, mx, my);
+    // Sigmoid logistic approximation
+    let exp_l: Float = 1.0 + l + ((l * l) * 0.5);
+    if exp_l <= 0.0 {
+        return 0.0;
+    }
+    return exp_l / (1.0 + exp_l);
+}

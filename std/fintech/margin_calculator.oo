@@ -1,0 +1,162 @@
+// # Derivatives Portfolio Margin & Risk Calculator
+//
+// Logline: Calculates initial, maintenance, and variation margin, leverage ratios, and liquidation levels.
+//
+// Setup: Pure risk management algorithms for margin requirements and leverage enforcement.
+//
+// Beats:
+//   1. Define margin accounts, collateral balances, and position risk configurations.
+//   2. Evaluate initial margin (IM), maintenance margin (MM), and variation margin (VM) requirements.
+//   3. Calculate account equity, margin call deficit triggers, and liquidation price thresholds.
+
+pub type MarginPosition = struct {
+    symbol: String,
+    quantity: Int,
+    entry_price: Float,
+    current_price: Float,
+    im_rate: Float, // Initial margin rate (e.g. 0.10 for 10x leverage)
+    mm_rate: Float, // Maintenance margin rate (e.g. 0.05 for 5%)
+    is_long: Bool,
+};
+
+pub type MarginAccount = struct {
+    account_id: String,
+    cash_balance: Float,
+    positions: List[MarginPosition],
+    total_initial_margin: Float,
+    total_maintenance_margin: Float,
+};
+
+pub type MarginStatus = struct {
+    equity: Float,
+    free_margin: Float,
+    margin_ratio: Float,
+    margin_call: Bool,
+    liquidation_required: Bool,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 100000 { f = f + 100000.0; count = count - 100000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn margin_position_new(
+    symbol: String,
+    qty: Int,
+    entry_px: Float,
+    current_px: Float,
+    im_rate: Float,
+    mm_rate: Float,
+    is_long: Bool
+) -> MarginPosition {
+    return MarginPosition {
+        symbol: symbol,
+        quantity: qty,
+        entry_price: entry_px,
+        current_price: current_px,
+        im_rate: im_rate,
+        mm_rate: mm_rate,
+        is_long: is_long,
+    };
+}
+
+pub fn margin_position_unrealized_pnl(pos: &MarginPosition) -> Float {
+    let qty_f: Float = int_to_float((pos).quantity);
+    if (pos).is_long {
+        return ((pos).current_price - (pos).entry_price) * qty_f;
+    } else {
+        return ((pos).entry_price - (pos).current_price) * qty_f;
+    }
+}
+
+pub fn margin_position_notional(pos: &MarginPosition) -> Float {
+    let qty_f: Float = int_to_float((pos).quantity);
+    return (pos).current_price * qty_f;
+}
+
+pub fn margin_account_new(account_id: String, initial_cash: Float) -> MarginAccount {
+    let empty_pos: List[MarginPosition] = list_new();
+    return MarginAccount {
+        account_id: account_id,
+        cash_balance: initial_cash,
+        positions: empty_pos,
+        total_initial_margin: 0.0,
+        total_maintenance_margin: 0.0,
+    };
+}
+
+pub fn margin_account_add_position(acct: &mut MarginAccount, pos: MarginPosition) {
+    let cur_pos: List[MarginPosition] = (acct).positions;
+    (acct).positions = list_push(cur_pos, pos);
+    
+    let notional: Float = margin_position_notional(&pos);
+    (acct).total_initial_margin = (acct).total_initial_margin + (notional * pos.im_rate);
+    (acct).total_maintenance_margin = (acct).total_maintenance_margin + (notional * pos.mm_rate);
+}
+
+pub fn margin_evaluate_account(acct: &MarginAccount) -> MarginStatus {
+    let mut total_unrealized_pnl: Float = 0.0;
+    let mut total_im: Float = 0.0;
+    let mut total_mm: Float = 0.0;
+    
+    let pos_list: List[MarginPosition] = (acct).positions;
+    let n: Int = list_len(pos_list);
+    let mut i: Int = 0;
+    
+    while i < n {
+        let p: MarginPosition = list_get(pos_list, i);
+        let pnl: Float = margin_position_unrealized_pnl(&p);
+        let notional: Float = margin_position_notional(&p);
+        
+        total_unrealized_pnl = total_unrealized_pnl + pnl;
+        total_im = total_im + (notional * (p).im_rate);
+        total_mm = total_mm + (notional * (p).mm_rate);
+        i = i + 1;
+    }
+    
+    let equity: Float = (acct).cash_balance + total_unrealized_pnl;
+    let free_margin: Float = equity - total_im;
+    
+    let margin_ratio: Float = if total_mm > 0.0 { equity / total_mm } else { 10.0 };
+    let margin_call: Bool = equity < total_im;
+    let liquidation: Bool = equity < total_mm;
+    
+    return MarginStatus {
+        equity: equity,
+        free_margin: free_margin,
+        margin_ratio: margin_ratio,
+        margin_call: margin_call,
+        liquidation_required: liquidation,
+    };
+}
+
+pub fn margin_calculate_liquidation_price(
+    pos: &MarginPosition,
+    available_margin: Float
+) -> Float {
+    let qty_f: Float = int_to_float((pos).quantity);
+    if qty_f <= 0.0 { return 0.0; }
+    
+    // For Long: LiqPrice = EntryPrice - (AvailableMargin / Qty) + (EntryPrice * MMR)
+    // For Short: LiqPrice = EntryPrice + (AvailableMargin / Qty) - (EntryPrice * MMR)
+    let margin_per_unit: Float = available_margin / qty_f;
+    let mm_buffer: Float = (pos).entry_price * (pos).mm_rate;
+    
+    if (pos).is_long {
+        let liq: Float = (pos).entry_price - margin_per_unit + mm_buffer;
+        if liq > 0.0 { return liq; }
+        return 0.0;
+    } else {
+        return (pos).entry_price + margin_per_unit - mm_buffer;
+    }
+}

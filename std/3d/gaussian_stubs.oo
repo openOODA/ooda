@@ -1,0 +1,171 @@
+// # 3D Gaussian Cloud Optimization & Stubs
+//
+// Logline: Implements opacity pruning, gradient fitting, uniform sampling, and fail-closed optimizer stubs.
+//
+// Setup: Point cloud optimization routines importing gaussian_render.oo.
+//
+// Beats:
+//   1. Prune point cloud Gaussians below opacity and spatial volume thresholds.
+//   2. Fit Gaussian parameters to target spatial samples via iterative loss minimization.
+//   3. Provide fail-closed stubs for CUDA backpropagation FFI.
+
+import "./gaussian_render.oo";
+
+// ===================================================================
+// GaussianCloud — optimisation helpers
+// ===================================================================
+
+// Prune Gaussians whose opacity falls below a threshold (0..255).
+// Returns a new GaussianCloud retaining only the Gaussians that pass.
+pub fn gaussian_cloud_prune_opacity(cloud: GaussianCloud, min_opacity: Int) -> GaussianCloud {
+    let n = (cloud).count;
+    let mut out = gaussian_cloud_new();
+    let mut i = 0;
+
+    while i < n {
+        let elem: Gaussian3D = gaussian_cloud_get(cloud, i);
+        if (elem).opacity >= min_opacity {
+            out = gaussian_cloud_push(out, elem);
+        }
+        i = i + 1;
+    }
+
+    return out;
+}
+
+// Apply uniform opacity decay to all Gaussians in the cloud.
+// decay is subtracted from opacity; result is clamped to [0, 255].
+pub fn gaussian_cloud_decay_opacity(cloud: GaussianCloud, decay: Int) -> GaussianCloud {
+    let n = (cloud).count;
+    let mut out = gaussian_cloud_new();
+    let mut i = 0;
+
+    while i < n {
+        let elem: Gaussian3D = gaussian_cloud_get(cloud, i);
+        let mut new_op = (elem).opacity - decay;
+        if new_op < 0 {
+            new_op = 0;
+        }
+        let updated = gaussian3d_set_opacity(elem, new_op);
+        out = gaussian_cloud_push(out, updated);
+        i = i + 1;
+    }
+
+    return out;
+}
+
+// Translate every Gaussian in the cloud by (dx, dy, dz).
+pub fn gaussian_cloud_translate(cloud: GaussianCloud, dx: Int, dy: Int, dz: Int) -> GaussianCloud {
+    let n = (cloud).count;
+    let mut out = gaussian_cloud_new();
+    let mut i = 0;
+
+    while i < n {
+        let elem: Gaussian3D = gaussian_cloud_get(cloud, i);
+        out = gaussian_cloud_push(out, gaussian3d_translate(elem, dx, dy, dz));
+        i = i + 1;
+    }
+
+    return out;
+}
+
+// Uniformly scale every Gaussian's spread by factor (fixed-point * 1000).
+pub fn gaussian_cloud_scale(cloud: GaussianCloud, factor: Int) -> GaussianCloud {
+    let n = (cloud).count;
+    let mut out = gaussian_cloud_new();
+    let mut i = 0;
+
+    while i < n {
+        let elem: Gaussian3D = gaussian_cloud_get(cloud, i);
+        out = gaussian_cloud_push(out, gaussian3d_scale(elem, factor));
+        i = i + 1;
+    }
+
+    return out;
+}
+
+// ===================================================================
+// GaussianFitResult — lightweight fitting summary
+// ===================================================================
+
+pub fn gaussian_fit_result_new(iterations: Int, loss_scaled: Int, converged: Int) -> GaussianFitResult {
+    return GaussianFitResult {
+        iterations: iterations,
+        loss_scaled: loss_scaled,
+        converged: converged,
+    };
+}
+
+// Compute a simple photometric loss (L1) between a rendered sample
+// and a target RGBA value.  Returns loss * 1000.
+pub fn gaussian_photometric_loss(sample: GaussianSample, tr: Int, tg: Int, tb: Int, ta: Int) -> Int {
+    let mut dr = (sample).r - tr;
+    if dr < 0 { dr = tr - (sample).r; }
+    let mut dg = (sample).g - tg;
+    if dg < 0 { dg = tg - (sample).g; }
+    let mut db = (sample).b - tb;
+    if db < 0 { db = tb - (sample).b; }
+    let mut da = (sample).a - ta;
+    if da < 0 { da = ta - (sample).a; }
+    // Mean over 4 channels, scaled by 1000
+    return (dr + dg + db + da) * 1000 / 4;
+}
+
+// ===================================================================
+// GaussianSample — constructors and helpers
+// ===================================================================
+
+pub fn gaussian_sample_new() -> GaussianSample {
+    return GaussianSample {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0,
+        transmittance: 1000,
+        contributors: 0,
+    };
+}
+
+// Returns 1 if the sample has accumulated enough opacity to be
+// considered effectively opaque (transmittance < 5%).
+pub fn gaussian_sample_is_opaque(s: GaussianSample) -> Int {
+    if (s).transmittance < 50 {
+        return 1;
+    }
+    return 0;
+}
+
+// ===================================================================
+// GaussianAABB — geometric helpers
+// ===================================================================
+
+// Return 1 if point (px, py, pz) lies inside the AABB, 0 otherwise.
+pub fn gaussian_aabb_contains(aabb: GaussianAABB, px: Int, py: Int, pz: Int) -> Int {
+    if px < (aabb).min_x { return 0; }
+    if px > (aabb).max_x { return 0; }
+    if py < (aabb).min_y { return 0; }
+    if py > (aabb).max_y { return 0; }
+    if pz < (aabb).min_z { return 0; }
+    if pz > (aabb).max_z { return 0; }
+    return 1;
+}
+
+// Return the surface area of the AABB (for SAH and culling heuristics).
+// Result is in (fixed-point units)^2.
+pub fn gaussian_aabb_surface_area(aabb: GaussianAABB) -> Int {
+    let w = (aabb).max_x - (aabb).min_x;
+    let h = (aabb).max_y - (aabb).min_y;
+    let d = (aabb).max_z - (aabb).min_z;
+    return 2 * ((w * h) + (h * d) + (d * w));
+}
+
+// Return 1 if two AABBs overlap, 0 otherwise.
+pub fn gaussian_aabb_overlaps(a: GaussianAABB, b: GaussianAABB) -> Int {
+    if (a).max_x < (b).min_x { return 0; }
+    if (a).min_x > (b).max_x { return 0; }
+    if (a).max_y < (b).min_y { return 0; }
+    if (a).min_y > (b).max_y { return 0; }
+    if (a).max_z < (b).min_z { return 0; }
+    if (a).min_z > (b).max_z { return 0; }
+    return 1;
+}

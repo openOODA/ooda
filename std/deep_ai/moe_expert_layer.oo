@@ -1,0 +1,159 @@
+// # Mixture-of-Experts (MoE) Sparse Dispatch & FFN Expert Layer
+//
+// Logline: Dispatches routed tokens to SwiGLU expert feed-forward blocks, executes parallel expert compute, and gathers weighted token outputs.
+//
+// Setup: SwiGLU / GeGLU expert implementation and sparse dispatch execution.
+//
+// Beats:
+//   1. Define MoEExpertConfig, ExpertFFN, and MoELayer structures.
+//   2. Implement SwiGLU expert feed-forward transformations.
+//   3. Dispatch token inputs to designated experts and aggregate combined outputs.
+
+pub type MoEExpertConfig = struct {
+    embed_dim: Int,
+    hidden_dim: Int,
+    num_experts: Int,
+    capacity_factor: Float,
+};
+
+pub type ExpertFFN = struct {
+    w_gate: List[Float],
+    w_up: List[Float],
+    w_down: List[Float],
+    embed_dim: Int,
+    hidden_dim: Int,
+};
+
+pub type MoELayer = struct {
+    config: MoEExpertConfig,
+    experts: List[ExpertFFN],
+};
+
+pub fn moe_expert_silu(x: Float) -> Float {
+    let sig: Float = 1.0 / (1.0 + exp(0.0 - x));
+    return x * sig;
+}
+
+pub fn expert_ffn_new(embed_dim: Int, hidden_dim: Int) -> ExpertFFN {
+    let mut g_data: List[Float] = list_new();
+    let mut u_data: List[Float] = list_new();
+    let mut d_data: List[Float] = list_new();
+
+    let in_out_size: Int = embed_dim * hidden_dim;
+    let mut i: Int = 0;
+    while i < in_out_size {
+        g_data = list_push(g_data, 0.01);
+        u_data = list_push(u_data, 0.01);
+        d_data = list_push(d_data, 0.01);
+        i = i + 1;
+    }
+
+    return ExpertFFN {
+        w_gate: g_data,
+        w_up: u_data,
+        w_down: d_data,
+        embed_dim: embed_dim,
+        hidden_dim: hidden_dim,
+    };
+}
+
+pub fn expert_ffn_forward(expert: &ExpertFFN, x: List[Float]) -> List[Float] {
+    let in_d: Int = (expert).embed_dim;
+    let h_d: Int = (expert).hidden_dim;
+
+    let mut hidden_acts: List[Float] = list_new();
+    let mut h: Int = 0;
+    while h < h_d {
+        let mut gate_acc: Float = 0.0;
+        let mut up_acc: Float = 0.0;
+        let mut d: Int = 0;
+        while d < in_d {
+            let x_val: Float = list_get(x, d);
+            let g_w: Float = list_get((expert).w_gate, (d * h_d) + h);
+            let u_w: Float = list_get((expert).w_up, (d * h_d) + h);
+            gate_acc = gate_acc + (x_val * g_w);
+            up_acc = up_acc + (x_val * u_w);
+            d = d + 1;
+        }
+        let act: Float = moe_expert_silu(gate_acc) * up_acc;
+        hidden_acts = list_push(hidden_acts, act);
+        h = h + 1;
+    }
+
+    let mut out: List[Float] = list_new();
+    let mut out_d: Int = 0;
+    while out_d < in_d {
+        let mut down_acc: Float = 0.0;
+        let mut h2: Int = 0;
+        while h2 < h_d {
+            let h_val: Float = list_get(hidden_acts, h2);
+            let d_w: Float = list_get((expert).w_down, (h2 * in_d) + out_d);
+            down_acc = down_acc + (h_val * d_w);
+            h2 = h2 + 1;
+        }
+        out = list_push(out, down_acc);
+        out_d = out_d + 1;
+    }
+
+    return out;
+}
+
+pub fn moe_layer_new(cfg: MoEExpertConfig) -> MoELayer {
+    let mut exp_list: List[ExpertFFN] = list_new();
+    let mut e: Int = 0;
+    let num_e: Int = (cfg).num_experts;
+    while e < num_e {
+        let expert: ExpertFFN = expert_ffn_new((cfg).embed_dim, (cfg).hidden_dim);
+        exp_list = list_push(exp_list, expert);
+        e = e + 1;
+    }
+    return MoELayer {
+        config: cfg,
+        experts: exp_list,
+    };
+}
+
+pub fn moe_layer_forward_token(
+    layer: &MoELayer,
+    token: List[Float],
+    selected_experts: List[Int],
+    weights: List[Float]
+) -> List[Float] {
+    let dim: Int = ((layer).config).embed_dim;
+    let k: Int = list_len(selected_experts);
+
+    let mut accum_out: List[Float] = list_new();
+    let mut init_d: Int = 0;
+    while init_d < dim {
+        accum_out = list_push(accum_out, 0.0);
+        init_d = init_d + 1;
+    }
+
+    let mut idx: Int = 0;
+    while idx < k {
+        let exp_id: Int = list_get(selected_experts, idx);
+        let weight: Float = list_get(weights, idx);
+
+        if exp_id >= 0 && exp_id < list_len((layer).experts) {
+            let expert: ExpertFFN = list_get((layer).experts, exp_id);
+            let exp_out: List[Float] = expert_ffn_forward(&expert, token);
+
+            let mut next_accum: List[Float] = list_new();
+            let mut d: Int = 0;
+            while d < dim {
+                let prev: Float = list_get(accum_out, d);
+                let delta: Float = list_get(exp_out, d) * weight;
+                next_accum = list_push(next_accum, prev + delta);
+                d = d + 1;
+            }
+            accum_out = next_accum;
+        }
+        idx = idx + 1;
+    }
+
+    return accum_out;
+}
+
+pub fn moe_expert_layer_marker() -> Int {
+    return 1;
+}

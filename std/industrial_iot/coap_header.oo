@@ -1,0 +1,114 @@
+// # CoAP Header Framing & Protocol Codecs
+//
+// Logline: Implements RFC 7252 Constrained Application Protocol 4-byte fixed header and token codecs.
+//
+// Setup: Pure wire framing serializer for lightweight IoT UDP communication.
+//
+// Beats:
+//   1. Frame CoAP 4-byte fixed headers with Type, Token Length, and Message ID.
+//   2. Encode and decode RFC 7252 class.detail request and response status codes.
+//   3. Pack and unpack 0-8 byte token sequences for asynchronous transaction matching.
+
+pub type CoapHeader = struct {
+    version: Int,
+    msg_type: Int,        // 0=CON, 1=NON, 2=ACK, 3=RST
+    token_length: Int,    // 0..8 bytes
+    code_class: Int,      // 0..7
+    code_detail: Int,     // 0..31
+    message_id: Int,      // 16-bit
+    token: List[Int],
+};
+
+/// Convert class (0..7) and detail (0..31) into 8-bit CoAP code byte (c.dd).
+pub fn coap_code_to_byte(c_class: Int, c_detail: Int) -> Int {
+    return ((c_class % 8) * 32) + (c_detail % 32);
+}
+
+/// Construct a new CoapHeader instance with standard version 1.
+pub fn coap_header_new(
+    msg_type: Int,
+    c_class: Int,
+    c_detail: Int,
+    msg_id: Int,
+    token: List[Int]
+) -> CoapHeader {
+    let tkl: Int = list_len(token);
+    return CoapHeader {
+        version: 1,
+        msg_type: msg_type % 4,
+        token_length: tkl % 9,
+        code_class: c_class % 8,
+        code_detail: c_detail % 32,
+        message_id: msg_id % 65536,
+        token: token,
+    };
+}
+
+/// Serialize CoAP header and token into raw byte stream.
+pub fn coap_header_encode(hdr: &CoapHeader) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let b0: Int = (((hdr).version % 4) * 64) + (((hdr).msg_type % 4) * 16) + ((hdr).token_length % 16);
+    let b1: Int = coap_code_to_byte((hdr).code_class, (hdr).code_detail);
+    let mid: Int = (hdr).message_id;
+
+    out = list_push(out, b0);
+    out = list_push(out, b1);
+    out = list_push(out, (mid / 256) % 256);
+    out = list_push(out, mid % 256);
+
+    let tkl: Int = list_len((hdr).token);
+    let mut i: Int = 0;
+    while i < tkl {
+        out = list_push(out, list_get((hdr).token, i) % 256);
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Deserialize CoAP header and token from raw byte stream.
+pub fn coap_header_decode(bytes: &List[Int]) -> Result[CoapHeader, String] {
+    let size: Int = list_len(*bytes);
+    if size < 4 {
+        return Err("CoAP header requires at least 4 bytes");
+    }
+
+    let b0: Int = list_get(*bytes, 0);
+    let ver: Int = b0 / 64;
+    let mtype: Int = (b0 / 16) % 4;
+    let tkl: Int = b0 % 16;
+
+    if ver != 1 {
+        return Err("Unsupported CoAP version (only version 1 supported)");
+    }
+    if tkl > 8 {
+        return Err("CoAP token length exceeds 8 bytes");
+    }
+    if size < (4 + tkl) {
+        return Err("CoAP message too short for token payload");
+    }
+
+    let b1: Int = list_get(*bytes, 1);
+    let c_class: Int = b1 / 32;
+    let c_detail: Int = b1 % 32;
+
+    let mid_hi: Int = list_get(*bytes, 2);
+    let mid_lo: Int = list_get(*bytes, 3);
+    let mid: Int = (mid_hi * 256) + mid_lo;
+
+    let mut tok: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < tkl {
+        tok = list_push(tok, list_get(*bytes, 4 + i));
+        i = i + 1;
+    }
+
+    return Ok(CoapHeader {
+        version: ver,
+        msg_type: mtype,
+        token_length: tkl,
+        code_class: c_class,
+        code_detail: c_detail,
+        message_id: mid,
+        token: tok,
+    });
+}

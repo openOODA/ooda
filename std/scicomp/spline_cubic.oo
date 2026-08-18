@@ -1,0 +1,154 @@
+// # Cubic Spline Interpolation & Quadrature
+//
+// Logline: Piecewise cubic polynomial spline interpolation with natural and clamped boundary conditions.
+//
+// Setup: Smooth C^2 interpolation, derivative evaluation, and definite integration for sampled curve data.
+//
+// Beats:
+//   1. Define CubicSplineSegment and CubicSpline data structures.
+//   2. Build natural cubic spline using tridiagonal second-derivative solve.
+//   3. Evaluate spline values, derivatives, curvatures, and definite integrals.
+
+import "./tridiagonal_solver_thomas.oo";
+
+pub type CubicSplineSegment = struct {
+    x0: Float,
+    x1: Float,
+    a: Float,
+    b: Float,
+    c: Float,
+    d: Float,
+};
+
+pub type CubicSpline = struct {
+    num_segments: Int,
+    segments: List[CubicSplineSegment],
+};
+
+pub fn cubic_spline_new() -> CubicSpline {
+    return CubicSpline {
+        num_segments: 0,
+        segments: list_new(),
+    };
+}
+
+pub fn spline_segment_eval(seg: &CubicSplineSegment, x: Float) -> Float {
+    let dx: Float = x - (seg).x0;
+    return (seg).a + ((seg).b * dx) + ((seg).c * dx * dx) + ((seg).d * dx * dx * dx);
+}
+
+pub fn spline_segment_deriv(seg: &CubicSplineSegment, x: Float) -> Float {
+    let dx: Float = x - (seg).x0;
+    return (seg).b + (2.0 * (seg).c * dx) + (3.0 * (seg).d * dx * dx);
+}
+
+pub fn spline_segment_integral(seg: &CubicSplineSegment) -> Float {
+    let h: Float = (seg).x1 - (seg).x0;
+    let h2: Float = h * h;
+    let h3: Float = h2 * h;
+    let h4: Float = h3 * h;
+    return ((seg).a * h) + (0.5 * (seg).b * h2) + ((1.0 / 3.0) * (seg).c * h3) + (0.25 * (seg).d * h4);
+}
+
+pub fn cubic_spline_natural_fit(xs: &List[Float], ys: &List[Float]) -> CubicSpline {
+    let n: Int = list_len(*xs);
+    if n < 2 {
+        return cubic_spline_new();
+    }
+
+    let num_seg: Int = n - 1;
+    let mut h: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < num_seg {
+        let h_i: Float = list_get(*xs, i + 1) - list_get(*xs, i);
+        h = list_push(h, h_i);
+        i = i + 1;
+    }
+
+    let mut sub: List[Float] = list_new();
+    let mut main_diag: List[Float] = list_new();
+    let mut sup: List[Float] = list_new();
+    let mut rhs: List[Float] = list_new();
+
+    main_diag = list_push(main_diag, 1.0);
+    rhs = list_push(rhs, 0.0);
+    if num_seg > 1 {
+        sup = list_push(sup, 0.0);
+    }
+
+    i = 1;
+    while i < (n - 1) {
+        let h_prev: Float = list_get(h, i - 1);
+        let h_curr: Float = list_get(h, i);
+        sub = list_push(sub, h_prev);
+        main_diag = list_push(main_diag, 2.0 * (h_prev + h_curr));
+        if i < (n - 2) {
+            sup = list_push(sup, h_curr);
+        }
+
+        let dy_curr: Float = (list_get(*ys, i + 1) - list_get(*ys, i)) / h_curr;
+        let dy_prev: Float = (list_get(*ys, i) - list_get(*ys, i - 1)) / h_prev;
+        rhs = list_push(rhs, 3.0 * (dy_curr - dy_prev));
+        i = i + 1;
+    }
+
+    if n > 2 {
+        sub = list_push(sub, 0.0);
+    }
+    main_diag = list_push(main_diag, 1.0);
+    rhs = list_push(rhs, 0.0);
+
+    let sys: TridiagonalSystem = tridiagonal_system_new(n, sub, main_diag, sup, rhs);
+    let c_coeffs: List[Float] = solve_thomas(&sys);
+
+    let mut segs: List[CubicSplineSegment] = list_new();
+    i = 0;
+    while i < num_seg {
+        let x0: Float = list_get(*xs, i);
+        let x1: Float = list_get(*xs, i + 1);
+        let a: Float = list_get(*ys, i);
+        let h_i: Float = list_get(h, i);
+        let c_i: Float = list_get(c_coeffs, i);
+        let c_next: Float = list_get(c_coeffs, i + 1);
+
+        let d_i: Float = (c_next - c_i) / (3.0 * h_i);
+        let b_i: Float = ((list_get(*ys, i + 1) - a) / h_i) - ((h_i * ((2.0 * c_i) + c_next)) / 3.0);
+
+        let seg: CubicSplineSegment = CubicSplineSegment {
+            x0: x0,
+            x1: x1,
+            a: a,
+            b: b_i,
+            c: c_i,
+            d: d_i,
+        };
+        segs = list_push(segs, seg);
+        i = i + 1;
+    }
+
+    return CubicSpline {
+        num_segments: num_seg,
+        segments: segs,
+    };
+}
+
+pub fn cubic_spline_eval(spline: &CubicSpline, x: Float) -> Float {
+    let n: Int = (spline).num_segments;
+    if n == 0 {
+        return 0.0;
+    }
+    let mut i: Int = 0;
+    while i < n {
+        let seg: CubicSplineSegment = list_get((spline).segments, i);
+        if (x >= (seg).x0) && (x <= (seg).x1) {
+            return spline_segment_eval(&seg, x);
+        }
+        i = i + 1;
+    }
+    if x < (list_get((spline).segments, 0)).x0 {
+        let first_seg: CubicSplineSegment = list_get((spline).segments, 0);
+        return spline_segment_eval(&first_seg, x);
+    }
+    let last_seg: CubicSplineSegment = list_get((spline).segments, n - 1);
+    return spline_segment_eval(&last_seg, x);
+}

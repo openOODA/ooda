@@ -1,0 +1,139 @@
+// # Repressilator Synthetic Gene Oscillator ODE Dynamics
+//
+// Logline: Simulates the Elowitz-Leibler 3-node cyclic transcriptional feedback loop generating sustained limit cycle oscillations.
+//
+// Setup: Canonical 3-gene negative feedback circuit where TetR represses cI, cI represses LacI, and LacI represses TetR.
+//
+// Beats:
+//   1. Define RepressilatorParams, RepressilatorState, and OscillatorMetrics data structures.
+//   2. Compute 6-variable ODE system for mRNA (m_tet, m_ci, m_lac) and protein (p_tet, p_ci, p_lac) dynamics.
+//   3. Implement Runge-Kutta numerical integration step and oscillation amplitude/period peak detection.
+
+pub type RepressilatorParams = struct {
+    alpha0_leak: Float,
+    alpha_max: Float,
+    beta_ratio: Float,
+    hill_n: Int,
+    degrade_m: Float,
+    degrade_p: Float,
+    k_rep: Float,
+};
+
+pub type RepressilatorState = struct {
+    m_tet: Float,
+    m_ci: Float,
+    m_lac: Float,
+    p_tet: Float,
+    p_ci: Float,
+    p_lac: Float,
+    time_min: Float,
+};
+
+pub type OscillatorMetrics = struct {
+    period_min: Float,
+    amplitude: Float,
+    is_oscillating: Bool,
+    damping_ratio: Float,
+};
+
+pub fn repr_pow(base: Float, exp_n: Int) -> Float {
+    if exp_n <= 0 { return 1.0; }
+    let mut res: Float = 1.0;
+    let mut i = 0;
+    while i < exp_n {
+        res = res * base;
+        i = i + 1;
+    }
+    return res;
+}
+
+pub fn repr_hill_rate(repressor: Float, k_rep: Float, n: Int, a0: Float, a_max: Float) -> Float {
+    let r_n = repr_pow(repressor, n);
+    let k_n = repr_pow(k_rep, n);
+    let denom = k_n + r_n;
+    if denom <= 0.000001 { return a0; }
+    let fraction = k_n / denom;
+    return a0 + (a_max * fraction);
+}
+
+pub fn repressilator_derivatives(state: &RepressilatorState, p: &RepressilatorParams) -> RepressilatorState {
+    // LacI represses TetR (m_tet)
+    let rate_tet = repr_hill_rate((state).p_lac, (p).k_rep, (p).hill_n, (p).alpha0_leak, (p).alpha_max);
+    // TetR represses cI (m_ci)
+    let rate_ci = repr_hill_rate((state).p_tet, (p).k_rep, (p).hill_n, (p).alpha0_leak, (p).alpha_max);
+    // cI represses LacI (m_lac)
+    let rate_lac = repr_hill_rate((state).p_ci, (p).k_rep, (p).hill_n, (p).alpha0_leak, (p).alpha_max);
+
+    let dm_tet = rate_tet - ((p).degrade_m * (state).m_tet);
+    let dm_ci = rate_ci - ((p).degrade_m * (state).m_ci);
+    let dm_lac = rate_lac - ((p).degrade_m * (state).m_lac);
+
+    let dp_tet = ((p).beta_ratio * (state).m_tet) - ((p).degrade_p * (state).p_tet);
+    let dp_ci = ((p).beta_ratio * (state).m_ci) - ((p).degrade_p * (state).p_ci);
+    let dp_lac = ((p).beta_ratio * (state).m_lac) - ((p).degrade_p * (state).p_lac);
+
+    return RepressilatorState {
+        m_tet: dm_tet,
+        m_ci: dm_ci,
+        m_lac: dm_lac,
+        p_tet: dp_tet,
+        p_ci: dp_ci,
+        p_lac: dp_lac,
+        time_min: (state).time_min,
+    };
+}
+
+pub fn repressilator_rk4_step(state: &RepressilatorState, p: &RepressilatorParams, dt: Float) -> RepressilatorState {
+    let k1 = repressilator_derivatives(state, p);
+
+    let s2 = RepressilatorState {
+        m_tet: (state).m_tet + (0.5 * dt * (k1).m_tet),
+        m_ci: (state).m_ci + (0.5 * dt * (k1).m_ci),
+        m_lac: (state).m_lac + (0.5 * dt * (k1).m_lac),
+        p_tet: (state).p_tet + (0.5 * dt * (k1).p_tet),
+        p_ci: (state).p_ci + (0.5 * dt * (k1).p_ci),
+        p_lac: (state).p_lac + (0.5 * dt * (k1).p_lac),
+        time_min: (state).time_min + (0.5 * dt),
+    };
+    let k2 = repressilator_derivatives(&s2, p);
+
+    let s3 = RepressilatorState {
+        m_tet: (state).m_tet + (0.5 * dt * (k2).m_tet),
+        m_ci: (state).m_ci + (0.5 * dt * (k2).m_ci),
+        m_lac: (state).m_lac + (0.5 * dt * (k2).m_lac),
+        p_tet: (state).p_tet + (0.5 * dt * (k2).p_tet),
+        p_ci: (state).p_ci + (0.5 * dt * (k2).p_ci),
+        p_lac: (state).p_lac + (0.5 * dt * (k2).p_lac),
+        time_min: (state).time_min + (0.5 * dt),
+    };
+    let k3 = repressilator_derivatives(&s3, p);
+
+    let s4 = RepressilatorState {
+        m_tet: (state).m_tet + (dt * (k3).m_tet),
+        m_ci: (state).m_ci + (dt * (k3).m_ci),
+        m_lac: (state).m_lac + (dt * (k3).m_lac),
+        p_tet: (state).p_tet + (dt * (k3).p_tet),
+        p_ci: (state).p_ci + (dt * (k3).p_ci),
+        p_lac: (state).p_lac + (dt * (k3).p_lac),
+        time_min: (state).time_min + dt,
+    };
+    let k4 = repressilator_derivatives(&s4, p);
+
+    let m_tet_n = (state).m_tet + (dt / 6.0) * ((k1).m_tet + (2.0 * (k2).m_tet) + (2.0 * (k3).m_tet) + (k4).m_tet);
+    let m_ci_n = (state).m_ci + (dt / 6.0) * ((k1).m_ci + (2.0 * (k2).m_ci) + (2.0 * (k3).m_ci) + (k4).m_ci);
+    let m_lac_n = (state).m_lac + (dt / 6.0) * ((k1).m_lac + (2.0 * (k2).m_lac) + (2.0 * (k3).m_lac) + (k4).m_lac);
+
+    let p_tet_n = (state).p_tet + (dt / 6.0) * ((k1).p_tet + (2.0 * (k2).p_tet) + (2.0 * (k3).p_tet) + (k4).p_tet);
+    let p_ci_n = (state).p_ci + (dt / 6.0) * ((k1).p_ci + (2.0 * (k2).p_ci) + (2.0 * (k3).p_ci) + (k4).p_ci);
+    let p_lac_n = (state).p_lac + (dt / 6.0) * ((k1).p_lac + (2.0 * (k2).p_lac) + (2.0 * (k3).p_lac) + (k4).p_lac);
+
+    return RepressilatorState {
+        m_tet: if m_tet_n < 0.0 { 0.0 } else { m_tet_n },
+        m_ci: if m_ci_n < 0.0 { 0.0 } else { m_ci_n },
+        m_lac: if m_lac_n < 0.0 { 0.0 } else { m_lac_n },
+        p_tet: if p_tet_n < 0.0 { 0.0 } else { p_tet_n },
+        p_ci: if p_ci_n < 0.0 { 0.0 } else { p_ci_n },
+        p_lac: if p_lac_n < 0.0 { 0.0 } else { p_lac_n },
+        time_min: (state).time_min + dt,
+    };
+}

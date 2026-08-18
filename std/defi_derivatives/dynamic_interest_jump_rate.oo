@@ -1,0 +1,87 @@
+// # Dynamic Interest Jump-Rate Curve Engine
+//
+// Logline: Models piecewise kinked interest rate curves with base rates, optimal utilization kinks, and steep jump slopes (Compound/Aave style).
+//
+// Setup: Pure quantitative DeFi protocol module calculating utilization-dependent borrowing and deposit interest yields.
+//
+// Beats:
+//   1. Define JumpRateModelConfig, LendingPoolLiquidity, and BorrowLendRatesResult structures.
+//   2. Compute pool utilization ratio $U = \text{TotalBorrows} / (\text{Cash} + \text{TotalBorrows})$.
+//   3. Calculate kinked borrow APRs and supply APRs accounting for protocol reserve factors.
+
+pub type JumpRateModelConfig = struct {
+    base_rate_apr: Float,       // e.g. 0.01 (1% base APR)
+    optimal_utilization: Float, // e.g. 0.80 (80% target kink)
+    slope_1_apr: Float,         // e.g. 0.04 (4% slope below kink)
+    slope_2_jump_apr: Float,    // e.g. 0.75 (75% steep jump slope above kink)
+    reserve_factor: Float,      // e.g. 0.10 (10% protocol cut)
+};
+
+pub type LendingPoolLiquidity = struct {
+    total_cash_available: Float,
+    total_borrowed: Float,
+    total_reserves: Float,
+};
+
+pub type BorrowLendRatesResult = struct {
+    utilization_rate: Float,
+    borrow_rate_apr: Float,
+    supply_rate_apr: Float,
+    is_above_kink: Bool,
+    reserve_income_annual_usd: Float,
+};
+
+pub fn jump_rate_config_stablecoin_default() -> JumpRateModelConfig {
+    return JumpRateModelConfig {
+        base_rate_apr: 0.005,
+        optimal_utilization: 0.80,
+        slope_1_apr: 0.04,
+        slope_2_jump_apr: 0.60,
+        reserve_factor: 0.10,
+    };
+}
+
+pub fn calc_pool_utilization(pool: &LendingPoolLiquidity) -> Float {
+    let total_supplied: Float = (pool).total_cash_available + (pool).total_borrowed;
+    if total_supplied <= 0.0 {
+        return 0.0;
+    }
+    return (pool).total_borrowed / total_supplied;
+}
+
+pub fn calc_borrow_lend_rates(
+    pool: &LendingPoolLiquidity,
+    cfg: &JumpRateModelConfig
+) -> BorrowLendRatesResult {
+    let u: Float = calc_pool_utilization(pool);
+    let mut borrow_apr: Float = (cfg).base_rate_apr;
+    let is_kink: Bool = u > (cfg).optimal_utilization;
+
+    if is_kink {
+        let normal_part: Float = (cfg).slope_1_apr;
+        let excess_u: Float = u - (cfg).optimal_utilization;
+        let rem_capacity: Float = 1.0 - (cfg).optimal_utilization;
+        let mut jump_part: Float = 0.0;
+        if rem_capacity > 0.0 {
+            jump_part = (excess_u / rem_capacity) * (cfg).slope_2_jump_apr;
+        }
+        borrow_apr = (cfg).base_rate_apr + normal_part + jump_part;
+    } else {
+        if (cfg).optimal_utilization > 0.0 {
+            let slope_part: Float = (u / (cfg).optimal_utilization) * (cfg).slope_1_apr;
+            borrow_apr = (cfg).base_rate_apr + slope_part;
+        }
+    }
+
+    // Supply APR = Utilization * Borrow APR * (1 - Reserve Factor)
+    let supply_apr: Float = u * borrow_apr * (1.0 - (cfg).reserve_factor);
+    let reserve_income: Float = (pool).total_borrowed * borrow_apr * (cfg).reserve_factor;
+
+    return BorrowLendRatesResult {
+        utilization_rate: u,
+        borrow_rate_apr: borrow_apr,
+        supply_rate_apr: supply_apr,
+        is_above_kink: is_kink,
+        reserve_income_annual_usd: reserve_income,
+    };
+}

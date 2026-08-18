@@ -1,0 +1,106 @@
+// # Service Mesh RBAC Authorization Engine
+//
+// Logline: Evaluates Istio/Envoy AuthorizationPolicy rules with ALLOW and DENY actions across principals and paths.
+//
+// Setup: Layer-7 security policy evaluator inspecting source identities, request methods, and URI paths.
+//
+// Beats:
+//   1. Model authorization rules with action types (ALLOW=1, DENY=2), source principals, paths, and methods.
+//   2. Enforce standard mesh evaluation logic (explicit DENY takes precedence over ALLOW).
+//   3. Return Boolean access authorization decisions and increment audit telemetry.
+
+pub type RbacRule = struct {
+    action: Int, // 1: ALLOW, 2: DENY
+    source_principal: String,
+    request_path_prefix: String,
+    http_method: String,
+};
+
+pub type MeshRbacEngine = struct {
+    rules: List[RbacRule],
+    total_evaluated: Int,
+    allowed_count: Int,
+    denied_count: Int,
+};
+
+pub fn mesh_rbac_engine_new() -> MeshRbacEngine {
+    let empty_rules: List[RbacRule] = list_new();
+    return MeshRbacEngine {
+        rules: empty_rules,
+        total_evaluated: 0,
+        allowed_count: 0,
+        denied_count: 0,
+    };
+}
+
+pub fn mesh_rbac_add_rule(
+    engine: &mut MeshRbacEngine,
+    action: Int,
+    principal: String,
+    path_prefix: String,
+    method: String
+) {
+    let r = RbacRule {
+        action: action,
+        source_principal: principal,
+        request_path_prefix: path_prefix,
+        http_method: method,
+    };
+    (engine).rules = list_push((engine).rules, r);
+}
+
+pub fn mesh_rbac_evaluate(
+    engine: &mut MeshRbacEngine,
+    principal: String,
+    path: String,
+    method: String
+) -> Bool {
+    (engine).total_evaluated = (engine).total_evaluated + 1;
+    let n: Int = list_len((engine).rules);
+
+    // Pass 1: Check explicit DENY rules first
+    let mut i: Int = 0;
+    while i < n {
+        let r: RbacRule = list_get((engine).rules, i);
+        if (r).action == 2 {
+            let mut match_p: Bool = (r).source_principal == "*" || (r).source_principal == principal;
+            let mut match_path: Bool = (r).request_path_prefix == "*" || (r).request_path_prefix == "/" || (r).request_path_prefix == path;
+            let mut match_m: Bool = (r).http_method == "*" || (r).http_method == method;
+
+            if match_p && match_path && match_m {
+                (engine).denied_count = (engine).denied_count + 1;
+                return false; // Denied by explicit deny rule
+            }
+        }
+        i = i + 1;
+    }
+
+    // Pass 2: Check ALLOW rules
+    let mut j: Int = 0;
+    let mut has_allow_rules: Bool = false;
+    while j < n {
+        let r: RbacRule = list_get((engine).rules, j);
+        if (r).action == 1 {
+            has_allow_rules = true;
+            let mut match_p: Bool = (r).source_principal == "*" || (r).source_principal == principal;
+            let mut match_path: Bool = (r).request_path_prefix == "*" || (r).request_path_prefix == "/" || (r).request_path_prefix == path;
+            let mut match_m: Bool = (r).http_method == "*" || (r).http_method == method;
+
+            if match_p && match_path && match_m {
+                (engine).allowed_count = (engine).allowed_count + 1;
+                return true; // Allowed by matching allow rule
+            }
+        }
+        j = j + 1;
+    }
+
+    // If allow rules exist and none matched, default is deny
+    if has_allow_rules {
+        (engine).denied_count = (engine).denied_count + 1;
+        return false;
+    }
+
+    // If no allow rules exist, default is allow
+    (engine).allowed_count = (engine).allowed_count + 1;
+    return true;
+}

@@ -1,0 +1,146 @@
+// # UAV Multi-Sensor Altitude Kalman Filter Fusion
+//
+// Logline: Fuses vertical IMU accelerometer, barometric pressure altitude, and downward ToF / LiDAR rangefinder in a 3-state EKF.
+//
+// Setup: High-rate, drift-free vertical altitude, climb rate, and accelerometer bias estimation for precise terrain tracking.
+//
+// Beats:
+//   1. Define 3-State Altitude Vector: x = [altitude_z, vertical_velocity_vz, accel_bias_az].
+//   2. Propagate state and covariance over dt using specific vertical acceleration az.
+//   3. Update state using Barometer pressure altitude measurement with innovation gating.
+//   4. Update state using LiDAR / ToF rangefinder measurement when within valid surface range.
+
+import "./uav_coordinate_frames.oo";
+
+pub type AltitudeFilterState = struct {
+    alt_z: Float,
+    vel_vz: Float,
+    bias_az: Float,
+    var_z: Float,
+    var_vz: Float,
+    var_az: Float,
+};
+
+pub type AltitudeFilterConfig = struct {
+    q_accel_noise: Float,
+    q_bias_noise: Float,
+    r_baro_noise: Float,
+    r_lidar_noise: Float,
+    max_lidar_range: Float,
+};
+
+pub fn altitude_filter_config_default() -> AltitudeFilterConfig {
+    return AltitudeFilterConfig {
+        q_accel_noise: 0.15,
+        q_bias_noise: 0.001,
+        r_baro_noise: 1.2,
+        r_lidar_noise: 0.04,
+        max_lidar_range: 25.0,
+    };
+}
+
+pub fn altitude_filter_init(init_z: Float) -> AltitudeFilterState {
+    return AltitudeFilterState {
+        alt_z: init_z,
+        vel_vz: 0.0,
+        bias_az: 0.0,
+        var_z: 1.0,
+        var_vz: 0.5,
+        var_az: 0.1,
+    };
+}
+
+pub fn altitude_filter_predict(
+    state: &AltitudeFilterState,
+    cfg: &AltitudeFilterConfig,
+    meas_accel_z: Float,
+    dt: Float
+) -> AltitudeFilterState {
+    let unb_a: Float = meas_accel_z - (state).bias_az;
+
+    // State propagation
+    let new_z: Float = (state).alt_z + ((state).vel_vz * dt) + (0.5 * unb_a * dt * dt);
+    let new_vz: Float = (state).vel_vz + (unb_a * dt);
+    let new_az: Float = (state).bias_az;
+
+    // Variance propagation
+    let q_a: Float = (cfg).q_accel_noise;
+    let q_b: Float = (cfg).q_bias_noise;
+
+    let new_var_z: Float = (state).var_z + ((state).var_vz * dt * 2.0) + (0.25 * q_a * dt * dt * dt * dt);
+    let new_var_vz: Float = (state).var_vz + (q_a * dt * dt);
+    let new_var_az: Float = (state).var_az + (q_b * dt);
+
+    return AltitudeFilterState {
+        alt_z: new_z,
+        vel_vz: new_vz,
+        bias_az: new_az,
+        var_z: new_var_z,
+        var_vz: new_var_vz,
+        var_az: new_var_az,
+    };
+}
+
+pub fn altitude_filter_update_baro(
+    state: &AltitudeFilterState,
+    cfg: &AltitudeFilterConfig,
+    baro_alt_meas: Float
+) -> AltitudeFilterState {
+    let r: Float = (cfg).r_baro_noise;
+    let s: Float = (state).var_z + r;
+    let k_z: Float = (state).var_z / s;
+    let k_vz: Float = (state).var_vz / s;
+
+    let innov: Float = baro_alt_meas - (state).alt_z;
+
+    let upd_z: Float = (state).alt_z + (k_z * innov);
+    let upd_vz: Float = (state).vel_vz + (k_vz * innov);
+    let upd_var_z: Float = (1.0 - k_z) * (state).var_z;
+
+    return AltitudeFilterState {
+        alt_z: upd_z,
+        vel_vz: upd_vz,
+        bias_az: (state).bias_az,
+        var_z: upd_var_z,
+        var_vz: (state).var_vz,
+        var_az: (state).var_az,
+    };
+}
+
+pub fn altitude_filter_update_lidar(
+    state: &AltitudeFilterState,
+    cfg: &AltitudeFilterConfig,
+    lidar_dist: Float,
+    cos_tilt: Float
+) -> AltitudeFilterState {
+    if lidar_dist > (cfg).max_lidar_range {
+        return AltitudeFilterState {
+            alt_z: (state).alt_z, vel_vz: (state).vel_vz, bias_az: (state).bias_az,
+            var_z: (state).var_z, var_vz: (state).var_vz, var_az: (state).var_az,
+        };
+    }
+
+    // Altitude above ground = lidar_dist * cos(tilt)
+    let safe_cos: Float = if cos_tilt < 0.2 { 0.2 } else { cos_tilt };
+    let true_agl: Float = lidar_dist * safe_cos;
+
+    let r: Float = (cfg).r_lidar_noise;
+    let s: Float = (state).var_z + r;
+    let k_z: Float = (state).var_z / s;
+    let k_vz: Float = (state).var_vz / s;
+
+    let innov: Float = true_agl - (state).alt_z;
+
+    let upd_z: Float = (state).alt_z + (k_z * innov);
+    let upd_vz: Float = (state).vel_vz + (k_vz * innov);
+    let upd_var_z: Float = (1.0 - k_z) * (state).var_z;
+
+    return AltitudeFilterState {
+        alt_z: upd_z,
+        vel_vz: upd_vz,
+        bias_az: (state).bias_az,
+        var_z: upd_var_z,
+        var_vz: (state).var_vz,
+        var_az: (state).var_az,
+    };
+}

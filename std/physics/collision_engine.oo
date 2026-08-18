@@ -1,0 +1,228 @@
+// # Collision Raycasting & Impulse Engine
+//
+// Logline: Performs spatial raycasting against primitives and evaluates elastic collision impulse responses.
+//
+// Setup: Imports collision_types.oo, collision_ops.oo, and collision_narrow.oo for intersection queries.
+//
+// Beats:
+//   1. Execute parametric raycast tests against spheres, planes, AABBs, and triangles.
+//   2. Calculate time-of-impact (TOI) and surface normal vectors at ray hit locations.
+//   3. Compute restitution impulses, frictional contact response, and velocity updates.
+
+import "./collision_types.oo";
+import "./collision_ops.oo";
+
+// -------------------------------------------------------------------
+// Raycasting queries
+// -------------------------------------------------------------------
+
+/// Ray vs Sphere intersection test.
+pub fn ray_intersects_sphere(ray: Ray, s: Sphere) -> RaycastHit {
+    let oc = vec3_sub((ray).origin, (s).centre);
+    let b = vec3_dot(oc, (ray).dir);
+    let c = vec3_dot(oc, oc) - ((s).radius * (s).radius);
+
+    let discriminant = (b * b) - c;
+    if discriminant < 0.0 {
+        return raycast_hit_none();
+    }
+
+    let sqrt_d = sqrt(discriminant);
+    let mut t = (0.0 - b) - sqrt_d;
+    if t < 0.0 {
+        t = (0.0 - b) + sqrt_d;
+    }
+
+    if t < 0.0 {
+        return raycast_hit_none();
+    }
+
+    let hit_pt = vec3_add((ray).origin, vec3_scale((ray).dir, t));
+    let hit_norm = vec3_normalize(vec3_sub(hit_pt, (s).centre));
+
+    return RaycastHit {
+        hit:      1,
+        distance: t,
+        point:    hit_pt,
+        normal:   hit_norm,
+    };
+}
+
+/// Ray vs Plane intersection test.
+pub fn ray_intersects_plane(ray: Ray, plane: Plane) -> RaycastHit {
+    let denom = vec3_dot((plane).normal, (ray).dir);
+
+    // Ray is parallel to plane
+    let abs_denom = sqrt(denom * denom);
+    if abs_denom < 0.000001 {
+        return raycast_hit_none();
+    }
+
+    let t = (0.0 - (vec3_dot((plane).normal, (ray).origin) + (plane).dist)) / denom;
+    if t < 0.0 {
+        return raycast_hit_none();
+    }
+
+    let hit_pt = vec3_add((ray).origin, vec3_scale((ray).dir, t));
+
+    return RaycastHit {
+        hit:      1,
+        distance: t,
+        point:    hit_pt,
+        normal:   (plane).normal,
+    };
+}
+
+/// Ray vs AABB intersection test (Slab method).
+pub fn ray_intersects_aabb(ray: Ray, box: AABB) -> RaycastHit {
+    let mut tmin = 0.0 - 999999.0;
+    let mut tmax = 999999.0;
+
+    // X axis slab
+    if sqrt((ray).dir.x * (ray).dir.x) < 0.000001 {
+        if (ray).origin.x < (box).min.x { return raycast_hit_none(); }
+        if (ray).origin.x > (box).max.x { return raycast_hit_none(); }
+    } else {
+        let inv_d = 1.0 / (ray).dir.x;
+        let mut t1 = ((box).min.x - (ray).origin.x) * inv_d;
+        let mut t2 = ((box).max.x - (ray).origin.x) * inv_d;
+        if t1 > t2 {
+            let tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+        }
+        if t1 > tmin { tmin = t1; }
+        if t2 < tmax { tmax = t2; }
+        if tmin > tmax { return raycast_hit_none(); }
+    }
+
+    // Y axis slab
+    if sqrt((ray).dir.y * (ray).dir.y) < 0.000001 {
+        if (ray).origin.y < (box).min.y { return raycast_hit_none(); }
+        if (ray).origin.y > (box).max.y { return raycast_hit_none(); }
+    } else {
+        let inv_d = 1.0 / (ray).dir.y;
+        let mut t1 = ((box).min.y - (ray).origin.y) * inv_d;
+        let mut t2 = ((box).max.y - (ray).origin.y) * inv_d;
+        if t1 > t2 {
+            let tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+        }
+        if t1 > tmin { tmin = t1; }
+        if t2 < tmax { tmax = t2; }
+        if tmin > tmax { return raycast_hit_none(); }
+    }
+
+    // Z axis slab
+    if sqrt((ray).dir.z * (ray).dir.z) < 0.000001 {
+        if (ray).origin.z < (box).min.z { return raycast_hit_none(); }
+        if (ray).origin.z > (box).max.z { return raycast_hit_none(); }
+    } else {
+        let inv_d = 1.0 / (ray).dir.z;
+        let mut t1 = ((box).min.z - (ray).origin.z) * inv_d;
+        let mut t2 = ((box).max.z - (ray).origin.z) * inv_d;
+        if t1 > t2 {
+            let tmp = t1;
+            t1 = t2;
+            t2 = tmp;
+        }
+        if t1 > tmin { tmin = t1; }
+        if t2 < tmax { tmax = t2; }
+        if tmin > tmax { return raycast_hit_none(); }
+    }
+
+    if tmin < 0.0 {
+        if tmax < 0.0 {
+            return raycast_hit_none();
+        }
+        tmin = tmax;
+    }
+
+    let hit_pt = vec3_add((ray).origin, vec3_scale((ray).dir, tmin));
+    let box_c = Vec3 {
+        x: ((box).min.x + (box).max.x) * 0.5,
+        y: ((box).min.y + (box).max.y) * 0.5,
+        z: ((box).min.z + (box).max.z) * 0.5,
+    };
+    let hit_norm = vec3_normalize(vec3_sub(hit_pt, box_c));
+
+    return RaycastHit {
+        hit:      1,
+        distance: tmin,
+        point:    hit_pt,
+        normal:   hit_norm,
+    };
+}
+
+/// Ray vs Triangle (Moller-Trumbore intersection algorithm).
+pub fn ray_intersects_triangle(ray: Ray, v0: Vec3, v1: Vec3, v2: Vec3) -> RaycastHit {
+    let edge1 = vec3_sub(v1, v0);
+    let edge2 = vec3_sub(v2, v0);
+    let h = vec3_cross((ray).dir, edge2);
+    let a = vec3_dot(edge1, h);
+
+    let abs_a = sqrt(a * a);
+    if abs_a < 0.000001 {
+        return raycast_hit_none();
+    }
+
+    let f = 1.0 / a;
+    let s_vec = vec3_sub((ray).origin, v0);
+    let u_bary = f * vec3_dot(s_vec, h);
+
+    if u_bary < 0.0 { return raycast_hit_none(); }
+    if u_bary > 1.0 { return raycast_hit_none(); }
+
+    let q = vec3_cross(s_vec, edge1);
+    let v_bary = f * vec3_dot((ray).dir, q);
+
+    if v_bary < 0.0 { return raycast_hit_none(); }
+    if (u_bary + v_bary) > 1.0 { return raycast_hit_none(); }
+
+    let t = f * vec3_dot(edge2, q);
+    if t < 0.000001 {
+        return raycast_hit_none();
+    }
+
+    let hit_pt = vec3_add((ray).origin, vec3_scale((ray).dir, t));
+    let hit_norm = vec3_normalize(vec3_cross(edge1, edge2));
+
+    return RaycastHit {
+        hit:      1,
+        distance: t,
+        point:    hit_pt,
+        normal:   hit_norm,
+    };
+}
+
+// -------------------------------------------------------------------
+// Contact response helper
+// -------------------------------------------------------------------
+
+/// Compute 1D linear impulse scalar along normal for two colliding masses.
+pub fn resolve_contact_impulse(v1: Vec3, v2: Vec3, m1: Float, m2: Float, normal: Vec3, restitution: Float) -> Float {
+    let rel_v = vec3_sub(v1, v2);
+    let v_along_normal = vec3_dot(rel_v, normal);
+
+    if v_along_normal > 0.0 {
+        return 0.0;
+    }
+
+    let mut inv_m1 = 0.0;
+    if m1 > 0.000001 {
+        inv_m1 = 1.0 / m1;
+    }
+    let mut inv_m2 = 0.0;
+    if m2 > 0.000001 {
+        inv_m2 = 1.0 / m2;
+    }
+
+    let inv_m_sum = inv_m1 + inv_m2;
+    if inv_m_sum < 0.000001 {
+        return 0.0;
+    }
+
+    let j = (0.0 - (1.0 + restitution)) * v_along_normal / inv_m_sum;
+    return j;
+}

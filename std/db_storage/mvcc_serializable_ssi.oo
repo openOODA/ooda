@@ -1,0 +1,124 @@
+// # MVCC Serializable Snapshot Isolation (SSI) & Anti-Dependency Graph
+//
+// Logline: Implements Serializable Snapshot Isolation (SSI) using SIREAD lock tracking and rw-antidependency cycle detection.
+//
+// Setup: Prevents write skew and phantom anomalies without pessimistic locking by detecting dangerous dependency structures.
+//
+// Beats:
+//   1. Define SiReadLock, RwAntiDependency, and SsiTracker structures.
+//   2. Implement SIREAD predicate and tuple lock registration during snapshot reads.
+//   3. Implement rw-antidependency edge creation and pivot transaction abort selection.
+
+pub type SiReadLock = struct {
+    tx_id: Int,
+    row_id: Int,
+    is_active: Bool,
+};
+
+pub type RwAntiDependency = struct {
+    reader_tx: Int,
+    writer_tx: Int,
+    row_id: Int,
+};
+
+pub type SsiTracker = struct {
+    siread_locks: List[SiReadLock],
+    in_conflicts: List[RwAntiDependency],
+    out_conflicts: List[RwAntiDependency],
+    aborted_tx_count: Int,
+};
+
+pub fn ssi_tracker_new() -> SsiTracker {
+    let empty_locks: List[SiReadLock] = list_new();
+    let empty_in: List[RwAntiDependency] = list_new();
+    let empty_out: List[RwAntiDependency] = list_new();
+
+    return SsiTracker {
+        siread_locks: empty_locks,
+        in_conflicts: empty_in,
+        out_conflicts: empty_out,
+        aborted_tx_count: 0,
+    };
+}
+
+pub fn ssi_acquire_siread_lock(
+    tracker: SsiTracker,
+    tx: Int,
+    rid: Int
+) -> SsiTracker {
+    let lock: SiReadLock = SiReadLock {
+        tx_id: tx,
+        row_id: rid,
+        is_active: true,
+    };
+    let updated_locks: List[SiReadLock] = list_push((tracker).siread_locks, lock);
+
+    return SsiTracker {
+        siread_locks: updated_locks,
+        in_conflicts: (tracker).in_conflicts,
+        out_conflicts: (tracker).out_conflicts,
+        aborted_tx_count: (tracker).aborted_tx_count,
+    };
+}
+
+pub fn ssi_check_and_add_writer(
+    tracker: SsiTracker,
+    writer_tx: Int,
+    written_row_id: Int
+) -> SsiTracker {
+    let locks: List[SiReadLock] = (tracker).siread_locks;
+    let n: Int = list_len(locks);
+    let mut updated_in: List[RwAntiDependency] = (tracker).in_conflicts;
+    let mut updated_out: List[RwAntiDependency] = (tracker).out_conflicts;
+
+    let mut i: Int = 0;
+    while i < n {
+        let lk: SiReadLock = list_get(locks, i);
+        if (lk).row_id == written_row_id && (lk).tx_id != writer_tx {
+            let edge: RwAntiDependency = RwAntiDependency {
+                reader_tx: (lk).tx_id,
+                writer_tx: writer_tx,
+                row_id: written_row_id,
+            };
+            updated_in = list_push(updated_in, edge);
+            updated_out = list_push(updated_out, edge);
+        }
+        i = i + 1;
+    }
+
+    return SsiTracker {
+        siread_locks: (tracker).siread_locks,
+        in_conflicts: updated_in,
+        out_conflicts: updated_out,
+        aborted_tx_count: (tracker).aborted_tx_count,
+    };
+}
+
+pub fn ssi_is_dangerous_structure(tracker: SsiTracker, tx: Int) -> Bool {
+    let in_edges: List[RwAntiDependency] = (tracker).in_conflicts;
+    let out_edges: List[RwAntiDependency] = (tracker).out_conflicts;
+    let mut has_in: Bool = false;
+    let mut has_out: Bool = false;
+
+    let n_in: Int = list_len(in_edges);
+    let mut i: Int = 0;
+    while i < n_in {
+        let e: RwAntiDependency = list_get(in_edges, i);
+        if (e).writer_tx == tx {
+            has_in = true;
+        }
+        i = i + 1;
+    }
+
+    let n_out: Int = list_len(out_edges);
+    let mut j: Int = 0;
+    while j < n_out {
+        let e2: RwAntiDependency = list_get(out_edges, j);
+        if (e2).reader_tx == tx {
+            has_out = true;
+        }
+        j = j + 1;
+    }
+
+    return has_in && has_out;
+}

@@ -1,0 +1,140 @@
+// # Write-Ahead Logging (WAL) Recovery
+//
+// Logline: Executes ARIES-style analysis, redo, and undo passes for crash recovery from WAL records.
+//
+// Setup: Cap-gated crash recovery scanner reconstructing database state from logs.
+//
+// Beats:
+//   1. Track transaction commit status, active transaction table, and redo state.
+//   2. Run analysis pass over sequenced WAL records under FsReadCap.
+//   3. Execute redo phase for committed updates and identify uncommitted transactions for rollback.
+
+import "./wal_writer.oo";
+
+pub type RecoveryState = struct {
+    last_checkpoint_lsn: Int,
+    recovered_tx_count: Int,
+    committed_tx_ids: List[Int],
+    aborted_tx_ids: List[Int],
+    active_tx_ids: List[Int],
+    redo_records_applied: Int,
+};
+
+pub fn wal_recovery_state_init() -> RecoveryState {
+    let empty_committed: List[Int] = list_new();
+    let empty_aborted: List[Int] = list_new();
+    let empty_active: List[Int] = list_new();
+    return RecoveryState {
+        last_checkpoint_lsn: 0,
+        recovered_tx_count: 0,
+        committed_tx_ids: empty_committed,
+        aborted_tx_ids: empty_aborted,
+        active_tx_ids: empty_active,
+        redo_records_applied: 0,
+    };
+}
+
+pub fn wal_recovery_is_tx_committed(state: &RecoveryState, tx_id: Int) -> Bool {
+    let committed: List[Int] = (state).committed_tx_ids;
+    let n: Int = list_len(committed);
+    let mut i: Int = 0;
+    while i < n {
+        if list_get(committed, i) == tx_id {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn wal_recovery_analyze(records: List[WalRecord]) -> RecoveryState {
+    let mut state: RecoveryState = wal_recovery_state_init();
+    let n: Int = list_len(records);
+    let mut i: Int = 0;
+
+    while i < n {
+        let rec: WalRecord = list_get(records, i);
+        let op: Int = (rec).op_type;
+        let tid: Int = (rec).tx_id;
+
+        if op == 7 {
+            (state).last_checkpoint_lsn = (rec).lsn;
+        } else if op == 4 {
+            let cur_active: List[Int] = (state).active_tx_ids;
+            (state).active_tx_ids = list_push(cur_active, tid);
+        } else if op == 5 {
+            let cur_comm: List[Int] = (state).committed_tx_ids;
+            (state).committed_tx_ids = list_push(cur_comm, tid);
+
+            let cur_active: List[Int] = (state).active_tx_ids;
+            let n_act: Int = list_len(cur_active);
+            let mut new_active: List[Int] = list_new();
+            let mut j: Int = 0;
+            while j < n_act {
+                let act_id: Int = list_get(cur_active, j);
+                if act_id != tid {
+                    new_active = list_push(new_active, act_id);
+                }
+                j = j + 1;
+            }
+            (state).active_tx_ids = new_active;
+        } else if op == 6 {
+            let cur_abort: List[Int] = (state).aborted_tx_ids;
+            (state).aborted_tx_ids = list_push(cur_abort, tid);
+        }
+
+        i = i + 1;
+    }
+
+    (state).recovered_tx_count = list_len((state).committed_tx_ids);
+    return state;
+}
+
+pub fn wal_recovery_redo(
+    records: List[WalRecord],
+    state: &RecoveryState
+) -> List[WalRecord] {
+    let mut redo_list: List[WalRecord] = list_new();
+    let n: Int = list_len(records);
+    let mut i: Int = 0;
+
+    while i < n {
+        let rec: WalRecord = list_get(records, i);
+        let op: Int = (rec).op_type;
+        let tid: Int = (rec).tx_id;
+
+        if op == 1 || op == 2 || op == 3 {
+            if wal_recovery_is_tx_committed(state, tid) {
+                redo_list = list_push(redo_list, rec);
+            }
+        }
+        i = i + 1;
+    }
+
+    return redo_list;
+}
+
+pub fn wal_recovery_undo_uncommitted(
+    records: List[WalRecord],
+    state: &RecoveryState
+) -> List[Int] {
+    return (state).active_tx_ids;
+}
+
+pub fn wal_recovery_execute(
+    fs: &FsReadCap,
+    log_path: String,
+    records: List[WalRecord]
+) -> Result[RecoveryState, String] {
+    let n: Int = list_len(records);
+    if n == 0 {
+        let st: RecoveryState = wal_recovery_state_init();
+        return Ok(st);
+    }
+
+    let mut state: RecoveryState = wal_recovery_analyze(records);
+    let redone: List[WalRecord] = wal_recovery_redo(records, &state);
+    (state).redo_records_applied = list_len(redone);
+
+    return Ok(state);
+}

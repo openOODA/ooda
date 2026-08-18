@@ -1,0 +1,204 @@
+// # Grid Frequency Governor & Regulation Control
+//
+// Logline: Executes speed droop governor actuation, automatic generation control, and load shedding stages.
+//
+// Setup: Pure frequency control algorithms importing by-value inertia types.
+//
+// Beats:
+//   1. Calculate primary droop frequency response and active power adjustments.
+//   2. Step governor mechanical valve actuation over simulation time.
+//   3. Compute tie-line Area Control Error for secondary AGC regulation.
+//   4. Integrate PI commands for secondary frequency restoration.
+//   5. Evaluate multi-stage under-frequency load shedding (UFLS) requirements.
+
+import "./freq_inertia.oo";
+
+type GovernorState = struct {
+    droop_pct: Float,
+    deadband_hz: Float,
+    p_nominal_mw: Float,
+    p_setpoint_mw: Float,
+    p_min_mw: Float,
+    p_max_mw: Float,
+    time_constant_sec: Float,
+    p_actual_mw: Float,
+    valve_position: Float
+};
+
+type AreaControlError = struct {
+    area_id: Int,
+    tie_line_mismatch_mw: Float,
+    frequency_bias_mw_per_hz: Float,
+    ace_mw: Float,
+    integral_gain_ki: Float,
+    agc_command_mw: Float
+};
+
+type UnderFrequencyLoadShedding = struct {
+    stage_1_trigger_hz: Float,
+    stage_2_trigger_hz: Float,
+    stage_3_trigger_hz: Float,
+    shed_pct_stage_1: Float,
+    shed_pct_stage_2: Float,
+    shed_pct_stage_3: Float,
+    active_stage: Int,
+    total_load_shed_mw: Float
+};
+
+pub fn governor_state_new(droop_pct: Float, deadband_hz: Float, p_nominal_mw: Float, p_min_mw: Float, p_max_mw: Float) -> GovernorState {
+    return GovernorState {
+        droop_pct: droop_pct,
+        deadband_hz: deadband_hz,
+        p_nominal_mw: p_nominal_mw,
+        p_setpoint_mw: p_nominal_mw,
+        p_min_mw: p_min_mw,
+        p_max_mw: p_max_mw,
+        time_constant_sec: 5.0,
+        p_actual_mw: p_nominal_mw,
+        valve_position: 1.0
+    };
+}
+
+/// Droop: R = droop_pct/100; Delta_P = -(P_nominal / (R * f0)) * delta_f_eff
+pub fn governor_state_calc_droop_delta_p(gov: GovernorState, freq: GridFrequency) -> Float {
+    let dev: Float = freq.delta_f;
+    let abs_dev: Float = freq_math_abs(dev);
+    let db: Float = gov.deadband_hz;
+    if abs_dev <= db {
+        return 0.0;
+    }
+    let mut eff_dev: Float = 0.0;
+    if dev > db {
+        eff_dev = dev - db;
+    } else {
+        eff_dev = dev + db;
+    }
+    let r_fraction: Float = gov.droop_pct / 100.0;
+    let f0: Float = freq.nominal_hz;
+    if r_fraction <= 0.0 {
+        return 0.0;
+    }
+    if f0 <= 0.0 {
+        return 0.0;
+    }
+    let gain_mw_per_hz: Float = gov.p_nominal_mw / (r_fraction * f0);
+    return 0.0 - (gain_mw_per_hz * eff_dev);
+}
+
+pub fn governor_state_step_actuation(gov: GovernorState, freq: GridFrequency, dt_sec: Float) -> GovernorState {
+    let delta_p_droop: Float = governor_state_calc_droop_delta_p(gov, freq);
+    let target_power: Float = gov.p_setpoint_mw + delta_p_droop;
+    let clamped_target: Float = freq_math_clamp(target_power, gov.p_min_mw, gov.p_max_mw);
+    let t_gov: Float = gov.time_constant_sec;
+    let mut new_p: Float = gov.p_actual_mw;
+    if dt_sec > 0.0 {
+        if t_gov > 0.0 {
+            let dp: Float = (clamped_target - gov.p_actual_mw) / t_gov;
+            new_p = gov.p_actual_mw + (dp * dt_sec);
+        } else {
+            new_p = clamped_target;
+        }
+    } else {
+        new_p = clamped_target;
+    }
+    new_p = freq_math_clamp(new_p, gov.p_min_mw, gov.p_max_mw);
+    let p_range: Float = gov.p_max_mw - gov.p_min_mw;
+    let mut valve: Float = gov.valve_position;
+    if p_range > 0.0 {
+        valve = (new_p - gov.p_min_mw) / p_range;
+    }
+    return GovernorState {
+        droop_pct: gov.droop_pct,
+        deadband_hz: gov.deadband_hz,
+        p_nominal_mw: gov.p_nominal_mw,
+        p_setpoint_mw: gov.p_setpoint_mw,
+        p_min_mw: gov.p_min_mw,
+        p_max_mw: gov.p_max_mw,
+        time_constant_sec: gov.time_constant_sec,
+        p_actual_mw: new_p,
+        valve_position: valve
+    };
+}
+
+pub fn area_control_error_new(area_id: Int, bias_mw_per_hz: Float, ki: Float) -> AreaControlError {
+    return AreaControlError {
+        area_id: area_id,
+        tie_line_mismatch_mw: 0.0,
+        frequency_bias_mw_per_hz: bias_mw_per_hz,
+        ace_mw: 0.0,
+        integral_gain_ki: ki,
+        agc_command_mw: 0.0
+    };
+}
+
+/// ACE = Tie_Mismatch + B * delta_f
+pub fn area_control_error_calculate(ace: AreaControlError, tie_mismatch_mw: Float, freq: GridFrequency) -> AreaControlError {
+    let ace_val: Float = tie_mismatch_mw + (ace.frequency_bias_mw_per_hz * freq.delta_f);
+    return AreaControlError {
+        area_id: ace.area_id,
+        tie_line_mismatch_mw: tie_mismatch_mw,
+        frequency_bias_mw_per_hz: ace.frequency_bias_mw_per_hz,
+        ace_mw: ace_val,
+        integral_gain_ki: ace.integral_gain_ki,
+        agc_command_mw: ace.agc_command_mw
+    };
+}
+
+pub fn area_control_error_step_agc(ace: AreaControlError, dt_sec: Float) -> AreaControlError {
+    if dt_sec <= 0.0 {
+        return ace;
+    }
+    let delta_cmd: Float = 0.0 - (ace.integral_gain_ki * ace.ace_mw * dt_sec);
+    return AreaControlError {
+        area_id: ace.area_id,
+        tie_line_mismatch_mw: ace.tie_line_mismatch_mw,
+        frequency_bias_mw_per_hz: ace.frequency_bias_mw_per_hz,
+        ace_mw: ace.ace_mw,
+        integral_gain_ki: ace.integral_gain_ki,
+        agc_command_mw: ace.agc_command_mw + delta_cmd
+    };
+}
+
+pub fn ufls_new(s1: Float, s2: Float, s3: Float, p1: Float, p2: Float, p3: Float) -> UnderFrequencyLoadShedding {
+    return UnderFrequencyLoadShedding {
+        stage_1_trigger_hz: s1,
+        stage_2_trigger_hz: s2,
+        stage_3_trigger_hz: s3,
+        shed_pct_stage_1: p1,
+        shed_pct_stage_2: p2,
+        shed_pct_stage_3: p3,
+        active_stage: 0,
+        total_load_shed_mw: 0.0
+    };
+}
+
+pub fn ufls_evaluate(ufls: UnderFrequencyLoadShedding, freq: GridFrequency, total_grid_load_mw: Float) -> UnderFrequencyLoadShedding {
+    let cur_hz: Float = freq.current_hz;
+    let mut stage: Int = 0;
+    let mut shed_pct: Float = 0.0;
+    if cur_hz <= ufls.stage_3_trigger_hz {
+        stage = 3;
+        shed_pct = ufls.shed_pct_stage_1 + ufls.shed_pct_stage_2 + ufls.shed_pct_stage_3;
+    } else {
+        if cur_hz <= ufls.stage_2_trigger_hz {
+            stage = 2;
+            shed_pct = ufls.shed_pct_stage_1 + ufls.shed_pct_stage_2;
+        } else {
+            if cur_hz <= ufls.stage_1_trigger_hz {
+                stage = 1;
+                shed_pct = ufls.shed_pct_stage_1;
+            }
+        }
+    }
+    let shed_mw: Float = (total_grid_load_mw * shed_pct) / 100.0;
+    return UnderFrequencyLoadShedding {
+        stage_1_trigger_hz: ufls.stage_1_trigger_hz,
+        stage_2_trigger_hz: ufls.stage_2_trigger_hz,
+        stage_3_trigger_hz: ufls.stage_3_trigger_hz,
+        shed_pct_stage_1: ufls.shed_pct_stage_1,
+        shed_pct_stage_2: ufls.shed_pct_stage_2,
+        shed_pct_stage_3: ufls.shed_pct_stage_3,
+        active_stage: stage,
+        total_load_shed_mw: shed_mw
+    };
+}

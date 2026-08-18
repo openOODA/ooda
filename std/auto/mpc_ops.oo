@@ -1,0 +1,238 @@
+// # MPC Kinematic Bicycle Model & Cost Operations
+//
+// Logline: Evaluates kinematic bicycle model updates, tracking error costs, and control penalty functions.
+//
+// Setup: MPC operational kinematics importing mpc_types.oo.
+//
+// Beats:
+//   1. Implement angle clamping, normalization, and mathematical helpers.
+//   2. Propagate kinematic bicycle model states with steering and acceleration inputs.
+//   3. Compute quadratic trajectory tracking error penalties and control effort costs.
+
+import "mpc_types.oo";
+
+pub fn mpc_pi() -> Float {
+    return 3.14159265358979323846;
+}
+
+pub fn mpc_abs(x: Float) -> Float {
+    if x < 0.0 {
+        return 0.0 - x;
+    }
+    return x;
+}
+
+pub fn mpc_clamp(val: Float, min_v: Float, max_v: Float) -> Float {
+    if val < min_v {
+        return min_v;
+    }
+    if val > max_v {
+        return max_v;
+    }
+    return val;
+}
+
+pub fn mpc_min(a: Float, b: Float) -> Float {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+pub fn mpc_max(a: Float, b: Float) -> Float {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+pub fn math_atan_unit(x: Float) -> Float {
+    let x2: Float = x * x;
+    let num: Float = x * (1.0 + (x2 * 0.280872));
+    let den: Float = 1.0 + (x2 * 0.614397);
+    return num / den;
+}
+
+pub fn math_atan(z: Float) -> Float {
+    let abs_z: Float = mpc_abs(z);
+    if abs_z <= 1.0 {
+        let res_atan: Float = math_atan_unit(abs_z);
+        if z < 0.0 {
+            return 0.0 - res_atan;
+        }
+        return res_atan;
+    }
+    let half_pi: Float = mpc_pi() / 2.0;
+    let res_atan: Float = half_pi - math_atan_unit(1.0 / abs_z);
+    if z < 0.0 {
+        return 0.0 - res_atan;
+        }
+    return res_atan;
+}
+
+pub fn math_atan2(y_val: Float, x_val: Float) -> Float {
+    let pi_val: Float = mpc_pi();
+    if x_val > 0.0 {
+        return math_atan(y_val / x_val);
+    }
+    if x_val < 0.0 {
+        if y_val >= 0.0 {
+            return math_atan(y_val / x_val) + pi_val;
+        }
+        return math_atan(y_val / x_val) - pi_val;
+    }
+    if y_val > 0.0 {
+        return pi_val / 2.0;
+    }
+    if y_val < 0.0 {
+        return 0.0 - (pi_val / 2.0);
+    }
+    return 0.0;
+}
+
+pub fn normalize_angle(angle: Float) -> Float {
+    let pi_val: Float = mpc_pi();
+    let two_pi: Float = 2.0 * pi_val;
+    let mut angle_val: Float = angle;
+    while angle_val > pi_val {
+        angle_val = angle_val - two_pi;
+    }
+    let neg_pi: Float = 0.0 - pi_val;
+    while angle_val < neg_pi {
+        angle_val = angle_val + two_pi;
+    }
+    return angle_val;
+}
+
+pub fn deg2rad(deg: Float) -> Float {
+    return (deg * mpc_pi()) / 180.0;
+}
+
+pub fn rad2deg(rad: Float) -> Float {
+    return (rad * 180.0) / mpc_pi();
+}
+
+pub fn mpc_clamp_control_inputs(steer: Float, accel: Float, constraints: MpcConstraints) -> ControlCommand {
+    let max_s: Float = (constraints).max_steering_angle;
+    let neg_s: Float = 0.0 - max_s;
+    let clamped_steer: Float = mpc_clamp(steer, neg_s, max_s);
+
+    let min_a: Float = (constraints).min_accel;
+    let max_a: Float = (constraints).max_accel;
+    let clamped_accel: Float = mpc_clamp(accel, min_a, max_a);
+
+    return ControlCommand {
+        steering_angle: clamped_steer,
+        acceleration: clamped_accel,
+        target_speed: (constraints).max_speed,
+        is_valid: true,
+    };
+}
+
+pub fn mpc_kinematic_bicycle_step(state: ControlState, steer: Float, accel: Float, constraints: MpcConstraints, dt: Float) -> ControlState {
+    let cmd: ControlCommand = mpc_clamp_control_inputs(steer, accel, constraints);
+    let delta: Float = (cmd).steering_angle;
+    let a: Float = (cmd).acceleration;
+
+    let x: Float = (state).x;
+    let y: Float = (state).y;
+    let yaw: Float = (state).yaw;
+    let v: Float = (state).velocity;
+    let L: Float = (constraints).wheelbase_m;
+
+    let mut safe_L: Float = L;
+    if safe_L <= 0.1 {
+        safe_L = 2.7;
+    }
+
+    let cos_yaw: Float = cos(yaw);
+    let sin_yaw: Float = sin(yaw);
+
+    let cos_d: Float = cos(delta);
+    let mut tan_d: Float = 0.0;
+    if mpc_abs(cos_d) < 0.000001 {
+        if sin(delta) >= 0.0 {
+            tan_d = 10000.0;
+        } else {
+            tan_d = 0.0 - 10000.0;
+        }
+    } else {
+        tan_d = sin(delta) / cos_d;
+    }
+
+    let dx: Float = (v * cos_yaw) * dt;
+    let dy: Float = (v * sin_yaw) * dt;
+    let dyaw: Float = ((v / safe_L) * tan_d) * dt;
+    let dv: Float = a * dt;
+
+    let next_v: Float = mpc_clamp(v + dv, (constraints).min_speed, (constraints).max_speed);
+    let next_yaw: Float = normalize_angle(yaw + dyaw);
+
+    return ControlState {
+        x: x + dx,
+        y: y + dy,
+        yaw: next_yaw,
+        velocity: next_v,
+        steering_angle: delta,
+        acceleration: a,
+        timestamp_s: (state).timestamp_s + dt,
+        valid: (state).valid,
+    };
+}
+
+pub fn mpc_distance_to_target(state: ControlState, target: TrajectoryTarget) -> Float {
+    let dx: Float = (state).x - (target).x;
+    let dy: Float = (state).y - (target).y;
+    return sqrt((dx * dx) + (dy * dy));
+}
+
+pub fn mpc_heading_error(state: ControlState, target: TrajectoryTarget) -> Float {
+    return normalize_angle((state).yaw - (target).target_yaw);
+}
+
+pub fn mpc_evaluate_step_cost(state: ControlState, target: TrajectoryTarget, cmd: ControlCommand, prev_cmd: ControlCommand, weights: MpcWeights) -> Float {
+    let dx: Float = (state).x - (target).x;
+    let dy: Float = (state).y - (target).y;
+    let dyaw: Float = mpc_heading_error(state, target);
+    let dv: Float = (state).velocity - (target).target_speed;
+
+    let steer: Float = (cmd).steering_angle;
+    let accel: Float = (cmd).acceleration;
+    let dsteer: Float = steer - (prev_cmd).steering_angle;
+    let daccel: Float = accel - (prev_cmd).acceleration;
+
+    let cost_pos: Float = ((dx * dx) * (weights).pos_x) + ((dy * dy) * (weights).pos_y);
+    let cost_yaw: Float = (dyaw * dyaw) * (weights).yaw;
+    let cost_speed: Float = (dv * dv) * (weights).speed;
+
+    let cost_actuation: Float = ((steer * steer) * (weights).steer_angle) + ((accel * accel) * (weights).acceleration);
+    let cost_rates: Float = ((dsteer * dsteer) * (weights).steer_rate) + ((daccel * daccel) * (weights).accel_rate);
+
+    return (cost_pos + cost_yaw + cost_speed) + (cost_actuation + cost_rates);
+}
+
+pub fn mpc_evaluate_horizon_cost(initial_state: ControlState, target: TrajectoryTarget, steer: Float, accel: Float, horizon: MpcHorizon, constraints: MpcConstraints, weights: MpcWeights) -> Float {
+    let mut current: ControlState = initial_state;
+    let mut total_cost: Float = 0.0;
+    let mut prev_cmd: ControlCommand = control_command_zero();
+    let cmd: ControlCommand = mpc_clamp_control_inputs(steer, accel, constraints);
+
+    let dt: Float = (horizon).dt_s;
+    let mut step: Int = 0;
+    let max_steps: Int = (horizon).steps;
+
+    while step < max_steps {
+        let step_cost: Float = mpc_evaluate_step_cost(current, target, cmd, prev_cmd, weights);
+        total_cost = total_cost + step_cost;
+        prev_cmd = cmd;
+        current = mpc_kinematic_bicycle_step(current, (cmd).steering_angle, (cmd).acceleration, constraints, dt);
+        step = step + 1;
+    }
+
+    let term_dx: Float = (current).x - (target).x;
+    let term_dy: Float = (current).y - (target).y;
+    let term_dyaw: Float = mpc_heading_error(current, target);
+    let terminal_cost: Float = (((term_dx * term_dx) + (term_dy * term_dy)) * (weights).terminal_pos) + ((term_dyaw * term_dyaw) * (weights).terminal_yaw);
+
+    return total_cost + terminal_cost;
+}

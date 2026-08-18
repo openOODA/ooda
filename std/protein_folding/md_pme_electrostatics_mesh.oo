@@ -1,0 +1,82 @@
+// # Particle Mesh Ewald (PME) Electrostatics & Charge Grid
+//
+// Logline: Implements Particle Mesh Ewald electrostatics with B-spline charge assignment on reciprocal 3D Fourier meshes.
+//
+// Setup: Fast long-range electrostatics solver decomposing Coulomb potential into real-space screening and reciprocal grid FFT sums.
+//
+// Beats:
+//   1. Define PmeGridParams and PmeChargeAssignment data structures.
+//   2. Calculate 4th-order cardinal B-spline interpolation weights for continuous charge mapping.
+//   3. Compute real-space complementary error function screening and reciprocal space grid energy.
+
+pub type PmeGridParams = struct {
+    grid_dim_x: Int,
+    grid_dim_y: Int,
+    grid_dim_z: Int,
+    box_size_x: Float,
+    box_size_y: Float,
+    box_size_z: Float,
+    ewald_alpha_inv_a: Float,
+    spline_order: Int, // Typically 4 (cubic B-spline)
+};
+
+pub type PmeBsplineWeight4 = struct {
+    w0: Float,
+    w1: Float,
+    w2: Float,
+    w3: Float,
+};
+
+pub type PmeEnergyPartition = struct {
+    real_space_energy_kcal: Float,
+    reciprocal_energy_kcal: Float,
+    self_energy_kcal: Float,
+    total_coulomb_energy_kcal: Float,
+};
+
+pub fn pme_bspline_4th_order(u: Float) -> PmeBsplineWeight4 {
+    // 4th-order B-spline basis functions for u in [0, 1]
+    let u2 = u * u;
+    let u3 = u2 * u;
+
+    let w0 = (1.0 / 6.0) * (1.0 - u) * (1.0 - u) * (1.0 - u);
+    let w1 = (1.0 / 6.0) * ((3.0 * u3) - (6.0 * u2) + 4.0);
+    let w2 = (1.0 / 6.0) * ((-3.0 * u3) + (3.0 * u2) + (3.0 * u) + 1.0);
+    let w3 = (1.0 / 6.0) * u3;
+
+    return PmeBsplineWeight4 { w0: w0, w1: w1, w2: w2, w3: w3 };
+}
+
+pub fn pme_calc_self_energy(total_charge_sq_sum: Float, alpha: Float) -> Float {
+    // E_self = - (alpha / sqrt(pi)) * sum(q_i^2) * f_coulomb
+    let f_coulomb: Float = 332.0637;
+    let sqrt_pi: Float = 1.77245385;
+    let factor = alpha / sqrt_pi;
+    return -1.0 * factor * total_charge_sq_sum * f_coulomb;
+}
+
+pub fn pme_erfc_approx(x: Float) -> Float {
+    // Complementary error function erfc(x) Chebyshev polynomial approximation
+    if x < 0.0 { return 2.0 - pme_erfc_approx(-x); }
+    if x > 5.0 { return 0.0; }
+
+    let t = 1.0 / (1.0 + (0.3275911 * x));
+    let t2 = t * t;
+    let t3 = t2 * t;
+    let t4 = t3 * t;
+    let t5 = t4 * t;
+
+    let poly = (0.254829592 * t) - (0.284496736 * t2) + (1.421413741 * t3) - (1.453152027 * t4) + (1.061405429 * t5);
+    // exp(-x^2) approximation
+    let x2 = x * x;
+    let exp_term = 1.0 / (1.0 + x2 + (0.5 * x2 * x2));
+
+    return poly * exp_term;
+}
+
+pub fn pme_real_space_pair(q1: Float, q2: Float, r: Float, alpha: Float) -> Float {
+    if r < 0.1 { return 0.0; }
+    let erfc_val = pme_erfc_approx(alpha * r);
+    let f_coulomb: Float = 332.0637;
+    return (f_coulomb * q1 * q2 * erfc_val) / r;
+}

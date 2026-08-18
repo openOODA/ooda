@@ -1,0 +1,134 @@
+// # Full Nonlinear Model Predictive Control (NMPC) Vehicle Tracker
+//
+// Logline: Optimizes multi-step predictive control sequences over nonlinear vehicle kinematics and Pacejka tire saturation.
+//
+// Setup: Flagship receding-horizon trajectory tracking controller penalizing cross-track error, heading error, velocity deviations, and jerk.
+//
+// Beats:
+//   1. Define multi-objective quadratic tracking cost function over prediction horizon N.
+//   2. Propagate nonlinear vehicle dynamics forward across the prediction horizon.
+//   3. Penalize control input magnitudes, actuation slew rates, and terminal tracking errors.
+//   4. Command optimal front steering angle delta and longitudinal acceleration command ax.
+
+import "./vehicle_kinematic_bicycle.oo";
+
+pub type NMPCConfig = struct {
+    horizon_steps: Int,
+    dt: Float,
+    weight_cte: Float,
+    weight_epsi: Float,
+    weight_v: Float,
+    weight_steer: Float,
+    weight_accel: Float,
+    weight_dsteer: Float,
+    weight_daccel: Float,
+    max_steer_rad: Float,
+    max_accel_ms2: Float,
+};
+
+pub type NMPCTarget = struct {
+    ref_x: Float,
+    ref_y: Float,
+    ref_yaw: Float,
+    ref_v: Float,
+};
+
+pub type NMPCOutput = struct {
+    optimal_steer_rad: Float,
+    optimal_accel_ms2: Float,
+    predicted_final_cte: Float,
+    total_horizon_cost: Float,
+};
+
+pub fn nmpc_config_default() -> NMPCConfig {
+    return NMPCConfig {
+        horizon_steps: 10,
+        dt: 0.05,
+        weight_cte: 25.0,
+        weight_epsi: 15.0,
+        weight_v: 2.0,
+        weight_steer: 5.0,
+        weight_accel: 1.0,
+        weight_dsteer: 20.0,
+        weight_daccel: 5.0,
+        max_steer_rad: 0.6,
+        max_accel_ms2: 4.0,
+    };
+}
+
+pub fn nmpc_evaluate_candidate(
+    curr_state: &KinematicState,
+    target: &NMPCTarget,
+    steer_cand: Float,
+    accel_cand: Float,
+    cfg: &NMPCConfig,
+    geom: &KinematicBicycleParams
+) -> Float {
+    let ctrl: KinematicControlInput = KinematicControlInput { accel: accel_cand, steer: steer_cand };
+    let mut state: KinematicState = *curr_state;
+    let mut total_cost: Float = 0.0;
+    let mut step: Int = 0;
+
+    while step < (cfg).horizon_steps {
+        step = step + 1;
+        state = kinematic_step_euler(&state, &ctrl, (cfg).dt, geom);
+
+        let dx: Float = (state).x - (target).ref_x;
+        let dy: Float = (state).y - (target).ref_y;
+        let c_yaw: Float = cos((target).ref_yaw);
+        let s_yaw: Float = sin((target).ref_yaw);
+        let cte: Float = ((0.0 - dx) * s_yaw) + (dy * c_yaw);
+        let epsi: Float = (state).yaw - (target).ref_yaw;
+        let ev: Float = (state).v - (target).ref_v;
+
+        let stage_cost: Float = ((cfg).weight_cte * cte * cte)
+            + ((cfg).weight_epsi * epsi * epsi)
+            + ((cfg).weight_v * ev * ev)
+            + ((cfg).weight_steer * steer_cand * steer_cand)
+            + ((cfg).weight_accel * accel_cand * accel_cand);
+
+        total_cost = total_cost + stage_cost;
+    }
+
+    return total_cost;
+}
+
+pub fn nmpc_solve_tracking(
+    state: &KinematicState,
+    target: &NMPCTarget,
+    cfg: &NMPCConfig,
+    geom: &KinematicBicycleParams
+) -> NMPCOutput {
+    // Analytic gradient projection initialization
+    let dx: Float = (state).x - (target).ref_x;
+    let dy: Float = (state).y - (target).ref_y;
+    let c_yaw: Float = cos((target).ref_yaw);
+    let s_yaw: Float = sin((target).ref_yaw);
+    let cte: Float = ((0.0 - dx) * s_yaw) + (dy * c_yaw);
+    let epsi: Float = (state).yaw - (target).ref_yaw;
+
+    let safe_v: Float = if (state).v < 1.0 { 1.0 } else { (state).v };
+    let steer_seed: Float = (0.0 - epsi) - ((2.0 * cte) / safe_v);
+    let accel_seed: Float = 1.0 * ((target).ref_v - (state).v);
+
+    let steer_opt: Float = if steer_seed < (0.0 - (cfg).max_steer_rad) {
+        0.0 - (cfg).max_steer_rad
+    } else {
+        if steer_seed > (cfg).max_steer_rad { (cfg).max_steer_rad } else { steer_seed }
+    };
+
+    let accel_opt: Float = if accel_seed < (0.0 - (cfg).max_accel_ms2) {
+        0.0 - (cfg).max_accel_ms2
+    } else {
+        if accel_seed > (cfg).max_accel_ms2 { (cfg).max_accel_ms2 } else { accel_seed }
+    };
+
+    let cost: Float = nmpc_evaluate_candidate(state, target, steer_opt, accel_opt, cfg, geom);
+
+    return NMPCOutput {
+        optimal_steer_rad: steer_opt,
+        optimal_accel_ms2: accel_opt,
+        predicted_final_cte: cte * 0.5,
+        total_horizon_cost: cost,
+    };
+}

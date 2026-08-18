@@ -1,0 +1,168 @@
+// # Loosely-Coupled INS / DVL / Depth 12-State EKF Fusion
+//
+// Logline: Fuses high-rate 6-axis IMU strapdown mechanization with DVL bottom-track velocity and pressure depth fixes.
+//
+// Setup: Extended Kalman Filter estimating 3D position, body velocities, gyro biases, and accelerometer drift.
+//
+// Beats:
+//   1. Define 12-state navigation filter structure (pos_ned, vel_body, gyro_bias, accel_bias).
+//   2. Propagate state and diagonal covariance matrices using specific IMU accelerations and angular rates.
+//   3. Perform Kalman measurement update with DVL bottom track body velocities (u, v, w).
+//   4. Perform Kalman measurement update with hydrostatic pressure depth transducer.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+import "./dvb_dead_reckoning_nav.oo";
+
+pub type InsDvlEkfState = struct {
+    pos_x: Float,
+    pos_y: Float,
+    pos_z: Float,
+    vel_u: Float,
+    vel_v: Float,
+    vel_w: Float,
+    gyro_bias_x: Float,
+    gyro_bias_y: Float,
+    gyro_bias_z: Float,
+    accel_bias_x: Float,
+    accel_bias_y: Float,
+    accel_bias_z: Float,
+    var_pos: Float,
+    var_vel: Float,
+    var_bias: Float,
+};
+
+pub type InsDvlEkfNoise = struct {
+    q_accel: Float,
+    q_gyro: Float,
+    q_bias: Float,
+    r_dvl_vel: Float,
+    r_depth: Float,
+};
+
+pub fn ins_dvl_ekf_noise_default() -> InsDvlEkfNoise {
+    return InsDvlEkfNoise {
+        q_accel: 0.05,
+        q_gyro: 0.001,
+        q_bias: 0.0001,
+        r_dvl_vel: 0.0004,
+        r_depth: 0.0025,
+    };
+}
+
+pub fn ins_dvl_ekf_state_init(init_x: Float, init_y: Float, init_z: Float) -> InsDvlEkfState {
+    return InsDvlEkfState {
+        pos_x: init_x,
+        pos_y: init_y,
+        pos_z: init_z,
+        vel_u: 0.0,
+        vel_v: 0.0,
+        vel_w: 0.0,
+        gyro_bias_x: 0.0,
+        gyro_bias_y: 0.0,
+        gyro_bias_z: 0.0,
+        accel_bias_x: 0.0,
+        accel_bias_y: 0.0,
+        accel_bias_z: 0.0,
+        var_pos: 1.0,
+        var_vel: 0.1,
+        var_bias: 0.01,
+    };
+}
+
+pub fn ins_dvl_ekf_predict(
+    state: &InsDvlEkfState,
+    noise: &InsDvlEkfNoise,
+    meas_accel: &Vector3,
+    meas_gyro: &Vector3,
+    pose: &AuvPose,
+    dt: Float
+) -> InsDvlEkfState {
+    // Correct IMU measurements with estimated biases
+    let ax_corr: Float = (meas_accel).x - (state).accel_bias_x;
+    let ay_corr: Float = (meas_accel).y - (state).accel_bias_y;
+    let az_corr: Float = (meas_accel).z - (state).accel_bias_z;
+
+    // Body velocity integration
+    let new_u: Float = (state).vel_u + (ax_corr * dt);
+    let new_v: Float = (state).vel_v + (ay_corr * dt);
+    let new_w: Float = (state).vel_w + (az_corr * dt);
+
+    // Transform body velocity into NED frame for position integration
+    let ned_vel: Vector3 = fossen_body_to_ned_linear_vel(
+        (pose).phi, (pose).theta, (pose).psi,
+        new_u, new_v, new_w
+    );
+
+    let new_x: Float = (state).pos_x + ((ned_vel).x * dt);
+    let new_y: Float = (state).pos_y + ((ned_vel).y * dt);
+    let new_z: Float = (state).pos_z + ((ned_vel).z * dt);
+
+    // Covariance propagation
+    let new_var_vel: Float = (state).var_vel + ((noise).q_accel * dt);
+    let new_var_pos: Float = (state).var_pos + (new_var_vel * dt * dt);
+    let new_var_bias: Float = (state).var_bias + ((noise).q_bias * dt);
+
+    return InsDvlEkfState {
+        pos_x: new_x,
+        pos_y: new_y,
+        pos_z: new_z,
+        vel_u: new_u,
+        vel_v: new_v,
+        vel_w: new_w,
+        gyro_bias_x: (state).gyro_bias_x,
+        gyro_bias_y: (state).gyro_bias_y,
+        gyro_bias_z: (state).gyro_bias_z,
+        accel_bias_x: (state).accel_bias_x,
+        accel_bias_y: (state).accel_bias_y,
+        accel_bias_z: (state).accel_bias_z,
+        var_pos: new_var_pos,
+        var_vel: new_var_vel,
+        var_bias: new_var_bias,
+    };
+}
+
+pub fn ins_dvl_ekf_update_dvl(
+    state: &InsDvlEkfState,
+    noise: &InsDvlEkfNoise,
+    dvl_u: Float,
+    dvl_v: Float,
+    dvl_w: Float
+) -> InsDvlEkfState {
+    let s_innov: Float = (state).var_vel + (noise).r_dvl_vel;
+    let k_gain: Float = (state).var_vel / s_innov;
+
+    let innov_u: Float = dvl_u - (state).vel_u;
+    let innov_v: Float = dvl_v - (state).vel_v;
+    let innov_w: Float = dvl_w - (state).vel_w;
+
+    let upd_u: Float = (state).vel_u + (k_gain * innov_u);
+    let upd_v: Float = (state).vel_v + (k_gain * innov_v);
+    let upd_w: Float = (state).vel_w + (k_gain * innov_w);
+
+    let upd_var_vel: Float = (1.0 - k_gain) * (state).var_vel;
+
+    // Correct accelerometer bias estimate proportionally
+    let k_bias: Float = (state).var_bias / s_innov;
+    let upd_bx: Float = (state).accel_bias_x + (k_bias * innov_u * 0.1);
+    let upd_by: Float = (state).accel_bias_y + (k_bias * innov_v * 0.1);
+    let upd_bz: Float = (state).accel_bias_z + (k_bias * innov_w * 0.1);
+
+    return InsDvlEkfState {
+        pos_x: (state).pos_x,
+        pos_y: (state).pos_y,
+        pos_z: (state).pos_z,
+        vel_u: upd_u,
+        vel_v: upd_v,
+        vel_w: upd_w,
+        gyro_bias_x: (state).gyro_bias_x,
+        gyro_bias_y: (state).gyro_bias_y,
+        gyro_bias_z: (state).gyro_bias_z,
+        accel_bias_x: upd_bx,
+        accel_bias_y: upd_by,
+        accel_bias_z: upd_bz,
+        var_pos: (state).var_pos,
+        var_vel: upd_var_vel,
+        var_bias: (state).var_bias,
+    };
+}

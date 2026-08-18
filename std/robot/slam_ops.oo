@@ -1,0 +1,224 @@
+// # SLAM Mathematical Operations
+//
+// Logline: Fixed-point trigonometry, pose projection, odometry dead reckoning, and observation geometry.
+//
+// Setup: Pure algorithmic transforms operating on integer millidegrees and millimeters.
+//
+// Beats:
+//   1. Implement integer math helpers, clamping, and angle normalization.
+//   2. Implement integer square root and Bhaskara I approximation trigonometry.
+//   3. Implement dead reckoning pose prediction from velocity and delta steps.
+//   4. Implement global landmark projection and expected observation prediction.
+
+import "./slam_types.oo";
+
+// -------------------------------------------------------------------
+// Fixed-Point Math & Trigonometry Helpers
+// -------------------------------------------------------------------
+
+pub fn abs_val(val: Int) -> Int {
+    if val < 0 {
+        return -val;
+    }
+    return val;
+}
+
+pub fn min_val(a: Int, b: Int) -> Int {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+pub fn max_val(a: Int, b: Int) -> Int {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+pub fn clamp_val(val: Int, min_v: Int, max_v: Int) -> Int {
+    if val < min_v {
+        return min_v;
+    }
+    if val > max_v {
+        return max_v;
+    }
+    return val;
+}
+
+pub fn normalize_angle_mdeg(deg: Int) -> Int {
+    let mut a = deg;
+    while a > 180000 {
+        a = a - 360000;
+    }
+    while a < -180000 {
+        a = a + 360000;
+    }
+    return a;
+}
+
+pub fn slam_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + (n / x)) / 2;
+    }
+    return x;
+}
+
+// Fixed-point sine scaled by 1000 for millidegrees [-180000..180000]
+pub fn slam_sin_mdeg(mdeg: Int) -> Int {
+    let norm = normalize_angle_mdeg(mdeg);
+    let mut sign = 1;
+    let mut abs_m = norm;
+    if abs_m < 0 {
+        sign = -1;
+        abs_m = -abs_m;
+    }
+    if abs_m > 180000 {
+        abs_m = 360000 - abs_m;
+    }
+
+    // Bhaskara I approximation scaled: m_deg = abs_m / 1000
+    let p = (abs_m * (180000 - abs_m)) / 1000000;
+    let denom = 40500 - p;
+    if denom == 0 {
+        return 0;
+    }
+    let sin_scaled = (4000 * p) / denom;
+    return sign * sin_scaled;
+}
+
+// Fixed-point cosine scaled by 1000 for millidegrees
+pub fn slam_cos_mdeg(mdeg: Int) -> Int {
+    return slam_sin_mdeg(90000 - mdeg);
+}
+
+// Fixed-point atan2 returning millidegrees
+pub fn slam_atan2_mdeg(y: Int, x: Int) -> Int {
+    if x == 0 {
+        if y > 0 {
+            return 90000;
+        }
+        if y < 0 {
+            return -90000;
+        }
+        return 0;
+    }
+
+    let abs_y = abs_val(y);
+    let abs_x = abs_val(x);
+
+    let mut angle = 0;
+    if abs_x >= abs_y {
+        let r = (abs_y * 1000) / abs_x;
+        angle = (45000 * r) / 1000;
+    } else {
+        let r = (abs_x * 1000) / abs_y;
+        angle = 90000 - ((45000 * r) / 1000);
+    }
+
+    if x < 0 {
+        if y >= 0 {
+            angle = 180000 - angle;
+        } else {
+            angle = -180000 + angle;
+        }
+    } else {
+        if y < 0 {
+            angle = -angle;
+        }
+    }
+
+    return angle;
+}
+
+// -------------------------------------------------------------------
+// Motion Prediction (Dead Reckoning & Odometry)
+// -------------------------------------------------------------------
+
+pub fn slam_predict_pose(current: Pose2D, dx: Int, dy: Int, dtheta: Int) -> Pose2D {
+    let cur_theta = (current).theta_mdeg;
+    let cos_t = slam_cos_mdeg(cur_theta);
+    let sin_t = slam_sin_mdeg(cur_theta);
+
+    let dx_cos = dx * cos_t;
+    let dy_sin = dy * sin_t;
+    let gx = (dx_cos - dy_sin) / 1000;
+
+    let dx_sin = dx * sin_t;
+    let dy_cos = dy * cos_t;
+    let gy = (dx_sin + dy_cos) / 1000;
+
+    let cur_x = (current).x;
+    let cur_y = (current).y;
+    let new_x = cur_x + gx;
+    let new_y = cur_y + gy;
+    let new_theta = normalize_angle_mdeg(cur_theta + dtheta);
+
+    return Pose2D {
+        x: new_x,
+        y: new_y,
+        theta_mdeg: new_theta,
+    };
+}
+
+pub fn slam_predict_pose_velocity(current: Pose2D, vel: Velocity2D, dt_ms: Int) -> Pose2D {
+    let vx = (vel).vx;
+    let vy = (vel).vy;
+    let omega = (vel).omega_mdeg_s;
+    let dx = (vx * dt_ms) / 1000;
+    let dy = (vy * dt_ms) / 1000;
+    let dtheta = (omega * dt_ms) / 1000;
+
+    return slam_predict_pose(current, dx, dy, dtheta);
+}
+
+// -------------------------------------------------------------------
+// Observation Model & Landmark Fusion Helpers
+// -------------------------------------------------------------------
+
+pub fn slam_landmark_global_pos(robot_pose: Pose2D, obs: Observation) -> Landmark {
+    let r_theta = (robot_pose).theta_mdeg;
+    let obs_bearing = (obs).bearing_mdeg;
+    let abs_angle = normalize_angle_mdeg(r_theta + obs_bearing);
+    let cos_a = slam_cos_mdeg(abs_angle);
+    let sin_a = slam_sin_mdeg(abs_angle);
+    let r_range = (obs).range_mm;
+    let offset_x = (r_range * cos_a) / 1000;
+    let offset_y = (r_range * sin_a) / 1000;
+    let lx = (robot_pose).x + offset_x;
+    let ly = (robot_pose).y + offset_y;
+    let obs_id = (obs).landmark_id;
+
+    return Landmark {
+        id: obs_id,
+        x: lx,
+        y: ly,
+        z: 0,
+        observation_count: 1,
+        confidence: 500,
+    };
+}
+
+pub fn slam_predict_observation(robot_pose: Pose2D, lm: Landmark) -> Observation {
+    let dx = (lm).x - (robot_pose).x;
+    let dy = (lm).y - (robot_pose).y;
+    let dx2 = dx * dx;
+    let dy2 = dy * dy;
+    let dist_sq = dx2 + dy2;
+    let range = slam_isqrt(dist_sq);
+    let global_angle = slam_atan2_mdeg(dy, dx);
+    let bearing = normalize_angle_mdeg(global_angle - (robot_pose).theta_mdeg);
+
+    return Observation {
+        landmark_id: (lm).id,
+        range_mm: range,
+        bearing_mdeg: bearing,
+    };
+}

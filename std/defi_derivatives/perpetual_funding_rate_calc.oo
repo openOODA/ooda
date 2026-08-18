@@ -1,0 +1,146 @@
+// # Perpetual Futures Funding Rate Engine
+//
+// Logline: Calculates premium index, 8-hour clamped funding rates, funding payment distributions, and TWAP smoothing for perpetual derivatives.
+//
+// Setup: Pure quantitative finance module implementing standard perpetual exchange funding mechanisms (Binance, dYdX, Bybit style).
+//
+// Beats:
+//   1. Define FundingRateConfig, PremiumObservation, and FundingSettlement structures.
+//   2. Compute continuous time-weighted average price (TWAP) premium index between mark and index feeds.
+//   3. Apply interest rate basis offset, clamp within safety bands, and calculate net position funding transfers.
+
+pub type FundingRateConfig = struct {
+    clamp_min: Float,
+    clamp_max: Float,
+    interest_rate_basis: Float,
+    funding_interval_hours: Float,
+    max_rate_change_per_interval: Float,
+};
+
+pub type PremiumObservation = struct {
+    timestamp_sec: Int,
+    mark_price: Float,
+    index_price: Float,
+    impact_bid_price: Float,
+    impact_ask_price: Float,
+};
+
+pub type FundingSettlement = struct {
+    symbol: String,
+    funding_rate: Float,
+    annualized_rate: Float,
+    settlement_timestamp: Int,
+    payment_amount_usd: Float,
+    is_payer_long: Bool,
+};
+
+pub fn funding_config_default() -> FundingRateConfig {
+    return FundingRateConfig {
+        clamp_min: 0.0 - 0.0075, // -0.75%
+        clamp_max: 0.0075,       // +0.75%
+        interest_rate_basis: 0.0001, // 0.01% standard interest component
+        funding_interval_hours: 8.0,
+        max_rate_change_per_interval: 0.0025,
+    };
+}
+
+pub fn calc_instantaneous_premium(mark_px: Float, index_px: Float) -> Float {
+    if index_px <= 0.0 {
+        return 0.0;
+    }
+    return (mark_px - index_px) / index_px;
+}
+
+pub fn calc_impact_premium(
+    impact_bid: Float,
+    impact_ask: Float,
+    index_px: Float
+) -> Float {
+    if index_px <= 0.0 {
+        return 0.0;
+    }
+    let mid_impact: Float = (impact_bid + impact_ask) / 2.0;
+    return (mid_impact - index_px) / index_px;
+}
+
+pub fn calc_twap_premium(
+    observations: List[PremiumObservation]
+) -> Float {
+    let n: Int = list_len(observations);
+    if n == 0 {
+        return 0.0;
+    }
+    let mut total_premium: Float = 0.0;
+    let mut i: Int = 0;
+    while i < n {
+        let obs: PremiumObservation = list_get(observations, i);
+        let prem: Float = calc_impact_premium((obs).impact_bid_price, (obs).impact_ask_price, (obs).index_price);
+        total_premium = total_premium + prem;
+        i = i + 1;
+    }
+    let mut count_f: Float = 0.0;
+    let mut rem: Int = n;
+    while rem > 0 {
+        count_f = count_f + 1.0;
+        rem = rem - 1;
+    }
+    return total_premium / count_f;
+}
+
+pub fn clamp_funding_rate(
+    raw_rate: Float,
+    cfg: &FundingRateConfig
+) -> Float {
+    let mut clamped: Float = raw_rate;
+    if clamped < (cfg).clamp_min {
+        clamped = (cfg).clamp_min;
+    }
+    if clamped > (cfg).clamp_max {
+        clamped = (cfg).clamp_max;
+    }
+    return clamped;
+}
+
+pub fn calc_final_funding_rate(
+    twap_premium: Float,
+    cfg: &FundingRateConfig
+) -> Float {
+    let spread: Float = (cfg).interest_rate_basis - twap_premium;
+    let mut clamped_spread: Float = spread;
+    if clamped_spread < (0.0 - 0.0005) {
+        clamped_spread = 0.0 - 0.0005;
+    }
+    if clamped_spread > 0.0005 {
+        clamped_spread = 0.0005;
+    }
+    let target_rate: Float = twap_premium + clamped_spread;
+    return clamp_funding_rate(target_rate, cfg);
+}
+
+pub fn settle_funding_payment(
+    symbol: String,
+    position_size: Float,
+    mark_px: Float,
+    funding_rate: Float,
+    timestamp: Int
+) -> FundingSettlement {
+    let notional_usd: Float = position_size * mark_px;
+    let mut abs_notional: Float = notional_usd;
+    if abs_notional < 0.0 {
+        abs_notional = 0.0 - abs_notional;
+    }
+    let payment: Float = abs_notional * funding_rate;
+    let is_long: Bool = position_size > 0.0;
+    let is_payer: Bool = (is_long && (funding_rate > 0.0)) || (!is_long && (funding_rate < 0.0));
+
+    let annualized: Float = funding_rate * 3.0 * 365.0; // 3 intervals per day
+
+    return FundingSettlement {
+        symbol: symbol,
+        funding_rate: funding_rate,
+        annualized_rate: annualized,
+        settlement_timestamp: timestamp,
+        payment_amount_usd: payment,
+        is_payer_long: is_payer,
+    };
+}

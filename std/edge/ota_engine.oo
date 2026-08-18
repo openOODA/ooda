@@ -1,0 +1,188 @@
+// # Edge OTA Update Engine
+//
+// Logline: Executes the over-the-air firmware update state machine across staging, verification, and slot activation.
+//
+// Setup: Imports ota_types.oo; requires SysCap token for privileged partition switching and rollback operations.
+//
+// Beats:
+//   1. Initialize and configure the update manager lifecycle state machine.
+//   2. Ingest payload chunks and verify cryptographic signatures and checksums.
+//   3. Apply firmware updates with dual-bank slot swapping and automatic rollback.
+
+import "./ota_types.oo";
+
+pub fn ota_manager_init(cap: &SysCap) -> OtaManager {
+    return OtaManager {
+        state: 0,
+        active_slot: 0,
+        target_slot: 1,
+        download_bytes_received: 0,
+        total_bytes_expected: 0,
+        current_version_code: 10000,
+        target_version_code: 0,
+        expected_checksum: 0,
+        download_progress_pct: 0,
+        retry_count: 0,
+        max_retries: 3,
+        auto_rollback: true,
+        error_code: 0,
+        cap: cap,
+    };
+}
+
+pub fn ota_manager_start_update(mgr: &mut OtaManager, manifest: &OtaManifest) -> Bool {
+    let valid = ota_manifest_is_valid(manifest);
+    if valid == false {
+        (mgr).state = 6;
+        (mgr).error_code = 1; // INVALID_MANIFEST
+        return false;
+    }
+
+    let target_ver = ota_manifest_version_code(manifest);
+    if target_ver <= (mgr).current_version_code {
+        return false;
+    }
+
+    (mgr).target_version_code = target_ver;
+    (mgr).total_bytes_expected = (manifest).image_size_bytes;
+    (mgr).download_bytes_received = 0;
+    (mgr).expected_checksum = (manifest).checksum;
+    (mgr).download_progress_pct = 0;
+    (mgr).error_code = 0;
+    (mgr).state = 1; // DOWNLOADING
+
+    return true;
+}
+
+pub fn ota_manager_chunk_received(mgr: &mut OtaManager, chunk_bytes: Int) -> Int {
+    if (mgr).state != 1 {
+        return (mgr).state;
+    }
+
+    let current_bytes = (mgr).download_bytes_received + chunk_bytes;
+    (mgr).download_bytes_received = current_bytes;
+
+    let expected = (mgr).total_bytes_expected;
+    if expected > 0 {
+        let pct = (current_bytes * 100) / expected;
+        if pct > 100 {
+            (mgr).download_progress_pct = 100;
+        } else {
+            (mgr).download_progress_pct = pct;
+        }
+    }
+
+    if current_bytes >= expected {
+        (mgr).state = 2; // VERIFYING
+    }
+
+    return (mgr).state;
+}
+
+pub fn ota_manager_verify_payload(mgr: &mut OtaManager, calculated_checksum: Int, signature_valid: Bool) -> Bool {
+    if (mgr).state != 2 {
+        return false;
+    }
+
+    if signature_valid == false {
+        (mgr).state = 6; // FAILED
+        (mgr).error_code = 3; // SIGNATURE_INVALID
+        return false;
+    }
+
+    if calculated_checksum != (mgr).expected_checksum {
+        (mgr).state = 6; // FAILED
+        (mgr).error_code = 2; // CHECKSUM_MISMATCH
+        return false;
+    }
+
+    (mgr).state = 3; // STAGED
+    (mgr).error_code = 0;
+    return true;
+}
+
+pub fn ota_manager_stage_payload(mgr: &mut OtaManager) -> Bool {
+    if (mgr).state != 3 {
+        return false;
+    }
+    return true;
+}
+
+/// Privileged update activation. Requires explicit &SysCap reference.
+pub fn ota_manager_apply_update(mgr: &mut OtaManager, sys: &SysCap) -> Bool {
+    if (mgr).state != 3 {
+        return false;
+    }
+
+    (mgr).state = 4; // APPLYING
+
+    // Perform A/B partition slot flip
+    let curr_active = (mgr).active_slot;
+    let curr_target = (mgr).target_slot;
+    (mgr).active_slot = curr_target;
+    (mgr).target_slot = curr_active;
+
+    (mgr).current_version_code = (mgr).target_version_code;
+    (mgr).state = 5; // SUCCESS
+    return true;
+}
+
+pub fn ota_manager_mark_boot_successful(mgr: &mut OtaManager) -> Bool {
+    if (mgr).state == 5 {
+        (mgr).state = 0; // IDLE
+        (mgr).error_code = 0;
+        return true;
+    }
+    if (mgr).state == 4 {
+        (mgr).state = 0; // IDLE
+        (mgr).error_code = 0;
+        return true;
+    }
+    return false;
+}
+
+/// Privileged rollback execution. Requires explicit &SysCap reference.
+pub fn ota_manager_rollback(mgr: &mut OtaManager, sys: &SysCap, error_reason: Int) -> Bool {
+    let curr_active = (mgr).active_slot;
+    let curr_target = (mgr).target_slot;
+    (mgr).active_slot = curr_target;
+    (mgr).target_slot = curr_active;
+
+    (mgr).error_code = error_reason;
+    (mgr).state = 7; // ROLLED_BACK
+    return true;
+}
+
+pub fn ota_manager_get_progress(mgr: &OtaManager) -> Int {
+    return (mgr).download_progress_pct;
+}
+
+pub fn ota_manager_get_state(mgr: &OtaManager) -> Int {
+    return (mgr).state;
+}
+
+pub fn ota_manager_get_error(mgr: &OtaManager) -> Int {
+    return (mgr).error_code;
+}
+
+pub fn ota_manager_is_busy(mgr: &OtaManager) -> Bool {
+    let st = (mgr).state;
+    if st == 1 {
+        return true;
+    }
+    if st == 2 {
+        return true;
+    }
+    if st == 4 {
+        return true;
+    }
+    return false;
+}
+
+pub fn ota_manager_do_work(mgr: &OtaManager) -> Int {
+    let busy = ota_manager_is_busy(mgr);
+    if busy {
+        return 1;
+    }
+    return 0;
+}

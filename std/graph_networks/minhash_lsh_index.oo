@@ -1,0 +1,193 @@
+// # MinHash & Locality-Sensitive Hashing (LSH) Index
+//
+// Logline: Implements MinHash signature generation and LSH band partitioning for rapid Jaccard similarity search.
+//
+// Setup: Probabilistic set similarity index utilizing universal hash permutation families and multi-band bucketing.
+//
+// Beats:
+//   1. Generate k-dimensional MinHash signature vectors across sparse element sets.
+//   2. Estimate pairwise Jaccard set similarities from signature collisions.
+//   3. Partition signatures into bands to index candidate pairs within sub-linear query time.
+
+pub type MinHashConfig = struct {
+    num_hashes: Int,
+    a_coeffs: List[Int],
+    b_coeffs: List[Int],
+    prime_mod: Int,
+};
+
+pub type MinHashSignature = struct {
+    doc_id: Int,
+    signature: List[Int],
+};
+
+pub type LshBucketEntry = struct {
+    band_id: Int,
+    bucket_hash: Int,
+    doc_id: Int,
+};
+
+pub type LshIndex = struct {
+    num_bands: Int,
+    rows_per_band: Int,
+    entries: List[LshBucketEntry],
+};
+
+pub fn minhash_config_create(k: Int) -> MinHashConfig {
+    let prime: Int = 2147483647; // 2^31 - 1
+    let mut a: List[Int] = list_new();
+    let mut b: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < k {
+        let a_val: Int = (i * 10007 + 31) % 65536 + 1;
+        let b_val: Int = (i * 20011 + 97) % 65536;
+        a = list_push(a, a_val);
+        b = list_push(b, b_val);
+        i = i + 1;
+    }
+    return MinHashConfig {
+        num_hashes: k,
+        a_coeffs: a,
+        b_coeffs: b,
+        prime_mod: prime,
+    };
+}
+
+pub fn minhash_compute(cfg: &MinHashConfig, tokens: List[Int], doc_id: Int) -> MinHashSignature {
+    let k: Int = (cfg).num_hashes;
+    let n_tokens: Int = list_len(tokens);
+    let inf_val: Int = 2147483647;
+    let mut sig: List[Int] = list_new();
+
+    let mut h: Int = 0;
+    while h < k {
+        let a: Int = list_get((cfg).a_coeffs, h);
+        let b: Int = list_get((cfg).b_coeffs, h);
+        let p: Int = (cfg).prime_mod;
+        let mut min_h: Int = inf_val;
+
+        let mut t: Int = 0;
+        while t < n_tokens {
+            let tok: Int = list_get(tokens, t);
+            let mut h_val: Int = (tok * a + b) % p;
+            if h_val < 0 {
+                h_val = 0 - h_val;
+            }
+            if h_val < min_h {
+                min_h = h_val;
+            }
+            t = t + 1;
+        }
+        sig = list_push(sig, min_h);
+        h = h + 1;
+    }
+
+    return MinHashSignature {
+        doc_id: doc_id,
+        signature: sig,
+    };
+}
+
+pub fn minhash_estimate_similarity(s1: &MinHashSignature, s2: &MinHashSignature) -> Int {
+    let n1: Int = list_len((s1).signature);
+    let n2: Int = list_len((s2).signature);
+    let n: Int = if n1 < n2 { n1 } else { n2 };
+    if n == 0 {
+        return 0;
+    }
+
+    let mut matches: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let v1: Int = list_get((s1).signature, i);
+        let v2: Int = list_get((s2).signature, i);
+        if v1 == v2 {
+            matches = matches + 1;
+        }
+        i = i + 1;
+    }
+    // Return similarity scaled by 10000 (0 to 10000)
+    return (matches * 10000) / n;
+}
+
+pub fn lsh_index_create(num_bands: Int, rows_per_band: Int) -> LshIndex {
+    let empty: List[LshBucketEntry] = list_new();
+    return LshIndex {
+        num_bands: num_bands,
+        rows_per_band: rows_per_band,
+        entries: empty,
+    };
+}
+
+pub fn lsh_hash_band(sig: &MinHashSignature, start_idx: Int, row_count: Int) -> Int {
+    let mut acc: Int = 0;
+    let mut r: Int = 0;
+    while r < row_count {
+        let idx: Int = start_idx + r;
+        if idx < list_len((sig).signature) {
+            let val: Int = list_get((sig).signature, idx);
+            acc = (acc * 31 + val) % 1000000007;
+            if acc < 0 {
+                acc = 0 - acc;
+            }
+        }
+        r = r + 1;
+    }
+    return acc;
+}
+
+pub fn lsh_insert(index: &mut LshIndex, sig: &MinHashSignature) -> Bool {
+    let b: Int = (index).num_bands;
+    let r: Int = (index).rows_per_band;
+    let mut band: Int = 0;
+    while band < b {
+        let start_idx: Int = band * r;
+        let bucket_h: Int = lsh_hash_band(sig, start_idx, r);
+        let entry: LshBucketEntry = LshBucketEntry {
+            band_id: band,
+            bucket_hash: bucket_h,
+            doc_id: (sig).doc_id,
+        };
+        (index).entries = list_push((index).entries, entry);
+        band = band + 1;
+    }
+    return true;
+}
+
+pub fn lsh_query_candidates(index: &LshIndex, sig: &MinHashSignature) -> List[Int] {
+    let b: Int = (index).num_bands;
+    let r: Int = (index).rows_per_band;
+    let total_entries: Int = list_len((index).entries);
+    let mut candidates: List[Int] = list_new();
+
+    let mut band: Int = 0;
+    while band < b {
+        let start_idx: Int = band * r;
+        let query_hash: Int = lsh_hash_band(sig, start_idx, r);
+
+        let mut i: Int = 0;
+        while i < total_entries {
+            let entry: LshBucketEntry = list_get((index).entries, i);
+            if (entry).band_id == band && (entry).bucket_hash == query_hash {
+                if (entry).doc_id != (sig).doc_id {
+                    // Check deduplication
+                    let mut exists: Bool = false;
+                    let mut c: Int = 0;
+                    let n_cands: Int = list_len(candidates);
+                    while c < n_cands {
+                        if list_get(candidates, c) == (entry).doc_id {
+                            exists = true;
+                        }
+                        c = c + 1;
+                    }
+                    if !exists {
+                        candidates = list_push(candidates, (entry).doc_id);
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        band = band + 1;
+    }
+    return candidates;
+}

@@ -1,0 +1,105 @@
+// # Underwater Robotic Manipulator Kinematics & Reaction Wrench
+//
+// Logline: Computes 3-DOF manipulator arm forward kinematics, hydrodynamic link drag, and base vehicle reaction wrenches.
+//
+// Setup: Underwater vehicle-manipulator system (UVMS) simulator modeling arm hydrodynamic resistance and vehicle reaction forces.
+//
+// Beats:
+//   1. Define 3-DOF manipulator link geometry (upper arm L1, forearm L2, link diameters, joint limits).
+//   2. Compute forward kinematics mapping joint angles (q1, q2, q3) to end-effector position.
+//   3. Calculate hydrodynamic drag force on moving arm links during rapid slewing.
+//   4. Deliver reaction wrench on base vehicle for thruster feedforward compensation.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type ManipulatorConfig = struct {
+    link1_length_m: Float,
+    link2_length_m: Float,
+    link_diameter_m: Float,
+    c_d_cylinder: Float,
+    max_joint_speed_rad_s: Float,
+};
+
+pub type JointAngles = struct {
+    q1_shoulder_pitch: Float,
+    q2_elbow_pitch: Float,
+    q3_wrist_pitch: Float,
+};
+
+pub type JointVelocities = struct {
+    dq1: Float,
+    dq2: Float,
+    dq3: Float,
+};
+
+pub type ManipulatorOutput = struct {
+    end_effector_pos: Vector3,
+    reaction_wrench_on_base: Vector6,
+    total_hydro_power_loss_w: Float,
+};
+
+pub fn manipulator_config_default() -> ManipulatorConfig {
+    return ManipulatorConfig {
+        link1_length_m: 0.35,
+        link2_length_m: 0.30,
+        link_diameter_m: 0.05,
+        c_d_cylinder: 1.1,
+        max_joint_speed_rad_s: 1.0,
+    };
+}
+
+pub fn manipulator_forward_kinematics(
+    cfg: &ManipulatorConfig,
+    joints: &JointAngles
+) -> Vector3 {
+    let l1: Float = (cfg).link1_length_m;
+    let l2: Float = (cfg).link2_length_m;
+
+    let th1: Float = (joints).q1_shoulder_pitch;
+    let th12: Float = th1 + (joints).q2_elbow_pitch;
+
+    // Pitch in sagittal plane: x forward, z down
+    let x_ee: Float = (l1 * cos(th1)) + (l2 * cos(th12));
+    let z_ee: Float = (l1 * sin(th1)) + (l2 * sin(th12));
+
+    return vec3_new(x_ee, 0.0, z_ee);
+}
+
+pub fn compute_arm_reaction_wrench(
+    cfg: &ManipulatorConfig,
+    joints: &JointAngles,
+    vels: &JointVelocities,
+    water_density: Float
+) -> ManipulatorOutput {
+    let p_ee: Vector3 = manipulator_forward_kinematics(cfg, joints);
+
+    let l1: Float = (cfg).link1_length_m;
+    let l2: Float = (cfg).link2_length_m;
+    let d: Float = (cfg).link_diameter_m;
+    let cd: Float = (cfg).c_d_cylinder;
+
+    // Average linear speed of link midpoints
+    let dq1: Float = (vels).dq1;
+    let dq2: Float = (vels).dq2;
+
+    let v_mid1: Float = math_abs(dq1) * (0.5 * l1);
+    let v_mid2: Float = math_abs(dq1 + dq2) * (l1 + 0.5 * l2);
+
+    // Hydrodynamic drag on links opposing rotation
+    let f_drag1: Float = 0.5 * water_density * cd * (d * l1) * (v_mid1 * v_mid1);
+    let f_drag2: Float = 0.5 * water_density * cd * (d * l2) * (v_mid2 * v_mid2);
+
+    // Reaction moments on base vehicle: tau = r x F
+    let tau_pitch_rx: Float = (f_drag1 * 0.5 * l1) + (f_drag2 * (l1 + 0.5 * l2));
+
+    let p_loss: Float = (f_drag1 * v_mid1) + (f_drag2 * v_mid2);
+
+    let rx_wrench: Vector6 = vec6_new(0.0, 0.0, 0.0 - (f_drag1 + f_drag2), 0.0, tau_pitch_rx, 0.0);
+
+    return ManipulatorOutput {
+        end_effector_pos: p_ee,
+        reaction_wrench_on_base: rx_wrench,
+        total_hydro_power_loss_w: p_loss,
+    };
+}

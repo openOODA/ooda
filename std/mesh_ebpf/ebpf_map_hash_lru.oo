@@ -1,0 +1,142 @@
+// # eBPF LRU Hash Map Implementation
+//
+// Logline: Implements bounded Least-Recently-Used (LRU) hash map with collision resolution and automatic eviction.
+//
+// Setup: High-performance eBPF kernel map storage for connection tracking, metrics, and flow cache states.
+//
+// Beats:
+//   1. Store key-value pairs in fixed-capacity hash map with timestamp tracking.
+//   2. Update access timestamps upon lookups to maintain LRU recency ordering.
+//   3. Evict oldest expired or least-recently accessed entry upon capacity saturation.
+
+pub type LruMapEntry = struct {
+    key: Int,
+    value: Int,
+    last_access_ns: Int,
+    is_occupied: Bool,
+};
+
+pub type EbpfLruHashMap = struct {
+    entries: List[LruMapEntry],
+    capacity: Int,
+    current_size: Int,
+    hit_count: Int,
+    miss_count: Int,
+    eviction_count: Int,
+};
+
+pub fn ebpf_lru_map_new(max_entries: Int) -> EbpfLruHashMap {
+    let mut initial_entries: List[LruMapEntry] = list_new();
+    let mut i: Int = 0;
+    while i < max_entries {
+        let e = LruMapEntry {
+            key: 0,
+            value: 0,
+            last_access_ns: 0,
+            is_occupied: false,
+        };
+        initial_entries = list_push(initial_entries, e);
+        i = i + 1;
+    }
+
+    return EbpfLruHashMap {
+        entries: initial_entries,
+        capacity: max_entries,
+        current_size: 0,
+        hit_count: 0,
+        miss_count: 0,
+        eviction_count: 0,
+    };
+}
+
+pub fn ebpf_lru_map_lookup(map: &mut EbpfLruHashMap, key: Int, now_ns: Int) -> Int {
+    let n: Int = (map).capacity;
+    let mut i: Int = 0;
+
+    while i < n {
+        let mut e: LruMapEntry = list_get((map).entries, i);
+        if (e).is_occupied && (e).key == key {
+            (map).hit_count = (map).hit_count + 1;
+            (e).last_access_ns = now_ns;
+            return (e).value;
+        }
+        i = i + 1;
+    }
+
+    (map).miss_count = (map).miss_count + 1;
+    return 0 - 1; // -1 indicates not found
+}
+
+pub fn ebpf_lru_map_update(
+    map: &mut EbpfLruHashMap,
+    key: Int,
+    value: Int,
+    now_ns: Int
+) -> Bool {
+    let n: Int = (map).capacity;
+    let mut i: Int = 0;
+    let mut free_idx: Int = 0 - 1;
+    let mut oldest_idx: Int = 0;
+    let mut oldest_time: Int = 2147483647;
+
+    while i < n {
+        let e: LruMapEntry = list_get((map).entries, i);
+        if (e).is_occupied {
+            if (e).key == key {
+                // Key already exists, update in-place
+                let updated = LruMapEntry {
+                    key: key,
+                    value: value,
+                    last_access_ns: now_ns,
+                    is_occupied: true,
+                };
+                let mut new_list: List[LruMapEntry] = list_new();
+                let mut j: Int = 0;
+                while j < n {
+                    if j == i {
+                        new_list = list_push(new_list, updated);
+                    } else {
+                        new_list = list_push(new_list, list_get((map).entries, j));
+                    }
+                    j = j + 1;
+                }
+                (map).entries = new_list;
+                return true;
+            }
+            if (e).last_access_ns < oldest_time {
+                oldest_time = (e).last_access_ns;
+                oldest_idx = i;
+            }
+        } else if free_idx < 0 {
+            free_idx = i;
+        }
+        i = i + 1;
+    }
+
+    let target_idx: Int = if free_idx >= 0 { free_idx } else { oldest_idx };
+    if free_idx < 0 {
+        (map).eviction_count = (map).eviction_count + 1;
+    } else {
+        (map).current_size = (map).current_size + 1;
+    }
+
+    let new_entry = LruMapEntry {
+        key: key,
+        value: value,
+        last_access_ns: now_ns,
+        is_occupied: true,
+    };
+
+    let mut new_list: List[LruMapEntry] = list_new();
+    let mut k: Int = 0;
+    while k < n {
+        if k == target_idx {
+            new_list = list_push(new_list, new_entry);
+        } else {
+            new_list = list_push(new_list, list_get((map).entries, k));
+        }
+        k = k + 1;
+    }
+    (map).entries = new_list;
+    return true;
+}

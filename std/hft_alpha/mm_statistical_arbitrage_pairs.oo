@@ -1,0 +1,122 @@
+// # Statistical Arbitrage Pairs Trading Engine
+//
+// Logline: Executes pairs trading alpha strategies using z-score thresholding, half-life mean reversion bounds, and dynamic stop-losses.
+//
+// Setup: Pure quantitative stat-arb execution module generating entry, exit, and stop-loss signals for cointegrated pairs.
+//
+// Beats:
+//   1. Define PairStrategyConfig, PairState, and PairSignal structures.
+//   2. Compute normalized spread z-score = (spread - mu) / sigma.
+//   3. Generate discrete trading actions: Long Pair (+1), Short Pair (-1), Exit (0), or Stop-Loss.
+
+pub type PairStrategyConfig = struct {
+    entry_z_score: Float,
+    exit_z_score: Float,
+    stop_loss_z_score: Float,
+    max_holding_period_sec: Float,
+};
+
+pub type PairState = struct {
+    current_spread: Float,
+    mean_spread: Float,
+    std_spread: Float,
+    current_position: Int,
+    position_entry_time: Float,
+};
+
+pub type PairSignal = struct {
+    z_score: Float,
+    target_position: Int,
+    action_code: Int,
+    reason: String,
+};
+
+pub fn pair_config_default() -> PairStrategyConfig {
+    return PairStrategyConfig {
+        entry_z_score: 2.0,
+        exit_z_score: 0.5,
+        stop_loss_z_score: 3.5,
+        max_holding_period_sec: 1800.0,
+    };
+}
+
+pub fn pair_evaluate_signal(
+    state: &PairState,
+    current_time: Float,
+    config: &PairStrategyConfig
+) -> PairSignal {
+    let s: Float = (state).current_spread;
+    let mu: Float = (state).mean_spread;
+    let sigma: Float = (state).std_spread;
+    let pos: Int = (state).current_position;
+
+    let z: Float = if sigma > 0.00001 { (s - mu) / sigma } else { 0.0 };
+    let abs_z: Float = if z < 0.0 { 0.0 - z } else { z };
+
+    let entry_thresh: Float = (config).entry_z_score;
+    let exit_thresh: Float = (config).exit_z_score;
+    let stop_thresh: Float = (config).stop_loss_z_score;
+
+    let mut target_pos: Int = pos;
+    let mut code: Int = 0;
+    let mut why: String = "HOLD";
+
+    // 1. Stop loss check
+    if abs_z >= stop_thresh && pos != 0 {
+        target_pos = 0;
+        code = 3; // 3 = Stop Loss Exit
+        why = "STOP_LOSS_EXCEEDED";
+        return PairSignal {
+            z_score: z,
+            target_position: target_pos,
+            action_code: code,
+            reason: why,
+        };
+    }
+
+    // 2. Timeout check
+    if pos != 0 {
+        let duration: Float = current_time - (state).position_entry_time;
+        if duration > (config).max_holding_period_sec {
+            target_pos = 0;
+            code = 4; // 4 = Max Holding Time Exit
+            why = "MAX_HOLDING_TIME_EXPIRED";
+            return PairSignal {
+                z_score: z,
+                target_position: target_pos,
+                action_code: code,
+                reason: why,
+            };
+        }
+    }
+
+    // 3. Exit check (mean reversion achieved)
+    if pos == 1 && z >= (0.0 - exit_thresh) {
+        target_pos = 0;
+        code = 2; // 2 = Mean Reversion Exit
+        why = "EXIT_LONG_PAIR";
+    } else if pos == (0 - 1) && z <= exit_thresh {
+        target_pos = 0;
+        code = 2;
+        why = "EXIT_SHORT_PAIR";
+    }
+    // 4. Entry check
+    else if pos == 0 {
+        if z <= (0.0 - entry_thresh) {
+            target_pos = 1; // Long spread (Buy Y, Sell X)
+            code = 1;
+            why = "ENTER_LONG_PAIR";
+        } else if z >= entry_thresh {
+            target_pos = 0 - 1; // Short spread (Sell Y, Buy X)
+            code = 1;
+            why = "ENTER_SHORT_PAIR";
+        }
+    }
+
+    return PairSignal {
+        z_score: z,
+        target_position: target_pos,
+        action_code: code,
+        reason: why,
+    };
+}

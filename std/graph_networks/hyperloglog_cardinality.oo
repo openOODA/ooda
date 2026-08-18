@@ -1,0 +1,183 @@
+// # HyperLogLog Cardinality Estimation
+//
+// Logline: Implements HyperLogLog probabilistic cardinality estimation using harmonic mean register scaling.
+//
+// Setup: Memory-efficient streaming distinct counter with 2^p registers and empirical small-range correction.
+//
+// Beats:
+//   1. Partition 32-bit integer hashes into p-bit register address and trailing zero rank.
+//   2. Update register banks with maximum observed leading zero runs.
+//   3. Compute harmonic mean estimator with linear counting bias correction.
+
+pub type HllRegisterBank = struct {
+    precision_bits: Int,
+    num_registers: Int,
+    registers: List[Int],
+};
+
+pub type HllEstimate = struct {
+    raw_estimate: Int,
+    corrected_cardinality: Int,
+    zero_registers: Int,
+};
+
+pub fn hll_power_of_two(exp: Int) -> Int {
+    let mut res: Int = 1;
+    let mut i: Int = 0;
+    while i < exp {
+        res = res * 2;
+        i = i + 1;
+    }
+    return res;
+}
+
+pub fn hll_create(precision_bits: Int) -> HllRegisterBank {
+    let mut p: Int = precision_bits;
+    if p < 4 {
+        p = 4;
+    }
+    if p > 16 {
+        p = 16;
+    }
+    let m: Int = hll_power_of_two(p);
+    let mut regs: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < m {
+        regs = list_push(regs, 0);
+        i = i + 1;
+    }
+    return HllRegisterBank {
+        precision_bits: p,
+        num_registers: m,
+        registers: regs,
+    };
+}
+
+pub fn hll_count_leading_zeros_32(val: Int) -> Int {
+    if val <= 0 {
+        return 32;
+    }
+    let mut count: Int = 0;
+    let mut current: Int = val;
+    let mut bit_test: Int = 1073741824; // 2^30
+    while bit_test > 0 {
+        if current >= bit_test {
+            return count;
+        }
+        count = count + 1;
+        bit_test = bit_test / 2;
+    }
+    return count;
+}
+
+pub fn hll_hash_to_index(hash_val: Int, p: Int) -> Int {
+    let m: Int = hll_power_of_two(p);
+    let mut positive_hash: Int = hash_val;
+    if positive_hash < 0 {
+        positive_hash = 0 - positive_hash;
+    }
+    return positive_hash % m;
+}
+
+pub fn hll_hash_to_rank(hash_val: Int, p: Int) -> Int {
+    let m: Int = hll_power_of_two(p);
+    let mut positive_hash: Int = hash_val;
+    if positive_hash < 0 {
+        positive_hash = 0 - positive_hash;
+    }
+    let remaining: Int = positive_hash / m;
+    let lz: Int = hll_count_leading_zeros_32(remaining);
+    let rank: Int = lz + 1;
+    if rank > 32 {
+        return 32;
+    }
+    return rank;
+}
+
+pub fn hll_update_register(regs: List[Int], target_idx: Int, new_val: Int) -> List[Int] {
+    let mut new_regs: List[Int] = list_new();
+    let n: Int = list_len(regs);
+    let mut i: Int = 0;
+    while i < n {
+        if i == target_idx {
+            new_regs = list_push(new_regs, new_val);
+        } else {
+            new_regs = list_push(new_regs, list_get(regs, i));
+        }
+        i = i + 1;
+    }
+    return new_regs;
+}
+
+pub fn hll_add(bank: &mut HllRegisterBank, val_hash: Int) -> Bool {
+    let p: Int = (bank).precision_bits;
+    let idx: Int = hll_hash_to_index(val_hash, p);
+    let rank: Int = hll_hash_to_rank(val_hash, p);
+    let current_val: Int = list_get((bank).registers, idx);
+    if rank > current_val {
+        (bank).registers = hll_update_register((bank).registers, idx, rank);
+        return true;
+    }
+    return false;
+}
+
+pub fn hll_estimate(bank: &HllRegisterBank) -> HllEstimate {
+    let m: Int = (bank).num_registers;
+    let mut sum_harmonic: Int = 0;
+    let mut zero_count: Int = 0;
+    let scale: Int = 1000000;
+    let mut i: Int = 0;
+    while i < m {
+        let r: Int = list_get((bank).registers, i);
+        if r == 0 {
+            zero_count = zero_count + 1;
+        }
+        let two_pow_r: Int = hll_power_of_two(r);
+        let term: Int = scale / two_pow_r;
+        sum_harmonic = sum_harmonic + term;
+        i = i + 1;
+    }
+
+    // Alpha_m approximation for m >= 16: ~0.7213 / (1 + 1.079/m)
+    // In scaled integer arithmetic (scaled by 10000)
+    let alpha_scaled: Int = 7213;
+    let raw: Int = (alpha_scaled * m * m) / (sum_harmonic / (scale / 10000));
+
+    let mut corrected: Int = raw;
+    // Linear counting correction for small cardinalities
+    if raw <= (5 * m) / 2 {
+        if zero_count > 0 {
+            let ratio_scaled: Int = (m * 1000) / zero_count;
+            let approx_ln: Int = (ratio_scaled - 1000);
+            corrected = (m * approx_ln) / 1000;
+            if corrected < 0 {
+                corrected = 0;
+            }
+        }
+    }
+
+    return HllEstimate {
+        raw_estimate: raw,
+        corrected_cardinality: corrected,
+        zero_registers: zero_count,
+    };
+}
+
+pub fn hll_merge(b1: &HllRegisterBank, b2: &HllRegisterBank) -> HllRegisterBank {
+    let p: Int = (b1).precision_bits;
+    let m: Int = (b1).num_registers;
+    let mut merged_regs: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < m {
+        let r1: Int = list_get((b1).registers, i);
+        let r2: Int = list_get((b2).registers, i);
+        let max_r: Int = if r1 > r2 { r1 } else { r2 };
+        merged_regs = list_push(merged_regs, max_r);
+        i = i + 1;
+    }
+    return HllRegisterBank {
+        precision_bits: p,
+        num_registers: m,
+        registers: merged_regs,
+    };
+}

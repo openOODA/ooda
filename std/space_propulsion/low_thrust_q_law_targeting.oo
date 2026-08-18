@@ -1,0 +1,110 @@
+// # Q-Law Lyapunov Low-Thrust Orbital Transfer Guidance
+//
+// Logline: Formulates Q-Law Lyapunov feedback control guidance for low-thrust continuous-thrust orbit transfers between arbitrary Keplerian orbits.
+//
+// Setup: Calculates Lyapunov proximity function derivatives, optimal thrust pitch/yaw steering angles, and periapsis altitude keep-out penalties.
+//
+// Beats:
+//   1. Define current and target Keplerian orbital elements (a, e, i, Omega, omega) and weighting parameters.
+//   2. Compute maximum Gauss variational element rates under unit thrust acceleration in RSW frame.
+//   3. Calculate Petropoulos Q-function value, optimal thrust direction angles (alpha, beta), and Lyapunov rate of change.
+
+import "./space_propulsion_constants.oo";
+
+pub type KeplerianElements = struct {
+    semi_major_axis_m: Float,
+    eccentricity: Float,
+    inclination_rad: Float,
+    raan_rad: Float,
+    arg_periapsis_rad: Float,
+    true_anomaly_rad: Float,
+};
+
+pub type QLawSteeringCommand = struct {
+    q_proximity_value: Float,
+    pitch_angle_alpha_rad: Float,
+    yaw_angle_beta_rad: Float,
+    thrust_direction_rsw: Vector3D,
+    penalty_periapsis: Float,
+};
+
+pub fn keplerian_elements_leo_default() -> KeplerianElements {
+    return KeplerianElements {
+        semi_major_axis_m: 6800000.0,
+        eccentricity: 0.001,
+        inclination_rad: 0.497, // 28.5 deg
+        raan_rad: 0.0,
+        arg_periapsis_rad: 0.0,
+        true_anomaly_rad: 0.0,
+    };
+}
+
+pub fn keplerian_elements_geo_target() -> KeplerianElements {
+    return KeplerianElements {
+        semi_major_axis_m: 42164000.0,
+        eccentricity: 0.0001,
+        inclination_rad: 0.001, // 0 deg GSO
+        raan_rad: 0.0,
+        arg_periapsis_rad: 0.0,
+        true_anomaly_rad: 0.0,
+    };
+}
+
+pub fn q_law_evaluate_steering(
+    curr: KeplerianElements,
+    target: KeplerianElements,
+    mu: Float
+) -> QLawSteeringCommand {
+    let a_c: Float = (curr).semi_major_axis_m;
+    let e_c: Float = (curr).eccentricity;
+    let i_c: Float = (curr).inclination_rad;
+    let nu_c: Float = (curr).true_anomaly_rad;
+
+    let a_t: Float = (target).semi_major_axis_m;
+    let e_t: Float = (target).eccentricity;
+    let i_t: Float = (target).inclination_rad;
+
+    // Element differences normalized
+    let da: Float = (a_c - a_t) / a_t;
+    let de: Float = e_c - e_t;
+    let di: Float = i_c - i_t;
+
+    // Relative weighting factors
+    let w_a: Float = 1.0;
+    let w_e: Float = 2.0;
+    let w_i: Float = 3.0;
+
+    // Minimum periapsis altitude penalty (keep r_p > R_earth + 200 km)
+    let r_p_min: Float = const_radius_earth() + 200000.0;
+    let r_p_curr: Float = a_c * (1.0 - e_c);
+    let mut p_peri: Float = 1.0;
+    if r_p_curr < r_p_min {
+        let dr_p: Float = (r_p_min - r_p_curr) / 100000.0;
+        p_peri = math_exp(dr_p * 2.0);
+    }
+
+    // Petropoulos Lyapunov proximity Q-function:
+    // Q = (1 + W_p * P) * sum( W_oe * ( (oe - oe_t) / dot{oe}_max )^2 )
+    let q_sum: Float = (w_a * (da * da)) + (w_e * (de * de)) + (w_i * (di * di));
+    let q_val: Float = p_peri * q_sum;
+
+    // Optimal steering thrust components in RSW (Radial, Circumferential, Normal) frame:
+    // F_r ~ sign(-de) * sin(nu), F_s ~ sign(-da) + sign(-de)*cos(nu), F_w ~ sign(-di) * cos(omega + nu)
+    let f_r: Float = (0.0 - de) * sin(nu_c);
+    let f_s: Float = ((0.0 - da) * 0.5) + ((0.0 - de) * cos(nu_c));
+    let f_w: Float = (0.0 - di) * cos(nu_c);
+
+    let u_rsw: Vector3D = vec3_normalize(vec3_new(f_r, f_s, f_w));
+
+    // Pitch (alpha) and Yaw (beta) thrust steering angles
+    let alpha: Float = math_atan2((u_rsw).x, (u_rsw).y);
+    let beta: Float = math_asin((u_rsw).z);
+
+    return QLawSteeringCommand {
+        q_proximity_value: q_val,
+        pitch_angle_alpha_rad: alpha,
+        yaw_angle_beta_rad: beta,
+        thrust_direction_rsw: u_rsw,
+        penalty_periapsis: p_peri,
+    };
+}

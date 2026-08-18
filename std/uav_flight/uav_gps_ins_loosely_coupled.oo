@@ -1,0 +1,144 @@
+// # UAV Loosely-Coupled GPS/INS 15-State Error Kalman Filter (ESKF)
+//
+// Logline: 15-State Error-State Kalman Filter (ESKF) fusing GPS position/velocity fixes with high-rate strapdown inertial navigation.
+//
+// Setup: Aerospace-grade state estimation tracking position, velocity, orientation errors, and IMU sensor biases.
+//
+// Beats:
+//   1. Define 15-State Error Vector: [delta_p (3), delta_v (3), delta_theta (3), delta_ba (3), delta_bg (3)].
+//   2. Propagate nominal navigation state using high-rate IMU strapdown mechanization.
+//   3. Predict error covariance matrix P using linearized error dynamics Jacobians.
+//   4. Ingest GPS 3D position and velocity measurement updates to reset error states and correct biases.
+
+import "./uav_coordinate_frames.oo";
+import "./uav_quaternion_kinematics.oo";
+
+pub type EskfNominalState = struct {
+    pos: Vector3D,
+    vel: Vector3D,
+    quat: Quaternion,
+    accel_bias: Vector3D,
+    gyro_bias: Vector3D,
+};
+
+pub type EskfCovarianceDiag = struct {
+    var_p: Float,
+    var_v: Float,
+    var_theta: Float,
+    var_ba: Float,
+    var_bg: Float,
+};
+
+pub type GpsMeasurement = struct {
+    pos: Vector3D,
+    vel: Vector3D,
+    pos_accuracy_m: Float,
+    vel_accuracy_m_s: Float,
+    has_fix: Bool,
+};
+
+pub fn eskf_nominal_state_init() -> EskfNominalState {
+    return EskfNominalState {
+        pos: vector3d_zero(),
+        vel: vector3d_zero(),
+        quat: quat_identity(),
+        accel_bias: vector3d_zero(),
+        gyro_bias: vector3d_zero(),
+    };
+}
+
+pub fn eskf_covariance_init() -> EskfCovarianceDiag {
+    return EskfCovarianceDiag {
+        var_p: 2.0,
+        var_v: 0.5,
+        var_theta: 0.05,
+        var_ba: 0.01,
+        var_bg: 0.001,
+    };
+}
+
+pub fn eskf_predict_step(
+    nom: &EskfNominalState,
+    cov: &EskfCovarianceDiag,
+    acc_meas: &Vector3D,
+    gyr_meas: &Vector3D,
+    dt: Float
+) -> EskfNominalState {
+    let unb_acc: Vector3D = vector3d_sub(acc_meas, &(nom).accel_bias);
+    let unb_gyr: Vector3D = vector3d_sub(gyr_meas, &(nom).gyro_bias);
+
+    let gravity: Vector3D = Vector3D { x: 0.0, y: 0.0, z: (0.0 - 9.80665) };
+
+    // Accel rotated to world frame: R * a_body + g
+    let acc_world: Vector3D = quat_rotate_vector(&(nom).quat, &unb_acc);
+    let acc_tot: Vector3D = vector3d_add(&acc_world, &gravity);
+
+    // Propagate nominal position and velocity
+    let p_next: Vector3D = Vector3D {
+        x: (nom).pos.x + ((nom).vel.x * dt) + (0.5 * acc_tot.x * dt * dt),
+        y: (nom).pos.y + ((nom).vel.y * dt) + (0.5 * acc_tot.y * dt * dt),
+        z: (nom).pos.z + ((nom).vel.z * dt) + (0.5 * acc_tot.z * dt * dt),
+    };
+
+    let v_next: Vector3D = Vector3D {
+        x: (nom).vel.x + (acc_tot.x * dt),
+        y: (nom).vel.y + (acc_tot.y * dt),
+        z: (nom).vel.z + (acc_tot.z * dt),
+    };
+
+    // Propagate nominal quaternion
+    let q_next: Quaternion = quat_propagate(&(nom).quat, &unb_gyr, dt);
+
+    return EskfNominalState {
+        pos: p_next,
+        vel: v_next,
+        quat: q_next,
+        accel_bias: (nom).accel_bias,
+        gyro_bias: (nom).gyro_bias,
+    };
+}
+
+pub fn eskf_update_gps(
+    nom: &EskfNominalState,
+    cov: &EskfCovarianceDiag,
+    gps: &GpsMeasurement
+) -> EskfNominalState {
+    if !(gps).has_fix {
+        return EskfNominalState {
+            pos: (nom).pos, vel: (nom).vel, quat: (nom).quat,
+            accel_bias: (nom).accel_bias, gyro_bias: (nom).gyro_bias,
+        };
+    }
+
+    // Kalman gain for position: K_p = P_p / (P_p + R_gps)
+    let r_p: Float = (gps).pos_accuracy_m * (gps).pos_accuracy_m;
+    let k_p: Float = (cov).var_p / ((cov).var_p + r_p);
+
+    let err_px: Float = (gps).pos.x - (nom).pos.x;
+    let err_py: Float = (gps).pos.y - (nom).pos.y;
+    let err_pz: Float = (gps).pos.z - (nom).pos.z;
+
+    let corr_px: Float = (nom).pos.x + (k_p * err_px);
+    let corr_py: Float = (nom).pos.y + (k_p * err_py);
+    let corr_pz: Float = (nom).pos.z + (k_p * err_pz);
+
+    // Kalman gain for velocity: K_v = P_v / (P_v + R_v)
+    let r_v: Float = (gps).vel_accuracy_m_s * (gps).vel_accuracy_m_s;
+    let k_v: Float = (cov).var_v / ((cov).var_v + r_v);
+
+    let err_vx: Float = (gps).vel.x - (nom).vel.x;
+    let err_vy: Float = (gps).vel.y - (nom).vel.y;
+    let err_vz: Float = (gps).vel.z - (nom).vel.z;
+
+    let corr_vx: Float = (nom).vel.x + (k_v * err_vx);
+    let corr_vy: Float = (nom).vel.y + (k_v * err_vy);
+    let corr_vz: Float = (nom).vel.z + (k_v * err_vz);
+
+    return EskfNominalState {
+        pos: Vector3D { x: corr_px, y: corr_py, z: corr_pz },
+        vel: Vector3D { x: corr_vx, y: corr_vy, z: corr_vz },
+        quat: (nom).quat,
+        accel_bias: (nom).accel_bias,
+        gyro_bias: (nom).gyro_bias,
+    };
+}

@@ -1,0 +1,93 @@
+// # UAV Brushless Motor & Electronic Speed Controller (ESC) Dynamics
+//
+// Logline: PWM voltage, back-EMF, first-order omega lag. Int milli destub.
+//
+// Setup: 4S 920 Kv motor; tau 35 ms; I = (V_arm - V_bemf) / R.
+//
+// Beats:
+//   1. Kv, R, tau, no-load I, supply V.
+//   2. Omega_tgt = throttle * Kv * V * 2pi/60.
+//   3. dOmega = (Omega_tgt - Omega) * dt / tau.
+//   4. V_bemf = Omega / Kv_si; P = V_arm * I_arm.
+
+type MotorEscParams = struct {
+    kv_rpm_per_v: Int,
+    resistance_mohm: Int,
+    time_constant_ms: Int,
+    rotor_inertia_ug_m2: Int,
+    no_load_current_ma: Int,
+    supply_voltage_mv: Int
+};
+
+type MotorState = struct {
+    omega_mrad_s: Int,
+    current_ma: Int,
+    voltage_mv: Int,
+    electrical_power_mw: Int
+};
+
+pub fn motor_esc_params_default() -> MotorEscParams {
+    return MotorEscParams {
+        kv_rpm_per_v: 920,
+        resistance_mohm: 120,
+        time_constant_ms: 35,
+        rotor_inertia_ug_m2: 25,
+        no_load_current_ma: 500,
+        supply_voltage_mv: 14800
+    };
+}
+
+pub fn motor_state_zero() -> MotorState {
+    return MotorState {
+        omega_mrad_s: 0,
+        current_ma: 0,
+        voltage_mv: 0,
+        electrical_power_mw: 0
+    };
+}
+
+pub fn mesc_clamp_throttle(th_milli: Int) -> Int {
+    if th_milli < 0 {
+        return 0;
+    }
+    if th_milli > 1000 {
+        return 1000;
+    }
+    return th_milli;
+}
+
+pub fn throttle_to_target_omega(throttle_milli: Int, params: MotorEscParams) -> Int {
+    let th: Int = mesc_clamp_throttle(throttle_milli);
+    let target_rpm: Int = ((th * params.kv_rpm_per_v) * params.supply_voltage_mv) / 1000000;
+    return (target_rpm * 104720) / 1000;
+}
+
+pub fn motor_dynamics_step(
+    params: MotorEscParams,
+    current_state: MotorState,
+    throttle_milli: Int,
+    aerodynamic_load_torque_un_m: Int,
+    dt_ms: Int
+) -> MotorState {
+    let target_omega: Int = throttle_to_target_omega(throttle_milli, params);
+    let tau: Int = if params.time_constant_ms < 1 { 1 } else { params.time_constant_ms };
+    let dt_use: Int = if dt_ms < 0 { 0 } else { dt_ms };
+    let d_omega: Int = ((target_omega - current_state.omega_mrad_s) * dt_use) / tau;
+    let new_omega: Int = current_state.omega_mrad_s + d_omega;
+    let safe_omega: Int = if new_omega < 0 { 0 } else { new_omega };
+    let kv_mrad_s_v: Int = (params.kv_rpm_per_v * 104720) / 1000;
+    let kv_use: Int = if kv_mrad_s_v < 1 { 1 } else { kv_mrad_s_v };
+    let v_bemf_mv: Int = (safe_omega * 1000) / kv_use;
+    let th: Int = mesc_clamp_throttle(throttle_milli);
+    let v_arm_mv: Int = (th * params.supply_voltage_mv) / 1000;
+    let r_mohm: Int = if params.resistance_mohm < 1 { 1 } else { params.resistance_mohm };
+    let i_raw: Int = ((v_arm_mv - v_bemf_mv) * 1000) / r_mohm;
+    let i_arm: Int = if i_raw < 0 { 0 } else { i_raw };
+    let p_elec: Int = (v_arm_mv * i_arm) / 1000;
+    return MotorState {
+        omega_mrad_s: safe_omega,
+        current_ma: i_arm,
+        voltage_mv: v_arm_mv,
+        electrical_power_mw: p_elec
+    };
+}

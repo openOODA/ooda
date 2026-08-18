@@ -1,0 +1,167 @@
+// # Ring Attention Distributed Sequence Context Engine
+//
+// Logline: Device-block token lengths, ring rotate, online softmax m/l.
+// residual: destubbed to Int floor.
+
+type RingAttentionConfig = struct {
+    n_dev: Int,
+    device_id: Int,
+    block_n: Int,
+    head_d: Int
+}
+
+type RingBlockState = struct {
+    acc0: Int,
+    max_s: Int,
+    sum_e: Int,
+    n_blk: Int
+}
+
+fn ring_isqrt_iter(n: Int, x: Int, y: Int, guard: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if guard >= 32 {
+        return x;
+    }
+    if y < x {
+        if y == 0 {
+            return 0;
+        }
+        return ring_isqrt_iter(n, y, (y + (n / y)) / 2, guard + 1);
+    }
+    return x;
+}
+
+fn ring_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    return ring_isqrt_iter(n, n, (n + 1) / 2, 0);
+}
+
+fn ring_max2(a: Int, b: Int) -> Int {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn ring_exp_milli(z: Int) -> Int {
+    if z >= 0 {
+        return 1000;
+    }
+    if z <= (0 - 8) {
+        return 0;
+    }
+    if z == (0 - 1) {
+        return 367;
+    }
+    if z == (0 - 2) {
+        return 135;
+    }
+    if z == (0 - 3) {
+        return 49;
+    }
+    if z == (0 - 4) {
+        return 18;
+    }
+    if z == (0 - 5) {
+        return 6;
+    }
+    if z == (0 - 6) {
+        return 2;
+    }
+    return 1;
+}
+
+pub fn ring_attention_config_new(devices: Int, dev_id: Int, b_size: Int, h_dim: Int) -> RingAttentionConfig {
+    return RingAttentionConfig {
+        n_dev: devices,
+        device_id: dev_id,
+        block_n: b_size,
+        head_d: h_dim
+    };
+}
+
+pub fn ring_n_tok(cfg: RingAttentionConfig) -> Int {
+    return cfg.n_dev * cfg.block_n;
+}
+
+pub fn ring_block_start(cfg: RingAttentionConfig) -> Int {
+    return cfg.device_id * cfg.block_n;
+}
+
+pub fn ring_rotate(cfg: RingAttentionConfig) -> RingAttentionConfig {
+    let nxt: Int = cfg.device_id + 1;
+    if nxt >= cfg.n_dev {
+        return RingAttentionConfig {
+            n_dev: cfg.n_dev,
+            device_id: 0,
+            block_n: cfg.block_n,
+            head_d: cfg.head_d
+        };
+    }
+    return RingAttentionConfig {
+        n_dev: cfg.n_dev,
+        device_id: nxt,
+        block_n: cfg.block_n,
+        head_d: cfg.head_d
+    };
+}
+
+pub fn ring_init_state(b_size: Int) -> RingBlockState {
+    return RingBlockState {
+        acc0: 0,
+        max_s: 0 - 100000,
+        sum_e: 0,
+        n_blk: b_size
+    };
+}
+
+pub fn ring_score(q0: Int, q1: Int, k0: Int, k1: Int, head_d: Int) -> Int {
+    let dot: Int = (q0 * k0) + (q1 * k1);
+    let s: Int = ring_isqrt(head_d);
+    if s <= 1 {
+        return dot;
+    }
+    return dot / s;
+}
+
+pub fn ring_step_accumulate(
+    state: RingBlockState,
+    cfg: RingAttentionConfig,
+    q0: Int,
+    q1: Int,
+    k00: Int,
+    k01: Int,
+    k10: Int,
+    k11: Int,
+    v0: Int,
+    v1: Int
+) -> RingBlockState {
+    let s0: Int = ring_score(q0, q1, k00, k01, cfg.head_d);
+    let s1: Int = ring_score(q0, q1, k10, k11, cfg.head_d);
+    let blk_max: Int = ring_max2(s0, s1);
+    let new_max: Int = ring_max2(state.max_s, blk_max);
+    let scale_prev: Int = ring_exp_milli(state.max_s - new_max);
+    let e0: Int = ring_exp_milli(s0 - new_max);
+    let e1: Int = ring_exp_milli(s1 - new_max);
+    let new_l: Int = ((state.sum_e * scale_prev) / 1000) + (e0 + e1);
+    if new_l == 0 {
+        return RingBlockState {
+            acc0: 0,
+            max_s: new_max,
+            sum_e: 0,
+            n_blk: state.n_blk
+        };
+    }
+    let prev_term: Int = ((state.acc0 * state.sum_e) / 1000) * scale_prev;
+    let new_acc: Int = (prev_term + ((e0 * v0) + (e1 * v1))) / new_l;
+    return RingBlockState {
+        acc0: new_acc,
+        max_s: new_max,
+        sum_e: new_l,
+        n_blk: state.n_blk
+    };
+}

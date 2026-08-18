@@ -1,0 +1,174 @@
+// # UAV 3D Geofence Containment & Failsafe Breach Detection
+//
+// Logline: Cylinder margin, radial t_breach, action 0..3. Int milli destub.
+//
+// Setup: Flattened cylinder; r = isqrt(dx^2+dy^2); no nested Vector3.
+//
+// Beats:
+//   1. Center, radius, min/max alt, buffer.
+//   2. Horizontal and vertical margins to the walls.
+//   3. t_breach = h_margin / v_radial.
+//   4. Action: 0 normal, 1 warn, 2 brake, 3 RTL.
+
+type GeofenceCylinder = struct {
+    center_x_mm: Int,
+    center_y_mm: Int,
+    center_z_mm: Int,
+    radius_mm: Int,
+    min_alt_mm: Int,
+    max_alt_mm: Int,
+    buffer_margin_mm: Int
+};
+
+type GeofenceStatus = struct {
+    is_inside: Bool,
+    horizontal_margin_mm: Int,
+    vertical_margin_mm: Int,
+    time_to_breach_s: Int,
+    safety_action_code: Int
+};
+
+pub fn gef_isqrt_seed(n: Int, g: Int) -> Int {
+    let g2: Int = g * 2;
+    if g2 <= 0 {
+        return g;
+    }
+    if (g2 * g2) > n {
+        return g;
+    }
+    if g2 <= g {
+        return g;
+    }
+    return gef_isqrt_seed(n, g2);
+}
+
+pub fn gef_isqrt_iter(n: Int, guess: Int, steps: Int) -> Int {
+    if steps <= 0 {
+        return guess;
+    }
+    if guess <= 0 {
+        return 0;
+    }
+    let next: Int = (guess + (n / guess)) / 2;
+    let diff: Int = next - guess;
+    if diff == 0 {
+        return next;
+    }
+    if diff < 0 {
+        if (0 - diff) <= 1 {
+            return next;
+        }
+        return gef_isqrt_iter(n, next, steps - 1);
+    }
+    if diff <= 1 {
+        return guess;
+    }
+    return gef_isqrt_iter(n, next, steps - 1);
+}
+
+pub fn gef_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if n < 4 {
+        return 1;
+    }
+    let seed: Int = gef_isqrt_seed(n, 1);
+    return gef_isqrt_iter(n, seed, 8);
+}
+
+pub fn geofence_cylinder_default() -> GeofenceCylinder {
+    return GeofenceCylinder {
+        center_x_mm: 0,
+        center_y_mm: 0,
+        center_z_mm: 0,
+        radius_mm: 150000,
+        min_alt_mm: 2000,
+        max_alt_mm: 120000,
+        buffer_margin_mm: 15000
+    };
+}
+
+pub fn check_geofence_containment(
+    fence: GeofenceCylinder,
+    pos_x_mm: Int,
+    pos_y_mm: Int,
+    pos_z_mm: Int,
+    vel_x_mm_s: Int,
+    vel_y_mm_s: Int
+) -> GeofenceStatus {
+    let dx: Int = pos_x_mm - fence.center_x_mm;
+    let dy: Int = pos_y_mm - fence.center_y_mm;
+    let r_sq: Int = (dx * dx) + (dy * dy);
+    let r_curr: Int = gef_isqrt(r_sq);
+    let h_margin: Int = fence.radius_mm - r_curr;
+    let mid_alt: Int = (fence.min_alt_mm + fence.max_alt_mm) / 2;
+    let v_margin: Int = if pos_z_mm > mid_alt {
+        fence.max_alt_mm - pos_z_mm
+    } else {
+        pos_z_mm - fence.min_alt_mm
+    };
+    let inside_h: Bool = r_curr <= fence.radius_mm;
+    let inside_v: Bool = if pos_z_mm >= fence.min_alt_mm {
+        pos_z_mm <= fence.max_alt_mm
+    } else {
+        false
+    };
+    let is_inside: Bool = if inside_h { inside_v } else { false };
+    let v_radial: Int = if r_curr > 0 {
+        ((dx * vel_x_mm_s) + (dy * vel_y_mm_s)) / r_curr
+    } else {
+        0
+    };
+    let t_breach: Int = if v_radial > 0 {
+        h_margin / v_radial
+    } else {
+        999
+    };
+    let buf: Int = fence.buffer_margin_mm;
+    let tight: Int = (buf * 35) / 100;
+    let action: Int = if is_inside {
+        if h_margin < tight {
+            2
+        } else {
+            if v_margin < tight {
+                2
+            } else {
+                if t_breach < 2 {
+                    2
+                } else {
+                    if h_margin < buf {
+                        1
+                    } else {
+                        if v_margin < buf {
+                            1
+                        } else {
+                            if t_breach < 5 {
+                                1
+                            } else {
+                                0
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        3
+    };
+    return GeofenceStatus {
+        is_inside: is_inside,
+        horizontal_margin_mm: h_margin,
+        vertical_margin_mm: v_margin,
+        time_to_breach_s: t_breach,
+        safety_action_code: action
+    };
+}
+
+pub fn geofence_action(s: GeofenceStatus) -> Int {
+    return s.safety_action_code;
+}
+
+pub fn geofence_h_margin(s: GeofenceStatus) -> Int {
+    return s.horizontal_margin_mm;
+}

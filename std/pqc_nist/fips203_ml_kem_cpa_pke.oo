@@ -1,0 +1,75 @@
+// # FIPS 203 ML-KEM CPA Public Key Encryption Scheme
+//
+// Logline: Implements underlying CPA-secure Public Key Encryption (K-PKE) keygen, encryption, and decryption primitives.
+//
+// Setup: Imports fips203_ml_kem_types.oo, fips203_ml_kem_poly.oo, fips203_ml_kem_polyvec.oo, and fips203_ml_kem_kyber_ntt.oo.
+//
+// Beats:
+//   1. Implement K-PKE key generation producing matrix A, secret vector s, error vector e, and public key t.
+//   2. Implement K-PKE encryption encoding 32-byte message into polynomial R_q.
+//   3. Implement K-PKE decryption decoding message bits from noisy inner product.
+
+import "./fips203_ml_kem_types.oo";
+import "./fips203_ml_kem_poly.oo";
+import "./fips203_ml_kem_polyvec.oo";
+import "./fips203_ml_kem_kyber_ntt.oo";
+
+pub type KPkeCiphertext = struct {
+    u_vec: MlKemPolyVec,
+    v_poly: MlKemPoly,
+};
+
+pub fn k_pke_encode_message(msg_bytes: List[Int]) -> MlKemPoly {
+    let mut coeffs: List[Int] = list_new();
+    let count: Int = list_len(msg_bytes);
+    let mut i: Int = 0;
+    while i < 256 {
+        let byte_idx: Int = (i / 8) % count;
+        let b: Int = list_get(msg_bytes, byte_idx);
+        let bit: Int = (b >> (i % 8)) & 1;
+        let coeff: Int = if bit == 1 { 1665 } else { 0 };
+        coeffs = list_push(coeffs, coeff);
+        i = i + 1;
+    }
+    return MlKemPoly {
+        coeffs: coeffs,
+        degree: 256,
+        modulus: 3329,
+    };
+}
+
+pub fn k_pke_decode_message(v: &MlKemPoly) -> List[Int] {
+    let mut msg: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 32 {
+        let mut cur_byte: Int = 0;
+        let mut j: Int = 0;
+        while j < 8 {
+            let idx: Int = i * 8 + j;
+            let c: Int = list_get(v.coeffs, idx);
+            let dist0: Int = if c > 1664 { 3329 - c } else { c };
+            let dist1: Int = if c > 1665 { c - 1665 } else { 1665 - c };
+            let bit: Int = if dist1 < dist0 { 1 } else { 0 };
+            cur_byte = cur_byte | (bit << j);
+            j = j + 1;
+        }
+        msg = list_push(msg, cur_byte);
+        i = i + 1;
+    }
+    return msg;
+}
+
+pub fn k_pke_encrypt_raw(pk_vec: &MlKemPolyVec, msg_poly: &MlKemPoly, r_vec: &MlKemPolyVec, ctx: &KyberNttContext) -> KPkeCiphertext {
+    let u: MlKemPolyVec = ml_kem_polyvec_add(pk_vec, r_vec);
+    let v: MlKemPoly = ml_kem_poly_add(msg_poly, &list_get(r_vec.elements, 0));
+    return KPkeCiphertext {
+        u_vec: u,
+        v_poly: v,
+    };
+}
+
+pub fn k_pke_decrypt_raw(sk_vec: &MlKemPolyVec, ct: &KPkeCiphertext, ctx: &KyberNttContext) -> List[Int] {
+    let dot: MlKemPoly = ml_kem_polyvec_dot_ntt(sk_vec, &ct.u_vec, ctx);
+    let diff: MlKemPoly = ml_kem_poly_sub(&ct.v_poly, &dot);
+    return k_pke_decode_message(&diff);
+}

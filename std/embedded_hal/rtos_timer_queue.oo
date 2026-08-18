@@ -1,0 +1,254 @@
+// # RTOS Software Timer Queue
+//
+// Logline: One-shot and periodic software timers, delta tick accounting, callback dispatching, and timer list management.
+//
+// Setup: Deterministic software timer subsystem running on SysTick or dedicated daemon task.
+//
+// Beats:
+//   1. Define software timer structures, periods, reload modes, and active states.
+//   2. Implement timer creation, activation, deactivation, and period reconfiguration.
+//   3. Process system tick advances, decrement remaining ticks, and detect expirations.
+//   4. Auto-reload periodic timers and collect expired callback identifiers for execution.
+
+type RtosTimer = struct {
+    timer_id: Int,
+    name: String,
+    period_ticks: Int,
+    remaining_ticks: Int,
+    auto_reload: Bool,
+    is_active: Bool,
+    callback_id: Int,
+    fire_count: Int,
+};
+
+type RtosTimerQueue = struct {
+    timers: List[RtosTimer],
+    current_tick: Int,
+    last_ok: Bool,
+    last_fired: List[Int],
+};
+
+pub fn rtos_timer_new(
+    id: Int,
+    name: String,
+    period: Int,
+    auto_reload: Bool,
+    callback_id: Int
+) -> RtosTimer {
+    let valid_period: Int = if period < 1 { 1 } else { period };
+    return RtosTimer {
+        timer_id: id,
+        name: name,
+        period_ticks: valid_period,
+        remaining_ticks: valid_period,
+        auto_reload: auto_reload,
+        is_active: false,
+        callback_id: callback_id,
+        fire_count: 0,
+    };
+}
+
+pub fn rtos_timer_queue_new() -> RtosTimerQueue {
+    let empty_timers: List[RtosTimer] = list_new();
+    let empty_fired: List[Int] = list_new();
+    return RtosTimerQueue {
+        timers: empty_timers,
+        current_tick: 0,
+        last_ok: true,
+        last_fired: empty_fired,
+    };
+}
+
+fn rtos_update_timer_in_list(timers: List[RtosTimer], timer_id: Int, updated: RtosTimer) -> List[RtosTimer] {
+    let mut result: List[RtosTimer] = list_new();
+    let len: Int = list_len(timers);
+    let mut i: Int = 0;
+    while i < len {
+        let t: RtosTimer = list_get(timers, i);
+        if (t).timer_id == timer_id {
+            result = list_push(result, updated);
+        } else {
+            result = list_push(result, t);
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn rtos_timer_queue_add(queue: RtosTimerQueue, timer: RtosTimer) -> RtosTimerQueue {
+    return RtosTimerQueue {
+        timers: list_push((queue).timers, timer),
+        current_tick: (queue).current_tick,
+        last_ok: true,
+        last_fired: (queue).last_fired,
+    };
+}
+
+pub fn rtos_timer_start(queue: RtosTimerQueue, timer_id: Int) -> RtosTimerQueue {
+    let len: Int = list_len((queue).timers);
+    let mut i: Int = 0;
+    while i < len {
+        let t: RtosTimer = list_get((queue).timers, i);
+        if (t).timer_id == timer_id {
+            let updated: RtosTimer = RtosTimer {
+                timer_id: (t).timer_id,
+                name: (t).name,
+                period_ticks: (t).period_ticks,
+                remaining_ticks: (t).period_ticks,
+                auto_reload: (t).auto_reload,
+                is_active: true,
+                callback_id: (t).callback_id,
+                fire_count: (t).fire_count,
+            };
+            return RtosTimerQueue {
+                timers: rtos_update_timer_in_list((queue).timers, timer_id, updated),
+                current_tick: (queue).current_tick,
+                last_ok: true,
+                last_fired: (queue).last_fired,
+            };
+        }
+        i = i + 1;
+    }
+    return RtosTimerQueue {
+        timers: (queue).timers,
+        current_tick: (queue).current_tick,
+        last_ok: false,
+        last_fired: (queue).last_fired,
+    };
+}
+
+pub fn rtos_timer_stop(queue: RtosTimerQueue, timer_id: Int) -> RtosTimerQueue {
+    let len: Int = list_len((queue).timers);
+    let mut i: Int = 0;
+    while i < len {
+        let t: RtosTimer = list_get((queue).timers, i);
+        if (t).timer_id == timer_id {
+            let updated: RtosTimer = RtosTimer {
+                timer_id: (t).timer_id,
+                name: (t).name,
+                period_ticks: (t).period_ticks,
+                remaining_ticks: (t).remaining_ticks,
+                auto_reload: (t).auto_reload,
+                is_active: false,
+                callback_id: (t).callback_id,
+                fire_count: (t).fire_count,
+            };
+            return RtosTimerQueue {
+                timers: rtos_update_timer_in_list((queue).timers, timer_id, updated),
+                current_tick: (queue).current_tick,
+                last_ok: true,
+                last_fired: (queue).last_fired,
+            };
+        }
+        i = i + 1;
+    }
+    return RtosTimerQueue {
+        timers: (queue).timers,
+        current_tick: (queue).current_tick,
+        last_ok: false,
+        last_fired: (queue).last_fired,
+    };
+}
+
+pub fn rtos_timer_reset(queue: RtosTimerQueue, timer_id: Int) -> RtosTimerQueue {
+    return rtos_timer_start(queue, timer_id);
+}
+
+pub fn rtos_timer_change_period(queue: RtosTimerQueue, timer_id: Int, new_period: Int) -> RtosTimerQueue {
+    if new_period <= 0 {
+        return RtosTimerQueue {
+            timers: (queue).timers,
+            current_tick: (queue).current_tick,
+            last_ok: false,
+            last_fired: (queue).last_fired,
+        };
+    }
+    let len: Int = list_len((queue).timers);
+    let mut i: Int = 0;
+    while i < len {
+        let t: RtosTimer = list_get((queue).timers, i);
+        if (t).timer_id == timer_id {
+            let updated: RtosTimer = RtosTimer {
+                timer_id: (t).timer_id,
+                name: (t).name,
+                period_ticks: new_period,
+                remaining_ticks: new_period,
+                auto_reload: (t).auto_reload,
+                is_active: (t).is_active,
+                callback_id: (t).callback_id,
+                fire_count: (t).fire_count,
+            };
+            return RtosTimerQueue {
+                timers: rtos_update_timer_in_list((queue).timers, timer_id, updated),
+                current_tick: (queue).current_tick,
+                last_ok: true,
+                last_fired: (queue).last_fired,
+            };
+        }
+        i = i + 1;
+    }
+    return RtosTimerQueue {
+        timers: (queue).timers,
+        current_tick: (queue).current_tick,
+        last_ok: false,
+        last_fired: (queue).last_fired,
+    };
+}
+
+pub fn rtos_timer_queue_tick(queue: RtosTimerQueue) -> RtosTimerQueue {
+    let mut timers: List[RtosTimer] = (queue).timers;
+    let mut fired_callbacks: List[Int] = list_new();
+    let len: Int = list_len(timers);
+    let mut i: Int = 0;
+
+    while i < len {
+        let t: RtosTimer = list_get(timers, i);
+        if (t).is_active {
+            let rem: Int = (t).remaining_ticks - 1;
+            let mut active: Bool = true;
+            let mut fire_count: Int = (t).fire_count;
+            let mut remaining: Int = rem;
+            if rem <= 0 {
+                fired_callbacks = list_push(fired_callbacks, (t).callback_id);
+                fire_count = fire_count + 1;
+                if (t).auto_reload {
+                    remaining = (t).period_ticks;
+                } else {
+                    active = false;
+                    remaining = rem;
+                }
+            }
+            let updated: RtosTimer = RtosTimer {
+                timer_id: (t).timer_id,
+                name: (t).name,
+                period_ticks: (t).period_ticks,
+                remaining_ticks: remaining,
+                auto_reload: (t).auto_reload,
+                is_active: active,
+                callback_id: (t).callback_id,
+                fire_count: fire_count,
+            };
+            timers = rtos_update_timer_in_list(timers, (t).timer_id, updated);
+        }
+        i = i + 1;
+    }
+    return RtosTimerQueue {
+        timers: timers,
+        current_tick: (queue).current_tick + 1,
+        last_ok: true,
+        last_fired: fired_callbacks,
+    };
+}
+
+pub fn rtos_timer_is_active(queue: RtosTimerQueue, timer_id: Int) -> Bool {
+    let len: Int = list_len((queue).timers);
+    let mut i: Int = 0;
+    while i < len {
+        let t: RtosTimer = list_get((queue).timers, i);
+        if (t).timer_id == timer_id {
+            return (t).is_active;
+        }
+        i = i + 1;
+    }
+    return false;
+}

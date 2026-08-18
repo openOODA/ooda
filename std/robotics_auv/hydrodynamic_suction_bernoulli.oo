@@ -1,0 +1,123 @@
+// # Near-Boundary Hull Interaction & Bernoulli Suction Dynamics
+//
+// Logline: Gap speedup, Delta Cp, wall suction force and pitch. Int milli destub.
+//
+// Setup: Continuity v_gap/U = 1 + 0.35 / ratio^1.5; F = q A Cs dCp.
+//
+// Beats:
+//   1. Diameter, length, suction coeff, critical gap ratio.
+//   2. Active when gap/D < critical (default 2).
+//   3. q = 1/2 rho U^2; lever 0.15 L for pitch.
+//   4. Seafloor +Z attraction; ceiling reverses F.
+
+type BoundaryProximityConfig = struct {
+    hull_diameter_mm: Int,
+    hull_length_mm: Int,
+    suction_coeff_milli: Int,
+    critical_gap_ratio_milli: Int
+};
+
+type SuctionForceOutput = struct {
+    suction_force_z_mn: Int,
+    destabilizing_pitch_moment_mnm: Int,
+    gap_ratio_milli: Int,
+    is_ground_effect_active: Bool
+};
+
+pub fn boundary_proximity_config_default() -> BoundaryProximityConfig {
+    return BoundaryProximityConfig {
+        hull_diameter_mm: 200,
+        hull_length_mm: 1600,
+        suction_coeff_milli: 180,
+        critical_gap_ratio_milli: 2000
+    };
+}
+
+pub fn bsuc_isqrt_seed(n: Int, g: Int) -> Int {
+    let g2: Int = g * 2;
+    if g2 <= 0 {
+        return g;
+    }
+    if (g2 * g2) > n {
+        return g;
+    }
+    if g2 <= g {
+        return g;
+    }
+    return bsuc_isqrt_seed(n, g2);
+}
+
+pub fn bsuc_isqrt_iter(n: Int, guess: Int, steps: Int) -> Int {
+    if steps <= 0 {
+        return guess;
+    }
+    if guess <= 0 {
+        return 0;
+    }
+    let next: Int = (guess + (n / guess)) / 2;
+    let diff: Int = next - guess;
+    if diff == 0 {
+        return next;
+    }
+    if diff < 0 {
+        if (0 - diff) <= 1 {
+            return next;
+        }
+        return bsuc_isqrt_iter(n, next, steps - 1);
+    }
+    if diff <= 1 {
+        return guess;
+    }
+    return bsuc_isqrt_iter(n, next, steps - 1);
+}
+
+pub fn bsuc_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if n < 4 {
+        return 1;
+    }
+    let seed: Int = bsuc_isqrt_seed(n, 1);
+    return bsuc_isqrt_iter(n, seed, 8);
+}
+
+pub fn compute_bernoulli_suction_force(
+    cfg: BoundaryProximityConfig,
+    clearance_gap_mm: Int,
+    surge_speed_mm_s: Int,
+    water_density: Int,
+    is_overhead_ceiling: Bool
+) -> SuctionForceOutput {
+    let d: Int = if cfg.hull_diameter_mm < 1 { 1 } else { cfg.hull_diameter_mm };
+    let l: Int = cfg.hull_length_mm;
+    let safe_gap: Int = if clearance_gap_mm < 50 { 50 } else { clearance_gap_mm };
+    let gap_ratio_milli: Int = (safe_gap * 1000) / d;
+    let is_active: Bool = gap_ratio_milli < cfg.critical_gap_ratio_milli;
+    if is_active == false {
+        return SuctionForceOutput {
+            suction_force_z_mn: 0,
+            destabilizing_pitch_moment_mnm: 0,
+            gap_ratio_milli: gap_ratio_milli,
+            is_ground_effect_active: false
+        };
+    }
+    let denom_milli: Int = (gap_ratio_milli * bsuc_isqrt(gap_ratio_milli * 1000)) / 1000;
+    let denom_use: Int = if denom_milli < 100 { 100 } else { denom_milli };
+    let speedup_milli: Int = 1000 + (350000 / denom_use);
+    let delta_cp_milli: Int = ((speedup_milli * speedup_milli) / 1000) - 1000;
+    let u: Int = surge_speed_mm_s;
+    let rho: Int = if water_density < 1 { 1 } else { water_density };
+    let q_pa: Int = (rho * u * u) / 2000000;
+    let area_mm2: Int = d * l;
+    let f_mag: Int = ((((q_pa * area_mm2) / 100) * cfg.suction_coeff_milli) / 100 * delta_cp_milli) / 100000;
+    let f_z: Int = if is_overhead_ceiling { 0 - f_mag } else { f_mag };
+    let lever_arm_mm: Int = (15 * l) / 100;
+    let m_pitch: Int = (0 - f_z) * lever_arm_mm;
+    return SuctionForceOutput {
+        suction_force_z_mn: f_z,
+        destabilizing_pitch_moment_mnm: m_pitch,
+        gap_ratio_milli: gap_ratio_milli,
+        is_ground_effect_active: true
+    };
+}

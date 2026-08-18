@@ -1,0 +1,159 @@
+// # UAV Cascaded Multi-Loop PID Flight Controller
+//
+// Logline: PID with anti-windup plus P position-to-velocity. Int milli destub.
+//
+// Setup: Gains in milli; state flattened to integral / prev_error ints.
+//
+// Beats:
+//   1. Kp, Ki, Kd, integral and output limits.
+//   2. I += e dt, clamp; D = (e - e_prev) / dt.
+//   3. u = (Kp e + Ki I + Kd D) / 1000, clamp.
+//   4. v_des = Kp * pos_err, scale if |v| > vmax.
+
+type PIDGains = struct {
+    kp_milli: Int,
+    ki_milli: Int,
+    kd_milli: Int,
+    integral_limit: Int,
+    output_limit: Int
+};
+
+type PIDStepResult = struct {
+    output: Int,
+    integral: Int,
+    error: Int
+};
+
+pub fn pid_gains_new(kp: Int, ki: Int, kd: Int, int_lim: Int, out_lim: Int) -> PIDGains {
+    return PIDGains {
+        kp_milli: kp,
+        ki_milli: ki,
+        kd_milli: kd,
+        integral_limit: int_lim,
+        output_limit: out_lim
+    };
+}
+
+pub fn pid_clamp(v: Int, lim: Int) -> Int {
+    if v > lim {
+        return lim;
+    }
+    if v < (0 - lim) {
+        return 0 - lim;
+    }
+    return v;
+}
+
+pub fn pid_isqrt_seed(n: Int, g: Int) -> Int {
+    let g2: Int = g * 2;
+    if g2 <= 0 {
+        return g;
+    }
+    if (g2 * g2) > n {
+        return g;
+    }
+    if g2 <= g {
+        return g;
+    }
+    return pid_isqrt_seed(n, g2);
+}
+
+pub fn pid_isqrt_iter(n: Int, guess: Int, steps: Int) -> Int {
+    if steps <= 0 {
+        return guess;
+    }
+    if guess <= 0 {
+        return 0;
+    }
+    let next: Int = (guess + (n / guess)) / 2;
+    let diff: Int = next - guess;
+    if diff == 0 {
+        return next;
+    }
+    if diff < 0 {
+        if (0 - diff) <= 1 {
+            return next;
+        }
+        return pid_isqrt_iter(n, next, steps - 1);
+    }
+    if diff <= 1 {
+        return guess;
+    }
+    return pid_isqrt_iter(n, next, steps - 1);
+}
+
+pub fn pid_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if n < 4 {
+        return 1;
+    }
+    let seed: Int = pid_isqrt_seed(n, 1);
+    return pid_isqrt_iter(n, seed, 8);
+}
+
+pub fn pid_step(
+    gains: PIDGains,
+    integral: Int,
+    prev_error: Int,
+    target: Int,
+    current: Int,
+    dt: Int
+) -> PIDStepResult {
+    let error: Int = target - current;
+    let safe_dt: Int = if dt < 1 { 1 } else { dt };
+    let new_int: Int = pid_clamp(integral + (error * safe_dt), gains.integral_limit);
+    let deriv: Int = (error - prev_error) / safe_dt;
+    let u_raw: Int = (((gains.kp_milli * error) + (gains.ki_milli * new_int)) + (gains.kd_milli * deriv)) / 1000;
+    let u: Int = pid_clamp(u_raw, gains.output_limit);
+    return PIDStepResult {
+        output: u,
+        integral: new_int,
+        error: error
+    };
+}
+
+pub fn position_to_velocity_sp(
+    sp_x: Int,
+    sp_y: Int,
+    sp_z: Int,
+    cur_x: Int,
+    cur_y: Int,
+    cur_z: Int,
+    kp_pos: Int,
+    max_vel: Int
+) -> PIDStepResult {
+    let vx: Int = kp_pos * (sp_x - cur_x);
+    let vy: Int = kp_pos * (sp_y - cur_y);
+    let vz: Int = kp_pos * (sp_z - cur_z);
+    let v_mag: Int = pid_isqrt(((vx * vx) + (vy * vy)) + (vz * vz));
+    if v_mag > max_vel {
+        if v_mag < 1 {
+            return PIDStepResult {
+                output: 0,
+                integral: 0,
+                error: 0
+            };
+        }
+        let scale: Int = (max_vel * 1000) / v_mag;
+        return PIDStepResult {
+            output: (vx * scale) / 1000,
+            integral: (vy * scale) / 1000,
+            error: (vz * scale) / 1000
+        };
+    }
+    return PIDStepResult {
+        output: vx,
+        integral: vy,
+        error: vz
+    };
+}
+
+pub fn pid_output(r: PIDStepResult) -> Int {
+    return r.output;
+}
+
+pub fn pid_integral(r: PIDStepResult) -> Int {
+    return r.integral;
+}

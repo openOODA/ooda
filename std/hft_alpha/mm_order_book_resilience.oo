@@ -1,0 +1,111 @@
+// # Limit Order Book Resilience and Liquidity Replenishment
+//
+// Logline: Measures the rate and speed at which order book depth, spread width, and queue thickness recover following large aggressive liquidity shocks.
+//
+// Setup: Pure high-frequency market microstructure module calculating post-trade resilience metrics and replenishment half-lives.
+//
+// Beats:
+//   1. Define ShockEvent, ResilienceConfig, and RecoveryMetrics structures.
+//   2. Track depth replenishment percentage and spread narrowing trajectory over time intervals.
+//   3. Compute exponential resilience rate alpha and estimate time to full book restoration.
+
+pub type ShockEvent = struct {
+    timestamp_shock: Float,
+    pre_shock_spread: Float,
+    pre_shock_depth: Float,
+    post_shock_spread: Float,
+    post_shock_depth: Float,
+};
+
+pub type ResilienceConfig = struct {
+    recovery_tolerance_bps: Float,
+    max_tracking_duration: Float,
+};
+
+pub type RecoveryMetrics = struct {
+    current_time: Float,
+    spread_recovery_ratio: Float,
+    depth_recovery_ratio: Float,
+    replenishment_rate_alpha: Float,
+    half_life_recovery: Float,
+    is_fully_recovered: Bool,
+};
+
+pub fn shock_event_new(
+    t_shock: Float,
+    pre_spread: Float,
+    pre_depth: Float,
+    post_spread: Float,
+    post_depth: Float
+) -> ShockEvent {
+    return ShockEvent {
+        timestamp_shock: t_shock,
+        pre_shock_spread: pre_spread,
+        pre_shock_depth: pre_depth,
+        post_shock_spread: post_spread,
+        post_shock_depth: post_depth,
+    };
+}
+
+pub fn resilience_config_default() -> ResilienceConfig {
+    return ResilienceConfig {
+        recovery_tolerance_bps: 0.05,
+        max_tracking_duration: 30.0,
+    };
+}
+
+pub fn resilience_evaluate_recovery(
+    shock: &ShockEvent,
+    current_time: Float,
+    current_spread: Float,
+    current_depth: Float,
+    config: &ResilienceConfig
+) -> RecoveryMetrics {
+    let dt: Float = current_time - (shock).timestamp_shock;
+    let initial_spread_widening: Float = (shock).post_shock_spread - (shock).pre_shock_spread;
+    let initial_depth_drop: Float = (shock).pre_shock_depth - (shock).post_shock_depth;
+
+    let mut spread_ratio: Float = 1.0;
+    if initial_spread_widening > 0.00001 {
+        let current_widening: Float = current_spread - (shock).pre_shock_spread;
+        if current_widening <= 0.0 {
+            spread_ratio = 1.0;
+        } else {
+            spread_ratio = 1.0 - (current_widening / initial_spread_widening);
+        }
+    }
+
+    let mut depth_ratio: Float = 1.0;
+    if initial_depth_drop > 0.00001 {
+        let current_recovered_depth: Float = current_depth - (shock).post_shock_depth;
+        if current_recovered_depth >= initial_depth_drop {
+            depth_ratio = 1.0;
+        } else if current_recovered_depth <= 0.0 {
+            depth_ratio = 0.0;
+        } else {
+            depth_ratio = current_recovered_depth / initial_depth_drop;
+        }
+    }
+
+    // Exponential resilience model: 1 - ratio = e^(-alpha * dt) => alpha = -ln(1 - ratio) / dt
+    let mut alpha: Float = 0.1;
+    if dt > 0.001 {
+        if depth_ratio > 0.01 && depth_ratio < 0.99 {
+            let rem_gap: Float = 1.0 - depth_ratio;
+            alpha = (0.0 - ln(rem_gap)) / dt;
+        }
+    }
+
+    let half_life: Float = if alpha > 0.0001 { 0.693147 / alpha } else { 999.0 };
+    let tol: Float = (config).recovery_tolerance_bps;
+    let recovered: Bool = (spread_ratio >= (1.0 - tol)) && (depth_ratio >= (1.0 - tol));
+
+    return RecoveryMetrics {
+        current_time: current_time,
+        spread_recovery_ratio: spread_ratio,
+        depth_recovery_ratio: depth_ratio,
+        replenishment_rate_alpha: alpha,
+        half_life_recovery: half_life,
+        is_fully_recovered: recovered,
+    };
+}

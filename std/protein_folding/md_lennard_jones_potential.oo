@@ -1,0 +1,100 @@
+// # Lennard-Jones 12-6 Non-Bonded Potential & Force
+//
+// Logline: Calculates 12-6 Lennard-Jones van der Waals potential energies, forces, and polynomial cutoff switching functions.
+//
+// Setup: Non-bonded pairwise interaction engine computing Pauli repulsion and London dispersion terms.
+//
+// Beats:
+//   1. Define LjPairInteraction and LjCutoffSwitch data structures.
+//   2. Calculate analytical 12-6 potential V(r) = 4*eps*[(sig/r)^12 - (sig/r)^6] and scalar force dV/dr.
+//   3. Apply C2-continuous polynomial spline switching between r_switch and r_cut.
+
+pub type LjPairInteraction = struct {
+    energy_kcal: Float,
+    force_magnitude_kcal_per_a: Float,
+    is_within_cutoff: Bool,
+};
+
+pub type LjCutoffSwitch = struct {
+    r_on: Float,
+    r_cut: Float,
+    switch_val: Float,
+    dswitch_dr: Float,
+};
+
+pub fn lj_evaluate_pair_raw(r_angstrom: Float, sigma: Float, epsilon: Float) -> LjPairInteraction {
+    if r_angstrom < 0.1 {
+        return LjPairInteraction {
+            energy_kcal: 1000.0,
+            force_magnitude_kcal_per_a: 5000.0,
+            is_within_cutoff: true,
+        };
+    }
+
+    let inv_r = 1.0 / r_angstrom;
+    let s_over_r = sigma * inv_r;
+    let sr2 = s_over_r * s_over_r;
+    let sr6 = sr2 * sr2 * sr2;
+    let sr12 = sr6 * sr6;
+
+    // V(r) = 4 * eps * (sr12 - sr6)
+    let e_lj = 4.0 * epsilon * (sr12 - sr6);
+
+    // -dV/dr = 24 * eps * inv_r * (2*sr12 - sr6)
+    let force_mag = 24.0 * epsilon * inv_r * ((2.0 * sr12) - sr6);
+
+    return LjPairInteraction {
+        energy_kcal: e_lj,
+        force_magnitude_kcal_per_a: force_mag,
+        is_within_cutoff: true,
+    };
+}
+
+pub fn lj_smooth_switch(r: Float, r_on: Float, r_cut: Float) -> LjCutoffSwitch {
+    if r <= r_on {
+        return LjCutoffSwitch { r_on: r_on, r_cut: r_cut, switch_val: 1.0, dswitch_dr: 0.0 };
+    }
+    if r >= r_cut {
+        return LjCutoffSwitch { r_on: r_on, r_cut: r_cut, switch_val: 0.0, dswitch_dr: 0.0 };
+    }
+
+    // S(r) = (r_cut^2 - r^2)^2 * (r_cut^2 + 2*r^2 - 3*r_on^2) / (r_cut^2 - r_on^2)^3
+    let r2 = r * r;
+    let ron2 = r_on * r_on;
+    let rcut2 = r_cut * r_cut;
+    let denom = (rcut2 - ron2) * (rcut2 - ron2) * (rcut2 - ron2);
+
+    let d_cut = rcut2 - r2;
+    let numer = d_cut * d_cut * (rcut2 + (2.0 * r2) - (3.0 * ron2));
+    let s_val = numer / denom;
+
+    // dS/dr = 12 * (r_cut^2 - r^2) * (r_on^2 - r^2) * r / denom
+    let ds_dr = (12.0 * d_cut * (ron2 - r2) * r) / denom;
+
+    return LjCutoffSwitch {
+        r_on: r_on,
+        r_cut: r_cut,
+        switch_val: s_val,
+        dswitch_dr: ds_dr,
+    };
+}
+
+pub fn lj_evaluate_switched(r: Float, sigma: Float, eps: Float, r_on: Float, r_cut: Float) -> LjPairInteraction {
+    if r >= r_cut {
+        return LjPairInteraction { energy_kcal: 0.0, force_magnitude_kcal_per_a: 0.0, is_within_cutoff: false };
+    }
+
+    let raw = lj_evaluate_pair_raw(r, sigma, eps);
+    let sw = lj_smooth_switch(r, r_on, r_cut);
+
+    // E_switched = E_raw * S(r)
+    let e_sw = (raw).energy_kcal * (sw).switch_val;
+    // F_switched = F_raw * S(r) - E_raw * dS/dr
+    let f_sw = ((raw).force_magnitude_kcal_per_a * (sw).switch_val) - ((raw).energy_kcal * (sw).dswitch_dr);
+
+    return LjPairInteraction {
+        energy_kcal: e_sw,
+        force_magnitude_kcal_per_a: f_sw,
+        is_within_cutoff: true,
+    };
+}

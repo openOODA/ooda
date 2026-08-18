@@ -1,0 +1,193 @@
+// # ASLR Configuration and Address Range Operations
+//
+// Logline: Config presets, range test, overlap, floor-log2 entropy. Destubbed off List[AslrRegion].
+//
+// Setup: Imports aslr_types.oo. Two fixed layout slots.
+//
+// Beats:
+//   1. Default 28-bit, conservative 16-bit, strict 32-bit configs.
+//   2. addr in [base, base+size); ranges overlap iff e1>b2 and e2>b1.
+//   3. Entropy bits = floor(log2(size)).
+// residual: List[struct] destubbed to fixed Int slots.
+
+import "./aslr_types.oo";
+
+pub fn aslr_config_default() -> AslrConfig {
+    return AslrConfig {
+        entropy_bits: 28,
+        enabled: 1,
+        rand_mask: 7
+    };
+}
+
+pub fn aslr_config_conservative() -> AslrConfig {
+    return AslrConfig {
+        entropy_bits: 16,
+        enabled: 1,
+        rand_mask: 3
+    };
+}
+
+pub fn aslr_config_strict() -> AslrConfig {
+    return AslrConfig {
+        entropy_bits: 32,
+        enabled: 1,
+        rand_mask: 7
+    };
+}
+
+pub fn aslr_config_validate(cfg: AslrConfig) -> Int {
+    if cfg.entropy_bits < 0 {
+        return 0;
+    }
+    if cfg.entropy_bits > 64 {
+        return 0;
+    }
+    if cfg.enabled == 0 {
+        return 1;
+    }
+    if cfg.rand_mask == 0 {
+        return 0;
+    }
+    return 1;
+}
+
+pub fn aslr_region_create(base_addr_val: Int, size_bytes_val: Int, is_executable_val: Int, is_writable_val: Int) -> AslrRegion {
+    return aslr_region_new(base_addr_val, size_bytes_val, is_executable_val, is_writable_val);
+}
+
+pub fn aslr_layout_new() -> AslrLayout {
+    return aslr_layout_empty();
+}
+
+pub fn aslr_addr_in_range(addr: Int, base: Int, size: Int) -> Int {
+    if size <= 0 {
+        return 0;
+    }
+    let end: Int = base + size;
+    if addr < base {
+        return 0;
+    }
+    if addr >= end {
+        return 0;
+    }
+    return 1;
+}
+
+pub fn aslr_ranges_overlap(b1: Int, s1: Int, b2: Int, s2: Int) -> Int {
+    if s1 <= 0 {
+        return 0;
+    }
+    if s2 <= 0 {
+        return 0;
+    }
+    let e1: Int = b1 + s1;
+    let e2: Int = b2 + s2;
+    if e1 <= b2 {
+        return 0;
+    }
+    if e2 <= b1 {
+        return 0;
+    }
+    return 1;
+}
+
+pub fn aslr_compute_entropy(size: Int) -> Int {
+    if size <= 0 {
+        return 0;
+    }
+    let mut bits: Int = 0;
+    let mut n: Int = size;
+    while n > 1 {
+        n = n / 2;
+        bits = bits + 1;
+    }
+    return bits;
+}
+
+pub fn aslr_layout_set_region(layout: AslrLayout, region: AslrRegion) -> AslrLayout {
+    if layout.is_sealed == 1 {
+        return AslrLayout {
+            r0_base: layout.r0_base,
+            r0_size: layout.r0_size,
+            r1_base: layout.r1_base,
+            r1_size: layout.r1_size,
+            n_regions: layout.n_regions,
+            layout_entropy: layout.layout_entropy,
+            is_sealed: 1,
+            last_ok: 0
+        };
+    }
+    let ent: Int = aslr_compute_entropy(region.size_bytes);
+    let total_ent: Int = layout.layout_entropy + ent;
+    if layout.n_regions == 0 {
+        return AslrLayout {
+            r0_base: region.base_addr,
+            r0_size: region.size_bytes,
+            r1_base: layout.r1_base,
+            r1_size: layout.r1_size,
+            n_regions: 1,
+            layout_entropy: total_ent,
+            is_sealed: 0,
+            last_ok: 1
+        };
+    }
+    if layout.n_regions == 1 {
+        return AslrLayout {
+            r0_base: layout.r0_base,
+            r0_size: layout.r0_size,
+            r1_base: region.base_addr,
+            r1_size: region.size_bytes,
+            n_regions: 2,
+            layout_entropy: total_ent,
+            is_sealed: 0,
+            last_ok: 1
+        };
+    }
+    return AslrLayout {
+        r0_base: layout.r0_base,
+        r0_size: layout.r0_size,
+        r1_base: layout.r1_base,
+        r1_size: layout.r1_size,
+        n_regions: layout.n_regions,
+        layout_entropy: layout.layout_entropy,
+        is_sealed: layout.is_sealed,
+        last_ok: 0
+    };
+}
+
+pub fn aslr_layout_seal(layout: AslrLayout) -> AslrLayout {
+    return AslrLayout {
+        r0_base: layout.r0_base,
+        r0_size: layout.r0_size,
+        r1_base: layout.r1_base,
+        r1_size: layout.r1_size,
+        n_regions: layout.n_regions,
+        layout_entropy: layout.layout_entropy,
+        is_sealed: 1,
+        last_ok: layout.last_ok
+    };
+}
+
+pub fn aslr_layout_validate(layout: AslrLayout) -> Int {
+    if layout.n_regions < 1 {
+        return 0;
+    }
+    if layout.r0_size <= 0 {
+        return 0;
+    }
+    if layout.n_regions >= 2 {
+        if layout.r1_size <= 0 {
+            return 0;
+        }
+        let ov: Int = aslr_ranges_overlap(layout.r0_base, layout.r0_size, layout.r1_base, layout.r1_size);
+        if ov == 1 {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+pub fn aslr_check_addr_in_region(addr: Int, region: AslrRegion) -> Int {
+    return aslr_addr_in_range(addr, region.base_addr, region.size_bytes);
+}

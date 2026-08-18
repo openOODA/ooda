@@ -1,0 +1,129 @@
+// # Genetic Toggle Switch ODE Dynamics
+//
+// Logline: Simulates the Gardner-Collins bistable toggle switch with mutual transcriptional repression, nullclines, and saddle-node bifurcations.
+//
+// Setup: Canonical synthetic biology bistable switch composed of two mutually repressing transcription factors (u, v).
+//
+// Beats:
+//   1. Define ToggleSwitchParams, ToggleSwitchState, and ToggleBifurcationResult data structures.
+//   2. Compute deterministic ODE derivatives du/dt and dv/dt incorporating promoter basal rates, maximal expression, and Hill repression.
+//   3. Implement Runge-Kutta 4th-order (RK4) integration step and nullcline evaluation for bistable switching analysis.
+
+pub type ToggleSwitchParams = struct {
+    alpha1: Float,
+    alpha2: Float,
+    beta: Float,
+    gamma: Float,
+    k1: Float,
+    k2: Float,
+    degradation1: Float,
+    degradation2: Float,
+};
+
+pub type ToggleSwitchState = struct {
+    u_conc: Float,
+    v_conc: Float,
+    time_min: Float,
+};
+
+pub type ToggleBifurcationResult = struct {
+    u_nullcline_v: Float,
+    v_nullcline_u: Float,
+    is_bistable: Bool,
+    dominant_state: Int,
+};
+
+pub fn toggle_pow(base: Float, exp_int: Int) -> Float {
+    if exp_int <= 0 { return 1.0; }
+    let mut result: Float = 1.0;
+    let mut i = 0;
+    while i < exp_int {
+        result = result * base;
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn toggle_hill_repression(repressor_conc: Float, k_half: Float, cooperativity: Int) -> Float {
+    if repressor_conc < 0.0 { return 1.0; }
+    let r_n = toggle_pow(repressor_conc, cooperativity);
+    let k_n = toggle_pow(k_half, cooperativity);
+    let denom = k_n + r_n;
+    if denom <= 0.000001 { return 0.0; }
+    return k_n / denom;
+}
+
+pub fn toggle_switch_derivatives(
+    state: &ToggleSwitchState,
+    params: &ToggleSwitchParams,
+    inducer1: Float,
+    inducer2: Float,
+) -> ToggleSwitchState {
+    let eff_v = (state).v_conc / (1.0 + (inducer1 / (params).k1));
+    let eff_u = (state).u_conc / (1.0 + (inducer2 / (params).k2));
+
+    let rep_v = toggle_hill_repression(eff_v, (params).k1, 2);
+    let rep_u = toggle_hill_repression(eff_u, (params).k2, 2);
+
+    let du = ((params).alpha1 * rep_v) - ((params).degradation1 * (state).u_conc);
+    let dv = ((params).alpha2 * rep_u) - ((params).degradation2 * (state).v_conc);
+
+    return ToggleSwitchState {
+        u_conc: du,
+        v_conc: dv,
+        time_min: (state).time_min,
+    };
+}
+
+pub fn toggle_switch_rk4_step(
+    state: &ToggleSwitchState,
+    params: &ToggleSwitchParams,
+    dt: Float,
+    ind1: Float,
+    ind2: Float,
+) -> ToggleSwitchState {
+    let k1 = toggle_switch_derivatives(state, params, ind1, ind2);
+
+    let s2 = ToggleSwitchState {
+        u_conc: (state).u_conc + (0.5 * dt * (k1).u_conc),
+        v_conc: (state).v_conc + (0.5 * dt * (k1).v_conc),
+        time_min: (state).time_min + (0.5 * dt),
+    };
+    let k2 = toggle_switch_derivatives(&s2, params, ind1, ind2);
+
+    let s3 = ToggleSwitchState {
+        u_conc: (state).u_conc + (0.5 * dt * (k2).u_conc),
+        v_conc: (state).v_conc + (0.5 * dt * (k2).v_conc),
+        time_min: (state).time_min + (0.5 * dt),
+    };
+    let k3 = toggle_switch_derivatives(&s3, params, ind1, ind2);
+
+    let s4 = ToggleSwitchState {
+        u_conc: (state).u_conc + (dt * (k3).u_conc),
+        v_conc: (state).v_conc + (dt * (k3).v_conc),
+        time_min: (state).time_min + dt,
+    };
+    let k4 = toggle_switch_derivatives(&s4, params, ind1, ind2);
+
+    let u_next = (state).u_conc + (dt / 6.0) * ((k1).u_conc + (2.0 * (k2).u_conc) + (2.0 * (k3).u_conc) + (k4).u_conc);
+    let v_next = (state).v_conc + (dt / 6.0) * ((k1).v_conc + (2.0 * (k2).v_conc) + (2.0 * (k3).v_conc) + (k4).v_conc);
+
+    return ToggleSwitchState {
+        u_conc: if u_next < 0.0 { 0.0 } else { u_next },
+        v_conc: if v_next < 0.0 { 0.0 } else { v_next },
+        time_min: (state).time_min + dt,
+    };
+}
+
+pub fn toggle_switch_analyze_state(state: &ToggleSwitchState, threshold: Float) -> Int {
+    if (state).u_conc > threshold && (state).v_conc <= threshold {
+        return 1; // State 1: High U, Low V
+    }
+    if (state).v_conc > threshold && (state).u_conc <= threshold {
+        return 2; // State 2: Low U, High V
+    }
+    if (state).u_conc > threshold && (state).v_conc > threshold {
+        return 3; // Intermediate / transient both high
+    }
+    return 0; // Both low (off)
+}

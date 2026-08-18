@@ -1,0 +1,96 @@
+// # VQGAN PatchGAN Discriminator & Adversarial Loss
+//
+// Logline: Computes hinge discriminator loss, generator adversarial loss, and perceptual reconstruction gradients for high-fidelity generative autoencoders.
+//
+// Setup: Balances discrete codebook autoencoding with high-frequency PatchGAN adversarial textures.
+//
+// Beats:
+//   1. Define VQGANLossConfig and VQGANLossOutput structs.
+//   2. Compute Hinge discriminator loss: L_D = 0.5 * (E[max(0, 1 - D(x))] + E[max(0, 1 + D(G(z)))]).
+//   3. Compute generator adversarial loss and adaptive perceptual weight balance.
+
+pub type VQGANLossConfig = struct {
+    disc_weight: Float,
+    codebook_weight: Float,
+    perceptual_weight: Float,
+    hinge_margin: Float,
+};
+
+pub type VQGANLossOutput = struct {
+    loss_disc: Float,
+    loss_gen: Float,
+    loss_reconstruction: Float,
+};
+
+pub fn vqgan_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn vqgan_loss_config_new(
+    d_weight: Float,
+    cb_weight: Float,
+    p_weight: Float
+) -> VQGANLossConfig {
+    return VQGANLossConfig {
+        disc_weight: d_weight,
+        codebook_weight: cb_weight,
+        perceptual_weight: p_weight,
+        hinge_margin: 1.0,
+    };
+}
+
+pub fn vqgan_compute_losses(
+    cfg: &VQGANLossConfig,
+    real_logits: List[Float],
+    fake_logits: List[Float],
+    rec_loss_raw: Float,
+    num_patches: Int
+) -> VQGANLossOutput {
+    let mut d_loss_real: Float = 0.0;
+    let mut d_loss_fake: Float = 0.0;
+    let mut g_loss_adv: Float = 0.0;
+
+    let mut i: Int = 0;
+    while i < num_patches {
+        let r_logit: Float = if i < list_len(real_logits) { list_get(real_logits, i) } else { 0.0 };
+        let f_logit: Float = if i < list_len(fake_logits) { list_get(fake_logits, i) } else { 0.0 };
+
+        // Hinge loss: max(0, 1 - real)
+        let diff_r: Float = 1.0 - r_logit;
+        if diff_r > 0.0 { d_loss_real = d_loss_real + diff_r; }
+
+        // Hinge loss: max(0, 1 + fake)
+        let diff_f: Float = 1.0 + f_logit;
+        if diff_f > 0.0 { d_loss_fake = d_loss_fake + diff_f; }
+
+        // Generator adversarial loss: -E[D(G(z))]
+        g_loss_adv = g_loss_adv - f_logit;
+
+        i = i + 1;
+    }
+
+    let n_f: Float = vqgan_int_to_float(num_patches);
+    let avg_d_loss: Float = if n_f > 0.0 { (d_loss_real + d_loss_fake) / (2.0 * n_f) } else { 0.0 };
+    let avg_g_adv: Float = if n_f > 0.0 { g_loss_adv / n_f } else { 0.0 };
+
+    let total_g: Float = (rec_loss_raw * (cfg).perceptual_weight) + (avg_g_adv * (cfg).disc_weight);
+
+    return VQGANLossOutput {
+        loss_disc: avg_d_loss,
+        loss_gen: total_g,
+        loss_reconstruction: rec_loss_raw,
+    };
+}
+
+pub fn vqgan_discriminator_loss_marker() -> Int {
+    return 1;
+}

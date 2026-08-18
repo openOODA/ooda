@@ -1,0 +1,90 @@
+// # UAV Mahony 6-DOF IMU Attitude Complementary Filter
+//
+// Logline: Fuses high-rate gyroscope integration with gravity accelerometer vectors in an efficient SO(3) / quaternion complementary filter.
+//
+// Setup: Low-latency attitude estimation engine ideal for microcontrollers and high-frequency rate loops.
+//
+// Beats:
+//   1. Define Filter Gains (kp proportional gain, ki integral bias gain).
+//   2. Normalize measured accelerometer vector to unit gravity vector a_meas.
+//   3. Compute error cross-product e = a_meas x v_gravity_pred in body coordinates.
+//   4. Accumulate integral gyro bias correction and propagate attitude quaternion.
+
+import "./uav_coordinate_frames.oo";
+import "./uav_quaternion_kinematics.oo";
+
+pub type MahonyFilterConfig = struct {
+    kp_gain: Float,
+    ki_gain: Float,
+};
+
+pub type MahonyFilterState = struct {
+    quat: Quaternion,
+    integral_bias: Vector3D,
+};
+
+pub fn mahony_config_default() -> MahonyFilterConfig {
+    return MahonyFilterConfig {
+        kp_gain: 2.0,
+        ki_gain: 0.05,
+    };
+}
+
+pub fn mahony_state_init() -> MahonyFilterState {
+    return MahonyFilterState {
+        quat: quat_identity(),
+        integral_bias: vector3d_zero(),
+    };
+}
+
+pub fn mahony_filter_step(
+    cfg: &MahonyFilterConfig,
+    state: &MahonyFilterState,
+    acc_meas: &Vector3D,
+    gyr_meas: &Vector3D,
+    dt: Float
+) -> MahonyFilterState {
+    let acc_norm: Float = vector3d_norm(acc_meas);
+    if acc_norm < 0.001 {
+        // Degenerate accelerometer reading (e.g. pure freefall), pure gyro integration
+        let q_prop: Quaternion = quat_propagate(&(state).quat, gyr_meas, dt);
+        return MahonyFilterState {
+            quat: q_prop,
+            integral_bias: (state).integral_bias,
+        };
+    }
+
+    // Normalized accelerometer measurement
+    let ax: Float = (acc_meas).x / acc_norm;
+    let ay: Float = (acc_meas).y / acc_norm;
+    let az: Float = (acc_meas).z / acc_norm;
+
+    // Predicted gravity direction from current quaternion: v = [2*(qx*qz - qw*qy), 2*(qw*qx + qy*qz), qw^2 - qx^2 - qy^2 + qz^2]
+    let q: Quaternion = (state).quat;
+    let vx: Float = 2.0 * ((q.x * q.z) - (q.w * q.y));
+    let vy: Float = 2.0 * ((q.w * q.x) + (q.y * q.z));
+    let vz: Float = (q.w * q.w) - (q.x * q.x) - (q.y * q.y) + (q.z * q.z);
+
+    // Error cross product e = a x v
+    let ex: Float = (ay * vz) - (az * vy);
+    let ey: Float = (az * vx) - (ax * vz);
+    let ez: Float = (ax * vy) - (ay * vx);
+
+    // Integral bias update: bias += Ki * e * dt
+    let new_bx: Float = (state).integral_bias.x + ((cfg).ki_gain * ex * dt);
+    let new_by: Float = (state).integral_bias.y + ((cfg).ki_gain * ey * dt);
+    let new_bz: Float = (state).integral_bias.z + ((cfg).ki_gain * ez * dt);
+
+    // Corrected angular rate: omega_corr = gyro + Kp*e + bias
+    let gx_corr: Float = (gyr_meas).x + ((cfg).kp_gain * ex) + new_bx;
+    let gy_corr: Float = (gyr_meas).y + ((cfg).kp_gain * ey) + new_by;
+    let gz_corr: Float = (gyr_meas).z + ((cfg).kp_gain * ez) + new_bz;
+
+    let omega_corr: Vector3D = Vector3D { x: gx_corr, y: gy_corr, z: gz_corr };
+    let next_q: Quaternion = quat_propagate(&q, &omega_corr, dt);
+
+    return MahonyFilterState {
+        quat: next_q,
+        integral_bias: Vector3D { x: new_bx, y: new_by, z: new_bz },
+    };
+}

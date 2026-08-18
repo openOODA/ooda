@@ -1,0 +1,102 @@
+// # UAV Geometric Attitude Tracking Controller on SO(3)
+//
+// Logline: Implements Lee-Leok-McClamroch geometric tracking control directly on the Special Orthogonal group SO(3).
+//
+// Setup: Coordinate-free attitude control avoiding Euler angle singularities and quaternion unwinding ambiguities.
+//
+// Beats:
+//   1. Define Geometric Controller Gains (kR attitude gain, kOmega angular rate gain).
+//   2. Compute Geometric Rotation Error vector e_R = 0.5 * (R_d^T * R - R^T * R_d)^vee.
+//   3. Compute Angular Velocity Tracking Error e_Omega = omega - R^T * R_d * omega_d.
+//   4. Calculate Control Torques: tau = -kR*e_R - kOmega*e_Omega + omega x J*omega - J*(omega_hat * R^T * R_d * omega_d - R^T * R_d * omega_d_dot).
+
+import "./uav_coordinate_frames.oo";
+import "./uav_so3_rotation_matrix.oo";
+
+pub type GeometricAttitudeGains = struct {
+    kr_x: Float,
+    kr_y: Float,
+    kr_z: Float,
+    k_omega_x: Float,
+    k_omega_y: Float,
+    k_omega_z: Float,
+};
+
+pub type QuadrotorInertia = struct {
+    ixx: Float,
+    iyy: Float,
+    izz: Float,
+};
+
+pub type GeometricControlOutput = struct {
+    torque: Vector3D,
+    attitude_error: Vector3D,
+    rate_error: Vector3D,
+};
+
+pub fn geometric_gains_default() -> GeometricAttitudeGains {
+    return GeometricAttitudeGains {
+        kr_x: 8.5,
+        kr_y: 8.5,
+        kr_z: 2.8,
+        k_omega_x: 1.2,
+        k_omega_y: 1.2,
+        k_omega_z: 0.45,
+    };
+}
+
+pub fn quadrotor_inertia_default() -> QuadrotorInertia {
+    return QuadrotorInertia {
+        ixx: 0.015,
+        iyy: 0.015,
+        izz: 0.025,
+    };
+}
+
+pub fn geometric_attitude_control(
+    gains: &GeometricAttitudeGains,
+    inertia: &QuadrotorInertia,
+    r_curr: &Matrix3x3,
+    r_des: &Matrix3x3,
+    omega_curr: &Vector3D,
+    omega_des: &Vector3D
+) -> GeometricControlOutput {
+    // 1. Rotation error on SO(3): e_R = 0.5 * (R_d^T * R - R^T * R_d)^vee
+    let e_r: Vector3D = so3_attitude_error(r_curr, r_des);
+
+    // 2. Angular rate error: e_Omega = omega_curr - R^T * R_d * omega_des
+    let rd_t: Matrix3x3 = mat3_transpose(r_des);
+    let r_t: Matrix3x3 = mat3_transpose(r_curr);
+    let rt_rd: Matrix3x3 = mat3_multiply(&r_t, r_des);
+    let omega_des_in_body: Vector3D = mat3_multiply_vec(&rt_rd, omega_des);
+
+    let e_omega: Vector3D = Vector3D {
+        x: (omega_curr).x - omega_des_in_body.x,
+        y: (omega_curr).y - omega_des_in_body.y,
+        z: (omega_curr).z - omega_des_in_body.z,
+    };
+
+    // 3. Gyroscopic torque compensation: omega x (J * omega)
+    let jx: Float = (inertia).ixx;
+    let jy: Float = (inertia).iyy;
+    let jz: Float = (inertia).izz;
+
+    let wx: Float = (omega_curr).x;
+    let wy: Float = (omega_curr).y;
+    let wz: Float = (omega_curr).z;
+
+    let gyro_x: Float = (jz - jy) * wy * wz;
+    let gyro_y: Float = (jx - jz) * wx * wz;
+    let gyro_z: Float = (jy - jx) * wx * wy;
+
+    // 4. Control torque: tau = -kR * e_R - k_omega * e_Omega + gyro
+    let tau_x: Float = (0.0 - ((gains).kr_x * e_r.x)) - ((gains).k_omega_x * e_omega.x) + gyro_x;
+    let tau_y: Float = (0.0 - ((gains).kr_y * e_r.y)) - ((gains).k_omega_y * e_omega.y) + gyro_y;
+    let tau_z: Float = (0.0 - ((gains).kr_z * e_r.z)) - ((gains).k_omega_z * e_omega.z) + gyro_z;
+
+    return GeometricControlOutput {
+        torque: Vector3D { x: tau_x, y: tau_y, z: tau_z },
+        attitude_error: e_r,
+        rate_error: e_omega,
+    };
+}

@@ -1,0 +1,78 @@
+// # UAV Multirotor Motor Failure Detection & Degraded Yaw Control
+//
+// Logline: Detects single-rotor mechanical/electrical failure and reconfigures control allocation to maintain level hover while sacrificing yaw.
+//
+// Setup: Emergency fault recovery algorithm preventing catastrophic loss of control upon motor stall or propeller detachment.
+//
+// Beats:
+//   1. Define Failure Detection Thresholds (angular acceleration residual, persistent roll/pitch tilt error).
+//   2. Identify failed rotor index by analyzing error torque directional sign.
+//   3. Reconfigure motor mixer allocation shutting down opposing rotor or entering controlled periodic spinning descent.
+//   4. Command degraded level descent with zero yaw torque constraint.
+
+import "./uav_coordinate_frames.oo";
+
+pub type MotorFaultConfig = struct {
+    tilt_error_threshold_rad: Float,
+    fault_persistence_time_sec: Float,
+    emergency_descent_rate_m_s: Float,
+};
+
+pub type MotorFaultStatus = struct {
+    is_fault_detected: Bool,
+    failed_motor_index: Int, // 1..4 (or 0 if none)
+    is_spinning_recovery_active: Bool,
+    commanded_descent_vel: Float,
+};
+
+pub fn motor_fault_config_default() -> MotorFaultConfig {
+    return MotorFaultConfig {
+        tilt_error_threshold_rad: 0.35, // ~20 degrees uncontrollable tilt
+        fault_persistence_time_sec: 0.25,
+        emergency_descent_rate_m_s: 1.8,
+    };
+}
+
+pub fn detect_and_recover_motor_fault(
+    roll_error_rad: Float,
+    pitch_error_rad: Float,
+    yaw_rate_rad_s: Float,
+    time_uncontrollable_sec: Float,
+    cfg: &MotorFaultConfig
+) -> MotorFaultStatus {
+    let err_mag: Float = sqrt((roll_error_rad * roll_error_rad) + (pitch_error_rad * pitch_error_rad));
+
+    let is_persistent_tilt: Bool = (err_mag > (cfg).tilt_error_threshold_rad) &&
+                                  (time_uncontrollable_sec > (cfg).fault_persistence_time_sec);
+
+    if !is_persistent_tilt {
+        return MotorFaultStatus {
+            is_fault_detected: false,
+            failed_motor_index: 0,
+            is_spinning_recovery_active: false,
+            commanded_descent_vel: 0.0,
+        };
+    }
+
+    // Determine failed quadrant:
+    // Roll > 0 means drone tilting right (Right motors 1 or 4 lost thrust)
+    // Pitch > 0 means drone pitching up (Rear motors 2 or 4 lost thrust)
+    let mut failed_idx: Int = 1;
+    if (roll_error_rad > 0.0) && (pitch_error_rad < 0.0) {
+        failed_idx = 1; // Front-Right
+    } else if (roll_error_rad < 0.0) && (pitch_error_rad > 0.0) {
+        failed_idx = 2; // Rear-Left
+    } else if (roll_error_rad < 0.0) && (pitch_error_rad < 0.0) {
+        failed_idx = 3; // Front-Left
+    } else {
+        failed_idx = 4; // Rear-Right
+    }
+
+    // Activate spinning descent recovery: vehicle spins around vertical axis while collective thrust keeps it level
+    return MotorFaultStatus {
+        is_fault_detected: true,
+        failed_motor_index: failed_idx,
+        is_spinning_recovery_active: true,
+        commanded_descent_vel: (cfg).emergency_descent_rate_m_s,
+    };
+}

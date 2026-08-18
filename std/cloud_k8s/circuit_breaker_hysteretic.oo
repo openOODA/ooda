@@ -1,0 +1,97 @@
+// # Hysteretic Circuit Breaker State Machine
+//
+// Logline: Implements Michael Nygard Circuit Breaker with hysteretic thresholds and exponential backoff cooldown.
+//
+// Setup: Cascading failure prevention governor switching between Closed, Open, and Half-Open states.
+//
+// Beats:
+//   1. Track state transitions (0=Closed, 1=Open, 2=HalfOpen), consecutive error streaks, and recovery probes.
+//   2. Fast-fail incoming requests when Open until cooldown expires, then transition to Half-Open.
+//   3. Close circuit after consecutive successful probes or re-open on any probe failure.
+
+pub type CircuitState = Int; // 0=Closed, 1=Open, 2=HalfOpen
+
+pub type HystereticCircuitBreaker = struct {
+    state: Int,
+    failure_threshold: Int,
+    recovery_success_threshold: Int,
+    cooldown_base_ms: Int,
+    consecutive_failures: Int,
+    consecutive_successes: Int,
+    last_state_change_ms: Int,
+    trip_count: Int,
+};
+
+pub fn hysteretic_circuit_breaker_new(
+    fail_thresh: Int,
+    recov_thresh: Int,
+    cooldown_ms: Int,
+    now_ms: Int
+) -> HystereticCircuitBreaker {
+    return HystereticCircuitBreaker {
+        state: 0, // Closed
+        failure_threshold: fail_thresh,
+        recovery_success_threshold: recov_thresh,
+        cooldown_base_ms: cooldown_ms,
+        consecutive_failures: 0,
+        consecutive_successes: 0,
+        last_state_change_ms: now_ms,
+        trip_count: 0,
+    };
+}
+
+pub fn circuit_breaker_can_execute(cb: &mut HystereticCircuitBreaker, now_ms: Int) -> Bool {
+    if (cb).state == 0 {
+        return true;
+    }
+
+    if (cb).state == 1 { // Open
+        let elapsed: Int = now_ms - (cb).last_state_change_ms;
+        if elapsed >= (cb).cooldown_base_ms {
+            (cb).state = 2; // Transition to Half-Open probe
+            (cb).consecutive_successes = 0;
+            (cb).last_state_change_ms = now_ms;
+            return true;
+        }
+        return false;
+    }
+
+    // Half-Open: allow limited probe execution
+    return true;
+}
+
+pub fn circuit_breaker_on_success(cb: &mut HystereticCircuitBreaker, now_ms: Int) {
+    if (cb).state == 0 {
+        (cb).consecutive_failures = 0;
+        return;
+    }
+
+    if (cb).state == 2 { // HalfOpen
+        (cb).consecutive_successes = (cb).consecutive_successes + 1;
+        if (cb).consecutive_successes >= (cb).recovery_success_threshold {
+            (cb).state = 0; // Reset to Closed
+            (cb).consecutive_failures = 0;
+            (cb).consecutive_successes = 0;
+            (cb).last_state_change_ms = now_ms;
+        }
+    }
+}
+
+pub fn circuit_breaker_on_failure(cb: &mut HystereticCircuitBreaker, now_ms: Int) {
+    if (cb).state == 0 { // Closed
+        (cb).consecutive_failures = (cb).consecutive_failures + 1;
+        if (cb).consecutive_failures >= (cb).failure_threshold {
+            (cb).state = 1; // Trip to Open
+            (cb).trip_count = (cb).trip_count + 1;
+            (cb).last_state_change_ms = now_ms;
+        }
+        return;
+    }
+
+    if (cb).state == 2 { // HalfOpen probe failed -> immediate re-trip
+        (cb).state = 1; // Open
+        (cb).trip_count = (cb).trip_count + 1;
+        (cb).consecutive_successes = 0;
+        (cb).last_state_change_ms = now_ms;
+    }
+}

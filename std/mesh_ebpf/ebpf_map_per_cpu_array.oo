@@ -1,0 +1,99 @@
+// # eBPF Per-CPU Array Map Storage & Aggregator
+//
+// Logline: Implements lockless per-CPU array map storage and cross-core aggregation for metrics and statistics.
+//
+// Setup: Core-local array memory eliminating cross-CPU cache invalidation and bus contention in high-packet workloads.
+//
+// Beats:
+//   1. Maintain independent array memory slices indexed by logical CPU ID and array slot index.
+//   2. Provide core-local fast increments and updates without synchronization primitives.
+//   3. Aggregate cross-CPU values into unified counters during userspace polling cycles.
+
+pub type CpuSlotValue = struct {
+    cpu_id: Int,
+    index: Int,
+    counter: Int,
+};
+
+pub type EbpfPerCpuArray = struct {
+    slots: List[CpuSlotValue],
+    max_entries: Int,
+    num_cpus: Int,
+};
+
+pub fn ebpf_per_cpu_array_new(max_entries: Int, num_cpus: Int) -> EbpfPerCpuArray {
+    let mut initial_slots: List[CpuSlotValue] = list_new();
+    let mut c: Int = 0;
+    while c < num_cpus {
+        let mut idx: Int = 0;
+        while idx < max_entries {
+            let slot = CpuSlotValue {
+                cpu_id: c,
+                index: idx,
+                counter: 0,
+            };
+            initial_slots = list_push(initial_slots, slot);
+            idx = idx + 1;
+        }
+        c = c + 1;
+    }
+
+    return EbpfPerCpuArray {
+        slots: initial_slots,
+        max_entries: max_entries,
+        num_cpus: num_cpus,
+    };
+}
+
+pub fn ebpf_per_cpu_add(
+    arr: &mut EbpfPerCpuArray,
+    cpu_id: Int,
+    index: Int,
+    delta: Int
+) -> Bool {
+    if cpu_id < 0 || cpu_id >= (arr).num_cpus || index < 0 || index >= (arr).max_entries {
+        return false;
+    }
+
+    let n: Int = list_len((arr).slots);
+    let mut updated: List[CpuSlotValue] = list_new();
+    let mut i: Int = 0;
+
+    while i < n {
+        let s: CpuSlotValue = list_get((arr).slots, i);
+        if (s).cpu_id == cpu_id && (s).index == index {
+            let mod_s = CpuSlotValue {
+                cpu_id: (s).cpu_id,
+                index: (s).index,
+                counter: (s).counter + delta,
+            };
+            updated = list_push(updated, mod_s);
+        } else {
+            updated = list_push(updated, s);
+        }
+        i = i + 1;
+    }
+
+    (arr).slots = updated;
+    return true;
+}
+
+pub fn ebpf_per_cpu_aggregate(arr: &EbpfPerCpuArray, index: Int) -> Int {
+    if index < 0 || index >= (arr).max_entries {
+        return 0;
+    }
+
+    let n: Int = list_len((arr).slots);
+    let mut sum: Int = 0;
+    let mut i: Int = 0;
+
+    while i < n {
+        let s: CpuSlotValue = list_get((arr).slots, i);
+        if (s).index == index {
+            sum = sum + (s).counter;
+        }
+        i = i + 1;
+    }
+
+    return sum;
+}

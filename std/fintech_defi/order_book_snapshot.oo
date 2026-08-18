@@ -1,0 +1,157 @@
+// # Order Book Snapshot and Delta Reconciliation
+//
+// Logline: Manages Level 2/3 order book snapshots, sequential delta update processing, and sequence gap detection.
+//
+// Setup: Pure data structure module for market data synchronization.
+//
+// Beats:
+//   1. Define BookDeltaUpdate, BookSnapshot, and SnapshotSyncState structures.
+//   2. Apply incremental delta updates to snapshot state with sequence tracking.
+//   3. Detect packet drops, out-of-order sequence numbers, and trigger resync flags.
+
+pub type BookDeltaUpdate = struct {
+    sequence_num: Int,
+    is_bid: Bool,
+    price: Int,
+    qty: Int,
+    timestamp_ns: Int,
+    is_delete: Bool,
+};
+
+pub type PriceLevel = struct {
+    price: Int,
+    qty: Int,
+    order_count: Int,
+};
+
+pub type BookSnapshot = struct {
+    symbol: String,
+    last_sequence_num: Int,
+    timestamp_ns: Int,
+    bids: List[PriceLevel],
+    asks: List[PriceLevel],
+};
+
+pub type SnapshotSyncState = struct {
+    snapshot: BookSnapshot,
+    is_synced: Bool,
+    expected_sequence_num: Int,
+    dropped_packets: Int,
+};
+
+pub fn price_level_new(price: Int, qty: Int, count: Int) -> PriceLevel {
+    return PriceLevel {
+        price: price,
+        qty: qty,
+        order_count: count,
+    };
+}
+
+pub fn book_snapshot_new(symbol: String, seq: Int, ts_ns: Int) -> BookSnapshot {
+    let empty_b: List[PriceLevel] = list_new();
+    let empty_a: List[PriceLevel] = list_new();
+    return BookSnapshot {
+        symbol: symbol,
+        last_sequence_num: seq,
+        timestamp_ns: ts_ns,
+        bids: empty_b,
+        asks: empty_a,
+    };
+}
+
+pub fn snapshot_sync_state_new(snap: BookSnapshot) -> SnapshotSyncState {
+    let next_seq: Int = (snap).last_sequence_num + 1;
+    return SnapshotSyncState {
+        snapshot: snap,
+        is_synced: true,
+        expected_sequence_num: next_seq,
+        dropped_packets: 0,
+    };
+}
+
+pub fn snapshot_apply_delta(
+    state: &mut SnapshotSyncState,
+    delta: BookDeltaUpdate
+) -> Bool {
+    if (delta).sequence_num != (state).expected_sequence_num {
+        (state).is_synced = false;
+        (state).dropped_packets = (state).dropped_packets + 1;
+        return false;
+    }
+
+    (state).expected_sequence_num = (delta).sequence_num + 1;
+    (state).snapshot.last_sequence_num = (delta).sequence_num;
+    (state).snapshot.timestamp_ns = (delta).timestamp_ns;
+
+    if (delta).is_bid {
+        let mut updated_bids: List[PriceLevel] = list_new();
+        let mut applied: Bool = false;
+        let old_bids: List[PriceLevel] = (state).snapshot.bids;
+        let n: Int = list_len(old_bids);
+        let mut i: Int = 0;
+
+        while i < n {
+            let lvl: PriceLevel = list_get(old_bids, i);
+            if (lvl).price == (delta).price {
+                applied = true;
+                if !(delta).is_delete && (delta).qty > 0 {
+                    let updated = PriceLevel {
+                        price: (delta).price,
+                        qty: (delta).qty,
+                        order_count: (lvl).order_count + 1,
+                    };
+                    updated_bids = list_push(updated_bids, updated);
+                }
+            } else {
+                updated_bids = list_push(updated_bids, lvl);
+            }
+            i = i + 1;
+        }
+
+        if !applied && !(delta).is_delete && (delta).qty > 0 {
+            let new_lvl = PriceLevel {
+                price: (delta).price,
+                qty: (delta).qty,
+                order_count: 1,
+            };
+            updated_bids = list_push(updated_bids, new_lvl);
+        }
+        (state).snapshot.bids = updated_bids;
+    } else {
+        let mut updated_asks: List[PriceLevel] = list_new();
+        let mut applied_a: Bool = false;
+        let old_asks: List[PriceLevel] = (state).snapshot.asks;
+        let n_a: Int = list_len(old_asks);
+        let mut j: Int = 0;
+
+        while j < n_a {
+            let lvl_a: PriceLevel = list_get(old_asks, j);
+            if (lvl_a).price == (delta).price {
+                applied_a = true;
+                if !(delta).is_delete && (delta).qty > 0 {
+                    let updated_a = PriceLevel {
+                        price: (delta).price,
+                        qty: (delta).qty,
+                        order_count: (lvl_a).order_count + 1,
+                    };
+                    updated_asks = list_push(updated_asks, updated_a);
+                }
+            } else {
+                updated_asks = list_push(updated_asks, lvl_a);
+            }
+            j = j + 1;
+        }
+
+        if !applied_a && !(delta).is_delete && (delta).qty > 0 {
+            let new_lvl_a = PriceLevel {
+                price: (delta).price,
+                qty: (delta).qty,
+                order_count: 1,
+            };
+            updated_asks = list_push(updated_asks, new_lvl_a);
+        }
+        (state).snapshot.asks = updated_asks;
+    }
+
+    return true;
+}

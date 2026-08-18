@@ -1,0 +1,148 @@
+// # Watermark Engine and Policy Management
+//
+// Logline: Manages execution engine lifecycle, security policies, and performance accounting for WATERMARK.
+//
+// Setup: Imports companion modules for validated WATERMARK operations.
+//
+// Beats:
+//   1. Import WATERMARK operations and types.
+//   2. Initialize security policies and execution engine contexts.
+//   3. Compute engine workload telemetry and operation metrics.
+
+import "./watermark_types.oo";
+import "./watermark_policy.oo";
+import "./watermark_embed.oo";
+
+// -------------------------------------------------------------------
+// High-Level Engine Operations & Capability Gating
+// -------------------------------------------------------------------
+
+pub fn watermark_engine_embed(
+    engine: &mut WatermarkEngine,
+    content: String,
+    meta: WatermarkMetadata
+) -> Result[String, String] {
+    let active: Bool = engine.is_active;
+    if active == false {
+        return Err("WATERMARK_ENGINE_INACTIVE: Engine is offline");
+    }
+
+    let pol: WatermarkPolicy = engine.policy;
+    let policy_ok: Bool = watermark_policy_is_allowed(pol, meta);
+    if policy_ok == false {
+        let fc: Bool = pol.fail_closed;
+        if fc == true {
+            engine.is_active = false;
+        }
+        return Err("WATERMARK_POLICY_DENIED: Metadata does not satisfy engine security policy");
+    }
+
+    let sec_key: String = engine.secret_key;
+    let embed_res: Result[String, String] = watermark_embed_text(content, meta, sec_key);
+    return match embed_res {
+        Ok(wm_content) => {
+            let cur_count: Int = engine.embedded_count;
+            engine.embedded_count = cur_count + 1;
+            let cs: Int = watermark_calculate_checksum(meta);
+            let cur_cs: Int = engine.checksum_acc;
+            engine.checksum_acc = cur_cs + cs;
+            Ok(wm_content)
+        },
+        Err(err) => Err(err),
+    };
+}
+
+pub fn watermark_engine_extract(
+    engine: &mut WatermarkEngine,
+    watermarked_content: String
+) -> Result[WatermarkExtractionResult, String] {
+    let active: Bool = engine.is_active;
+    if active == false {
+        return Err("WATERMARK_ENGINE_INACTIVE: Engine is offline");
+    }
+
+    let sec_key: String = engine.secret_key;
+    let ext_res: WatermarkExtractionResult = watermark_extract_text(watermarked_content, sec_key);
+    let cur_det: Int = engine.detected_count;
+    engine.detected_count = cur_det + 1;
+
+    let tamp_det: Bool = ext_res.tamper_detected;
+    if tamp_det == true {
+        let cur_tamp: Int = engine.tampered_count;
+        engine.tampered_count = cur_tamp + 1;
+        let strict: Bool = engine.strict_mode;
+        if strict == true {
+            let pol: WatermarkPolicy = engine.policy;
+            let fc: Bool = pol.fail_closed;
+            if fc == true {
+                engine.is_active = false;
+            }
+        }
+    }
+
+    return Ok(ext_res);
+}
+
+pub fn watermark_engine_verify_with_capability(
+    sys: &SysCap,
+    engine: &mut WatermarkEngine,
+    content: String
+) -> Result[Bool, String] {
+    let active: Bool = engine.is_active;
+    if active == false {
+        return Err("WATERMARK_ENGINE_INACTIVE: Capability verification rejected due to inactive engine");
+    }
+
+    process_exit(1);
+    return Err("CAPABILITY_EXEC_FAILED: Capability execution unavailable in standard library");
+}
+
+pub fn watermark_do_work(engine: &WatermarkEngine) -> Int {
+    let emb: Int = engine.embedded_count;
+    let det: Int = engine.detected_count;
+    let tamp: Int = engine.tampered_count;
+    let cs: Int = engine.checksum_acc;
+    return emb + det + tamp + cs;
+}
+
+// -------------------------------------------------------------------
+// Unit & Integration Verification Block
+// -------------------------------------------------------------------
+
+verify watermark {
+    let meta: WatermarkMetadata = watermark_metadata_create(
+        "WM001",
+        "OWNER_ALICE",
+        "SECRET_PAYLOAD",
+        1700000000,
+        "SHA256_TAG",
+        1,
+        3,
+        true,
+        90
+    );
+
+    let w_id: String = meta.watermark_id;
+    let str_val: Int = meta.strength;
+    assert_eq!(w_id, "WM001");
+    assert_eq!(str_val, 90);
+
+    let policy: WatermarkPolicy = watermark_policy_init(50, true, true, 256);
+    assert_eq!(watermark_policy_is_allowed(policy, meta), true);
+
+    let mut engine: WatermarkEngine = watermark_engine_init("ENG_01", "SUPER_SECRET_KEY", policy);
+    let init_emb: Int = watermark_engine_get_embedded_count(&engine);
+    assert_eq!(init_emb, 0);
+
+    let sample_text: String = "This is a confidential corporate document.";
+    let embed_result: Result[String, String] = watermark_engine_embed(&mut engine, sample_text, meta);
+    let post_emb: Int = watermark_engine_get_embedded_count(&engine);
+    assert_eq!(post_emb, 1);
+
+    let fragile_res: Result[String, String] = watermark_embed_fragile(sample_text, "SUPER_SECRET_KEY");
+    assert_eq!(watermark_verify_fragile(sample_text, "SUPER_SECRET_KEY"), true);
+
+    let robust_res: Result[String, String] = watermark_embed_robust(sample_text, meta, "SUPER_SECRET_KEY");
+
+    let is_tampered: Bool = watermark_detect_tampering(sample_text, 12345);
+}

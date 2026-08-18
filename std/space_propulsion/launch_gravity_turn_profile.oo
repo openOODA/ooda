@@ -1,0 +1,127 @@
+// # Launch Vehicle Gravity Turn Trajectory & Max-Q Aerodynamics
+//
+// Logline: Integrates planar ascent gravity turn trajectory, aerodynamic pitch-over maneuver, dynamic pressure Max-Q, and flight path angle.
+//
+// Setup: Solves point-mass 2D ascent flight equations of motion under gravity, aerodynamic drag, and thrust vector alignment.
+//
+// Beats:
+//   1. Define vehicle thrust, mass flow, liftoff thrust-to-weight ratio (TWR), and aerodynamic drag coefficient.
+//   2. Compute initial vertical climb, kick angle pitch-over transition altitude, and flight path angle rate (gamma_dot).
+//   3. Integrate step states to locate maximum dynamic pressure (Max-Q), Mach 1 crossing, and orbital burnout velocity.
+
+import "./space_propulsion_constants.oo";
+
+pub type GravityTurnVehicleSpec = struct {
+    thrust_sl_n: Float,
+    thrust_vac_n: Float,
+    mass_liftoff_kg: Float,
+    mass_burnout_kg: Float,
+    burn_time_s: Float,
+    aerodynamic_cd_area_m2: Float, // Cd * A reference
+    pitchover_alt_m: Float, // e.g. 800 m
+    pitchover_angle_deg: Float, // e.g. 2.0 deg
+};
+
+pub type GravityTurnStepState = struct {
+    time_s: Float,
+    altitude_m: Float,
+    downrange_m: Float,
+    velocity_m_s: Float,
+    flight_path_angle_deg: Float,
+    dynamic_pressure_kpa: Float,
+    mach_number: Float,
+    axial_accel_g: Float,
+};
+
+pub fn gravity_turn_spec_default() -> GravityTurnVehicleSpec {
+    return GravityTurnVehicleSpec {
+        thrust_sl_n: 74000000.0, // 74 MN (Super Heavy class)
+        thrust_vac_n: 82000000.0,
+        mass_liftoff_kg: 5000000.0, // 5000 tons
+        mass_burnout_kg: 1800000.0,
+        burn_time_s: 165.0,
+        aerodynamic_cd_area_m2: 28.0, // Cd*A ~ 0.4 * 70 m2
+        pitchover_alt_m: 600.0,
+        pitchover_angle_deg: 2.2,
+    };
+}
+
+pub fn gravity_turn_step(
+    spec: GravityTurnVehicleSpec,
+    state: GravityTurnStepState,
+    dt_s: Float
+) -> GravityTurnStepState {
+    let t: Float = (state).time_s;
+    let h: Float = (state).altitude_m;
+    let x: Float = (state).downrange_m;
+    let v: Float = (state).velocity_m_s;
+    let gamma_deg: Float = (state).flight_path_angle_deg;
+    let gamma_rad: Float = gamma_deg * const_deg_to_rad();
+
+    let t_burn: Float = (spec).burn_time_s;
+    let m0: Float = (spec).mass_liftoff_kg;
+    let mb: Float = (spec).mass_burnout_kg;
+    let cd_a: Float = (spec).aerodynamic_cd_area_m2;
+    let h_pitch: Float = (spec).pitchover_alt_m;
+    let th_kick: Float = (spec).pitchover_angle_deg;
+
+    // Instantaneous vehicle mass: m(t) = m0 - (m0 - mb) * (t / t_burn)
+    let frac: Float = math_min(t / t_burn, 1.0);
+    let m_curr: Float = m0 - ((m0 - mb) * frac);
+
+    // Atmospheric density at altitude: rho = rho0 * exp(-h / 7200)
+    let rho0: Float = 1.225;
+    let rho: Float = rho0 * math_exp(0.0 - (h / 7200.0));
+    let q_dyn_pa: Float = 0.5 * rho * (v * v);
+    let q_dyn_kpa: Float = q_dyn_pa / 1000.0;
+
+    let drag_force: Float = q_dyn_pa * cd_a;
+
+    // Thrust interpolation SL to Vac
+    let vac_frac: Float = math_min(h / 40000.0, 1.0);
+    let thrust: Float = (spec).thrust_sl_n + (((spec).thrust_vac_n - (spec).thrust_sl_n) * vac_frac);
+
+    // Local gravity: g(h) = g0 * (Re / (Re + h))^2
+    let re: Float = const_radius_earth();
+    let g_loc: Float = const_g0() * ((re / (re + h)) * (re / (re + h)));
+
+    // Kinematic derivatives for gravity turn:
+    // v_dot = (T - D)/m - g * sin(gamma)
+    // gamma_dot = -(g / v - v / (Re + h)) * cos(gamma)
+    let v_dot: Float = ((thrust - drag_force) / m_curr) - (g_loc * sin(gamma_rad));
+
+    let mut gamma_dot: Float = 0.0;
+    let mut gamma_new_rad: Float = gamma_rad;
+
+    if h < h_pitch {
+        // Pure vertical ascent phase
+        gamma_new_rad = const_pi() / 2.0; // 90 deg
+    } else if (state).flight_path_angle_deg >= 89.9 {
+        // Initiate pitch-over kick
+        gamma_new_rad = (90.0 - th_kick) * const_deg_to_rad();
+    } else {
+        // Natural gravity turn
+        let term_g: Float = (g_loc / (v + 0.1)) - (v / (re + h));
+        gamma_dot = (0.0 - term_g) * cos(gamma_rad);
+        gamma_new_rad = gamma_rad + (gamma_dot * dt_s);
+    }
+
+    let v_new: Float = v + (v_dot * dt_s);
+    let h_new: Float = h + (v * sin(gamma_rad) * dt_s);
+    let x_new: Float = x + (v * cos(gamma_rad) * dt_s);
+
+    let a_sound: Float = 340.0;
+    let mach: Float = v_new / a_sound;
+    let accel_g: Float = ((thrust - drag_force) / m_curr) / const_g0();
+
+    return GravityTurnStepState {
+        time_s: t + dt_s,
+        altitude_m: h_new,
+        downrange_m: x_new,
+        velocity_m_s: v_new,
+        flight_path_angle_deg: gamma_new_rad * const_rad_to_deg(),
+        dynamic_pressure_kpa: q_dyn_kpa,
+        mach_number: mach,
+        axial_accel_g: accel_g,
+    };
+}

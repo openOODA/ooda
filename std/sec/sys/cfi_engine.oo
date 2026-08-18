@@ -1,0 +1,242 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::sys::cfi_engine
+// Forward-edge & backward-edge verification, shadow stack, metrics
+// (split from cfi.oo, M172)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+import "./cfi_ops.oo";
+
+// -------------------------------------------------------------------
+// Pure CFI Engine Forward-Edge & Backward-Edge Verification Logic
+// -------------------------------------------------------------------
+
+pub fn cfi_engine_validate_forward_edge(
+    mut_engine_ref: &mut CfiEngine,
+    site_address_val: Int,
+    target_address_val: Int,
+    target_type_hash_val: Int,
+    timestamp_val: Int
+) -> Result[Bool, String] {
+    if (mut_engine_ref).is_halted {
+        return Err("CFI_ENGINE_ERR: CFI engine is in halted state due to previous violation");
+    }
+
+    let pol: CfiPolicy = (mut_engine_ref).policy;
+    if pol.is_active == false {
+        return Ok(true);
+    }
+    if pol.enforce_forward_edge == false {
+        return Ok(true);
+    }
+
+    let graph: ControlFlowGraph = (mut_engine_ref).cfg;
+
+    if pol.strict_type_checking && (graph.is_sealed == false) {
+        let ts_str: String = timestamp_val.to_string();
+        let v_id: String = "v_unsealed_" + ts_str;
+        let v_type: Int = cfi_violation_unsealed_cfg();
+        let viol = cfi_violation_create(
+            v_id,
+            site_address_val,
+            target_address_val,
+            v_type,
+            "CFI violation: Control flow graph is not sealed",
+            timestamp_val
+        );
+        let cur_viols: List[CfiViolation] = (mut_engine_ref).violations;
+        (mut_engine_ref).violations = list_push(cur_viols, viol);
+        let prev_blocked: Int = (mut_engine_ref).blocked_calls;
+        (mut_engine_ref).blocked_calls = prev_blocked + 1;
+        if pol.fail_closed {
+            (mut_engine_ref).is_halted = true;
+        }
+        return Err("CFI_FORWARD_EDGE_DENIED: Unsealed control flow graph");
+    }
+
+    let valid_target: Bool = control_flow_graph_contains_target(&graph, target_address_val);
+    if valid_target == false {
+        let ts_str: String = timestamp_val.to_string();
+        let v_id: String = "v_target_" + ts_str;
+        let v_type: Int = cfi_violation_invalid_target();
+        let viol = cfi_violation_create(
+            v_id,
+            site_address_val,
+            target_address_val,
+            v_type,
+            "CFI violation: Target address not found in CFG valid targets table",
+            timestamp_val
+        );
+        let cur_viols: List[CfiViolation] = (mut_engine_ref).violations;
+        (mut_engine_ref).violations = list_push(cur_viols, viol);
+        let prev_blocked: Int = (mut_engine_ref).blocked_calls;
+        (mut_engine_ref).blocked_calls = prev_blocked + 1;
+        if pol.fail_closed {
+            (mut_engine_ref).is_halted = true;
+        }
+        return Err("CFI_FORWARD_EDGE_DENIED: Indirect branch target address is not in allowed CFG graph");
+    }
+
+    if pol.strict_type_checking {
+        let site_res: Result[IndirectCallSite, String] = control_flow_graph_find_site(&graph, site_address_val);
+        let site_matched: Bool = match site_res {
+            Ok(site) => {
+                if indirect_call_site_verify_type(&site, target_type_hash_val) == false {
+                    let ts_str: String = timestamp_val.to_string();
+                    let v_id: String = "v_type_" + ts_str;
+                    let v_type: Int = cfi_violation_type_mismatch();
+                    let viol = cfi_violation_create(
+                        v_id,
+                        site_address_val,
+                        target_address_val,
+                        v_type,
+                        "CFI violation: Indirect call site type signature hash mismatch",
+                        timestamp_val
+                    );
+                    let cur_viols: List[CfiViolation] = (mut_engine_ref).violations;
+                    (mut_engine_ref).violations = list_push(cur_viols, viol);
+                    let prev_blocked: Int = (mut_engine_ref).blocked_calls;
+                    (mut_engine_ref).blocked_calls = prev_blocked + 1;
+                    if pol.fail_closed {
+                        (mut_engine_ref).is_halted = true;
+                    }
+                    return Err("CFI_FORWARD_EDGE_DENIED: Target type signature mismatch at indirect call site");
+                }
+                true
+            },
+            Err(e) => false,
+        };
+    }
+
+    let prev_ver: Int = (mut_engine_ref).verified_calls;
+    (mut_engine_ref).verified_calls = prev_ver + 1;
+    return Ok(true);
+}
+
+pub fn cfi_engine_shadow_stack_push(
+    mut_engine_ref: &mut CfiEngine,
+    return_address_val: Int,
+    caller_fp_val: Int
+) -> Result[Bool, String] {
+    if (mut_engine_ref).is_halted {
+        return Err("CFI_ENGINE_ERR: Cannot push shadow stack while engine is halted");
+    }
+    let pol: CfiPolicy = (mut_engine_ref).policy;
+    if pol.enforce_backward_edge == false {
+        return Ok(true);
+    }
+
+    let depth: Int = (mut_engine_ref).shadow_stack_depth;
+    let new_frame = CfiShadowStackFrame {
+        frame_id: depth + 1,
+        return_address: return_address_val,
+        caller_fp: caller_fp_val,
+    };
+    let cur_stack: List[CfiShadowStackFrame] = (mut_engine_ref).shadow_stack;
+    (mut_engine_ref).shadow_stack = list_push(cur_stack, new_frame);
+    (mut_engine_ref).shadow_stack_depth = depth + 1;
+    return Ok(true);
+}
+
+pub fn cfi_engine_shadow_stack_pop(
+    mut_engine_ref: &mut CfiEngine,
+    actual_return_address_val: Int,
+    timestamp_val: Int
+) -> Result[Bool, String] {
+    if (mut_engine_ref).is_halted {
+        return Err("CFI_ENGINE_ERR: Cannot pop shadow stack while engine is halted");
+    }
+    let pol: CfiPolicy = (mut_engine_ref).policy;
+    if pol.enforce_backward_edge == false {
+        return Ok(true);
+    }
+
+    let stack: List[CfiShadowStackFrame] = (mut_engine_ref).shadow_stack;
+    let n: Int = list_len(stack);
+    if n == 0 {
+        let ts_str: String = timestamp_val.to_string();
+        let v_id: String = "v_ss_underflow_" + ts_str;
+        let v_type: Int = cfi_violation_shadow_stack_mismatch();
+        let viol = cfi_violation_create(
+            v_id,
+            0,
+            actual_return_address_val,
+            v_type,
+            "CFI violation: Shadow stack underflow on return",
+            timestamp_val
+        );
+        let cur_viols: List[CfiViolation] = (mut_engine_ref).violations;
+        (mut_engine_ref).violations = list_push(cur_viols, viol);
+        let prev_blocked: Int = (mut_engine_ref).blocked_calls;
+        (mut_engine_ref).blocked_calls = prev_blocked + 1;
+        if pol.fail_closed {
+            (mut_engine_ref).is_halted = true;
+        }
+        return Err("CFI_BACKWARD_EDGE_DENIED: Shadow stack underflow");
+    }
+
+    let top_index: Int = n - 1;
+    let top_frame: CfiShadowStackFrame = list_get(stack, top_index);
+    let expected_ret: Int = top_frame.return_address;
+
+    let mut new_stack: List[CfiShadowStackFrame] = list_new();
+    let mut i: Int = 0;
+    while i < top_index {
+        let f: CfiShadowStackFrame = list_get(stack, i);
+        new_stack = list_push(new_stack, f);
+        i = i + 1;
+    }
+    (mut_engine_ref).shadow_stack = new_stack;
+    (mut_engine_ref).shadow_stack_depth = top_index;
+
+    if expected_ret != actual_return_address_val {
+        let ts_str: String = timestamp_val.to_string();
+        let v_id: String = "v_ss_mismatch_" + ts_str;
+        let v_type: Int = cfi_violation_shadow_stack_mismatch();
+        let viol = cfi_violation_create(
+            v_id,
+            0,
+            actual_return_address_val,
+            v_type,
+            "CFI violation: Return address mismatch against shadow stack frame",
+            timestamp_val
+        );
+        let cur_viols: List[CfiViolation] = (mut_engine_ref).violations;
+        (mut_engine_ref).violations = list_push(cur_viols, viol);
+        let prev_blocked: Int = (mut_engine_ref).blocked_calls;
+        (mut_engine_ref).blocked_calls = prev_blocked + 1;
+        if pol.fail_closed {
+            (mut_engine_ref).is_halted = true;
+        }
+        return Err("CFI_BACKWARD_EDGE_DENIED: Return address corrupted or hijacked");
+    }
+
+    let prev_ver: Int = (mut_engine_ref).verified_calls;
+    (mut_engine_ref).verified_calls = prev_ver + 1;
+    return Ok(true);
+}
+
+pub fn cfi_engine_reset_stats(mut_engine_ref: &mut CfiEngine) {
+    (mut_engine_ref).verified_calls = 0;
+    (mut_engine_ref).blocked_calls = 0;
+}
+
+pub fn cfi_engine_do_work(engine_ref: &CfiEngine) -> Int {
+    let viols: List[CfiViolation] = (engine_ref).violations;
+    let stack: List[CfiShadowStackFrame] = (engine_ref).shadow_stack;
+    let n_v: Int = list_len(viols);
+    let n_s: Int = list_len(stack);
+    let ver: Int = (engine_ref).verified_calls;
+    let blk: Int = (engine_ref).blocked_calls;
+    let total: Int = n_v * 5 + n_s * 2 + ver + blk * 10;
+    return total;
+}
+
+pub type Fail = struct {};
+pub type Default = struct {};
+
+
+pub fn __dummy_std_src_ooda_sec_sys_cfi_engine_oo() -> Int {
+    return 0;
+}

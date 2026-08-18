@@ -1,0 +1,87 @@
+// # UAV Wind Vector & Dryden Turbulence Gust Estimator
+//
+// Logline: Estimates 3D ambient wind velocity vectors and gust turbulence intensity from aerodynamic force residuals.
+//
+// Setup: Disturbance observer extracting horizontal wind speed and direction by comparing commanded thrust vectors against inertial accelerations.
+//
+// Beats:
+//   1. Define Aerodynamic Drag Coefficients (parasitic drag area Cd*S, vehicle mass).
+//   2. Compute Apparent Residual Force: F_residual = m * (a_measured - g) - R * [0, 0, T].
+//   3. Invert translational aerodynamic drag model to estimate body relative airspeed v_air.
+//   4. Subtract ground inertial velocity to calculate ambient wind velocity vector and turbulence intensity.
+
+import "./uav_coordinate_frames.oo";
+import "./uav_quaternion_kinematics.oo";
+
+pub type WindEstimatorParams = struct {
+    mass_kg: Float,
+    drag_coeff_xy: Float,
+    drag_coeff_z: Float,
+    air_density: Float,
+    filter_gain: Float,
+};
+
+pub type WindEstimate = struct {
+    wind_vector_ned: Vector3D,
+    wind_speed_m_s: Float,
+    wind_direction_rad: Float,
+    gust_intensity_m_s: Float,
+};
+
+pub fn wind_estimator_params_default() -> WindEstimatorParams {
+    return WindEstimatorParams {
+        mass_kg: 1.5,
+        drag_coeff_xy: 0.28,
+        drag_coeff_z: 0.45,
+        air_density: 1.225,
+        filter_gain: 0.08,
+    };
+}
+
+pub fn estimate_wind_vector(
+    params: &WindEstimatorParams,
+    prev_wind_est: &Vector3D,
+    accel_world: &Vector3D,
+    vel_world: &Vector3D,
+    quat: &Quaternion,
+    thrust_cmd_n: Float
+) -> WindEstimate {
+    let m: Float = (params).mass_kg;
+    let cd_xy: Float = (params).drag_coeff_xy;
+
+    // Commanded thrust vector in world frame
+    let thrust_body: Vector3D = Vector3D { x: 0.0, y: 0.0, z: thrust_cmd_n };
+    let thrust_world: Vector3D = quat_rotate_vector(quat, &thrust_body);
+
+    // Aerodynamic residual force: F_aero = m * a_world - T_world
+    let fa_x: Float = (m * (accel_world).x) - thrust_world.x;
+    let fa_y: Float = (m * (accel_world).y) - thrust_world.y;
+
+    // Linear drag approximation: F_drag = -Cd * (v_ground - v_wind)
+    // => v_wind_instant = v_ground + F_drag / Cd
+    let safe_cd: Float = if cd_xy < 0.01 { 0.01 } else { cd_xy };
+    let w_inst_x: Float = (vel_world).x + (fa_x / safe_cd);
+    let w_inst_y: Float = (vel_world).y + (fa_y / safe_cd);
+
+    // Low-pass exponential smoothing
+    let a: Float = (params).filter_gain;
+    let wind_x: Float = ((1.0 - a) * (prev_wind_est).x) + (a * w_inst_x);
+    let wind_y: Float = ((1.0 - a) * (prev_wind_est).y) + (a * w_inst_y);
+    let wind_z: Float = 0.0; // Vertical ambient wind predominantly zero near ground
+
+    let w_vec: Vector3D = Vector3D { x: wind_x, y: wind_y, z: wind_z };
+    let speed: Float = sqrt((wind_x * wind_x) + (wind_y * wind_y));
+    let dir_rad: Float = uav_atan2_approx(wind_y, wind_x);
+
+    // Gust intensity = magnitude of instantaneous high-frequency deviation
+    let dev_x: Float = w_inst_x - wind_x;
+    let dev_y: Float = w_inst_y - wind_y;
+    let gust: Float = sqrt((dev_x * dev_x) + (dev_y * dev_y));
+
+    return WindEstimate {
+        wind_vector_ned: w_vec,
+        wind_speed_m_s: speed,
+        wind_direction_rad: dir_rad,
+        gust_intensity_m_s: gust,
+    };
+}

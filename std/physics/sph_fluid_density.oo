@@ -1,0 +1,129 @@
+// # SPH Density Estimation & Poly6 Smoothing Kernel
+//
+// Logline: Computes particle density and pressure fields via cubic spline and Muller Poly6 radial weighting functions.
+//
+// Setup: SPH interpolation kernels and pressure gradient force evaluations for continuum fluid simulation.
+//
+// Beats:
+//   1. Evaluate Muller Poly6 density weighting kernel (315 / (64 * pi * h^9) * (h^2 - r^2)^3).
+//   2. Evaluate Desbrun Spiky pressure gradient kernel (-45 / (pi * h^6) * (h - r)^2 * r_hat).
+//   3. Compute symmetric pairwise pressure force contributions between interacting fluid particles.
+
+pub type KernelEvalResult = struct {
+    weight: Float,
+    grad_x: Float,
+    grad_y: Float,
+    grad_z: Float,
+};
+
+pub type SphPressureForceResult = struct {
+    f_ax: Float,
+    f_ay: Float,
+    f_az: Float,
+    f_bx: Float,
+    f_by: Float,
+    f_bz: Float,
+};
+
+// -------------------------------------------------------------------
+// Poly6 Density Smoothing Kernel
+// W_poly6(r, h) = 315 / (64 * pi * h^9) * (h^2 - r^2)^3  for 0 <= r <= h
+// -------------------------------------------------------------------
+
+pub fn sph_poly6_kernel(r_sq: Float, h: Float) -> Float {
+    let h2 = h * h;
+    if r_sq >= h2 || r_sq < 0.0 {
+        return 0.0;
+    }
+
+    // PI ~ 3.141592653589793
+    // h^9 = h^3 * h^3 * h^3
+    let h3 = h * h * h;
+    let h9 = h3 * h3 * h3;
+    let coeff = 315.0 / (64.0 * 3.141592653589793 * h9);
+
+    let diff = h2 - r_sq;
+    let diff3 = diff * diff * diff;
+
+    return coeff * diff3;
+}
+
+// -------------------------------------------------------------------
+// Spiky Pressure Gradient Kernel
+// grad W_spiky(r, h) = -45 / (pi * h^6) * (h - r)^2 * (r_vec / r)
+// -------------------------------------------------------------------
+
+pub fn sph_spiky_gradient(
+    dx: Float, dy: Float, dz: Float,
+    r: Float,
+    h: Float
+) -> KernelEvalResult {
+    if r >= h || r <= 0.000001 {
+        return KernelEvalResult { weight: 0.0, grad_x: 0.0, grad_y: 0.0, grad_z: 0.0 };
+    }
+
+    let h3 = h * h * h;
+    let h6 = h3 * h3;
+    let coeff = -45.0 / (3.141592653589793 * h6);
+
+    let diff = h - r;
+    let diff2 = diff * diff;
+    let factor = coeff * diff2 / r;
+
+    return KernelEvalResult {
+        weight: 0.0,
+        grad_x: factor * dx,
+        grad_y: factor * dy,
+        grad_z: factor * dz,
+    };
+}
+
+// -------------------------------------------------------------------
+// Pairwise Symmetric Pressure Acceleration (Müller et al.)
+// F_pressure_i = - sum_j m_j * (p_i + p_j) / (2 * rho_j) * grad W_spiky(r_ij, h)
+// -------------------------------------------------------------------
+
+pub fn sph_compute_pressure_force_pair(
+    p1_x: Float, p1_y: Float, p1_z: Float,
+    p2_x: Float, p2_y: Float, p2_z: Float,
+    mass_1: Float, mass_2: Float,
+    rho_1: Float, rho_2: Float,
+    p_1: Float, p_2: Float,
+    h: Float
+) -> SphPressureForceResult {
+    let dx = p1_x - p2_x;
+    let dy = p1_y - p2_y;
+    let dz = p1_z - p2_z;
+    let r_sq = (dx * dx) + (dy * dy) + (dz * dz);
+
+    if r_sq >= (h * h) || r_sq <= 0.00000001 {
+        return SphPressureForceResult {
+            f_ax: 0.0, f_ay: 0.0, f_az: 0.0,
+            f_bx: 0.0, f_by: 0.0, f_bz: 0.0,
+        };
+    }
+
+    let r = sqrt(r_sq);
+    let grad = sph_spiky_gradient(dx, dy, dz, r, h);
+
+    if rho_1 < 0.0001 || rho_2 < 0.0001 {
+        return SphPressureForceResult {
+            f_ax: 0.0, f_ay: 0.0, f_az: 0.0,
+            f_bx: 0.0, f_by: 0.0, f_bz: 0.0,
+        };
+    }
+
+    // Symmetric term: (p1 / rho1^2 + p2 / rho2^2)
+    let term1 = p_1 / (rho_1 * rho_1);
+    let term2 = p_2 / (rho_2 * rho_2);
+    let sym_term = term1 + term2;
+
+    let fx = - mass_1 * mass_2 * sym_term * (grad).grad_x;
+    let fy = - mass_1 * mass_2 * sym_term * (grad).grad_y;
+    let fz = - mass_1 * mass_2 * sym_term * (grad).grad_z;
+
+    return SphPressureForceResult {
+        f_ax: fx, f_ay: fy, f_az: fz,
+        f_bx: -fx, f_by: -fy, f_bz: -fz,
+    };
+}

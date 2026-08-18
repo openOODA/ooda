@@ -1,0 +1,212 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::sys::ima_engine
+// ImaContext, PCR extension & appraisal engine
+// (split from ima.oo, M172)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+import "./ima_ops.oo";
+
+// -------------------------------------------------------------------
+// ImaContext Constructors, PCR Computation & Appraisal Engine
+// -------------------------------------------------------------------
+
+pub fn ima_extend_pcr_hash(current_pcr_hash: String, new_measurement_hash: String) -> String {
+    return "pcr_ext(" + current_pcr_hash + ":" + new_measurement_hash + ")";
+}
+
+pub fn ima_context_new(name: String) -> ImaContext {
+    let empty_measurements: List[ImaMeasurement] = list_new();
+    let empty_signatures: List[EvmSignature] = list_new();
+    let default_pol = ima_policy_new(name + "_policy");
+    return ImaContext {
+        context_name: name,
+        policy: default_pol,
+        measurements: empty_measurements,
+        signatures: empty_signatures,
+        total_measurements: 0,
+        total_appraisals: 0,
+        total_violations: 0,
+        pcr_aggregate: "0000000000000000000000000000000000000000000000000000000000000000",
+        is_initialized: true,
+    };
+}
+
+pub fn ima_context_add_measurement(ctx: ImaContext, m: ImaMeasurement) -> ImaContext {
+    let mut updated_ms: List[ImaMeasurement] = list_new();
+    let old_ms: List[ImaMeasurement] = ctx.measurements;
+    let n = list_len(old_ms);
+    let mut i = 0;
+    while i < n {
+        let elem: ImaMeasurement = list_get(old_ms, i);
+        updated_ms = list_push(updated_ms, elem);
+        i = i + 1;
+    }
+    updated_ms = list_push(updated_ms, m);
+
+    let m_dig: String = m.measurement_digest;
+    let new_agg = ima_extend_pcr_hash(ctx.pcr_aggregate, m_dig);
+
+    return ImaContext {
+        context_name: ctx.context_name,
+        policy: ctx.policy,
+        measurements: updated_ms,
+        signatures: ctx.signatures,
+        total_measurements: ctx.total_measurements + 1,
+        total_appraisals: ctx.total_appraisals,
+        total_violations: ctx.total_violations,
+        pcr_aggregate: new_agg,
+        is_initialized: ctx.is_initialized,
+    };
+}
+
+pub fn ima_context_add_signature(ctx: ImaContext, sig: EvmSignature) -> ImaContext {
+    let mut updated_sigs: List[EvmSignature] = list_new();
+    let old_sigs: List[EvmSignature] = ctx.signatures;
+    let n = list_len(old_sigs);
+    let mut i = 0;
+    while i < n {
+        let elem: EvmSignature = list_get(old_sigs, i);
+        updated_sigs = list_push(updated_sigs, elem);
+        i = i + 1;
+    }
+    updated_sigs = list_push(updated_sigs, sig);
+
+    return ImaContext {
+        context_name: ctx.context_name,
+        policy: ctx.policy,
+        measurements: ctx.measurements,
+        signatures: updated_sigs,
+        total_measurements: ctx.total_measurements,
+        total_appraisals: ctx.total_appraisals,
+        total_violations: ctx.total_violations,
+        pcr_aggregate: ctx.pcr_aggregate,
+        is_initialized: ctx.is_initialized,
+    };
+}
+
+pub fn ima_context_eval_appraisal(
+    ctx: &mut ImaContext,
+    target_path: String,
+    actual_digest: String,
+    hook_func: Int,
+    mask_val: Int
+) -> ImaAppraisalResult {
+    let mut ctx = ctx;
+    let old_apprs: Int = (ctx).total_appraisals;
+    (ctx).total_appraisals = old_apprs + 1;
+
+    let rules: List[ImaRule] = (ctx).policy.rules;
+    let n = list_len(rules);
+    let mut i = 0;
+    let mut matched_idx = -1;
+
+    while i < n {
+        let rule: ImaRule = list_get(rules, i);
+        if ima_rule_matches(&rule, hook_func, mask_val) {
+            let r_act: Int = rule.action;
+            if r_act == 2 {
+                matched_idx = i;
+                i = n;
+            }
+        }
+        if matched_idx < 0 {
+            i = i + 1;
+        }
+    }
+
+    if matched_idx >= 0 {
+        let ms: List[ImaMeasurement] = (ctx).measurements;
+        let num_ms = list_len(ms);
+        let mut j = 0;
+        let mut found_expected = "";
+        while j < num_ms {
+            let m: ImaMeasurement = list_get(ms, j);
+            let m_path: String = m.file_name;
+            if m_path == target_path {
+                let m_dig: String = m.measurement_digest;
+                found_expected = m_dig;
+                j = num_ms;
+            } else {
+                j = j + 1;
+            }
+        }
+
+        if found_expected.len() == 0 {
+            let old_viols: Int = (ctx).total_violations;
+            (ctx).total_violations = old_viols + 1;
+            return ima_appraisal_result_create(
+                2,
+                target_path,
+                "",
+                actual_digest,
+                matched_idx,
+                "No reference measurement digest found in IMA context for file: " + target_path
+            );
+        }
+
+        if found_expected == actual_digest {
+            return ima_appraisal_result_create(
+                0,
+                target_path,
+                found_expected,
+                actual_digest,
+                matched_idx,
+                ""
+            );
+        } else {
+            let old_viols: Int = (ctx).total_violations;
+            (ctx).total_violations = old_viols + 1;
+            return ima_appraisal_result_create(
+                1,
+                target_path,
+                found_expected,
+                actual_digest,
+                matched_idx,
+                "Hash mismatch between IMA reference digest and target file: " + target_path
+            );
+        }
+    }
+
+    let is_def_appraise: Bool = (ctx).policy.default_appraise;
+    if is_def_appraise {
+        let old_viols: Int = (ctx).total_violations;
+        (ctx).total_violations = old_viols + 1;
+        return ima_appraisal_result_create(
+            1,
+            target_path,
+            "",
+            actual_digest,
+            -1,
+            "Default appraise policy enforced but no rule permitted file: " + target_path
+        );
+    }
+
+    return ima_appraisal_result_create(
+        0,
+        target_path,
+        actual_digest,
+        actual_digest,
+        -1,
+        ""
+    );
+}
+
+pub fn ima_context_do_work(ctx: &ImaContext) -> Int {
+    let n_meas: Int = (ctx).total_measurements;
+    let n_appr: Int = (ctx).total_appraisals;
+    let n_viol: Int = (ctx).total_violations;
+    let n_rules: Int = list_len((ctx).policy.rules);
+    let s1: Int = n_meas + n_appr;
+    let s2: Int = n_viol + n_rules;
+    return s1 + s2;
+}
+
+pub type Fail = struct {};
+pub type Default = struct {};
+
+
+pub fn __dummy_std_src_ooda_sec_sys_ima_engine_oo() -> Int {
+    return 0;
+}

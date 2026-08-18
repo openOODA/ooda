@@ -1,0 +1,116 @@
+// # Service Mesh xDS Nonce & Version Tracker
+//
+// Logline: Tracks xDS protocol version nonces, delta updates, and divergence detection across control plane nodes.
+//
+// Setup: State-of-the-World (SotW) and Delta xDS protocol state machine coordinating control plane handshakes.
+//
+// Beats:
+//   1. Track sequential protocol nonces per discovery type URL (LDS, RDS, CDS, EDS).
+//   2. Detect out-of-order responses, version rollbacks, and concurrent update conflicts.
+//   3. Maintain synchronization status and record telemetry on control plane round-trip latencies.
+
+pub type XdsTypeState = struct {
+    type_url: String,
+    applied_version: String,
+    pending_nonce: String,
+    last_ack_time_ms: Int,
+    is_in_sync: Bool,
+};
+
+pub type XdsVersionTracker = struct {
+    types: List[XdsTypeState],
+    total_nonces_generated: Int,
+    drift_detected_count: Int,
+};
+
+pub fn xds_version_tracker_new() -> XdsVersionTracker {
+    let empty_types: List[XdsTypeState] = list_new();
+    return XdsVersionTracker {
+        types: empty_types,
+        total_nonces_generated: 0,
+        drift_detected_count: 0,
+    };
+}
+
+pub fn xds_register_type(tracker: &mut XdsVersionTracker, type_url: String) {
+    let t = XdsTypeState {
+        type_url: type_url,
+        applied_version: "v0",
+        pending_nonce: "0",
+        last_ack_time_ms: 0,
+        is_in_sync: true,
+    };
+    (tracker).types = list_push((tracker).types, t);
+}
+
+pub fn xds_send_discovery_request(
+    tracker: &mut XdsVersionTracker,
+    type_url: String,
+    next_nonce: String
+) -> Bool {
+    (tracker).total_nonces_generated = (tracker).total_nonces_generated + 1;
+    let n: Int = list_len((tracker).types);
+    let mut updated: List[XdsTypeState] = list_new();
+    let mut found: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let t: XdsTypeState = list_get((tracker).types, i);
+        if (t).type_url == type_url {
+            let mod_t = XdsTypeState {
+                type_url: (t).type_url,
+                applied_version: (t).applied_version,
+                pending_nonce: next_nonce,
+                last_ack_time_ms: (t).last_ack_time_ms,
+                is_in_sync: (t).is_in_sync,
+            };
+            updated = list_push(updated, mod_t);
+            found = true;
+        } else {
+            updated = list_push(updated, t);
+        }
+        i = i + 1;
+    }
+
+    (tracker).types = updated;
+    return found;
+}
+
+pub fn xds_receive_discovery_response(
+    tracker: &mut XdsVersionTracker,
+    type_url: String,
+    version: String,
+    nonce: String,
+    now_ms: Int
+) -> Bool {
+    let n: Int = list_len((tracker).types);
+    let mut updated: List[XdsTypeState] = list_new();
+    let mut ack_ok: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let t: XdsTypeState = list_get((tracker).types, i);
+        if (t).type_url == type_url {
+            if (t).pending_nonce == nonce {
+                let mod_t = XdsTypeState {
+                    type_url: (t).type_url,
+                    applied_version: version,
+                    pending_nonce: "",
+                    last_ack_time_ms: now_ms,
+                    is_in_sync: true,
+                };
+                updated = list_push(updated, mod_t);
+                ack_ok = true;
+            } else {
+                (tracker).drift_detected_count = (tracker).drift_detected_count + 1;
+                updated = list_push(updated, t);
+            }
+        } else {
+            updated = list_push(updated, t);
+        }
+        i = i + 1;
+    }
+
+    (tracker).types = updated;
+    return ack_ok;
+}

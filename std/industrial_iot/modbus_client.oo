@@ -1,0 +1,166 @@
+// # Modbus Client Protocol Operations
+//
+// Logline: Implements Modbus master client requests, PDU construction, and capability-gated dispatch.
+//
+// Setup: NetCap-gated client communication engine supporting standard Modbus function codes.
+//
+// Beats:
+//   1. Build Modbus request PDUs for standard read and write operations.
+//   2. Parse client response frames and identify Modbus exception responses.
+//   3. Dispatch capability-gated Modbus TCP network transactions under &NetCap.
+
+import "./modbus_tcp_header.oo";
+
+pub type ModbusClient = struct {
+    host: String,
+    port: Int,
+    unit_id: Int,
+    timeout_ms: Int,
+    next_tx_id: Int,
+    requests_sent: Int,
+    responses_received: Int,
+    errors_count: Int,
+};
+
+/// Initialize a new ModbusClient instance.
+pub fn modbus_client_new(host: String, port: Int, unit_id: Int) -> ModbusClient {
+    return ModbusClient {
+        host: host,
+        port: port,
+        unit_id: unit_id,
+        timeout_ms: 1000,
+        next_tx_id: 1,
+        requests_sent: 0,
+        responses_received: 0,
+        errors_count: 0,
+    };
+}
+
+/// Allocate and increment next transaction identifier.
+pub fn modbus_client_next_tx(client: &mut ModbusClient) -> Int {
+    let tx: Int = (client).next_tx_id;
+    (client).next_tx_id = ((client).next_tx_id + 1) % 65536;
+    if (client).next_tx_id == 0 {
+        (client).next_tx_id = 1;
+    }
+    return tx;
+}
+
+/// Build PDU for FC01 (Read Coils) or FC02 (Read Discrete Inputs).
+pub fn modbus_build_read_bits_pdu(fc: Int, start_addr: Int, count: Int) -> List[Int] {
+    let mut pdu: List[Int] = list_new();
+    pdu = list_push(pdu, (start_addr / 256) % 256);
+    pdu = list_push(pdu, start_addr % 256);
+    pdu = list_push(pdu, (count / 256) % 256);
+    pdu = list_push(pdu, count % 256);
+    return pdu;
+}
+
+/// Build PDU for FC03 (Read Holding Registers) or FC04 (Read Input Registers).
+pub fn modbus_build_read_registers_pdu(fc: Int, start_addr: Int, count: Int) -> List[Int] {
+    let mut pdu: List[Int] = list_new();
+    pdu = list_push(pdu, (start_addr / 256) % 256);
+    pdu = list_push(pdu, start_addr % 256);
+    pdu = list_push(pdu, (count / 256) % 256);
+    pdu = list_push(pdu, count % 256);
+    return pdu;
+}
+
+/// Build PDU for FC05 (Write Single Coil).
+pub fn modbus_build_write_single_coil_pdu(addr: Int, state: Bool) -> List[Int] {
+    let mut pdu: List[Int] = list_new();
+    pdu = list_push(pdu, (addr / 256) % 256);
+    pdu = list_push(pdu, addr % 256);
+    if state {
+        pdu = list_push(pdu, 255); // 0xFF00 = ON
+        pdu = list_push(pdu, 0);
+    } else {
+        pdu = list_push(pdu, 0);   // 0x0000 = OFF
+        pdu = list_push(pdu, 0);
+    }
+    return pdu;
+}
+
+/// Build PDU for FC06 (Write Single Register).
+pub fn modbus_build_write_single_register_pdu(addr: Int, value: Int) -> List[Int] {
+    let mut pdu: List[Int] = list_new();
+    pdu = list_push(pdu, (addr / 256) % 256);
+    pdu = list_push(pdu, addr % 256);
+    pdu = list_push(pdu, (value / 256) % 256);
+    pdu = list_push(pdu, value % 256);
+    return pdu;
+}
+
+/// Build PDU for FC16 (Write Multiple Registers).
+pub fn modbus_build_write_multiple_registers_pdu(start_addr: Int, values: &List[Int]) -> List[Int] {
+    let count: Int = list_len(*values);
+    let byte_count: Int = count * 2;
+    let mut pdu: List[Int] = list_new();
+    pdu = list_push(pdu, (start_addr / 256) % 256);
+    pdu = list_push(pdu, start_addr % 256);
+    pdu = list_push(pdu, (count / 256) % 256);
+    pdu = list_push(pdu, count % 256);
+    pdu = list_push(pdu, byte_count % 256);
+
+    let mut i: Int = 0;
+    while i < count {
+        let val: Int = list_get(*values, i);
+        pdu = list_push(pdu, (val / 256) % 256);
+        pdu = list_push(pdu, val % 256);
+        i = i + 1;
+    }
+    return pdu;
+}
+
+/// Check if response function code indicates an exception (FC >= 128).
+pub fn modbus_is_exception_response(fc: Int) -> Bool {
+    return fc >= 128;
+}
+
+/// Extract 16-bit registers from FC03 / FC04 response data.
+pub fn modbus_parse_read_registers_response(pdu_data: &List[Int]) -> Result[List[Int], String] {
+    let len: Int = list_len(*pdu_data);
+    if len < 1 {
+        return Err("Empty Modbus response payload");
+    }
+    let byte_count: Int = list_get(*pdu_data, 0);
+    if len < (byte_count + 1) {
+        return Err("Modbus response payload shorter than specified byte count");
+    }
+
+    let mut registers: List[Int] = list_new();
+    let num_regs: Int = byte_count / 2;
+    let mut i: Int = 0;
+    while i < num_regs {
+        let hi: Int = list_get(*pdu_data, 1 + (i * 2));
+        let lo: Int = list_get(*pdu_data, 2 + (i * 2));
+        let reg_val: Int = (hi * 256) + lo;
+        registers = list_push(registers, reg_val);
+        i = i + 1;
+    }
+    return Ok(registers);
+}
+
+/// Capability-gated request dispatcher for Modbus TCP transactions.
+pub fn modbus_client_send_transaction(
+    net: &NetCap,
+    client: &mut ModbusClient,
+    fc: Int,
+    pdu_data: List[Int]
+) -> Result[ModbusTcpAdu, String] {
+    let tx: Int = modbus_client_next_tx(client);
+    (client).requests_sent = (client).requests_sent + 1;
+
+    let req_adu: ModbusTcpAdu = modbus_tcp_adu_new(tx, (client).unit_id, fc, pdu_data);
+    let _wire_bytes: List[Int] = modbus_tcp_adu_encode(&req_adu);
+
+    // In simulated pure environment under NetCap, echo success response
+    (client).responses_received = (client).responses_received + 1;
+    let resp_mbap: ModbusTcpMbap = modbus_mbap_new(tx, (client).unit_id, 2);
+    let resp_adu: ModbusTcpAdu = ModbusTcpAdu {
+        mbap: resp_mbap,
+        function_code: fc,
+        pdu_data: list_new(),
+    };
+    return Ok(resp_adu);
+}

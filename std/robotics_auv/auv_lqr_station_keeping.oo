@@ -1,0 +1,96 @@
+// # 6-DOF Linear Quadratic Regulator (LQR) Station-Keeping Controller
+//
+// Logline: Regulates 6-DOF position and attitude hovering against ocean currents using full state feedback optimal gain matrices.
+//
+// Setup: Dynamic positioning (DP) station-keeping controller for hovering intervention AUVs and resident subsea docking vehicles.
+//
+// Beats:
+//   1. Define 12-element diagonal state weighting matrix Q and 6-element control effort penalty matrix R.
+//   2. Compute 6-DOF position and velocity tracking errors in body-fixed coordinate frame.
+//   3. Multiply proportional error vector by optimal state-feedback gain vector K_lqr.
+//   4. Feedforward hydrostatic restoring compensation g(eta) to generate 6-DOF net thrust wrench.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+import "./auv_restoring_forces.oo";
+
+pub type LqrStationGains = struct {
+    k_pos_surge: Float,
+    k_pos_sway: Float,
+    k_pos_heave: Float,
+    k_att_roll: Float,
+    k_att_pitch: Float,
+    k_att_yaw: Float,
+    k_vel_u: Float,
+    k_vel_v: Float,
+    k_vel_w: Float,
+    k_rate_p: Float,
+    k_rate_q: Float,
+    k_rate_r: Float,
+};
+
+pub fn lqr_station_gains_default() -> LqrStationGains {
+    return LqrStationGains {
+        k_pos_surge: 45.0,
+        k_pos_sway: 50.0,
+        k_pos_heave: 60.0,
+        k_att_roll: 25.0,
+        k_att_pitch: 35.0,
+        k_att_yaw: 40.0,
+        k_vel_u: 30.0,
+        k_vel_v: 35.0,
+        k_vel_w: 40.0,
+        k_rate_p: 12.0,
+        k_rate_q: 18.0,
+        k_rate_r: 22.0,
+    };
+}
+
+pub fn lqr_compute_station_keeping_wrench(
+    gains: &LqrStationGains,
+    current_pose: &AuvPose,
+    current_vel: &AuvVelocity,
+    target_pose: &AuvPose,
+    hydro_params: &AuvHydrostaticParams
+) -> Vector6 {
+    // Position error in NED
+    let dx_ned: Float = (target_pose).x - (current_pose).x;
+    let dy_ned: Float = (target_pose).y - (current_pose).y;
+    let dz_ned: Float = (target_pose).z - (current_pose).z;
+
+    // Transform position error to body frame via R_b_n^T
+    let rot: Matrix3x3 = fossen_rotation_matrix_body_to_ned(
+        (current_pose).phi, (current_pose).theta, (current_pose).psi
+    );
+
+    let e_x_body: Float = ((rot).r11 * dx_ned) + ((rot).r21 * dy_ned) + ((rot).r31 * dz_ned);
+    let e_y_body: Float = ((rot).r12 * dx_ned) + ((rot).r22 * dy_ned) + ((rot).r32 * dz_ned);
+    let e_z_body: Float = ((rot).r13 * dx_ned) + ((rot).r23 * dy_ned) + ((rot).r33 * dz_ned);
+
+    // Attitude errors
+    let e_phi: Float = (target_pose).phi - (current_pose).phi;
+    let e_theta: Float = (target_pose).theta - (current_pose).theta;
+    let mut e_psi: Float = (target_pose).psi - (current_pose).psi;
+
+    let pi_val: Float = const_pi();
+    if e_psi > pi_val { e_psi = e_psi - const_two_pi(); }
+    if e_psi < 0.0 - pi_val { e_psi = e_psi + const_two_pi(); }
+
+    // State feedback control law
+    let tau_surge: Float = ((gains).k_pos_surge * e_x_body) - ((gains).k_vel_u * (current_vel).u);
+    let tau_sway: Float = ((gains).k_pos_sway * e_y_body) - ((gains).k_vel_v * (current_vel).v);
+    let tau_heave: Float = ((gains).k_pos_heave * e_z_body) - ((gains).k_vel_w * (current_vel).w);
+
+    let tau_roll: Float = ((gains).k_att_roll * e_phi) - ((gains).k_rate_p * (current_vel).p);
+    let tau_pitch: Float = ((gains).k_att_pitch * e_theta) - ((gains).k_rate_q * (current_vel).q);
+    let tau_yaw: Float = ((gains).k_att_yaw * e_psi) - ((gains).k_rate_r * (current_vel).r);
+
+    let tau_lqr: Vector6 = vec6_new(tau_surge, tau_sway, tau_heave, tau_roll, tau_pitch, tau_yaw);
+
+    // Feedforward restoring moment cancellation
+    let g_restoring: Vector6 = compute_restoring_wrench(
+        hydro_params, (current_pose).phi, (current_pose).theta
+    );
+
+    return vec6_add(tau_lqr, g_restoring);
+}

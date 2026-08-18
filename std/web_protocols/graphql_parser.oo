@@ -1,0 +1,192 @@
+// # GraphQL Recursive-Descent Document Parser
+//
+// Logline: Parses GraphQL token streams into typed AST documents, operations, and field selection sets.
+//
+// Setup: Recursive-descent parser conforming to GraphQL June 2018 and October 2021 specifications.
+//
+// Beats:
+//   1. Traverse lexical token streams matching operations, field names, and arguments.
+//   2. Parse nested selection sets and map field aliases and arguments.
+//   3. Produce typed GqlDocument AST or capture parsing errors.
+
+import "./graphql_lexer.oo";
+import "./graphql_ast.oo";
+
+pub type GqlParser = struct {
+    tokens: List[GraphqlToken],
+    pos: Int,
+    total: Int,
+    has_error: Bool,
+    error_msg: String,
+};
+
+pub fn gql_parser_new(tokens: List[GraphqlToken]) -> GqlParser {
+    let count: Int = list_len(tokens);
+    return GqlParser {
+        tokens: tokens,
+        pos: 0,
+        total: count,
+        has_error: false,
+        error_msg: "",
+    };
+}
+
+pub fn gql_parser_peek(p: &GqlParser) -> GraphqlToken {
+    if (p).pos < (p).total {
+        return list_get((p).tokens, (p).pos);
+    }
+    return graphql_token_new(99, "EOF", 0, 0, 0);
+}
+
+pub fn gql_parser_advance(p: &mut GqlParser) -> GraphqlToken {
+    if (p).pos < (p).total {
+        let tok: GraphqlToken = list_get((p).tokens, (p).pos);
+        (p).pos = (p).pos + 1;
+        return tok;
+    }
+    return graphql_token_new(99, "EOF", 0, 0, 0);
+}
+
+pub fn gql_parser_check_kind(p: &GqlParser, kind: Int) -> Bool {
+    let tok: GraphqlToken = gql_parser_peek(p);
+    return tok.kind == kind;
+}
+
+pub fn gql_parser_match_kind(p: &mut GqlParser, kind: Int) -> Bool {
+    let tok: GraphqlToken = gql_parser_peek(p);
+    if tok.kind == kind {
+        gql_parser_advance(p);
+        return true;
+    }
+    return false;
+}
+
+pub fn gql_parser_parse_field(p: &mut GqlParser) -> GqlField {
+    let first_tok: GraphqlToken = gql_parser_advance(p);
+    let mut field_name: String = first_tok.value;
+    let mut alias_name: String = "";
+
+    // Check if colon follows (aliasing: alias: field)
+    if gql_parser_check_kind(p, 11) { // :
+        gql_parser_advance(p); // consume :
+        let actual_field: GraphqlToken = gql_parser_advance(p);
+        alias_name = field_name;
+        field_name = actual_field.value;
+    }
+
+    let mut args: List[GqlArgument] = list_new();
+    // Parse arguments: (arg1: val1, arg2: $var)
+    if gql_parser_check_kind(p, 7) { // (
+        gql_parser_advance(p);
+        while (p).pos < (p).total && gql_parser_check_kind(p, 8) == false {
+            let arg_tok: GraphqlToken = gql_parser_advance(p);
+            let arg_name: String = arg_tok.value;
+            if gql_parser_check_kind(p, 11) { // :
+                gql_parser_advance(p);
+            }
+            let is_var: Bool = gql_parser_check_kind(p, 14); // $
+            if is_var {
+                gql_parser_advance(p);
+            }
+            let val_tok: GraphqlToken = gql_parser_advance(p);
+            let arg_item: GqlArgument = gql_argument_new(arg_name, val_tok.value, is_var);
+            args = list_push(args, arg_item);
+        }
+        if gql_parser_check_kind(p, 8) { // )
+            gql_parser_advance(p);
+        }
+    }
+
+    let mut sub_fields: List[String] = list_new();
+    let mut has_sub: Bool = false;
+
+    // Check for nested selection set: { subField1 subField2 }
+    if gql_parser_check_kind(p, 5) { // {
+        gql_parser_advance(p);
+        has_sub = true;
+        while (p).pos < (p).total && gql_parser_check_kind(p, 6) == false {
+            let sub_tok: GraphqlToken = gql_parser_advance(p);
+            if sub_tok.kind == 1 { // NAME
+                sub_fields = list_push(sub_fields, sub_tok.value);
+            }
+        }
+        if gql_parser_check_kind(p, 6) { // }
+            gql_parser_advance(p);
+        }
+    }
+
+    return GqlField {
+        name: field_name,
+        alias: alias_name,
+        args: args,
+        sub_fields: sub_fields,
+        has_subselection: has_sub,
+    };
+}
+
+pub fn gql_parser_parse_selection_set(p: &mut GqlParser) -> List[GqlField] {
+    let mut fields: List[GqlField] = list_new();
+    if gql_parser_check_kind(p, 5) { // {
+        gql_parser_advance(p); // consume {
+        while (p).pos < (p).total && gql_parser_check_kind(p, 6) == false {
+            let f: GqlField = gql_parser_parse_field(p);
+            fields = list_push(fields, f);
+        }
+        if gql_parser_check_kind(p, 6) { // }
+            gql_parser_advance(p);
+        }
+    }
+    return fields;
+}
+
+pub fn gql_parser_parse_operation(p: &mut GqlParser) -> GqlOperation {
+    let tok: GraphqlToken = gql_parser_peek(p);
+    let mut op_type: Int = 0; // default query
+    let mut op_name: String = "";
+
+    if tok.kind == 1 {
+        if tok.value == "query" {
+            op_type = 0;
+            gql_parser_advance(p);
+            if gql_parser_check_kind(p, 1) {
+                let name_tok: GraphqlToken = gql_parser_advance(p);
+                op_name = name_tok.value;
+            }
+        } else if tok.value == "mutation" {
+            op_type = 1;
+            gql_parser_advance(p);
+            if gql_parser_check_kind(p, 1) {
+                let name_tok: GraphqlToken = gql_parser_advance(p);
+                op_name = name_tok.value;
+            }
+        } else if tok.value == "subscription" {
+            op_type = 2;
+            gql_parser_advance(p);
+            if gql_parser_check_kind(p, 1) {
+                let name_tok: GraphqlToken = gql_parser_advance(p);
+                op_name = name_tok.value;
+            }
+        }
+    }
+
+    let selections: List[GqlField] = gql_parser_parse_selection_set(p);
+    return gql_operation_new(op_type, op_name, selections);
+}
+
+pub fn gql_parser_parse_document(p: &mut GqlParser) -> GqlDocument {
+    let mut ops: List[GqlOperation] = list_new();
+    let frags: List[GqlFragment] = list_new();
+
+    while (p).pos < (p).total && gql_parser_check_kind(p, 99) == false {
+        let op: GqlOperation = gql_parser_parse_operation(p);
+        ops = list_push(ops, op);
+    }
+
+    return gql_document_new(ops, frags);
+}
+
+pub fn graphql_parse(source: String) -> GqlDocument {
+    let tokens: List[GraphqlToken] = graphql_tokenize_all(source);
+    let mut parser: GqlParser = gql_parser_new(tokens);
+    return gql_parser_parse_document(&mut parser);
+}

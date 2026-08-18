@@ -1,0 +1,196 @@
+// # Cuckoo Filter Probabilistic Membership & Deletion
+//
+// Logline: Implements Cuckoo Filters using fingerprint hashing, partial-key cuckoo displacement, and deletion support.
+//
+// Setup: Compact approximate set membership data structure supporting dynamic additions and deletions.
+//
+// Beats:
+//   1. Compute compact non-zero fingerprints and dual candidate bucket indices.
+//   2. Insert fingerprints with bounded random-walk cuckoo displacements upon collision.
+//   3. Query approximate membership and safely remove existing item fingerprints.
+
+pub type CuckooFilter = struct {
+    num_buckets: Int,
+    bucket_capacity: Int,
+    fingerprints: List[Int], // Flattened num_buckets * bucket_capacity array
+    max_kicks: Int,
+    item_count: Int,
+};
+
+pub fn cuckoo_filter_create(num_buckets: Int, bucket_capacity: Int) -> CuckooFilter {
+    let mut b: Int = num_buckets;
+    let mut c: Int = bucket_capacity;
+    if b < 4 {
+        b = 16;
+    }
+    if c < 1 {
+        c = 4;
+    }
+    let total_slots: Int = b * c;
+    let mut slots: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < total_slots {
+        slots = list_push(slots, 0); // 0 denotes empty slot
+        i = i + 1;
+    }
+    return CuckooFilter {
+        num_buckets: b,
+        bucket_capacity: c,
+        fingerprints: slots,
+        max_kicks: 500,
+        item_count: 0,
+    };
+}
+
+pub fn cuckoo_calc_fingerprint(item: Int) -> Int {
+    let mut pos_item: Int = item;
+    if pos_item < 0 {
+        pos_item = 0 - pos_item;
+    }
+    let fp: Int = (pos_item * 2654435761) % 255 + 1; // 1..255 (8-bit non-zero)
+    return fp;
+}
+
+pub fn cuckoo_hash_1(item: Int, num_buckets: Int) -> Int {
+    let mut pos_item: Int = item;
+    if pos_item < 0 {
+        pos_item = 0 - pos_item;
+    }
+    return (pos_item * 31337 + 101) % num_buckets;
+}
+
+pub fn cuckoo_hash_2(i1: Int, fp: Int, num_buckets: Int) -> Int {
+    let fp_hash: Int = (fp * 13337 + 7919) % num_buckets;
+    let mut i2: Int = (i1 + fp_hash) % num_buckets;
+    if i2 < 0 {
+        i2 = i2 + num_buckets;
+    }
+    return i2;
+}
+
+pub fn cuckoo_get_slot(cf: &CuckooFilter, bucket: Int, slot: Int) -> Int {
+    let idx: Int = bucket * (cf).bucket_capacity + slot;
+    return list_get((cf).fingerprints, idx);
+}
+
+pub fn cuckoo_set_slot(slots: List[Int], idx: Int, val: Int) -> List[Int] {
+    let mut next_list: List[Int] = list_new();
+    let n: Int = list_len(slots);
+    let mut i: Int = 0;
+    while i < n {
+        if i == idx {
+            next_list = list_push(next_list, val);
+        } else {
+            next_list = list_push(next_list, list_get(slots, i));
+        }
+        i = i + 1;
+    }
+    return next_list;
+}
+
+pub fn cuckoo_lookup(cf: &CuckooFilter, item: Int) -> Bool {
+    let fp: Int = cuckoo_calc_fingerprint(item);
+    let i1: Int = cuckoo_hash_1(item, (cf).num_buckets);
+    let i2: Int = cuckoo_hash_2(i1, fp, (cf).num_buckets);
+
+    let cap: Int = (cf).bucket_capacity;
+    let mut s: Int = 0;
+    while s < cap {
+        if cuckoo_get_slot(cf, i1, s) == fp {
+            return true;
+        }
+        if cuckoo_get_slot(cf, i2, s) == fp {
+            return true;
+        }
+        s = s + 1;
+    }
+    return false;
+}
+
+pub fn cuckoo_insert(cf: &mut CuckooFilter, item: Int) -> Bool {
+    let fp: Int = cuckoo_calc_fingerprint(item);
+    let i1: Int = cuckoo_hash_1(item, (cf).num_buckets);
+    let i2: Int = cuckoo_hash_2(i1, fp, (cf).num_buckets);
+
+    let cap: Int = (cf).bucket_capacity;
+
+    // Check if empty slot in i1
+    let mut s: Int = 0;
+    while s < cap {
+        let idx: Int = i1 * cap + s;
+        if list_get((cf).fingerprints, idx) == 0 {
+            (cf).fingerprints = cuckoo_set_slot((cf).fingerprints, idx, fp);
+            (cf).item_count = (cf).item_count + 1;
+            return true;
+        }
+        s = s + 1;
+    }
+
+    // Check if empty slot in i2
+    s = 0;
+    while s < cap {
+        let idx: Int = i2 * cap + s;
+        if list_get((cf).fingerprints, idx) == 0 {
+            (cf).fingerprints = cuckoo_set_slot((cf).fingerprints, idx, fp);
+            (cf).item_count = (cf).item_count + 1;
+            return true;
+        }
+        s = s + 1;
+    }
+
+    // Cuckoo displacement loop
+    let mut cur_i: Int = i1;
+    let mut cur_fp: Int = fp;
+    let mut kicks: Int = 0;
+    let max_k: Int = (cf).max_kicks;
+
+    while kicks < max_k {
+        let victim_slot: Int = kicks % cap;
+        let victim_idx: Int = cur_i * cap + victim_slot;
+        let victim_fp: Int = list_get((cf).fingerprints, victim_idx);
+
+        (cf).fingerprints = cuckoo_set_slot((cf).fingerprints, victim_idx, cur_fp);
+        cur_fp = victim_fp;
+        cur_i = cuckoo_hash_2(cur_i, cur_fp, (cf).num_buckets);
+
+        // Check if new bucket has free slot
+        s = 0;
+        while s < cap {
+            let slot_idx: Int = cur_i * cap + s;
+            if list_get((cf).fingerprints, slot_idx) == 0 {
+                (cf).fingerprints = cuckoo_set_slot((cf).fingerprints, slot_idx, cur_fp);
+                (cf).item_count = (cf).item_count + 1;
+                return true;
+            }
+            s = s + 1;
+        }
+        kicks = kicks + 1;
+    }
+
+    return false; // Filter full
+}
+
+pub fn cuckoo_delete(cf: &mut CuckooFilter, item: Int) -> Bool {
+    let fp: Int = cuckoo_calc_fingerprint(item);
+    let i1: Int = cuckoo_hash_1(item, (cf).num_buckets);
+    let i2: Int = cuckoo_hash_2(i1, fp, (cf).num_buckets);
+    let cap: Int = (cf).bucket_capacity;
+
+    let mut s: Int = 0;
+    while s < cap {
+        let idx1: Int = i1 * cap + s;
+        if list_get((cf).fingerprints, idx1) == fp {
+            (cf).fingerprints = cuckoo_set_slot((cf).fingerprints, idx1, 0);
+            (cf).item_count = (cf).item_count - 1;
+            return true;
+        }
+        let idx2: Int = i2 * cap + s;
+        if list_get((cf).fingerprints, idx2) == fp {
+            (cf).fingerprints = cuckoo_set_slot((cf).fingerprints, idx2, 0);
+            (cf).item_count = (cf).item_count - 1;
+            return true;
+        }
+        s = s + 1;
+    }
+    return false;
+}

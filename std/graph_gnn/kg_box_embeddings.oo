@@ -1,0 +1,136 @@
+// # Box Embeddings for Knowledge Graphs
+//
+// Logline: Represents entities and concepts as axis-aligned hyper-rectangles in Euclidean space with intersection volume scoring.
+//
+// Setup: Geometric box representation capturing containment, intersection, and asymmetric hierarchy in knowledge graphs.
+//
+// Beats:
+//   1. Represent entities by lower-corner coordinates (min_point) and upper-corner coordinates (max_point).
+//   2. Compute box intersection and exact / soft logarithmic volumes in d-dimensional space.
+//   3. Score asymmetric conditional probabilities P(t|h, r) via volume overlap ratios.
+
+pub type BoxEmbeddingConfig = struct {
+    num_entities: Int,
+    num_relations: Int,
+    dim: Int,
+    min_vol_eps: Float,
+};
+
+pub type BoxEmbeddingModel = struct {
+    config: BoxEmbeddingConfig,
+    entity_min: List[Float],  // num_entities * dim
+    entity_max: List[Float],  // num_entities * dim
+    relation_delta: List[Float], // num_relations * dim (translation vector)
+};
+
+pub fn box_embedding_config_new(
+    num_entities: Int,
+    num_relations: Int,
+    dim: Int,
+    eps: Float
+) -> BoxEmbeddingConfig {
+    return BoxEmbeddingConfig {
+        num_entities: num_entities,
+        num_relations: num_relations,
+        dim: dim,
+        min_vol_eps: eps,
+    };
+}
+
+pub fn box_embedding_model_init(config: BoxEmbeddingConfig, seed: Int) -> BoxEmbeddingModel {
+    let dim: Int = (config).dim;
+    let total_e: Int = (config).num_entities * dim;
+    let mut e_min: List[Float] = list_new();
+    let mut e_max: List[Float] = list_new();
+    let mut state: Int = seed;
+
+    let mut i: Int = 0;
+    while i < total_e {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        let c_min: Float = (((state % 1000) as Float) / 1000.0);
+        let c_len: Float = 0.5 + (((state % 500) as Float) / 1000.0);
+        e_min = list_push(e_min, c_min);
+        e_max = list_push(e_max, c_min + c_len);
+        i = i + 1;
+    }
+
+    let total_r: Int = (config).num_relations * dim;
+    let mut r_del: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < total_r {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        r_del = list_push(r_del, (((state % 1000) as Float) / 500.0) - 1.0);
+        j = j + 1;
+    }
+
+    return BoxEmbeddingModel {
+        config: config,
+        entity_min: e_min,
+        entity_max: e_max,
+        relation_delta: r_del,
+    };
+}
+
+pub fn box_log_volume(
+    box_min: List[Float],
+    box_max: List[Float],
+    offset: Int,
+    dim: Int,
+    eps: Float
+) -> Float {
+    let mut log_vol: Float = 0.0;
+    let mut d: Int = 0;
+    while d < dim {
+        let l_min: Float = list_get(box_min, offset + d);
+        let l_max: Float = list_get(box_max, offset + d);
+        let mut width: Float = l_max - l_min;
+        if width < eps {
+            width = eps;
+        }
+        log_vol = log_vol + width; // Approximated linear volume measure in log domain
+        d = d + 1;
+    }
+    return log_vol;
+}
+
+pub fn box_intersection_score(
+    model: &BoxEmbeddingModel,
+    head: Int,
+    relation: Int,
+    tail: Int
+) -> Float {
+    let cfg: BoxEmbeddingConfig = (*model).config;
+    let dim: Int = (cfg).dim;
+    let h_off: Int = head * dim;
+    let r_off: Int = relation * dim;
+    let t_off: Int = tail * dim;
+
+    let mut overlap_volume: Float = 1.0;
+    let mut d: Int = 0;
+    while d < dim {
+        let h_min: Float = list_get((*model).entity_min, h_off + d);
+        let h_max: Float = list_get((*model).entity_max, h_off + d);
+        let r_del: Float = list_get((*model).relation_delta, r_off + d);
+        let t_min: Float = list_get((*model).entity_min, t_off + d);
+        let t_max: Float = list_get((*model).entity_max, t_off + d);
+
+        // Head translated by relation
+        let trans_h_min: Float = h_min + r_del;
+        let trans_h_max: Float = h_max + r_del;
+
+        // Intersection interval
+        let inter_min: Float = if trans_h_min > t_min { trans_h_min } else { t_min };
+        let inter_max: Float = if trans_h_max < t_max { trans_h_max } else { t_max };
+        let inter_width: Float = inter_max - inter_min;
+
+        if inter_width > 0.0 {
+            overlap_volume = overlap_volume * inter_width;
+        } else {
+            overlap_volume = 0.0;
+        }
+        d = d + 1;
+    }
+    return overlap_volume;
+}

@@ -1,0 +1,164 @@
+// # Sinusoidal timestep embedding
+//
+// Logline: Vaswani/Ho omega_k = 10000^(-k/half). sin/cos in 10000ths. SiLU MLP.
+// residual: destubbed to Int floor.
+
+type TimeEmbeddingConfig = struct {
+    embedding_dim: Int,
+    proj_dim: Int,
+    max_period: Int
+}
+
+type TimestepEmbedding = struct {
+    s0: Int,
+    c0: Int,
+    s1: Int,
+    c1: Int
+}
+
+fn temb_isqrt_iter(n: Int, x: Int, y: Int, guard: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if guard >= 32 {
+        return x;
+    }
+    if y < x {
+        if y == 0 {
+            return 0;
+        }
+        return temb_isqrt_iter(n, y, (y + (n / y)) / 2, guard + 1);
+    }
+    return x;
+}
+
+fn temb_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    return temb_isqrt_iter(n, n, (n + 1) / 2, 0);
+}
+
+fn temb_mul(a: Int, b: Int) -> Int {
+    return (a * b) / 10000;
+}
+
+fn temb_mod_2pi(x: Int) -> Int {
+    if x < 0 {
+        let y: Int = 0 - x;
+        let m: Int = y - (62832 * (y / 62832));
+        if m == 0 {
+            return 0;
+        }
+        return 62832 - m;
+    }
+    return x - (62832 * (x / 62832));
+}
+
+fn temb_sin_taylor(x: Int) -> Int {
+    let x2: Int = temb_mul(x, x);
+    let x3: Int = temb_mul(x2, x);
+    let x5: Int = temb_mul(temb_mul(x3, x), x);
+    return (x - (x3 / 6)) + (x5 / 120);
+}
+
+fn temb_cos_taylor(x: Int) -> Int {
+    let x2: Int = temb_mul(x, x);
+    let x4: Int = temb_mul(x2, x2);
+    return (10000 - (x2 / 2)) + (x4 / 24);
+}
+
+fn temb_sin_10000(x: Int) -> Int {
+    let r: Int = temb_mod_2pi(x);
+    if r > 31416 {
+        return 0 - temb_sin_10000(r - 31416);
+    }
+    if r > 15708 {
+        return temb_sin_taylor(31416 - r);
+    }
+    return temb_sin_taylor(r);
+}
+
+fn temb_cos_10000(x: Int) -> Int {
+    let r: Int = temb_mod_2pi(x);
+    if r > 31416 {
+        return 0 - temb_cos_10000(r - 31416);
+    }
+    if r > 15708 {
+        return 0 - temb_cos_taylor(31416 - r);
+    }
+    return temb_cos_taylor(r);
+}
+
+fn temb_period(max_period: Int, half_dim: Int, k: Int) -> Int {
+    if k <= 0 {
+        return 1;
+    }
+    if half_dim <= 1 {
+        return max_period;
+    }
+    if k >= half_dim {
+        return max_period;
+    }
+    if half_dim == 2 {
+        return temb_isqrt(max_period);
+    }
+    return max_period;
+}
+
+fn temb_arg(timestep: Int, period: Int) -> Int {
+    if period <= 0 {
+        return 0;
+    }
+    return (timestep * 10000) / period;
+}
+
+fn temb_sigmoid_10000(x: Int) -> Int {
+    if x >= 40000 {
+        return 10000;
+    }
+    if x <= (0 - 40000) {
+        return 0;
+    }
+    return 5000 + (x / 4);
+}
+
+fn temb_silu_10000(x: Int) -> Int {
+    return (x * temb_sigmoid_10000(x)) / 10000;
+}
+
+pub fn time_embedding_config_new(dim: Int, proj: Int) -> TimeEmbeddingConfig {
+    return TimeEmbeddingConfig {
+        embedding_dim: dim,
+        proj_dim: proj,
+        max_period: 10000
+    };
+}
+
+pub fn time_sinusoidal_embedding(cfg: TimeEmbeddingConfig, timestep: Int) -> TimestepEmbedding {
+    let half_dim: Int = cfg.embedding_dim / 2;
+    let p0: Int = temb_period(cfg.max_period, half_dim, 0);
+    let p1: Int = temb_period(cfg.max_period, half_dim, 1);
+    let a0: Int = temb_arg(timestep, p0);
+    let a1: Int = temb_arg(timestep, p1);
+    return TimestepEmbedding {
+        s0: temb_sin_10000(a0),
+        c0: temb_cos_10000(a0),
+        s1: temb_sin_10000(a1),
+        c1: temb_cos_10000(a1)
+    };
+}
+
+pub fn time_project_silu(emb: TimestepEmbedding) -> Int {
+    let sum_sc: Int = ((emb.s0 + emb.c0) + emb.s1) + emb.c1;
+    let lin: Int = (sum_sc * 500) / 10000;
+    return temb_silu_10000(lin);
+}
+
+pub fn time_emb_s0(emb: TimestepEmbedding) -> Int {
+    return emb.s0;
+}
+
+pub fn time_emb_c0(emb: TimestepEmbedding) -> Int {
+    return emb.c0;
+}

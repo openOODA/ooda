@@ -1,0 +1,92 @@
+// # Cryogenic Propellant Boiloff & Zero-Boiloff (ZBO) Cryocooling
+//
+// Logline: Calculates Multi-Layer Insulation (MLI) radiative heat transfer, cryogenic propellant boiloff rate, and zero-boiloff (ZBO) active cryocooler lift.
+//
+// Setup: Analyzes long-duration orbital storage of liquid hydrogen (20K), liquid methane (111K), and liquid oxygen (90K).
+//
+// Beats:
+//   1. Define tank surface area, MLI layer count, ambient boundary temperature, and propellant latent heat of vaporization.
+//   2. Compute modified Lockheed MLI effective thermal conductivity and heat leak rate.
+//   3. Calculate passive boiloff mass loss rate (%/day) and required reverse-Brayton/pulse-tube cryocooler input power for ZBO.
+
+import "./space_propulsion_constants.oo";
+
+pub type CryoStorageSpec = struct {
+    tank_surface_area_m2: Float,
+    mli_num_layers: Int, // e.g. 40 to 80 layers
+    t_ambient_k: Float, // e.g. 250 K (spacecraft sun/earth radiation environment)
+    propellant_type: Int, // 1: LH2 (20 K), 2: LOX (90 K), 3: LCH4 (111 K)
+    tank_capacity_kg: Float,
+};
+
+pub type CryoThermalPerformance = struct {
+    total_heat_leak_w: Float,
+    passive_boiloff_kg_day: Float,
+    boiloff_loss_percent_day: Float,
+    zbo_cryocooler_power_w: Float,
+    heat_flux_w_m2: Float,
+};
+
+pub fn cryo_storage_spec_default_lh2() -> CryoStorageSpec {
+    return CryoStorageSpec {
+        tank_surface_area_m2: 120.0,
+        mli_num_layers: 60,
+        t_ambient_k: 230.0,
+        propellant_type: 1, // Liquid Hydrogen
+        tank_capacity_kg: 18000.0,
+    };
+}
+
+pub fn cryo_compute_boiloff(spec: CryoStorageSpec) -> CryoThermalPerformance {
+    let a_tank: Float = (spec).tank_surface_area_m2;
+    let n_layers: Float = (spec).mli_num_layers + 0.0;
+    let t_amb: Float = (spec).t_ambient_k;
+    let p_type: Int = (spec).propellant_type;
+    let m_cap: Float = (spec).tank_capacity_kg;
+
+    let mut t_sat: Float = 20.3; // LH2 boiling point
+    let mut h_vap: Float = 446000.0; // J/kg (LH2 latent heat)
+    let mut cop_carnot_ref: Float = 0.07; // COP factor of Carnot at 20 K
+
+    if p_type == 2 {
+        // LOX
+        t_sat = 90.2;
+        h_vap = 213000.0;
+        cop_carnot_ref = 0.28;
+    } else if p_type == 3 {
+        // LCH4
+        t_sat = 111.6;
+        h_vap = 510000.0;
+        cop_carnot_ref = 0.35;
+    }
+
+    // Modified Lockheed equation for MLI heat flux in vacuum:
+    // q = (C_rad / N) * (T_hot^4.67 - T_cold^4.67) + (C_cond / N) * (T_hot - T_cold)
+    let t_h4: Float = math_pow(t_amb / 100.0, 4.67);
+    let t_c4: Float = math_pow(t_sat / 100.0, 4.67);
+    let q_rad: Float = (0.000000000070 * (t_h4 - t_c4)) / n_layers;
+    let q_cond: Float = (0.000000089 * (t_amb - t_sat)) / n_layers;
+    let q_flux: Float = q_rad + q_cond + 0.15; // include struts & penetration conduction (0.15 W/m2)
+
+    let q_total_w: Float = q_flux * a_tank;
+
+    // Boiloff mass rate: m_dot_boil = Q_total / h_vap
+    let m_dot_kg_s: Float = q_total_w / h_vap;
+    let boiloff_kg_day: Float = m_dot_kg_s * 86400.0;
+    let boiloff_pct_day: Float = (boiloff_kg_day / m_cap) * 100.0;
+
+    // Active ZBO cryocooler electrical input power:
+    // P_elec = Q_total / (COP_carnot * eta_second_law)
+    // COP_carnot = T_cold / (T_hot - T_cold)
+    let cop_carnot: Float = t_sat / (t_amb - t_sat);
+    let cop_actual: Float = cop_carnot * cop_carnot_ref;
+    let p_cryocooler_w: Float = q_total_w / (cop_actual + 0.0001);
+
+    return CryoThermalPerformance {
+        total_heat_leak_w: q_total_w,
+        passive_boiloff_kg_day: boiloff_kg_day,
+        boiloff_loss_percent_day: boiloff_pct_day,
+        zbo_cryocooler_power_w: p_cryocooler_w,
+        heat_flux_w_m2: q_flux,
+    };
+}

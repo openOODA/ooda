@@ -1,0 +1,116 @@
+// # DiffPool Hierarchical Differentiable Graph Pooling
+//
+// Logline: Implements DiffPool hierarchical graph coarsening generating soft cluster assignment matrices via GCN pool operators.
+//
+// Setup: Deep differentiable graph pooling module mapping fine-grained graph vertices to coarsened cluster super-nodes.
+//
+// Beats:
+//   1. Generate continuous soft cluster assignment matrix S in R^{N_l x N_{l+1}} via pooling GCN layer.
+//   2. Coarsen node embedding matrix X_{l+1} = S_l^T * Z_l.
+//   3. Compute coarsened adjacency matrix A_{l+1} = S_l^T * A_l * S_l preserving global multi-hop connectivity.
+
+pub type DiffPoolConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    num_clusters: Int,
+};
+
+pub type DiffPoolLayer = struct {
+    config: DiffPoolConfig,
+    w_embed: List[Float],  // in_features * out_features
+    w_assign: List[Float], // in_features * num_clusters
+};
+
+pub fn diffpool_config_new(in_f: Int, out_f: Int, n_clusters: Int) -> DiffPoolConfig {
+    return DiffPoolConfig {
+        in_features: in_f,
+        out_features: out_f,
+        num_clusters: n_clusters,
+    };
+}
+
+pub fn diffpool_layer_init(config: DiffPoolConfig, seed: Int) -> DiffPoolLayer {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let k_clusters: Int = (config).num_clusters;
+    let mut state: Int = seed;
+
+    let total_e: Int = in_f * out_f;
+    let mut we: List[Float] = list_new();
+    let scale_e: Float = sqrt(2.0 / ((in_f + out_f) as Float));
+    let mut i: Int = 0;
+    while i < total_e {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        we = list_push(we, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale_e);
+        i = i + 1;
+    }
+
+    let total_a: Int = in_f * k_clusters;
+    let mut wa: List[Float] = list_new();
+    let scale_a: Float = sqrt(2.0 / ((in_f + k_clusters) as Float));
+    let mut j: Int = 0;
+    while j < total_a {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        wa = list_push(wa, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale_a);
+        j = j + 1;
+    }
+
+    return DiffPoolLayer {
+        config: config,
+        w_embed: we,
+        w_assign: wa,
+    };
+}
+
+pub fn diffpool_compute_assignment_node(
+    layer: &DiffPoolLayer,
+    node_features: List[Float], // Length in_features
+    feat_offset: Int
+) -> List[Float] {
+    let cfg: DiffPoolConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let k_clusters: Int = (cfg).num_clusters;
+
+    let mut logits: List[Float] = list_new();
+    let mut max_l: Float = -1000000.0;
+    let mut k: Int = 0;
+    while k < k_clusters {
+        let mut dot: Float = 0.0;
+        let mut c: Int = 0;
+        while c < in_f {
+            let x: Float = list_get(node_features, feat_offset + c);
+            let w: Float = list_get((*layer).w_assign, (c * k_clusters) + k);
+            dot = dot + (x * w);
+            c = c + 1;
+        }
+        if dot > max_l {
+            max_l = dot;
+        }
+        logits = list_push(logits, dot);
+        k = k + 1;
+    }
+
+    // Softmax over clusters
+    let mut sum_exp: Float = 0.0;
+    let mut exp_vals: List[Float] = list_new();
+    let mut p: Int = 0;
+    while p < k_clusters {
+        let l: Float = list_get(logits, p);
+        let e: Float = exp(l - max_l);
+        exp_vals = list_push(exp_vals, e);
+        sum_exp = sum_exp + e;
+        p = p + 1;
+    }
+
+    let mut s_vec: List[Float] = list_new();
+    let mut q: Int = 0;
+    while q < k_clusters {
+        let ev: Float = list_get(exp_vals, q);
+        let prob: Float = if sum_exp > 0.0 { ev / sum_exp } else { 1.0 / (k_clusters as Float) };
+        s_vec = list_push(s_vec, prob);
+        q = q + 1;
+    }
+    return s_vec;
+}

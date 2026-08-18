@@ -1,0 +1,248 @@
+// # Battery Bank Facility State & Telemetry
+//
+// Logline: Models battery storage facility physical state, charging efficiency, degradation, and thermal safety.
+//
+// Setup: Energy storage facility modeling with by-value SoC and bank steps.
+//
+// Beats:
+//   1. Construct BatteryBank instances with efficiency bounds and defaults.
+//   2. Compute maximum charge and discharge power limits based on SoC and temperature.
+//   3. Apply charge and discharge energy step simulations with thermal heating.
+//   4. Track cycle degradation and calculate State of Health (SoH) metrics.
+
+type BatteryBank = struct {
+    capacity_kwh: Float,
+    max_charge_rate_kw: Float,
+    max_discharge_rate_kw: Float,
+    efficiency_pct: Float,
+    current_energy_kwh: Float,
+    cell_temperature_c: Float,
+    cycle_count: Int,
+    health_soh_pct: Float,
+    status: Int
+};
+
+type StateOfCharge = struct {
+    soc_pct: Float,
+    usable_kwh: Float,
+    total_capacity_kwh: Float,
+    min_soc_limit_pct: Float,
+    max_soc_limit_pct: Float,
+    is_critical_low: Bool,
+    is_fully_charged: Bool
+};
+
+pub fn battery_bank_new(capacity_kwh: Float, max_charge_kw: Float, max_discharge_kw: Float, efficiency_pct: Float) -> BatteryBank {
+    let mut eff: Float = efficiency_pct;
+    if eff <= 0.0 {
+        eff = 90.0;
+    }
+    if eff > 100.0 {
+        eff = 100.0;
+    }
+    return BatteryBank {
+        capacity_kwh: capacity_kwh,
+        max_charge_rate_kw: max_charge_kw,
+        max_discharge_rate_kw: max_discharge_kw,
+        efficiency_pct: eff,
+        current_energy_kwh: capacity_kwh * 0.5,
+        cell_temperature_c: 25.0,
+        cycle_count: 0,
+        health_soh_pct: 100.0,
+        status: 0
+    };
+}
+
+pub fn battery_bank_default() -> BatteryBank {
+    return battery_bank_new(1000.0, 500.0, 500.0, 92.0);
+}
+
+pub fn soc_calculate_pct(current_kwh: Float, total_capacity_kwh: Float) -> Float {
+    if total_capacity_kwh <= 0.0 {
+        return 0.0;
+    }
+    let mut pct: Float = (current_kwh / total_capacity_kwh) * 100.0;
+    if pct < 0.0 {
+        pct = 0.0;
+    }
+    if pct > 100.0 {
+        pct = 100.0;
+    }
+    return pct;
+}
+
+pub fn soc_new(soc_pct: Float, total_capacity_kwh: Float, min_limit_pct: Float, max_limit_pct: Float) -> StateOfCharge {
+    let mut pct: Float = soc_pct;
+    if pct < 0.0 {
+        pct = 0.0;
+    }
+    if pct > 100.0 {
+        pct = 100.0;
+    }
+    let usable: Float = (total_capacity_kwh * pct) / 100.0;
+    let is_low: Bool = pct <= min_limit_pct;
+    let is_full: Bool = pct >= max_limit_pct;
+    return StateOfCharge {
+        soc_pct: pct,
+        usable_kwh: usable,
+        total_capacity_kwh: total_capacity_kwh,
+        min_soc_limit_pct: min_limit_pct,
+        max_soc_limit_pct: max_limit_pct,
+        is_critical_low: is_low,
+        is_fully_charged: is_full
+    };
+}
+
+pub fn soc_available_charge_kwh(soc: StateOfCharge) -> Float {
+    if soc.soc_pct >= soc.max_soc_limit_pct {
+        return 0.0;
+    }
+    return (soc.total_capacity_kwh * (soc.max_soc_limit_pct - soc.soc_pct)) / 100.0;
+}
+
+pub fn soc_available_discharge_kwh(soc: StateOfCharge) -> Float {
+    if soc.soc_pct <= soc.min_soc_limit_pct {
+        return 0.0;
+    }
+    return (soc.total_capacity_kwh * (soc.soc_pct - soc.min_soc_limit_pct)) / 100.0;
+}
+
+pub fn battery_bank_get_soc(bank: BatteryBank) -> StateOfCharge {
+    let pct: Float = soc_calculate_pct(bank.current_energy_kwh, bank.capacity_kwh);
+    return soc_new(pct, bank.capacity_kwh, 10.0, 95.0);
+}
+
+/// Charge the battery bank. Returns updated bank (energy after efficiency).
+pub fn battery_bank_charge(bank: BatteryBank, power_kw: Float, duration_hours: Float) -> BatteryBank {
+    if bank.status == 4 {
+        return bank;
+    }
+    let mut requested_power: Float = power_kw;
+    if requested_power < 0.0 {
+        requested_power = 0.0 - requested_power;
+    }
+    if requested_power > bank.max_charge_rate_kw {
+        requested_power = bank.max_charge_rate_kw;
+    }
+    let gross_energy_kwh: Float = requested_power * duration_hours;
+    let net_stored_kwh: Float = (gross_energy_kwh * bank.efficiency_pct) / 100.0;
+    let soc: StateOfCharge = battery_bank_get_soc(bank);
+    let max_allowable_kwh: Float = soc_available_charge_kwh(soc);
+    let mut actual_stored_kwh: Float = net_stored_kwh;
+    if actual_stored_kwh > max_allowable_kwh {
+        actual_stored_kwh = max_allowable_kwh;
+    }
+    let mut next_status: Int = 0;
+    if actual_stored_kwh > 0.0 {
+        next_status = 1;
+    }
+    return BatteryBank {
+        capacity_kwh: bank.capacity_kwh,
+        max_charge_rate_kw: bank.max_charge_rate_kw,
+        max_discharge_rate_kw: bank.max_discharge_rate_kw,
+        efficiency_pct: bank.efficiency_pct,
+        current_energy_kwh: bank.current_energy_kwh + actual_stored_kwh,
+        cell_temperature_c: bank.cell_temperature_c,
+        cycle_count: bank.cycle_count,
+        health_soh_pct: bank.health_soh_pct,
+        status: next_status
+    };
+}
+
+/// Discharge the battery bank. Returns updated bank (energy delivered to grid).
+pub fn battery_bank_discharge(bank: BatteryBank, power_kw: Float, duration_hours: Float) -> BatteryBank {
+    if bank.status == 4 {
+        return bank;
+    }
+    let mut requested_power: Float = power_kw;
+    if requested_power < 0.0 {
+        requested_power = 0.0 - requested_power;
+    }
+    if requested_power > bank.max_discharge_rate_kw {
+        requested_power = bank.max_discharge_rate_kw;
+    }
+    let requested_energy_kwh: Float = requested_power * duration_hours;
+    let soc: StateOfCharge = battery_bank_get_soc(bank);
+    let max_discharge_kwh: Float = soc_available_discharge_kwh(soc);
+    let mut actual_delivered_kwh: Float = requested_energy_kwh;
+    if actual_delivered_kwh > max_discharge_kwh {
+        actual_delivered_kwh = max_discharge_kwh;
+    }
+    let mut next_status: Int = 0;
+    if actual_delivered_kwh > 0.0 {
+        next_status = 2;
+    }
+    return BatteryBank {
+        capacity_kwh: bank.capacity_kwh,
+        max_charge_rate_kw: bank.max_charge_rate_kw,
+        max_discharge_rate_kw: bank.max_discharge_rate_kw,
+        efficiency_pct: bank.efficiency_pct,
+        current_energy_kwh: bank.current_energy_kwh - actual_delivered_kwh,
+        cell_temperature_c: bank.cell_temperature_c,
+        cycle_count: bank.cycle_count,
+        health_soh_pct: bank.health_soh_pct,
+        status: next_status
+    };
+}
+
+pub fn battery_bank_update_temperature(bank: BatteryBank, ambient_temp_c: Float, current_kw: Float, thermal_resistance: Float) -> BatteryBank {
+    let mut power: Float = current_kw;
+    if power < 0.0 {
+        power = 0.0 - power;
+    }
+    let loss_kw: Float = power * (1.0 - (bank.efficiency_pct / 100.0));
+    let temp_rise: Float = loss_kw * thermal_resistance;
+    let target_temp: Float = ambient_temp_c + temp_rise;
+    let delta: Float = (target_temp - bank.cell_temperature_c) * 0.1;
+    let next_temp: Float = bank.cell_temperature_c + delta;
+    let mut next_status: Int = bank.status;
+    if next_temp > 65.0 {
+        next_status = 4;
+    }
+    return BatteryBank {
+        capacity_kwh: bank.capacity_kwh,
+        max_charge_rate_kw: bank.max_charge_rate_kw,
+        max_discharge_rate_kw: bank.max_discharge_rate_kw,
+        efficiency_pct: bank.efficiency_pct,
+        current_energy_kwh: bank.current_energy_kwh,
+        cell_temperature_c: next_temp,
+        cycle_count: bank.cycle_count,
+        health_soh_pct: bank.health_soh_pct,
+        status: next_status
+    };
+}
+
+pub fn battery_bank_update_health(bank: BatteryBank, energy_throughput_kwh: Float) -> BatteryBank {
+    let cap: Float = bank.capacity_kwh;
+    if cap <= 0.0 {
+        return bank;
+    }
+    let additional_cycles: Float = energy_throughput_kwh / (cap * 2.0);
+    let cycle_int: Int = bank.cycle_count + 1;
+    let degradation: Float = additional_cycles * 0.005;
+    let mut new_soh: Float = bank.health_soh_pct - degradation;
+    if new_soh < 0.0 {
+        new_soh = 0.0;
+    }
+    return BatteryBank {
+        capacity_kwh: bank.capacity_kwh,
+        max_charge_rate_kw: bank.max_charge_rate_kw,
+        max_discharge_rate_kw: bank.max_discharge_rate_kw,
+        efficiency_pct: bank.efficiency_pct,
+        current_energy_kwh: bank.current_energy_kwh,
+        cell_temperature_c: bank.cell_temperature_c,
+        cycle_count: cycle_int,
+        health_soh_pct: new_soh,
+        status: bank.status
+    };
+}
+
+pub fn battery_bank_is_safe(bank: BatteryBank, max_temp_c: Float) -> Bool {
+    if bank.status == 4 {
+        return false;
+    }
+    if bank.cell_temperature_c >= max_temp_c {
+        return false;
+    }
+    return true;
+}

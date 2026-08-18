@@ -1,0 +1,82 @@
+// # Side-Scan Sonar (SSS) Slant-Range Correction & Shadow Bathymetry
+//
+// Logline: Converts port/starboard side-scan acoustic backscatter into ground-range seafloor imagery and estimates target object heights.
+//
+// Setup: High-resolution side-scan sonar image processing correcting geometric slant-range distortion and calculating target relief.
+//
+// Beats:
+//   1. Define side-scan beam parameters (port/starboard beam angles, pulse duration, altitude above bottom).
+//   2. Perform slant-range to horizontal ground-range geometric projection y_g = sqrt(R^2 - h^2).
+//   3. Compute acoustic shadow length to physical obstacle height: H = (L_shadow * h) / (y_g + L_shadow).
+//   4. Apply empirical Time-Varying Gain (TVG) backscatter normalization.
+
+import "./auv_hydrodynamics_constants.oo";
+
+pub type SideScanConfig = struct {
+    carrier_frequency_khz: Float, // e.g. 455 kHz or 900 kHz EdgeTech
+    horizontal_beamwidth_deg: Float,
+    vertical_beamwidth_deg: Float,
+    max_slant_range_m: Float,
+    tvg_alpha_coeff: Float,
+};
+
+pub type TargetShadowFeature = struct {
+    slant_range_m: Float,
+    shadow_length_m: Float,
+    altitude_above_bottom_m: Float,
+};
+
+pub type SideScanImageLine = struct {
+    ground_range_m: Float,
+    corrected_intensity: Float,
+    estimated_target_height_m: Float,
+    is_valid: Bool,
+};
+
+pub fn sidescan_config_default() -> SideScanConfig {
+    return SideScanConfig {
+        carrier_frequency_khz: 455.0,
+        horizontal_beamwidth_deg: 0.5,
+        vertical_beamwidth_deg: 50.0,
+        max_slant_range_m: 100.0,
+        tvg_alpha_coeff: 0.05,
+    };
+}
+
+pub fn sidescan_slant_to_ground_range(
+    slant_range_m: Float,
+    altitude_m: Float
+) -> Float {
+    if slant_range_m <= altitude_m {
+        return 0.0;
+    }
+    return sqrt((slant_range_m * slant_range_m) - (altitude_m * altitude_m));
+}
+
+pub fn sidescan_estimate_object_height(feature: &TargetShadowFeature) -> Float {
+    let r_slant: Float = (feature).slant_range_m;
+    let h_alt: Float = (feature).altitude_above_bottom_m;
+    let l_shad: Float = (feature).shadow_length_m;
+
+    let y_ground: Float = sidescan_slant_to_ground_range(r_slant, h_alt);
+    if y_ground + l_shad <= 0.01 {
+        return 0.0;
+    }
+
+    // Shadow geometry: H_obj = (L_shadow * H_alt) / (Y_ground + L_shadow)
+    return (l_shad * h_alt) / (y_ground + l_shad);
+}
+
+pub fn sidescan_apply_tvg(
+    cfg: &SideScanConfig,
+    raw_intensity: Float,
+    slant_range_m: Float
+) -> Float {
+    let mut r: Float = slant_range_m;
+    if r < 1.0 {
+        r = 1.0;
+    }
+    // TVG gain: 20 * log10(R) + 2 * alpha * R
+    let gain_factor: Float = (1.0 + (0.05 * r)) * (1.0 + ((cfg).tvg_alpha_coeff * r));
+    return raw_intensity * gain_factor;
+}

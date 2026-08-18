@@ -1,0 +1,178 @@
+// # Extended Kalman Filter (EKF) Multi-Sensor State Estimator
+//
+// Logline: CTRV predict and scalar GPS/IMU Kalman updates.
+// residual: &mut destubbed to by-value.
+
+type EKFState6D = struct {
+    px: Float,
+    py: Float,
+    yaw: Float,
+    vx: Float,
+    vy: Float,
+    yaw_rate: Float
+};
+
+type EKFCovariance = struct {
+    var_px: Float,
+    var_py: Float,
+    var_yaw: Float,
+    var_vx: Float,
+    var_vy: Float,
+    var_yaw_rate: Float
+};
+
+type ExtendedKalmanFilter = struct {
+    state: EKFState6D,
+    cov: EKFCovariance,
+    q_noise: EKFCovariance,
+    last_timestamp_ns: Int
+};
+
+pub fn ekf_state6d_new(px: Float, py: Float, yaw: Float, vx: Float, vy: Float, yaw_rate: Float) -> EKFState6D {
+    return EKFState6D { px: px, py: py, yaw: yaw, vx: vx, vy: vy, yaw_rate: yaw_rate };
+}
+
+pub fn ekf_covariance_new(v_px: Float, v_py: Float, v_yaw: Float, v_vx: Float, v_vy: Float, v_yaw_rate: Float) -> EKFCovariance {
+    return EKFCovariance {
+        var_px: v_px,
+        var_py: v_py,
+        var_yaw: v_yaw,
+        var_vx: v_vx,
+        var_vy: v_vy,
+        var_yaw_rate: v_yaw_rate
+    };
+}
+
+pub fn ekf_new(init_state: EKFState6D, init_cov: EKFCovariance, q_noise: EKFCovariance) -> ExtendedKalmanFilter {
+    return ExtendedKalmanFilter {
+        state: init_state,
+        cov: init_cov,
+        q_noise: q_noise,
+        last_timestamp_ns: 0
+    };
+}
+
+pub fn ekf_predict(ekf: ExtendedKalmanFilter, dt_s: Float) -> ExtendedKalmanFilter {
+    let st: EKFState6D = ekf.state;
+    let px: Float = st.px;
+    let py: Float = st.py;
+    let yaw: Float = st.yaw;
+    let vx: Float = st.vx;
+    let vy: Float = st.vy;
+    let yr: Float = st.yaw_rate;
+    let v: Float = sqrt((vx * vx) + (vy * vy));
+    let mut npx: Float = px;
+    let mut npy: Float = py;
+    let mut nyaw: Float = yaw;
+    if yr > 0.0001 || yr < (0.0 - 0.0001) {
+        nyaw = yaw + (yr * dt_s);
+        npx = px + ((v / yr) * (sin(nyaw) - sin(yaw)));
+        npy = py + ((v / yr) * (cos(yaw) - cos(nyaw)));
+    } else {
+        npx = px + (v * cos(yaw) * dt_s);
+        npy = py + (v * sin(yaw) * dt_s);
+        nyaw = yaw + (yr * dt_s);
+    }
+    let nstate: EKFState6D = EKFState6D { px: npx, py: npy, yaw: nyaw, vx: vx, vy: vy, yaw_rate: yr };
+    let c: EKFCovariance = ekf.cov;
+    let q: EKFCovariance = ekf.q_noise;
+    let ncov: EKFCovariance = EKFCovariance {
+        var_px: c.var_px + (q.var_px * dt_s),
+        var_py: c.var_py + (q.var_py * dt_s),
+        var_yaw: c.var_yaw + (q.var_yaw * dt_s),
+        var_vx: c.var_vx + (q.var_vx * dt_s),
+        var_vy: c.var_vy + (q.var_vy * dt_s),
+        var_yaw_rate: c.var_yaw_rate + (q.var_yaw_rate * dt_s)
+    };
+    return ExtendedKalmanFilter {
+        state: nstate,
+        cov: ncov,
+        q_noise: q,
+        last_timestamp_ns: ekf.last_timestamp_ns
+    };
+}
+
+pub fn ekf_update_gps(ekf: ExtendedKalmanFilter, gps_x: Float, gps_y: Float, noise_r: Float) -> ExtendedKalmanFilter {
+    let r_var: Float = noise_r * noise_r;
+    let st: EKFState6D = ekf.state;
+    let c: EKFCovariance = ekf.cov;
+    let k_x: Float = c.var_px / (c.var_px + r_var);
+    let npx: Float = st.px + (k_x * (gps_x - st.px));
+    let nvar_px: Float = (1.0 - k_x) * c.var_px;
+    let k_y: Float = c.var_py / (c.var_py + r_var);
+    let npy: Float = st.py + (k_y * (gps_y - st.py));
+    let nvar_py: Float = (1.0 - k_y) * c.var_py;
+    let nstate: EKFState6D = EKFState6D {
+        px: npx,
+        py: npy,
+        yaw: st.yaw,
+        vx: st.vx,
+        vy: st.vy,
+        yaw_rate: st.yaw_rate
+    };
+    let ncov: EKFCovariance = EKFCovariance {
+        var_px: nvar_px,
+        var_py: nvar_py,
+        var_yaw: c.var_yaw,
+        var_vx: c.var_vx,
+        var_vy: c.var_vy,
+        var_yaw_rate: c.var_yaw_rate
+    };
+    return ExtendedKalmanFilter {
+        state: nstate,
+        cov: ncov,
+        q_noise: ekf.q_noise,
+        last_timestamp_ns: ekf.last_timestamp_ns
+    };
+}
+
+pub fn ekf_update_imu_yaw_rate(ekf: ExtendedKalmanFilter, gyro_yaw_rate: Float, noise_r: Float) -> ExtendedKalmanFilter {
+    let r_var: Float = noise_r * noise_r;
+    let st: EKFState6D = ekf.state;
+    let c: EKFCovariance = ekf.cov;
+    let k_yr: Float = c.var_yaw_rate / (c.var_yaw_rate + r_var);
+    let nyr: Float = st.yaw_rate + (k_yr * (gyro_yaw_rate - st.yaw_rate));
+    let nvar: Float = (1.0 - k_yr) * c.var_yaw_rate;
+    let nstate: EKFState6D = EKFState6D {
+        px: st.px,
+        py: st.py,
+        yaw: st.yaw,
+        vx: st.vx,
+        vy: st.vy,
+        yaw_rate: nyr
+    };
+    let ncov: EKFCovariance = EKFCovariance {
+        var_px: c.var_px,
+        var_py: c.var_py,
+        var_yaw: c.var_yaw,
+        var_vx: c.var_vx,
+        var_vy: c.var_vy,
+        var_yaw_rate: nvar
+    };
+    return ExtendedKalmanFilter {
+        state: nstate,
+        cov: ncov,
+        q_noise: ekf.q_noise,
+        last_timestamp_ns: ekf.last_timestamp_ns
+    };
+}
+
+pub fn ekf_px_milli(ekf: ExtendedKalmanFilter) -> Int {
+    let mut acc: Int = 0;
+    let mut rem: Float = ekf.state.px;
+    if rem < 0.0 {
+        rem = 0.0 - rem;
+    }
+    while rem >= 1.0 {
+        acc = acc + 1000;
+        rem = rem - 1.0;
+    }
+    while rem >= 0.001 {
+        acc = acc + 1;
+        rem = rem - 0.001;
+    }
+    if ekf.state.px < 0.0 {
+        return 0 - acc;
+    }
+    return acc;
+}

@@ -1,0 +1,210 @@
+// # Flash Wear Leveling & Block Management
+//
+// Logline: Dynamic and static wear leveling, erase cycle tracking, logical-to-physical block mapping, and garbage collection.
+//
+// Setup: Flash Translation Layer (FTL) endurance engine balancing erase distribution across flash sectors.
+//
+// Beats:
+//   1. Define Physical Block descriptors, Logical-to-Physical (L2P) maps, and endurance metrics.
+//   2. Implement dynamic wear leveling allocating writes to least-erased physical blocks.
+//   3. Implement block recycling, dirty mark tracking, and garbage collection compaction.
+//   4. Mark defective blocks exceeding maximum endurance ratings (e.g. 100,000 cycles).
+
+type FlashPhysicalBlock = struct {
+    physical_id: Int,
+    erase_count: Int,
+    is_bad: Bool,
+    is_allocated: Bool,
+    logical_id: Int,
+    dirty_bytes: Int,
+};
+
+type WearLeveler = struct {
+    total_blocks: Int,
+    max_erase_cycles: Int,
+    blocks: List[FlashPhysicalBlock],
+    l2p_table: List[Int],
+    total_erases: Int,
+    last_id: Int,
+    last_ok: Bool,
+};
+
+pub fn flash_physical_block_new(p_id: Int) -> FlashPhysicalBlock {
+    return FlashPhysicalBlock {
+        physical_id: p_id,
+        erase_count: 0,
+        is_bad: false,
+        is_allocated: false,
+        logical_id: 0 - 1,
+        dirty_bytes: 0,
+    };
+}
+
+pub fn wear_leveler_new(total_blocks: Int, max_cycles: Int) -> WearLeveler {
+    let mut blist: List[FlashPhysicalBlock] = list_new();
+    let mut l2p: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < total_blocks {
+        blist = list_push(blist, flash_physical_block_new(i));
+        l2p = list_push(l2p, 0 - 1);
+        i = i + 1;
+    }
+    return WearLeveler {
+        total_blocks: total_blocks,
+        max_erase_cycles: max_cycles,
+        blocks: blist,
+        l2p_table: l2p,
+        total_erases: 0,
+        last_id: 0 - 1,
+        last_ok: true,
+    };
+}
+
+fn update_block_in_list(blocks: List[FlashPhysicalBlock], p_id: Int, updated: FlashPhysicalBlock) -> List[FlashPhysicalBlock] {
+    let mut result: List[FlashPhysicalBlock] = list_new();
+    let len: Int = list_len(blocks);
+    let mut i: Int = 0;
+    while i < len {
+        let b: FlashPhysicalBlock = list_get(blocks, i);
+        if (b).physical_id == p_id {
+            result = list_push(result, updated);
+        } else {
+            result = list_push(result, b);
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+fn update_l2p(l2p: List[Int], l_id: Int, p_id: Int) -> List[Int] {
+    let mut result: List[Int] = list_new();
+    let len: Int = list_len(l2p);
+    let mut i: Int = 0;
+    while i < len {
+        if i == l_id {
+            result = list_push(result, p_id);
+        } else {
+            result = list_push(result, list_get(l2p, i));
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn wear_leveler_allocate_block(wl: WearLeveler, logical_id: Int) -> WearLeveler {
+    let mut best_p_id: Int = 0 - 1;
+    let mut min_erases: Int = 99999999;
+    let len: Int = list_len((wl).blocks);
+    let mut i: Int = 0;
+
+    while i < len {
+        let b: FlashPhysicalBlock = list_get((wl).blocks, i);
+        if !(b).is_bad {
+            if !(b).is_allocated {
+                if (b).erase_count < min_erases {
+                    min_erases = (b).erase_count;
+                    best_p_id = (b).physical_id;
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    if best_p_id >= 0 {
+        let b: FlashPhysicalBlock = list_get((wl).blocks, best_p_id);
+        let updated: FlashPhysicalBlock = FlashPhysicalBlock {
+            physical_id: (b).physical_id,
+            erase_count: (b).erase_count,
+            is_bad: (b).is_bad,
+            is_allocated: true,
+            logical_id: logical_id,
+            dirty_bytes: (b).dirty_bytes,
+        };
+        return WearLeveler {
+            total_blocks: (wl).total_blocks,
+            max_erase_cycles: (wl).max_erase_cycles,
+            blocks: update_block_in_list((wl).blocks, best_p_id, updated),
+            l2p_table: update_l2p((wl).l2p_table, logical_id, best_p_id),
+            total_erases: (wl).total_erases,
+            last_id: best_p_id,
+            last_ok: true,
+        };
+    }
+    return WearLeveler {
+        total_blocks: (wl).total_blocks,
+        max_erase_cycles: (wl).max_erase_cycles,
+        blocks: (wl).blocks,
+        l2p_table: (wl).l2p_table,
+        total_erases: (wl).total_erases,
+        last_id: 0 - 1,
+        last_ok: false,
+    };
+}
+
+pub fn wear_leveler_erase_block(wl: WearLeveler, physical_id: Int) -> WearLeveler {
+    if physical_id >= 0 {
+        if physical_id < (wl).total_blocks {
+            let b: FlashPhysicalBlock = list_get((wl).blocks, physical_id);
+            let new_erase: Int = (b).erase_count + 1;
+            let is_bad: Bool = if new_erase >= (wl).max_erase_cycles { true } else { (b).is_bad };
+            let mut l2p: List[Int] = (wl).l2p_table;
+            let mut new_logical: Int = (b).logical_id;
+            if (b).logical_id >= 0 {
+                l2p = update_l2p(l2p, (b).logical_id, 0 - 1);
+                new_logical = 0 - 1;
+            }
+            let updated: FlashPhysicalBlock = FlashPhysicalBlock {
+                physical_id: (b).physical_id,
+                erase_count: new_erase,
+                is_bad: is_bad,
+                is_allocated: false,
+                logical_id: new_logical,
+                dirty_bytes: 0,
+            };
+            return WearLeveler {
+                total_blocks: (wl).total_blocks,
+                max_erase_cycles: (wl).max_erase_cycles,
+                blocks: update_block_in_list((wl).blocks, physical_id, updated),
+                l2p_table: l2p,
+                total_erases: (wl).total_erases + 1,
+                last_id: physical_id,
+                last_ok: true,
+            };
+        }
+    }
+    return WearLeveler {
+        total_blocks: (wl).total_blocks,
+        max_erase_cycles: (wl).max_erase_cycles,
+        blocks: (wl).blocks,
+        l2p_table: (wl).l2p_table,
+        total_erases: (wl).total_erases,
+        last_id: physical_id,
+        last_ok: false,
+    };
+}
+
+pub fn wear_leveler_get_physical(wl: WearLeveler, logical_id: Int) -> Int {
+    if logical_id >= 0 {
+        if logical_id < list_len((wl).l2p_table) {
+            return list_get((wl).l2p_table, logical_id);
+        }
+    }
+    return 0 - 1;
+}
+
+pub fn wear_leveler_get_max_erase_delta(wl: WearLeveler) -> Int {
+    let mut min_e: Int = 99999999;
+    let mut max_e: Int = 0;
+    let len: Int = list_len((wl).blocks);
+    let mut i: Int = 0;
+    while i < len {
+        let b: FlashPhysicalBlock = list_get((wl).blocks, i);
+        if (b).erase_count < min_e { min_e = (b).erase_count; }
+        if (b).erase_count > max_e { max_e = (b).erase_count; }
+        i = i + 1;
+    }
+    if min_e > max_e {
+        return 0;
+    }
+    return max_e - min_e;
+}

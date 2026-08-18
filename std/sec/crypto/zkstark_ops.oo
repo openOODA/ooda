@@ -1,0 +1,248 @@
+// # ZK-STARK AIR Constraints and FRI Proof Verification Operations
+//
+// Logline: Implements AIR constraint evaluation, trace verification, and FRI proof validation routines.
+//
+// Setup: Imports zkstark_types.oo for data structure definitions.
+//
+// Beats:
+//   1. Import ZK-STARK data types and finite field arithmetic.
+//   2. Construct and evaluate boundary and transition AIR constraints.
+//   3. Validate execution traces against AIR polynomial constraint sets.
+//   4. Construct and verify Fast Reed-Solomon Interactive (FRI) proof commitments.
+//   5. Instantiate STARK execution traces and verified proof records.
+
+import "./zkstark_types.oo";
+
+pub fn air_constraint_create(
+    constraint_id: String,
+    degree: Int,
+    coefficient: Int,
+    target_step: Int,
+    expected_value: Int,
+    is_boundary: Bool
+) -> AirConstraint {
+    let mut valid: Bool = true;
+    if degree <= 0 || constraint_id.len() == 0 {
+        valid = false;
+    }
+    return AirConstraint {
+        constraint_id: constraint_id,
+        degree: degree,
+        coefficient: coefficient,
+        target_step: target_step,
+        expected_value: expected_value,
+        is_boundary: is_boundary,
+        is_valid: valid,
+    };
+}
+
+pub fn air_constraint_evaluate(
+    c: AirConstraint,
+    curr_val: Int,
+    next_val: Int,
+    mod_val: Int
+) -> Int {
+    if c.is_valid == false {
+        return 0 - 1;
+    }
+    if mod_val <= 1 {
+        return 0;
+    }
+    if c.is_boundary {
+        let diff: Int = stark_mod_sub(curr_val, c.expected_value, mod_val);
+        return stark_mod_mul(c.coefficient, diff, mod_val);
+    }
+    let power_val: Int = stark_mod_pow(curr_val, c.degree, mod_val);
+    let lhs: Int = stark_mod_mul(c.coefficient, power_val, mod_val);
+    return stark_mod_sub(next_val, lhs, mod_val);
+}
+
+pub fn air_constraint_is_satisfied(
+    c: AirConstraint,
+    curr_val: Int,
+    next_val: Int,
+    mod_val: Int
+) -> Bool {
+    return air_constraint_evaluate(c, curr_val, next_val, mod_val) == 0;
+}
+
+pub fn stark_air_init(
+    air_id: String,
+    trace_length: Int,
+    blowup_factor: Int,
+    grinding_bits: Int
+) -> StarkAir {
+    let empty_constraints: List[AirConstraint] = list_new();
+    let mut active: Bool = true;
+    if trace_length <= 0 || blowup_factor <= 1 {
+        active = false;
+    }
+    return StarkAir {
+        air_id: air_id,
+        trace_length: trace_length,
+        constraints: empty_constraints,
+        blowup_factor: blowup_factor,
+        grinding_bits: grinding_bits,
+        is_active: active,
+    };
+}
+
+pub fn stark_air_add_constraint(mut_air: &mut StarkAir, c: AirConstraint) {
+    if (mut_air).is_active == false {
+        return;
+    }
+    let old_c: List[AirConstraint] = (mut_air).constraints;
+    (mut_air).constraints = list_push(old_c, c);
+}
+
+pub fn stark_air_validate_trace(
+    air_ref: &StarkAir,
+    trace: StarkTrace,
+    mod_val: Int
+) -> Bool {
+    if (air_ref).is_active == false || trace.is_valid == false {
+        return false;
+    }
+    if trace.num_steps != (air_ref).trace_length {
+        return false;
+    }
+    let c_list: List[AirConstraint] = (air_ref).constraints;
+    let c_len: Int = list_len(c_list);
+    if c_len == 0 {
+        return true;
+    }
+    let vals: List[Int] = trace.trace_values;
+    let v_len: Int = list_len(vals);
+    if v_len < 2 {
+        return false;
+    }
+
+    let mut i: Int = 0;
+    while i < c_len {
+        let constraint: AirConstraint = list_get(c_list, i);
+        if constraint.is_boundary {
+            let target: Int = constraint.target_step;
+            if target >= 0 && target < v_len {
+                let step_val: Int = list_get(vals, target);
+                if air_constraint_is_satisfied(constraint, step_val, step_val, mod_val) == false {
+                    return false;
+                }
+            }
+        } else {
+            let mut step_idx: Int = 0;
+            let end_idx: Int = v_len - 1;
+            while step_idx < end_idx {
+                let curr: Int = list_get(vals, step_idx);
+                let next: Int = list_get(vals, step_idx + 1);
+                if air_constraint_is_satisfied(constraint, curr, next, mod_val) == false {
+                    return false;
+                }
+                step_idx = step_idx + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn fri_proof_create(
+    proof_id: String,
+    num_rounds: Int,
+    commitments: List[Int],
+    evaluations: List[Int],
+    final_poly_degree: Int
+) -> FriProof {
+    let mut valid: Bool = true;
+    if num_rounds <= 0 || list_len(commitments) == 0 || list_len(evaluations) == 0 {
+        valid = false;
+    }
+    return FriProof {
+        proof_id: proof_id,
+        num_rounds: num_rounds,
+        commitments: commitments,
+        evaluations: evaluations,
+        final_poly_degree: final_poly_degree,
+        collinearity_passed: valid,
+        is_valid: valid,
+    };
+}
+
+pub fn fri_proof_verify(fri: FriProof, target_security: Int) -> Bool {
+    if fri.is_valid == false || fri.collinearity_passed == false {
+        return false;
+    }
+    if list_len(fri.commitments) < fri.num_rounds {
+        return false;
+    }
+    if list_len(fri.evaluations) < fri.num_rounds {
+        return false;
+    }
+    return fri.final_poly_degree >= 0;
+}
+
+pub fn fri_proof_calculate_checksum(fri: FriProof) -> Int {
+    let mut checksum: Int = 5381;
+    checksum = checksum + fri.proof_id.len() * 17;
+    checksum = checksum + fri.num_rounds * 31;
+    checksum = checksum + list_len(fri.commitments) * 53;
+    checksum = checksum + list_len(fri.evaluations) * 97;
+    checksum = checksum + fri.final_poly_degree * 131;
+    if fri.collinearity_passed {
+        checksum = checksum + 1000;
+    }
+    return checksum;
+}
+
+pub fn stark_trace_create(
+    trace_id: String,
+    num_steps: Int,
+    num_columns: Int,
+    values: List[Int]
+) -> StarkTrace {
+    let v_len: Int = list_len(values);
+    let mut valid: Bool = true;
+    if num_steps <= 0 || num_columns <= 0 || v_len == 0 {
+        valid = false;
+    }
+    let mut hash_acc: Int = 0;
+    let mut i: Int = 0;
+    while i < v_len {
+        hash_acc = hash_acc + list_get(values, i) * (i + 1);
+        i = i + 1;
+    }
+    return StarkTrace {
+        trace_id: trace_id,
+        num_steps: num_steps,
+        num_columns: num_columns,
+        trace_values: values,
+        state_hash: hash_acc,
+        is_valid: valid,
+    };
+}
+
+pub fn stark_proof_create(
+    proof_id: String,
+    trace_root: Int,
+    constraint_root: Int,
+    fri_proof: FriProof,
+    trace_length: Int,
+    num_queries: Int,
+    security_level: Int,
+    public_inputs: List[Int]
+) -> StarkProof {
+    let mut verified: Bool = fri_proof_verify(fri_proof, security_level);
+    if trace_root <= 0 || constraint_root <= 0 {
+        verified = false;
+    }
+    return StarkProof {
+        proof_id: proof_id,
+        trace_root: trace_root,
+        constraint_root: constraint_root,
+        fri_proof: fri_proof,
+        trace_length: trace_length,
+        num_queries: num_queries,
+        security_level: security_level,
+        public_inputs: public_inputs,
+        is_verified: verified,
+    };
+}

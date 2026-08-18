@@ -1,0 +1,143 @@
+// # Linear Degradation & Remaining Useful Life (RUL)
+//
+// Logline: Extrapolates linear Health Index degradation trajectories to predict Remaining Useful Life until threshold breach.
+//
+// Setup: Fits ordinary least squares degradation velocity to estimate Mean Time to End-of-Life (EOL).
+//
+// Beats:
+//   1. Define LinearRulResult structure with predicted RUL, degradation slope, and R^2 confidence.
+//   2. Fit linear trend across time-series health index values.
+//   3. Compute remaining operational cycles/hours until critical health limit.
+
+pub type LinearRulResult = struct {
+    rul_hours: Float,
+    degradation_rate_per_hour: Float,
+    current_health_index: Float,
+    failure_threshold: Float,
+    r_squared: Float,
+    is_valid_forecast: Bool,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn math_sqrt(x: Float) -> Float {
+    if x <= 0.0 { return 0.0; }
+    let mut g: Float = if x > 1.0 { x / 2.0 } else { x };
+    let mut i: Int = 0;
+    while i < 12 {
+        g = 0.5 * (g + (x / g));
+        i = i + 1;
+    }
+    return g;
+}
+
+pub fn rul_linear_predict(
+    time_points: &List[Float],
+    health_indices: &List[Float],
+    threshold: Float,
+) -> LinearRulResult {
+    let n: Int = list_len(*time_points);
+    let ny: Int = list_len(*health_indices);
+
+    if n < 2 || n != ny {
+        let cur_hi: Float = if ny > 0 { list_get(*health_indices, ny - 1) } else { 100.0 };
+        return LinearRulResult {
+            rul_hours: 0.0,
+            degradation_rate_per_hour: 0.0,
+            current_health_index: cur_hi,
+            failure_threshold: threshold,
+            r_squared: 0.0,
+            is_valid_forecast: false,
+        };
+    }
+
+    let n_f: Float = int_to_float(n);
+    let mut sum_t: Float = 0.0;
+    let mut sum_y: Float = 0.0;
+    let mut sum_ty: Float = 0.0;
+    let mut sum_tt: Float = 0.0;
+
+    let mut i: Int = 0;
+    while i < n {
+        let t: Float = list_get(*time_points, i);
+        let y: Float = list_get(*health_indices, i);
+        sum_t = sum_t + t;
+        sum_y = sum_y + y;
+        sum_ty = sum_ty + (t * y);
+        sum_tt = sum_tt + (t * t);
+        i = i + 1;
+    }
+
+    let denom: Float = (n_f * sum_tt) - (sum_t * sum_t);
+    if denom == 0.0 {
+        let cur_hi: Float = list_get(*health_indices, n - 1);
+        return LinearRulResult {
+            rul_hours: 0.0,
+            degradation_rate_per_hour: 0.0,
+            current_health_index: cur_hi,
+            failure_threshold: threshold,
+            r_squared: 0.0,
+            is_valid_forecast: false,
+        };
+    }
+
+    let slope: Float = ((n_f * sum_ty) - (sum_t * sum_y)) / denom;
+    let intercept: Float = (sum_y - (slope * sum_t)) / n_f;
+
+    let y_mean: Float = sum_y / n_f;
+    let mut ss_tot: Float = 0.0;
+    let mut ss_res: Float = 0.0;
+
+    i = 0;
+    while i < n {
+        let t: Float = list_get(*time_points, i);
+        let y: Float = list_get(*health_indices, i);
+        let y_fit: Float = intercept + (slope * t);
+        let dy: Float = y - y_mean;
+        let dr: Float = y - y_fit;
+        ss_tot = ss_tot + (dy * dy);
+        ss_res = ss_res + (dr * dr);
+        i = i + 1;
+    }
+    let r2: Float = if ss_tot > 0.000001 { 1.0 - (ss_res / ss_tot) } else { 1.0 };
+
+    let last_t: Float = list_get(*time_points, n - 1);
+    let cur_hi: Float = list_get(*health_indices, n - 1);
+
+    let mut rul: Float = 0.0;
+    let mut is_valid: Bool = false;
+
+    if slope < 0.0 && cur_hi > threshold {
+        // Degrading downward toward threshold
+        let t_eol: Float = (threshold - intercept) / slope;
+        rul = t_eol - last_t;
+        if rul < 0.0 { rul = 0.0; }
+        is_valid = true;
+    } else if slope > 0.0 && cur_hi < threshold {
+        // Wear metric increasing upward toward threshold limit
+        let t_eol: Float = (threshold - intercept) / slope;
+        rul = t_eol - last_t;
+        if rul < 0.0 { rul = 0.0; }
+        is_valid = true;
+    }
+
+    return LinearRulResult {
+        rul_hours: rul,
+        degradation_rate_per_hour: slope,
+        current_health_index: cur_hi,
+        failure_threshold: threshold,
+        r_squared: r2,
+        is_valid_forecast: is_valid,
+    };
+}

@@ -1,0 +1,101 @@
+// # Industrial PID Controller with Anti-Windup & Derivative Filter
+//
+// Logline: Regulates SISO error dynamics with integrator clamping, back-calculation anti-windup, and derivative filtering.
+//
+// Setup: High-performance discrete PID controller for precision robotic joint position and velocity loops.
+//
+// Beats:
+//   1. Define PID gain configuration and runtime integrator/derivative state.
+//   2. Apply first-order low-pass filtering on derivative error to suppress sensor noise.
+//   3. Compute saturated control output within actuator effort boundaries.
+//   4. Execute back-calculation anti-windup to prevent integrator runaway during saturation.
+
+pub type PIDConfig = struct {
+    kp: Float,
+    ki: Float,
+    kd: Float,
+    kb_antiwindup: Float,
+    filter_alpha: Float, // [0.0 = max filter, 1.0 = unfiltered]
+    out_min: Float,
+    out_max: Float,
+};
+
+pub type PIDState = struct {
+    integrator: Float,
+    prev_error: Float,
+    filtered_deriv: Float,
+    last_output: Float,
+};
+
+pub fn pid_config_new(
+    kp: Float, ki: Float, kd: Float,
+    out_min: Float, out_max: Float
+) -> PIDConfig {
+    return PIDConfig {
+        kp: kp,
+        ki: ki,
+        kd: kd,
+        kb_antiwindup: 1.0,
+        filter_alpha: 0.8,
+        out_min: out_min,
+        out_max: out_max,
+    };
+}
+
+pub fn pid_state_new() -> PIDState {
+    return PIDState {
+        integrator: 0.0,
+        prev_error: 0.0,
+        filtered_deriv: 0.0,
+        last_output: 0.0,
+    };
+}
+
+pub fn pid_reset(state: &mut PIDState) -> Int {
+    (state).integrator = 0.0;
+    (state).prev_error = 0.0;
+    (state).filtered_deriv = 0.0;
+    (state).last_output = 0.0;
+    return 0;
+}
+
+pub fn pid_update_step(
+    cfg: &PIDConfig,
+    state: &mut PIDState,
+    setpoint: Float,
+    measured: Float,
+    dt: Float
+) -> Float {
+    let dt_safe: Float = if dt < 0.0001 { 0.0001 } else { dt };
+    let error: Float = setpoint - measured;
+
+    // Derivative calculation with low-pass filter
+    let raw_deriv: Float = (error - (state).prev_error) / dt_safe;
+    let alpha: Float = (cfg).filter_alpha;
+    let filtered_d: Float = (alpha * raw_deriv) + ((1.0 - alpha) * (state).filtered_deriv);
+    (state).filtered_deriv = filtered_d;
+    (state).prev_error = error;
+
+    // Unbounded control effort
+    let p_term: Float = (cfg).kp * error;
+    let i_term: Float = (state).integrator;
+    let d_term: Float = (cfg).kd * filtered_d;
+    let u_raw: Float = p_term + i_term + d_term;
+
+    // Saturate output
+    let mut u_sat: Float = u_raw;
+    if u_sat > (cfg).out_max {
+        u_sat = (cfg).out_max;
+    }
+    if u_sat < (cfg).out_min {
+        u_sat = (cfg).out_min;
+    }
+    (state).last_output = u_sat;
+
+    // Back-calculation anti-windup: integrate error + Kb * (u_sat - u_raw)
+    let sat_diff: Float = u_sat - u_raw;
+    let integrator_increment: Float = (((cfg).ki * error) + ((cfg).kb_antiwindup * sat_diff)) * dt_safe;
+    (state).integrator = (state).integrator + integrator_increment;
+
+    return u_sat;
+}

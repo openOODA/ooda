@@ -1,0 +1,170 @@
+// # B.A.T.M.A.N. Mesh Originator Message Tracker
+//
+// Logline: Implements the B.A.T.M.A.N. routing algorithm tracking sliding-window Originator Messages (OGMs) and link quality.
+//
+// Setup: Decentralized mesh routing protocol selecting best next-hop neighbors based on received OGM packet count proportions.
+//
+// Beats:
+//   1. Periodically broadcast local Originator Messages (OGM) containing monotonic sequence numbers.
+//   2. Track sliding-window OGM arrival counts per neighbor to compute asymmetric Transmission Quality (TQ).
+//   3. Select the neighbor with maximum TQ as preferred gateway router towards target originators.
+
+pub type BatmanOgmPacket = struct {
+    originator_id: Int,
+    prev_sender_id: Int,
+    seq_number: Int,
+    ttl: Int,
+    tq_value: Int, // 0..255 Link transmission quality
+};
+
+pub type BatmanNeighborStats = struct {
+    neighbor_id: Int,
+    ogm_window_bits: Int, // 32-bit sliding window bitmap
+    total_received: Int,
+    last_seq: Int,
+};
+
+pub type BatmanOriginatorEntry = struct {
+    originator_id: Int,
+    best_next_hop: Int,
+    best_tq: Int,
+    neighbor_stats: List[BatmanNeighborStats],
+};
+
+pub type BatmanMeshRouter = struct {
+    local_id: Int,
+    ogm_seq_num: Int,
+    originators: List[BatmanOriginatorEntry],
+};
+
+pub fn batman_create(local_id: Int) -> BatmanMeshRouter {
+    let empty: List[BatmanOriginatorEntry] = list_new();
+    return BatmanMeshRouter {
+        local_id: local_id,
+        ogm_seq_num: 1,
+        originators: empty,
+    };
+}
+
+pub fn batman_create_ogm(router: &mut BatmanMeshRouter) -> BatmanOgmPacket {
+    (router).ogm_seq_num = (router).ogm_seq_num + 1;
+    return BatmanOgmPacket {
+        originator_id: (router).local_id,
+        prev_sender_id: (router).local_id,
+        seq_number: (router).ogm_seq_num,
+        ttl: 50,
+        tq_value: 255,
+    };
+}
+
+pub fn batman_find_orig_idx(router: &BatmanMeshRouter, orig_id: Int) -> Int {
+    let n: Int = list_len((router).originators);
+    let mut i: Int = 0;
+    while i < n {
+        let e: BatmanOriginatorEntry = list_get((router).originators, i);
+        if (e).originator_id == orig_id {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+pub fn batman_process_ogm(router: &mut BatmanMeshRouter, ogm: &BatmanOgmPacket) -> Bool {
+    if (ogm).originator_id == (router).local_id {
+        return false; // Drop own OGMs
+    }
+
+    if (ogm).ttl <= 1 {
+        return false;
+    }
+
+    let orig_id: Int = (ogm).originator_id;
+    let sender: Int = (ogm).prev_sender_id;
+    let idx: Int = batman_find_orig_idx(router, orig_id);
+
+    if idx < 0 {
+        let mut stats: List[BatmanNeighborStats] = list_new();
+        let stat: BatmanNeighborStats = BatmanNeighborStats {
+            neighbor_id: sender,
+            ogm_window_bits: 1,
+            total_received: 1,
+            last_seq: (ogm).seq_number,
+        };
+        stats = list_push(stats, stat);
+
+        let new_entry: BatmanOriginatorEntry = BatmanOriginatorEntry {
+            originator_id: orig_id,
+            best_next_hop: sender,
+            best_tq: (ogm).tq_value,
+            neighbor_stats: stats,
+        };
+        (router).originators = list_push((router).originators, new_entry);
+        return true;
+    }
+
+    let mut entry: BatmanOriginatorEntry = list_get((router).originators, idx);
+    let mut stats_list: List[BatmanNeighborStats] = (entry).neighbor_stats;
+    let num_stats: Int = list_len(stats_list);
+
+    let mut s_idx: Int = 0;
+    let mut found_nbr: Bool = false;
+    let mut updated_stats: List[BatmanNeighborStats] = list_new();
+
+    while s_idx < num_stats {
+        let st: BatmanNeighborStats = list_get(stats_list, s_idx);
+        if (st).neighbor_id == sender {
+            found_nbr = true;
+            let updated_st: BatmanNeighborStats = BatmanNeighborStats {
+                neighbor_id: sender,
+                ogm_window_bits: ((st).ogm_window_bits * 2 + 1) % 1073741824,
+                total_received: (st).total_received + 1,
+                last_seq: (ogm).seq_number,
+            };
+            updated_stats = list_push(updated_stats, updated_st);
+        } else {
+            updated_stats = list_push(updated_stats, st);
+        }
+        s_idx = s_idx + 1;
+    }
+
+    if !found_nbr {
+        let new_st: BatmanNeighborStats = BatmanNeighborStats {
+            neighbor_id: sender,
+            ogm_window_bits: 1,
+            total_received: 1,
+            last_seq: (ogm).seq_number,
+        };
+        updated_stats = list_push(updated_stats, new_st);
+    }
+
+    let updated_entry: BatmanOriginatorEntry = BatmanOriginatorEntry {
+        originator_id: orig_id,
+        best_next_hop: if (ogm).tq_value >= (entry).best_tq { sender } else { (entry).best_next_hop },
+        best_tq: if (ogm).tq_value >= (entry).best_tq { (ogm).tq_value } else { (entry).best_tq },
+        neighbor_stats: updated_stats,
+    };
+
+    let mut next_origs: List[BatmanOriginatorEntry] = list_new();
+    let n_origs: Int = list_len((router).originators);
+    let mut j: Int = 0;
+    while j < n_origs {
+        if j == idx {
+            next_origs = list_push(next_origs, updated_entry);
+        } else {
+            next_origs = list_push(next_origs, list_get((router).originators, j));
+        }
+        j = j + 1;
+    }
+    (router).originators = next_origs;
+    return true;
+}
+
+pub fn batman_get_next_hop(router: &BatmanMeshRouter, dest_id: Int) -> Int {
+    let idx: Int = batman_find_orig_idx(router, dest_id);
+    if idx >= 0 {
+        let e: BatmanOriginatorEntry = list_get((router).originators, idx);
+        return (e).best_next_hop;
+    }
+    return -1;
+}

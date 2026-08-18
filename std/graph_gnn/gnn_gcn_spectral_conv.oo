@@ -1,0 +1,113 @@
+// # Graph Convolutional Networks (GCN) Spectral Layer
+//
+// Logline: Implements localized first-order spectral graph convolutions with symmetric degree normalization and self-loops.
+//
+// Setup: Spectral graph convolutional operator computing H^{(l+1)} = sigma(D_hat^{-1/2} * A_hat * D_hat^{-1/2} * H^{(l)} * W).
+//
+// Beats:
+//   1. Add self-loop identity matrices to adjacency structure A_hat = A + I_N.
+//   2. Compute symmetric degree normalization D_hat^{-1/2} * A_hat * D_hat^{-1/2}.
+//   3. Perform linear feature transformation W and apply elementwise non-linear activation.
+
+pub type GCNConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    use_bias: Bool,
+    dropout: Float,
+};
+
+pub type GCNLayer = struct {
+    config: GCNConfig,
+    weight_matrix: List[Float], // in_features * out_features
+    bias_vector: List[Float],   // out_features
+};
+
+pub fn gcn_config_new(in_f: Int, out_f: Int, use_bias: Bool, dropout: Float) -> GCNConfig {
+    return GCNConfig {
+        in_features: in_f,
+        out_features: out_f,
+        use_bias: use_bias,
+        dropout: dropout,
+    };
+}
+
+pub fn gcn_layer_init(config: GCNConfig, seed: Int) -> GCNLayer {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let total_w: Int = in_f * out_f;
+    let mut w_mat: List[Float] = list_new();
+    let mut state: Int = seed;
+
+    let scale: Float = sqrt(2.0 / ((in_f + out_f) as Float));
+    let mut i: Int = 0;
+    while i < total_w {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        let val: Float = ((((state % 2000) as Float) / 1000.0) - 1.0) * scale;
+        w_mat = list_push(w_mat, val);
+        i = i + 1;
+    }
+
+    let mut b_vec: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < out_f {
+        b_vec = list_push(b_vec, 0.0);
+        j = j + 1;
+    }
+
+    return GCNLayer {
+        config: config,
+        weight_matrix: w_mat,
+        bias_vector: b_vec,
+    };
+}
+
+pub fn gcn_forward_node(
+    layer: &GCNLayer,
+    node_id: Int,
+    node_deg: Float,
+    neighbor_ids: List[Int],
+    neighbor_degs: List[Float],
+    input_features: List[Float],
+    num_nodes: Int
+) -> List[Float] {
+    let cfg: GCNConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let out_f: Int = (cfg).out_features;
+    let num_neighbors: Int = list_len(neighbor_ids);
+
+    let mut out_feat: List[Float] = list_new();
+    let mut out_col: Int = 0;
+    while out_col < out_f {
+        let b: Float = if (cfg).use_bias { list_get((*layer).bias_vector, out_col) } else { 0.0 };
+        let mut accum: Float = b;
+
+        // Iterate over neighbors + self loop
+        let mut n_idx: Int = 0;
+        while n_idx <= num_neighbors {
+            let n_id: Int = if n_idx < num_neighbors { list_get(neighbor_ids, n_idx) } else { node_id };
+            let n_deg: Float = if n_idx < num_neighbors { list_get(neighbor_degs, n_idx) } else { node_deg };
+
+            let norm_coeff: Float = 1.0 / sqrt((node_deg + 1.0) * (n_deg + 1.0));
+            let in_off: Int = n_id * in_f;
+
+            let mut dot: Float = 0.0;
+            let mut in_col: Int = 0;
+            while in_col < in_f {
+                let x: Float = list_get(input_features, in_off + in_col);
+                let w: Float = list_get((*layer).weight_matrix, (in_col * out_f) + out_col);
+                dot = dot + (x * w);
+                in_col = in_col + 1;
+            }
+            accum = accum + (norm_coeff * dot);
+            n_idx = n_idx + 1;
+        }
+
+        // ReLU activation
+        let act_val: Float = if accum > 0.0 { accum } else { 0.0 };
+        out_feat = list_push(out_feat, act_val);
+        out_col = out_col + 1;
+    }
+
+    return out_feat;
+}

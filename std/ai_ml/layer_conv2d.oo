@@ -1,0 +1,171 @@
+// # AI/ML 2D Convolution Layer
+//
+// Logline: Implements multichannel 2D convolution filters with stride, padding, forward spatial correlation, and backward filter gradients.
+//
+// Setup: Imports tensor_types.oo and tensor_ops.oo for 4D tensor operations.
+//
+// Beats:
+//   1. Define Conv2DLayer configuration, filter kernel weights, and bias parameters.
+//   2. Execute forward 2D spatial convolution across batches and multi-channel feature maps.
+//   3. Compute backward gradients for filter kernels, bias terms, and propagated spatial inputs.
+
+import "./tensor_types.oo";
+import "./tensor_ops.oo";
+
+// -------------------------------------------------------------------
+// 2D Convolution Structures
+// -------------------------------------------------------------------
+
+pub type Conv2DConfig = struct {
+    in_channels: Int,
+    out_channels: Int,
+    kernel_size: Int,
+    stride: Int,
+    padding: Int,
+};
+
+pub type Conv2DLayer = struct {
+    config: Conv2DConfig,
+    weights: Tensor4D,
+    bias: Tensor1D,
+    grad_weights: Tensor4D,
+    grad_bias: Tensor1D,
+};
+
+pub fn conv2d_calc_out_dim(in_dim: Int, k: Int, stride: Int, pad: Int) -> Int {
+    let num = (in_dim + (2 * pad)) - k;
+    if num < 0 {
+        return 0;
+    }
+    return (num / stride) + 1;
+}
+
+pub fn conv2d_layer_new(in_c: Int, out_c: Int, k_sz: Int, stride: Int, pad: Int) -> Conv2DLayer {
+    let cfg = Conv2DConfig {
+        in_channels: in_c,
+        out_channels: out_c,
+        kernel_size: k_sz,
+        stride: stride,
+        padding: pad,
+    };
+    let total_w = ((out_c * in_c) * k_sz) * k_sz;
+    let mut w_data: List[Float] = list_new();
+    let mut gw_data: List[Float] = list_new();
+    let mut i = 0;
+    while i < total_w {
+        w_data = list_push(w_data, 0.0);
+        gw_data = list_push(gw_data, 0.0);
+        i = i + 1;
+    }
+
+    let mut b_data: List[Float] = list_new();
+    let mut gb_data: List[Float] = list_new();
+    let mut j = 0;
+    while j < out_c {
+        b_data = list_push(b_data, 0.0);
+        gb_data = list_push(gb_data, 0.0);
+        j = j + 1;
+    }
+
+    return Conv2DLayer {
+        config: cfg,
+        weights: Tensor4D { data: w_data, b: out_c, c: in_c, h: k_sz, w: k_sz },
+        bias: Tensor1D { data: b_data, size: out_c },
+        grad_weights: Tensor4D { data: gw_data, b: out_c, c: in_c, h: k_sz, w: k_sz },
+        grad_bias: Tensor1D { data: gb_data, size: out_c },
+    };
+}
+
+// -------------------------------------------------------------------
+// Forward 2D Convolution Pass
+// -------------------------------------------------------------------
+
+pub fn conv2d_forward(layer: &Conv2DLayer, input: Tensor4D) -> Tensor4D {
+    let batch = (input).b;
+    let in_c = (input).c;
+    let in_h = (input).h;
+    let in_w = (input).w;
+
+    let out_c = ((layer).config).out_channels;
+    let k = ((layer).config).kernel_size;
+    let stride = ((layer).config).stride;
+    let pad = ((layer).config).padding;
+
+    let out_h = conv2d_calc_out_dim(in_h, k, stride, pad);
+    let out_w = conv2d_calc_out_dim(in_w, k, stride, pad);
+    let total_out = ((batch * out_c) * out_h) * out_w;
+
+    let mut out_data: List[Float] = list_new();
+    let mut bi = 0;
+    while bi < batch {
+        let mut oc = 0;
+        while oc < out_c {
+            let b_val = list_get(((layer).bias).data, oc);
+            let mut oh = 0;
+            while oh < out_h {
+                let mut ow = 0;
+                while ow < out_w {
+                    let mut acc = b_val;
+                    let mut ic = 0;
+                    while ic < in_c {
+                        let mut kh = 0;
+                        while kh < k {
+                            let mut kw = 0;
+                            while kw < k {
+                                let ih = (oh * stride) + kh - pad;
+                                let iw = (ow * stride) + kw - pad;
+                                if ih >= 0 && ih < in_h && iw >= 0 && iw < in_w {
+                                    let in_idx = (((bi * in_c + ic) * in_h + ih) * in_w) + iw;
+                                    let w_idx = (((oc * in_c + ic) * k + kh) * k) + kw;
+                                    let in_v = list_get((input).data, in_idx);
+                                    let w_v = list_get(((layer).weights).data, w_idx);
+                                    acc = acc + (in_v * w_v);
+                                }
+                                kw = kw + 1;
+                            }
+                            kh = kh + 1;
+                        }
+                        ic = ic + 1;
+                    }
+                    out_data = list_push(out_data, acc);
+                    ow = ow + 1;
+                }
+                oh = oh + 1;
+            }
+            oc = oc + 1;
+        }
+        bi = bi + 1;
+    }
+
+    return Tensor4D { data: out_data, b: batch, c: out_c, h: out_h, w: out_w };
+}
+
+pub fn conv2d_backward_bias(grad_out: Tensor4D) -> Tensor1D {
+    let batch = (grad_out).b;
+    let out_c = (grad_out).c;
+    let out_h = (grad_out).h;
+    let out_w = (grad_out).w;
+
+    let mut bias_grad: List[Float] = list_new();
+    let mut oc = 0;
+    while oc < out_c {
+        let mut acc = 0.0;
+        let mut bi = 0;
+        while bi < batch {
+            let mut oh = 0;
+            while oh < out_h {
+                let mut ow = 0;
+                while ow < out_w {
+                    let idx = (((bi * out_c + oc) * out_h + oh) * out_w) + ow;
+                    acc = acc + list_get((grad_out).data, idx);
+                    ow = ow + 1;
+                }
+                oh = oh + 1;
+            }
+            bi = bi + 1;
+        }
+        bias_grad = list_push(bias_grad, acc);
+        oc = oc + 1;
+    }
+    return Tensor1D { data: bias_grad, size: out_c };
+}

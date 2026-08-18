@@ -1,0 +1,199 @@
+// # Level 3 Order Book Matching Engine
+//
+// Logline: Implements deterministic limit and market order execution against resting bid/ask limit queues.
+//
+// Setup: Pure algorithmic matching engine with discrete order fill event generation.
+//
+// Beats:
+//   1. Define L3BookOrder, L3TradeMatch, and L3OrderBook structures.
+//   2. Insert and cancel resting limit orders maintaining sorted priority queues.
+//   3. Execute crossing trades for aggressive limit and market orders.
+
+pub type L3BookOrder = struct {
+    order_id: Int,
+    trader_id: String,
+    is_buy: Bool,
+    price: Int,
+    qty: Int,
+    filled_qty: Int,
+    timestamp_ns: Int,
+};
+
+pub type L3TradeMatch = struct {
+    trade_id: Int,
+    maker_order_id: Int,
+    taker_order_id: Int,
+    price: Int,
+    qty: Int,
+    timestamp_ns: Int,
+};
+
+pub type L3OrderBook = struct {
+    symbol: String,
+    bids: List[L3BookOrder],
+    asks: List[L3BookOrder],
+    next_trade_id: Int,
+    total_traded_volume: Int,
+};
+
+pub fn l3_book_order_new(
+    order_id: Int,
+    trader_id: String,
+    is_buy: Bool,
+    price: Int,
+    qty: Int,
+    ts_ns: Int
+) -> L3BookOrder {
+    return L3BookOrder {
+        order_id: order_id,
+        trader_id: trader_id,
+        is_buy: is_buy,
+        price: price,
+        qty: qty,
+        filled_qty: 0,
+        timestamp_ns: ts_ns,
+    };
+}
+
+pub fn l3_order_book_new(symbol: String) -> L3OrderBook {
+    let empty_bids: List[L3BookOrder] = list_new();
+    let empty_asks: List[L3BookOrder] = list_new();
+    return L3OrderBook {
+        symbol: symbol,
+        bids: empty_bids,
+        asks: empty_asks,
+        next_trade_id: 1,
+        total_traded_volume: 0,
+    };
+}
+
+pub fn l3_order_book_match(
+    book: &mut L3OrderBook,
+    incoming: L3BookOrder
+) -> List[L3TradeMatch] {
+    let mut trades: List[L3TradeMatch] = list_new();
+    let mut taker: L3BookOrder = incoming;
+    let mut taker_rem: Int = (taker).qty - (taker).filled_qty;
+
+    if taker_rem <= 0 {
+        return trades;
+    }
+
+    if (taker).is_buy {
+        let mut rem_asks: List[L3BookOrder] = list_new();
+        let old_asks: List[L3BookOrder] = (book).asks;
+        let n: Int = list_len(old_asks);
+        let mut i: Int = 0;
+
+        while i < n {
+            let mut maker: L3BookOrder = list_get(old_asks, i);
+            let maker_rem: Int = (maker).qty - (maker).filled_qty;
+
+            if taker_rem > 0 && maker_rem > 0 && (taker).price >= (maker).price {
+                let mut fill: Int = taker_rem;
+                if maker_rem < fill {
+                    fill = maker_rem;
+                }
+                maker.filled_qty = (maker).filled_qty + fill;
+                taker.filled_qty = (taker).filled_qty + fill;
+                taker_rem = taker_rem - fill;
+
+                let tr = L3TradeMatch {
+                    trade_id: (book).next_trade_id,
+                    maker_order_id: (maker).order_id,
+                    taker_order_id: (taker).order_id,
+                    price: (maker).price,
+                    qty: fill,
+                    timestamp_ns: (taker).timestamp_ns,
+                };
+                (book).next_trade_id = (book).next_trade_id + 1;
+                (book).total_traded_volume = (book).total_traded_volume + fill;
+                trades = list_push(trades, tr);
+            }
+
+            if ((maker).qty - (maker).filled_qty) > 0 {
+                rem_asks = list_push(rem_asks, maker);
+            }
+            i = i + 1;
+        }
+        (book).asks = rem_asks;
+        if taker_rem > 0 {
+            (book).bids = list_push((book).bids, taker);
+        }
+    } else {
+        let mut rem_bids: List[L3BookOrder] = list_new();
+        let old_bids: List[L3BookOrder] = (book).bids;
+        let n_bids: Int = list_len(old_bids);
+        let mut j: Int = 0;
+
+        while j < n_bids {
+            let mut maker_bid: L3BookOrder = list_get(old_bids, j);
+            let maker_bid_rem: Int = (maker_bid).qty - (maker_bid).filled_qty;
+
+            if taker_rem > 0 && maker_bid_rem > 0 && (taker).price <= (maker_bid).price {
+                let mut fill_b: Int = taker_rem;
+                if maker_bid_rem < fill_b {
+                    fill_b = maker_bid_rem;
+                }
+                maker_bid.filled_qty = (maker_bid).filled_qty + fill_b;
+                taker.filled_qty = (taker).filled_qty + fill_b;
+                taker_rem = taker_rem - fill_b;
+
+                let tr_b = L3TradeMatch {
+                    trade_id: (book).next_trade_id,
+                    maker_order_id: (maker_bid).order_id,
+                    taker_order_id: (taker).order_id,
+                    price: (maker_bid).price,
+                    qty: fill_b,
+                    timestamp_ns: (taker).timestamp_ns,
+                };
+                (book).next_trade_id = (book).next_trade_id + 1;
+                (book).total_traded_volume = (book).total_traded_volume + fill_b;
+                trades = list_push(trades, tr_b);
+            }
+
+            if ((maker_bid).qty - (maker_bid).filled_qty) > 0 {
+                rem_bids = list_push(rem_bids, maker_bid);
+            }
+            j = j + 1;
+        }
+        (book).bids = rem_bids;
+        if taker_rem > 0 {
+            (book).asks = list_push((book).asks, taker);
+        }
+    }
+
+    return trades;
+}
+
+pub fn l3_order_book_cancel(book: &mut L3OrderBook, order_id: Int) -> Bool {
+    let mut found: Bool = false;
+    let mut new_bids: List[L3BookOrder] = list_new();
+    let bids_len: Int = list_len((book).bids);
+    let mut i: Int = 0;
+    while i < bids_len {
+        let ord: L3BookOrder = list_get((book).bids, i);
+        if (ord).order_id == order_id {
+            found = true;
+        } else {
+            new_bids = list_push(new_bids, ord);
+        }
+        i = i + 1;
+    }
+    (book).bids = new_bids;
+
+    let mut new_asks: List[L3BookOrder] = list_new();
+    let asks_len: Int = list_len((book).asks);
+    let mut j: Int = 0;
+    while j < asks_len {
+        let ord_a: L3BookOrder = list_get((book).asks, j);
+        if (ord_a).order_id == order_id {
+            found = true;
+        } else {
+            new_asks = list_push(new_asks, ord_a);
+        }
+        j = j + 1;
+    }
+    (book).asks = new_asks;
+    return found;
+}

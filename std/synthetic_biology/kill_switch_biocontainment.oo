@@ -1,0 +1,83 @@
+// # Synthetic Biocontainment Kill-Switch Circuits
+//
+// Logline: Simulates toxin-antitoxin biocontainment circuits ensuring rapid cell lethality upon environmental escape.
+//
+// Setup: Safety kill-switch ODE dynamics (CcdB gyrase poison / CcdA antitoxin) driven by permissive media inducer presence/absence.
+//
+// Beats:
+//   1. Define KillSwitchParams, BiocontainmentState, and ContainmentResult data structures.
+//   2. Compute differential degradation between labile antitoxin (CcdA) and stable toxin (CcdB).
+//   3. Advance ODE integration and determine cell survival probability and time to 99.99% kill efficiency.
+
+pub type KillSwitchParams = struct {
+    k_tx_toxin: Float,
+    k_tx_antitoxin_max: Float, // Induced by presence of permissive signal (e.g. Arabinose or DAP)
+    k_complex_binding: Float,
+    d_antitoxin_fast: Float, // Fast Lon/ClpXP protease degradation of antitoxin
+    d_toxin_slow: Float, // Stable toxin persists
+    lethal_toxin_threshold: Float,
+};
+
+pub type BiocontainmentState = struct {
+    free_toxin_conc: Float,
+    free_antitoxin_conc: Float,
+    inactive_complex_conc: Float,
+    time_minutes: Float,
+};
+
+pub type ContainmentResult = struct {
+    free_toxin_level: Float,
+    is_cell_viable: Bool,
+    escapee_frequency_prediction: Float,
+    time_to_death_min: Float,
+};
+
+pub fn killswitch_derivatives(
+    st: &BiocontainmentState,
+    p: &KillSwitchParams,
+    permissive_inducer_conc: Float, // > 0 in lab, = 0 in wild escape
+) -> BiocontainmentState {
+    let induced_at = if permissive_inducer_conc > 0.1 {
+        (p).k_tx_antitoxin_max * (permissive_inducer_conc / (1.0 + permissive_inducer_conc))
+    } else {
+        0.0
+    };
+
+    let bind_rate = (p).k_complex_binding * (st).free_toxin_conc * (st).free_antitoxin_conc;
+
+    // d[Toxin]/dt = k_tx_toxin - bind_rate - d_toxin_slow*[Toxin]
+    let d_tox = (p).k_tx_toxin - bind_rate - ((p).d_toxin_slow * (st).free_toxin_conc);
+
+    // d[Antitoxin]/dt = induced_at - bind_rate - d_antitoxin_fast*[Antitoxin]
+    let d_at = induced_at - bind_rate - ((p).d_antitoxin_fast * (st).free_antitoxin_conc);
+
+    // d[Complex]/dt = bind_rate - d_antitoxin_fast*[Complex] -> releases toxin upon antitoxin protease degradation
+    let d_comp = bind_rate - ((p).d_antitoxin_fast * 0.2 * (st).inactive_complex_conc);
+
+    return BiocontainmentState {
+        free_toxin_conc: d_tox,
+        free_antitoxin_conc: d_at,
+        inactive_complex_conc: d_comp,
+        time_minutes: (st).time_minutes,
+    };
+}
+
+pub fn killswitch_step(
+    st: &BiocontainmentState,
+    p: &KillSwitchParams,
+    inducer: Float,
+    dt: Float,
+) -> BiocontainmentState {
+    let d = killswitch_derivatives(st, p, inducer);
+
+    let next_t = (st).free_toxin_conc + ((d).free_toxin_conc * dt);
+    let next_a = (st).free_antitoxin_conc + ((d).free_antitoxin_conc * dt);
+    let next_c = (st).inactive_complex_conc + ((d).inactive_complex_conc * dt);
+
+    return BiocontainmentState {
+        free_toxin_conc: if next_t < 0.0 { 0.0 } else { next_t },
+        free_antitoxin_conc: if next_a < 0.0 { 0.0 } else { next_a },
+        inactive_complex_conc: if next_c < 0.0 { 0.0 } else { next_c },
+        time_minutes: (st).time_minutes + dt,
+    };
+}

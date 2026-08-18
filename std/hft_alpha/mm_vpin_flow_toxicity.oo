@@ -1,0 +1,146 @@
+// # Volume-Synchronized Probability of Toxicity (VPIN)
+//
+// Logline: Calculates real-time Volume-Synchronized Probability of Toxicity (VPIN) to measure adverse selection risk and informed order flow.
+//
+// Setup: Pure high-frequency market microstructure module implementing Easley et al. volume bucketing and toxicity index.
+//
+// Beats:
+//   1. Define VpinBucket, VpinConfig, and VpinMetrics structures.
+//   2. Fill equal-volume trade buckets with signed buy/sell volume and absolute volume imbalance.
+//   3. Compute rolling window VPIN toxicity index and adverse selection warning flags.
+
+pub type VpinBucket = struct {
+    bucket_id: Int,
+    volume_buy: Float,
+    volume_sell: Float,
+    abs_imbalance: Float,
+    is_filled: Bool,
+};
+
+pub type VpinConfig = struct {
+    bucket_volume: Float,
+    window_bucket_count: Int,
+    toxic_threshold: Float,
+};
+
+pub type VpinMetrics = struct {
+    vpin_value: Float,
+    is_toxic: Bool,
+    current_bucket: Int,
+    buckets_in_window: Int,
+    total_volume_processed: Float,
+};
+
+pub fn vpin_config_new(
+    bucket_vol: Float,
+    n_buckets: Int,
+    threshold: Float
+) -> VpinConfig {
+    return VpinConfig {
+        bucket_volume: bucket_vol,
+        window_bucket_count: n_buckets,
+        toxic_threshold: threshold,
+    };
+}
+
+pub fn vpin_bucket_new(id: Int) -> VpinBucket {
+    return VpinBucket {
+        bucket_id: id,
+        volume_buy: 0.0,
+        volume_sell: 0.0,
+        abs_imbalance: 0.0,
+        is_filled: false,
+    };
+}
+
+pub fn vpin_bucket_add_trade(
+    bucket: &mut VpinBucket,
+    is_buyer_initiated: Bool,
+    size: Float,
+    max_bucket_vol: Float
+) -> Float {
+    let current_total: Float = (bucket).volume_buy + (bucket).volume_sell;
+    let space_left: Float = max_bucket_vol - current_total;
+    
+    let trade_applied: Float = if size > space_left { space_left } else { size };
+    
+    if is_buyer_initiated {
+        (bucket).volume_buy = (bucket).volume_buy + trade_applied;
+    } else {
+        (bucket).volume_sell = (bucket).volume_sell + trade_applied;
+    }
+
+    let diff: Float = (bucket).volume_buy - (bucket).volume_sell;
+    (bucket).abs_imbalance = if diff < 0.0 { 0.0 - diff } else { diff };
+    
+    if ((bucket).volume_buy + (bucket).volume_sell) >= max_bucket_vol {
+        (bucket).is_filled = true;
+    }
+
+    return trade_applied;
+}
+
+pub fn vpin_compute_index(
+    buckets: &List[VpinBucket],
+    config: &VpinConfig
+) -> VpinMetrics {
+    let num_b: Int = list_len(*buckets);
+    let win_n: Int = (config).window_bucket_count;
+    let b_vol: Float = (config).bucket_volume;
+    let thresh: Float = (config).toxic_threshold;
+
+    if num_b == 0 || win_n <= 0 || b_vol <= 0.0 {
+        return VpinMetrics {
+            vpin_value: 0.0,
+            is_toxic: false,
+            current_bucket: 0,
+            buckets_in_window: 0,
+            total_volume_processed: 0.0,
+        };
+    }
+
+    let mut start_idx: Int = num_b - win_n;
+    if start_idx < 0 {
+        start_idx = 0;
+    }
+
+    let mut sum_imbalance: Float = 0.0;
+    let mut count_used: Int = 0;
+    let mut i: Int = start_idx;
+
+    while i < num_b {
+        let b: VpinBucket = list_get(*buckets, i);
+        if (b).is_filled {
+            sum_imbalance = sum_imbalance + (b).abs_imbalance;
+            count_used = count_used + 1;
+        }
+        i = i + 1;
+    }
+
+    if count_used == 0 {
+        return VpinMetrics {
+            vpin_value: 0.0,
+            is_toxic: false,
+            current_bucket: num_b,
+            buckets_in_window: 0,
+            total_volume_processed: 0.0,
+        };
+    }
+
+    let mut count_f: Float = 0.0;
+    let mut cnt: Int = count_used;
+    while cnt >= 10 { count_f = count_f + 10.0; cnt = cnt - 10; }
+    while cnt >= 1 { count_f = count_f + 1.0; cnt = cnt - 1; }
+
+    let total_v: Float = count_f * b_vol;
+    let vpin_val: Float = sum_imbalance / total_v;
+    let toxic_flag: Bool = vpin_val >= thresh;
+
+    return VpinMetrics {
+        vpin_value: vpin_val,
+        is_toxic: toxic_flag,
+        current_bucket: num_b,
+        buckets_in_window: count_used,
+        total_volume_processed: total_v,
+    };
+}

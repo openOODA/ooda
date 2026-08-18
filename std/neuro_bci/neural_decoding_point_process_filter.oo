@@ -1,0 +1,88 @@
+// # Point-Process Real-Time Neural Filter
+//
+// Logline: Decodes continuous motor intentions directly from discrete millisecond-level point-process spike events.
+//
+// Setup: Exact recursive point-process state-space filter updating trajectory beliefs upon each binary action potential.
+//
+// Beats:
+//   1. Define PointProcessParams (alpha_baseline, beta_gain, state_decay, state_noise_q, dt_sec).
+//   2. Compute conditional spike intensity lambda(t | x) = exp(alpha + beta * x).
+//   3. Update state estimate and posterior variance using instantaneous point-process innovation (Delta_N - lambda * dt).
+
+pub type PointProcessParams = struct {
+    alpha_baseline: Float, // Spontaneous log-intensity
+    beta_gain: Float,       // Kinematic tuning sensitivity
+    state_decay: Float,     // Autoregressive state persistence (e.g. 0.98)
+    state_noise_q: Float,   // Continuous process noise variance
+    dt_sec: Float,          // Integration interval in seconds (e.g. 0.001 s = 1 ms)
+};
+
+pub type PointProcessState = struct {
+    kinematic_x: Float,
+    variance_w: Float,
+};
+
+pub type PointProcessFilterOutput = struct {
+    updated_state: PointProcessState,
+    instantaneous_rate_hz: Float,
+    innovation: Float,
+};
+
+pub fn point_process_params_default() -> PointProcessParams {
+    return PointProcessParams {
+        alpha_baseline: 2.3, // ~10 Hz baseline
+        beta_gain: 0.15,
+        state_decay: 0.98,
+        state_noise_q: 0.005,
+        dt_sec: 0.001,
+    };
+}
+
+pub fn point_process_state_initial() -> PointProcessState {
+    return PointProcessState {
+        kinematic_x: 0.0,
+        variance_w: 0.1,
+    };
+}
+
+pub fn point_process_intensity(x: Float, params: &PointProcessParams) -> Float {
+    let exponent = (params).alpha_baseline + ((params).beta_gain * x);
+    // Limit exponent to prevent overflow
+    let clamped_exp = if exponent > 7.0 { 7.0 } else if exponent < (0.0 - 7.0) { 0.0 - 7.0 } else { exponent };
+    return exp(clamped_exp);
+}
+
+pub fn point_process_step(
+    state: &PointProcessState,
+    spike_occurred: Bool,
+    params: &PointProcessParams
+) -> PointProcessFilterOutput {
+    let dt = (params).dt_sec;
+    let a = (params).state_decay;
+    let beta = (params).beta_gain;
+
+    // 1. One-step state and variance prior prediction
+    let x_prior = a * (state).kinematic_x;
+    let w_prior = (a * a * (state).variance_w) + (params).state_noise_q;
+
+    // 2. Conditional firing rate intensity
+    let lambda_t = point_process_intensity(x_prior, params);
+    let delta_n = if spike_occurred { 1.0 } else { 0.0 };
+
+    // 3. Point-process innovation
+    let innov = delta_n - (lambda_t * dt);
+
+    // 4. Posterior state update
+    let x_post = x_prior + (w_prior * beta * innov);
+    let var_denom = 1.0 + (w_prior * beta * beta * lambda_t * dt);
+    let w_post = if var_denom <= 0.000001 { w_prior } else { w_prior / var_denom };
+
+    return PointProcessFilterOutput {
+        updated_state: PointProcessState {
+            kinematic_x: x_post,
+            variance_w: w_post,
+        },
+        instantaneous_rate_hz: lambda_t,
+        innovation: innov,
+    };
+}

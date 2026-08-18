@@ -1,0 +1,93 @@
+// # Runtime Anti-Tamper CRC32 & Memory Section Verifier
+//
+// Logline: Calculates cyclic redundancy checksums over executable memory pages to detect inline hooks and patches.
+//
+// Setup: Standalone integrity verification scanner over .text segments and critical entry points.
+//
+// Beats:
+//   1. Define CodeSegmentDigest, CrcVerifierContext, and TamperViolation descriptors.
+//   2. Compute 32-bit CRC polynomials over executable byte slices at runtime.
+//   3. Compare observed checksums against baseline hashes and detect binary modifications.
+
+pub type CodeSegmentDigest = struct {
+    segment_name: String,
+    base_address: Int,
+    size_bytes: Int,
+    expected_crc: Int,
+};
+
+pub type AntiTamperContext = struct {
+    segments: List[CodeSegmentDigest],
+    segment_count: Int,
+    tamper_events: Int,
+    is_compromised: Bool,
+};
+
+pub fn crc32_step(crc: Int, byte_val: Int) -> Int {
+    let mut c: Int = crc ^ byte_val;
+    let mut j: Int = 0;
+    while j < 8 {
+        let mask: Int = -(c & 1);
+        c = (c / 2) ^ (3988292384 & mask); // Polynomial 0xEDB88320
+        j = j + 1;
+    }
+    return c & 2147483647;
+}
+
+pub fn compute_bytes_crc32(bytes: List[Int], len: Int) -> Int {
+    let mut crc: Int = 2147483647; // 0xFFFFFFFF
+    let mut i: Int = 0;
+    while i < len {
+        let b: Int = list_get(bytes, i);
+        crc = crc32_step(crc, b & 255);
+        i = i + 1;
+    }
+    return crc ^ 2147483647;
+}
+
+pub fn anti_tamper_context_new() -> AntiTamperContext {
+    let empty_segs: List[CodeSegmentDigest] = list_new();
+    return AntiTamperContext {
+        segments: empty_segs,
+        segment_count: 0,
+        tamper_events: 0,
+        is_compromised: false,
+    };
+}
+
+pub fn anti_tamper_register_segment(
+    ctx: &mut AntiTamperContext,
+    name: String,
+    base: Int,
+    sz: Int,
+    expected: Int
+) -> Bool {
+    let seg = CodeSegmentDigest {
+        segment_name: name,
+        base_address: base,
+        size_bytes: sz,
+        expected_crc: expected,
+    };
+    (ctx).segments = list_push((ctx).segments, seg);
+    (ctx).segment_count = (ctx).segment_count + 1;
+    return true;
+}
+
+pub fn anti_tamper_verify_segment(
+    ctx: &mut AntiTamperContext,
+    seg_idx: Int,
+    actual_bytes: List[Int],
+    actual_len: Int
+) -> Bool {
+    if seg_idx < 0 || seg_idx >= (ctx).segment_count {
+        return false;
+    }
+    let seg: CodeSegmentDigest = list_get((ctx).segments, seg_idx);
+    let computed: Int = compute_bytes_crc32(actual_bytes, actual_len);
+    if computed != (seg).expected_crc {
+        (ctx).tamper_events = (ctx).tamper_events + 1;
+        (ctx).is_compromised = true;
+        return false; // Code modification detected!
+    }
+    return true;
+}

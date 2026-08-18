@@ -1,0 +1,102 @@
+// # On-Manifold IMU Preintegration & Bias Tracking
+//
+// Logline: Integrates high-rate accelerometer and gyroscope readings into keyframe delta motion manifolds with bias Jacobians.
+//
+// Setup: Visual-Inertial Odometry (VIO) preintegration engine decoupling state estimation from intermediate high-rate IMU rates.
+//
+// Beats:
+//   1. Define IMU Preintegrated Measurement and Sensor Bias structures.
+//   2. Integrate incremental gyroscope rotation onto SO(3) quaternion manifold.
+//   3. Integrate linear velocity delta_v and position displacement delta_p across time interval.
+//   4. Apply first-order linear bias correction updates for estimated sensor drift.
+
+import "./tf2_spatial_transform.oo";
+
+pub type IMUBias = struct {
+    gyro_bias: Vector3,
+    accel_bias: Vector3,
+};
+
+pub type IMUPreintegratedMeasurement = struct {
+    delta_pos: Vector3,
+    delta_vel: Vector3,
+    delta_rot: Quaternion,
+    total_dt_sec: Float,
+    sample_count: Int,
+};
+
+pub fn imu_bias_zero() -> IMUBias {
+    return IMUBias {
+        gyro_bias: vector3_zero(),
+        accel_bias: vector3_zero(),
+    };
+}
+
+pub fn imu_preintegration_new() -> IMUPreintegratedMeasurement {
+    return IMUPreintegratedMeasurement {
+        delta_pos: vector3_zero(),
+        delta_vel: vector3_zero(),
+        delta_rot: quaternion_identity(),
+        total_dt_sec: 0.0,
+        sample_count: 0,
+    };
+}
+
+pub fn imu_preintegrate_sample(
+    meas: &mut IMUPreintegratedMeasurement,
+    bias: &IMUBias,
+    raw_accel: &Vector3,
+    raw_gyro: &Vector3,
+    dt: Float
+) -> Int {
+    // Unbiased sensor measurements
+    let ax: Float = (raw_accel).x - (bias).accel_bias.x;
+    let ay: Float = (raw_accel).y - (bias).accel_bias.y;
+    let az: Float = (raw_accel).z - (bias).accel_bias.z;
+    let unbias_acc: Vector3 = Vector3 { x: ax, y: ay, z: az };
+
+    let wx: Float = (raw_gyro).x - (bias).gyro_bias.x;
+    let wy: Float = (raw_gyro).y - (bias).gyro_bias.y;
+    let wz: Float = (raw_gyro).z - (bias).gyro_bias.z;
+
+    // Small angle rotation increment quaternion dq = [0.5*w*dt, 1.0]
+    let half_dt: Float = 0.5 * dt;
+    let dq: Quaternion = Quaternion {
+        x: wx * half_dt,
+        y: wy * half_dt,
+        z: wz * half_dt,
+        w: 1.0,
+    };
+    let dq_norm: Quaternion = quaternion_normalize(&dq);
+
+    // Rotate unbiased acceleration by current preintegrated orientation: R * a
+    let rot_acc: Vector3 = quaternion_rotate_vector(&(meas).delta_rot, &unbias_acc);
+
+    // delta_p_next = delta_p + delta_v * dt + 0.5 * (R * a) * dt^2
+    let half_dt2: Float = 0.5 * dt * dt;
+    let dp_x: Float = ((meas).delta_vel.x * dt) + (rot_acc.x * half_dt2);
+    let dp_y: Float = ((meas).delta_vel.y * dt) + (rot_acc.y * half_dt2);
+    let dp_z: Float = ((meas).delta_vel.z * dt) + (rot_acc.z * half_dt2);
+
+    (meas).delta_pos = Vector3 {
+        x: (meas).delta_pos.x + dp_x,
+        y: (meas).delta_pos.y + dp_y,
+        z: (meas).delta_pos.z + dp_z,
+    };
+
+    // delta_v_next = delta_v + (R * a) * dt
+    (meas).delta_vel = Vector3 {
+        x: (meas).delta_vel.x + (rot_acc.x * dt),
+        y: (meas).delta_vel.y + (rot_acc.y * dt),
+        z: (meas).delta_vel.z + (rot_acc.z * dt),
+    };
+
+    // delta_R_next = delta_R * dq
+    let next_q: Quaternion = quaternion_multiply(&(meas).delta_rot, &dq_norm);
+    (meas).delta_rot = quaternion_normalize(&next_q);
+
+    (meas).total_dt_sec = (meas).total_dt_sec + dt;
+    (meas).sample_count = (meas).sample_count + 1;
+
+    return (meas).sample_count;
+}

@@ -1,0 +1,100 @@
+// # Cryogenic Propellant Tank Pressurization & Ullage Gas Collapse
+//
+// Logline: Models autogenous and inert gas (Helium) tank pressurization, cryogenic ullage collapse, and tank wall thickness sizing.
+//
+// Setup: Solves unsteady mass and energy balance in liquid rocket propellant tanks during engine drain and blowdown phases.
+//
+// Beats:
+//   1. Define tank geometry (dome/cylinder), operating pressure, liquid drain rate, and material yield strength.
+//   2. Compute required pressurant gas mass flow (autogenous gaseous O2/CH4 or regulated Helium).
+//   3. Calculate ullage thermal collapse heat transfer to liquid interface and minimum tank shell wall thickness.
+
+import "./space_propulsion_constants.oo";
+
+pub type TankPressurizationSpec = struct {
+    tank_diameter_m: Float,
+    tank_volume_m3: Float,
+    target_pressure_bar: Float,
+    propellant_drain_rate_m3_s: Float,
+    pressurant_gas_type: Int, // 1: Helium, 2: Autogenous Gaseous Oxygen, 3: Autogenous Gaseous Methane
+    pressurant_inlet_temp_k: Float,
+    liquid_temp_k: Float,
+    material_yield_strength_mpa: Float, // e.g. 450 MPa (Al-Li) or 800 MPa (Stainless 304L cold-worked)
+};
+
+pub type PressurizationResult = struct {
+    pressurant_mass_flow_kg_s: Float,
+    ullage_collapse_factor: Float,
+    total_pressurant_mass_kg: Float,
+    required_wall_thickness_mm: Float,
+    tank_dry_mass_kg: Float,
+};
+
+pub fn tank_pressurization_spec_default_methalox() -> TankPressurizationSpec {
+    return TankPressurizationSpec {
+        tank_diameter_m: 9.0, // 9-meter diameter rocket tank
+        tank_volume_m3: 650.0,
+        target_pressure_bar: 3.2,
+        propellant_drain_rate_m3_s: 1.85,
+        pressurant_gas_type: 3, // Autogenous Methane
+        pressurant_inlet_temp_k: 280.0,
+        liquid_temp_k: 110.0,
+        material_yield_strength_mpa: 750.0, // Stainless Steel
+    };
+}
+
+pub fn tank_compute_pressurization(
+    spec: TankPressurizationSpec,
+    burn_duration_s: Float
+) -> PressurizationResult {
+    let p_bar: Float = (spec).target_pressure_bar;
+    let p_pa: Float = p_bar * 100000.0;
+    let v_dot: Float = (spec).propellant_drain_rate_m3_s;
+    let g_type: Int = (spec).pressurant_gas_type;
+    let t_in: Float = (spec).pressurant_inlet_temp_k;
+    let t_liq: Float = (spec).liquid_temp_k;
+    let d_tank: Float = (spec).tank_diameter_m;
+    let v_tank: Float = (spec).tank_volume_m3;
+    let sigma_y: Float = (spec).material_yield_strength_mpa * 1000000.0;
+
+    let mut mw: Float = 4.0; // Helium
+    let mut gamma: Float = 1.66;
+    if g_type == 2 {
+        mw = 32.0; // GOX
+        gamma = 1.30;
+    } else if g_type == 3 {
+        mw = 16.04; // GCH4
+        gamma = 1.25;
+    }
+
+    let rs: Float = const_r_univ() / mw;
+
+    // Ullage thermal collapse factor (due to gas cooling against cold liquid interface & tank wall)
+    let dt_ratio: Float = (t_in - t_liq) / t_in;
+    let collapse_factor: Float = 1.15 + (0.35 * dt_ratio);
+
+    // Ideal pressurant mass flow: m_dot_ideal = (P * V_dot) / (R * T_in)
+    let m_dot_ideal: Float = (p_pa * v_dot) / (rs * t_in);
+    let m_dot_actual: Float = m_dot_ideal * collapse_factor;
+    let total_pressurant_kg: Float = m_dot_actual * burn_duration_s;
+
+    // Thin-walled cylindrical pressure vessel hoop stress: t_wall = (P * r) / (sigma_y / safety_factor)
+    let safety_factor: Float = 1.25;
+    let r_tank: Float = d_tank * 0.5;
+    let t_wall_m: Float = (p_pa * r_tank * safety_factor) / sigma_y;
+    let t_wall_mm: Float = t_wall_m * 1000.0;
+
+    // Tank structural dry mass (cylinder + 2 hemispherical domes)
+    let l_cyl: Float = (v_tank - ((4.0 / 3.0) * const_pi() * (r_tank * r_tank * r_tank))) / (const_pi() * r_tank * r_tank);
+    let a_surface: Float = (2.0 * const_pi() * r_tank * l_cyl) + (4.0 * const_pi() * r_tank * r_tank);
+    let rho_metal: Float = 7900.0; // Stainless steel kg/m3
+    let tank_mass_kg: Float = a_surface * t_wall_m * rho_metal;
+
+    return PressurizationResult {
+        pressurant_mass_flow_kg_s: m_dot_actual,
+        ullage_collapse_factor: collapse_factor,
+        total_pressurant_mass_kg: total_pressurant_kg,
+        required_wall_thickness_mm: t_wall_mm,
+        tank_dry_mass_kg: tank_mass_kg,
+    };
+}

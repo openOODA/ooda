@@ -1,0 +1,154 @@
+// # FIX Execution Report Lifecycle Manager
+//
+// Logline: Constructs, transitions, and tracks FIX execution reports across comprehensive order lifecycles.
+//
+// Setup: Imports fix_message.oo for serialization and status encoding.
+//
+// Beats:
+//   1. Define order status codes, execution types, order side codes, and fee calculations.
+//   2. Build standardized ExecutionReport records for New, PartialFill, Fill, Canceled, and Rejected states.
+//   3. Serialize ExecutionReport structures into compliant FIX MsgType 8 message envelopes.
+
+import "./fix_message.oo";
+
+pub type ExecutionReportRecord = struct {
+    order_id: Int,
+    cl_ord_id: String,
+    exec_id: String,
+    symbol: String,
+    side: Int, // 1 = Buy, 2 = Sell
+    order_qty: Int,
+    cum_qty: Int,
+    leaves_qty: Int,
+    price: Int,
+    last_price: Int,
+    last_qty: Int,
+    avg_price: Int,
+    ord_status: Int, // 0=New, 1=PartiallyFilled, 2=Filled, 4=Canceled, 8=Rejected
+    exec_type: Int,  // 0=New, 1=PartialFill, 2=Fill, 4=Canceled, 8=Rejected
+    fee_bps: Int,
+    reject_reason: String,
+    timestamp_ns: Int,
+};
+
+pub fn exec_report_create(
+    order_id: Int,
+    cl_ord_id: String,
+    exec_id: String,
+    symbol: String,
+    side: Int,
+    order_qty: Int,
+    price: Int,
+    timestamp_ns: Int
+) -> ExecutionReportRecord {
+    return ExecutionReportRecord {
+        order_id: order_id,
+        cl_ord_id: cl_ord_id,
+        exec_id: exec_id,
+        symbol: symbol,
+        side: side,
+        order_qty: order_qty,
+        cum_qty: 0,
+        leaves_qty: order_qty,
+        price: price,
+        last_price: 0,
+        last_qty: 0,
+        avg_price: 0,
+        ord_status: 0, // New
+        exec_type: 0,  // New
+        fee_bps: 2,    // 2 bps default taker fee
+        reject_reason: "",
+        timestamp_ns: timestamp_ns,
+    };
+}
+
+pub fn exec_report_apply_fill(
+    report: &mut ExecutionReportRecord,
+    fill_qty: Int,
+    fill_price: Int,
+    exec_id: String,
+    timestamp_ns: Int
+) {
+    let prev_cum: Int = (report).cum_qty;
+    let prev_avg: Int = (report).avg_price;
+    let new_cum: Int = prev_cum + fill_qty;
+    
+    // Update weighted average fill price
+    if new_cum > 0 {
+        let total_val: Int = (prev_cum * prev_avg) + (fill_qty * fill_price);
+        (report).avg_price = total_val / new_cum;
+    }
+    
+    (report).cum_qty = new_cum;
+    (report).leaves_qty = (report).order_qty - new_cum;
+    (report).last_price = fill_price;
+    (report).last_qty = fill_qty;
+    (report).exec_id = exec_id;
+    (report).timestamp_ns = timestamp_ns;
+    
+    if (report).leaves_qty == 0 {
+        (report).ord_status = 2; // Filled
+        (report).exec_type = 2;  // Fill
+    } else {
+        (report).ord_status = 1; // PartiallyFilled
+        (report).exec_type = 1;  // PartialFill
+    }
+}
+
+pub fn exec_report_cancel(
+    report: &mut ExecutionReportRecord,
+    exec_id: String,
+    timestamp_ns: Int
+) {
+    (report).leaves_qty = 0;
+    (report).ord_status = 4; // Canceled
+    (report).exec_type = 4;  // Canceled
+    (report).exec_id = exec_id;
+    (report).timestamp_ns = timestamp_ns;
+}
+
+pub fn exec_report_reject(
+    report: &mut ExecutionReportRecord,
+    reason: String,
+    timestamp_ns: Int
+) {
+    (report).leaves_qty = 0;
+    (report).ord_status = 8; // Rejected
+    (report).exec_type = 8;  // Rejected
+    (report).reject_reason = reason;
+    (report).timestamp_ns = timestamp_ns;
+}
+
+pub fn exec_report_is_terminal(report: &ExecutionReportRecord) -> Bool {
+    let st: Int = (report).ord_status;
+    if st == 2 { return true; } // Filled
+    if st == 4 { return true; } // Canceled
+    if st == 8 { return true; } // Rejected
+    return false;
+}
+
+pub fn exec_report_total_fee(report: &ExecutionReportRecord) -> Int {
+    let notional: Int = (report).cum_qty * (report).avg_price;
+    return (notional * (report).fee_bps) / 10000;
+}
+
+pub fn exec_report_to_fix_message(
+    report: &ExecutionReportRecord,
+    sender: String,
+    target: String,
+    seq_num: Int
+) -> FixMessage {
+    let hdr = fix_header_new(
+        "FIX.4.4",
+        "8", // MsgType 8 = ExecutionReport
+        sender,
+        target,
+        seq_num,
+        (report).timestamp_ns
+    );
+    let mut msg = fix_message_new(hdr);
+    fix_message_add_field(&mut msg, 11, (report).cl_ord_id);
+    fix_message_add_field(&mut msg, 17, (report).exec_id);
+    fix_message_add_field(&mut msg, 55, (report).symbol);
+    return msg;
+}

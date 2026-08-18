@@ -1,0 +1,173 @@
+// # Dilithium Engine and Key Registry
+//
+// Logline: Keypair registration, engine lifecycle, batch metrics, and capability verification for Dilithium.
+//
+// Setup: Stateful engine management and registry dispatch for Dilithium cryptographic schemes.
+//
+// Beats:
+//   1. Initialize engine instance with security policy configurations.
+//   2. Register and look up keypairs in engine state registry.
+//   3. Dispatch signing and signature verification requests through policy engine.
+//   4. Calculate operational work metrics and verify security subsystem capabilities.
+
+import "./dilithium_types.oo";
+import "./dilithium_ops.oo";
+
+pub fn dilithium_engine_init(engine_id: String, policy: DilithiumSecurityPolicy) -> DilithiumEngine {
+    let empty_pairs: List[DilithiumKeyPair] = list_new();
+    return DilithiumEngine {
+        engine_id: engine_id,
+        policy: policy,
+        key_pairs: empty_pairs,
+        signed_count: 0,
+        verified_count: 0,
+        rejected_count: 0,
+        strict_mode: true,
+        system_halted: false,
+    };
+}
+
+pub fn dilithium_engine_register_keypair(
+    engine: &mut DilithiumEngine,
+    kp: DilithiumKeyPair
+) -> Result[Bool, String] {
+    if (engine).system_halted {
+        return Err("DILITHIUM_ENGINE_ERR: Engine is halted");
+    }
+
+    let is_val: Bool = dilithium_keypair_validate(&kp);
+    if is_val == false {
+        return Err("DILITHIUM_ENGINE_ERR: Keypair validation failed");
+    }
+
+    let pol: DilithiumSecurityPolicy = (engine).policy;
+    let par: DilithiumParams = kp.params;
+    let mode_ok: Bool = dilithium_policy_allows_mode(&pol, par.mode);
+    if mode_ok == false {
+        if pol.fail_closed {
+            (engine).system_halted = true;
+        }
+        return Err("DILITHIUM_ENGINE_ERR: Keypair mode disallowed by policy");
+    }
+
+    let old_pairs: List[DilithiumKeyPair] = (engine).key_pairs;
+    let new_pairs: List[DilithiumKeyPair] = list_push(old_pairs, kp);
+    (engine).key_pairs = new_pairs;
+
+    return Ok(true);
+}
+
+pub fn dilithium_engine_find_keypair(
+    engine: &DilithiumEngine,
+    target_key_id: String
+) -> Result[DilithiumKeyPair, String] {
+    let pairs: List[DilithiumKeyPair] = (engine).key_pairs;
+    let count: Int = list_len(pairs);
+    let mut i: Int = 0;
+
+    while i < count {
+        let item: DilithiumKeyPair = list_get(pairs, i);
+        if item.key_id == target_key_id {
+            return Ok(item);
+        }
+        i = i + 1;
+    }
+
+    return Err("KEY_NOT_FOUND");
+}
+
+pub fn dilithium_engine_sign(
+    engine: &mut DilithiumEngine,
+    key_id: String,
+    message: String,
+    timestamp: Int
+) -> Result[DilithiumSignature, String] {
+    if (engine).system_halted {
+        return Err("DILITHIUM_ENGINE_ERR: System halted");
+    }
+
+    let kp_res: Result[DilithiumKeyPair, String] = dilithium_engine_find_keypair(engine, key_id);
+    let kp: DilithiumKeyPair = match kp_res {
+        Ok(k) => k,
+        Err(e) => {
+            let cur_rej: Int = (engine).rejected_count;
+            (engine).rejected_count = cur_rej + 1;
+            return Err("DILITHIUM_ENGINE_ERR: " + e);
+        },
+    };
+
+    let sig_res: Result[DilithiumSignature, String] = dilithium_sign_message(&kp, message, timestamp);
+    return match sig_res {
+        Ok(sig_out) => {
+            let cur_signed: Int = (engine).signed_count;
+            (engine).signed_count = cur_signed + 1;
+            Ok(sig_out)
+        },
+        Err(err) => {
+            let cur_rej: Int = (engine).rejected_count;
+            (engine).rejected_count = cur_rej + 1;
+            Err(err)
+        },
+    };
+}
+
+pub fn dilithium_engine_verify(
+    engine: &mut DilithiumEngine,
+    target_sig: &DilithiumSignature,
+    message: String
+) -> Result[Bool, String] {
+    if (engine).system_halted {
+        return Err("DILITHIUM_ENGINE_ERR: System halted");
+    }
+
+    let kid: String = (target_sig).key_id;
+    let kp_res: Result[DilithiumKeyPair, String] = dilithium_engine_find_keypair(engine, kid);
+    let kp: DilithiumKeyPair = match kp_res {
+        Ok(k) => k,
+        Err(e) => {
+            let cur_rej: Int = (engine).rejected_count;
+            (engine).rejected_count = cur_rej + 1;
+            return Err("DILITHIUM_ENGINE_ERR: Public key not found in engine registry");
+        },
+    };
+
+    let pk: String = kp.public_key;
+    let v_result: DilithiumVerificationResult = dilithium_verify_signature(pk, target_sig, message);
+
+    if v_result.is_valid {
+        let cur_ver: Int = (engine).verified_count;
+        (engine).verified_count = cur_ver + 1;
+        return Ok(true);
+    } else {
+        let cur_rej: Int = (engine).rejected_count;
+        (engine).rejected_count = cur_rej + 1;
+        let pol: DilithiumSecurityPolicy = (engine).policy;
+        if pol.fail_closed {
+            if (engine).strict_mode {
+                (engine).system_halted = true;
+            }
+        }
+        let err_msg: String = "DILITHIUM_VERIFY_FAILED: " + v_result.error_code;
+        return Err(err_msg);
+    }
+}
+
+pub fn dilithium_engine_verify_with_capability(
+    mut_engine: &mut DilithiumEngine,
+    cmd: String
+) -> Result[String, String]
+    requires cmd.len() > 0
+{
+    if (mut_engine).system_halted {
+        return Err("DILITHIUM_ENGINE_HALTED: Security subsystem is disabled");
+    }
+    return Ok("DILITHIUM_CAP_EXEC: " + cmd);
+}
+
+pub fn dilithium_engine_do_work(engine: &DilithiumEngine) -> Int {
+    let sc: Int = (engine).signed_count;
+    let vc: Int = (engine).verified_count;
+    let rc: Int = (engine).rejected_count;
+    let k_count: Int = list_len((engine).key_pairs);
+    return sc + vc * 2 + rc * 3 + k_count * 5;
+}

@@ -1,0 +1,91 @@
+// # eBPF Helper Function Dispatcher & ABI Shim
+//
+// Logline: Dispatches BPF helper function calls with parameter validation and return code mapping.
+//
+// Setup: Kernel helper ABI layer providing controlled access to system state and map manipulation.
+//
+// Beats:
+//   1. Validate helper function call IDs (1 to 180+) against caller program type capability masks.
+//   2. Type-check function arguments for pointers, sizes, and scalar integer limits.
+//   3. Execute simulated helper actions (map lookups, ktime retrieval, trace prints, packet redirects).
+
+pub type HelperCallArg = struct {
+    arg1: Int,
+    arg2: Int,
+    arg3: Int,
+    arg4: Int,
+    arg5: Int,
+};
+
+pub type HelperCallResult = struct {
+    ret_val: Int,
+    is_success: Bool,
+    error_no: Int,
+};
+
+pub type EbpfHelperDispatcher = struct {
+    total_calls: Int,
+    ktime_offset_ns: Int,
+    redirect_ifindex: Int,
+};
+
+pub fn ebpf_helper_dispatcher_new(initial_time_ns: Int) -> EbpfHelperDispatcher {
+    return EbpfHelperDispatcher {
+        total_calls: 0,
+        ktime_offset_ns: initial_time_ns,
+        redirect_ifindex: 0,
+    };
+}
+
+pub fn ebpf_dispatch_helper(
+    disp: &mut EbpfHelperDispatcher,
+    prog_type: Int,
+    func_id: Int,
+    args: &HelperCallArg
+) -> HelperCallResult {
+    (disp).total_calls = (disp).total_calls + 1;
+
+    // Helper 1: bpf_map_lookup_elem(map, key)
+    if func_id == 1 {
+        if (args).arg1 <= 0 {
+            return HelperCallResult { ret_val: 0, is_success: false, error_no: 22 }; // EINVAL
+        }
+        return HelperCallResult { ret_val: (args).arg2 * 10, is_success: true, error_no: 0 };
+    }
+
+    // Helper 2: bpf_map_update_elem(map, key, value, flags)
+    if func_id == 2 {
+        if (args).arg1 <= 0 {
+            return HelperCallResult { ret_val: 0 - 22, is_success: false, error_no: 22 };
+        }
+        return HelperCallResult { ret_val: 0, is_success: true, error_no: 0 };
+    }
+
+    // Helper 5: bpf_ktime_get_ns()
+    if func_id == 5 {
+        let now_ns: Int = (disp).ktime_offset_ns + (disp).total_calls * 100;
+        return HelperCallResult { ret_val: now_ns, is_success: true, error_no: 0 };
+    }
+
+    // Helper 6: bpf_trace_printk(fmt, fmt_size, ...)
+    if func_id == 6 {
+        return HelperCallResult { ret_val: (args).arg2, is_success: true, error_no: 0 };
+    }
+
+    // Helper 23: bpf_redirect(ifindex, flags) - only valid for XDP (3) or SCHED_CLS (4)
+    if func_id == 23 {
+        if prog_type != 3 && prog_type != 4 {
+            return HelperCallResult { ret_val: 0 - 1, is_success: false, error_no: 1 }; // EPERM
+        }
+        (disp).redirect_ifindex = (args).arg1;
+        return HelperCallResult { ret_val: 4, is_success: true, error_no: 0 }; // XDP_REDIRECT
+    }
+
+    // Helper 25: bpf_perf_event_output(ctx, map, flags, data, size)
+    if func_id == 25 {
+        return HelperCallResult { ret_val: 0, is_success: true, error_no: 0 };
+    }
+
+    // Unknown or unsupported helper
+    return HelperCallResult { ret_val: 0 - 38, is_success: false, error_no: 38 }; // ENOSYS
+}

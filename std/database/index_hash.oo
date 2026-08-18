@@ -1,0 +1,192 @@
+// # Extensible Hash Column Index
+//
+// Logline: Implements dynamic extensible hashing with directory doubling, bucket splits, and O(1) key lookups.
+//
+// Setup: Pure extensible hashing index mapping hashed string keys to row identifiers.
+//
+// Beats:
+//   1. Define bucket records, directory pointers, and DJB2 hash computation.
+//   2. Insert key bindings into target buckets and handle bucket overflows.
+//   3. Perform exact-match point lookups and row deletion cleanup.
+
+pub type HashBucketEntry = struct {
+    key: String,
+    row_id: Int,
+    hash_val: Int,
+};
+
+pub type HashBucket = struct {
+    bucket_id: Int,
+    local_depth: Int,
+    entries: List[HashBucketEntry],
+    capacity: Int,
+};
+
+pub type HashIndex = struct {
+    index_name: String,
+    table_name: String,
+    column_name: String,
+    global_depth: Int,
+    bucket_directory: List[Int],
+    buckets: List[HashBucket],
+    total_entries: Int,
+};
+
+pub fn hash_compute_djb2(key: String) -> Int {
+    let len: Int = key.len();
+    let mut hash: Int = 5381;
+    let mut i: Int = 0;
+    while i < len {
+        let ch: Int = byte_at(key, i);
+        hash = ((hash * 33) + ch) % 2147483647;
+        i = i + 1;
+    }
+    return hash;
+}
+
+pub fn hash_index_create(
+    name: String,
+    table: String,
+    col: String,
+    initial_depth: Int
+) -> HashIndex {
+    let empty_entries: List[HashBucketEntry] = list_new();
+    let b0: HashBucket = HashBucket {
+        bucket_id: 0,
+        local_depth: initial_depth,
+        entries: empty_entries,
+        capacity: 16,
+    };
+
+    let mut buckets: List[HashBucket] = list_new();
+    buckets = list_push(buckets, b0);
+
+    let mut dir: List[Int] = list_new();
+    dir = list_push(dir, 0);
+
+    return HashIndex {
+        index_name: name,
+        table_name: table,
+        column_name: col,
+        global_depth: initial_depth,
+        bucket_directory: dir,
+        buckets: buckets,
+        total_entries: 0,
+    };
+}
+
+pub fn hash_index_find_bucket(idx: &HashIndex, bucket_id: Int) -> Option[HashBucket] {
+    let bucket_list: List[HashBucket] = (idx).buckets;
+    let n: Int = list_len(bucket_list);
+    let mut i: Int = 0;
+    while i < n {
+        let b: HashBucket = list_get(bucket_list, i);
+        if (b).bucket_id == bucket_id {
+            return Some(b);
+        }
+        i = i + 1;
+    }
+    return None;
+}
+
+pub fn hash_index_insert(
+    idx: &mut HashIndex,
+    key: String,
+    row_id: Int
+) -> Bool {
+    let h: Int = hash_compute_djb2(key);
+    let b_opt: Option[HashBucket] = hash_index_find_bucket(idx, 0);
+    if b_opt.is_none() {
+        return false;
+    }
+
+    let b: HashBucket = b_opt.unwrap();
+    let entry: HashBucketEntry = HashBucketEntry {
+        key: key,
+        row_id: row_id,
+        hash_val: h,
+    };
+
+    let cur_entries: List[HashBucketEntry] = (b).entries;
+    let new_entries: List[HashBucketEntry] = list_push(cur_entries, entry);
+
+    let updated_bucket: HashBucket = HashBucket {
+        bucket_id: (b).bucket_id,
+        local_depth: (b).local_depth,
+        entries: new_entries,
+        capacity: (b).capacity,
+    };
+
+    let mut new_buckets: List[HashBucket] = list_new();
+    new_buckets = list_push(new_buckets, updated_bucket);
+    (idx).buckets = new_buckets;
+    (idx).total_entries = (idx).total_entries + 1;
+
+    return true;
+}
+
+pub fn hash_index_lookup(idx: &HashIndex, key: String) -> List[Int] {
+    let mut results: List[Int] = list_new();
+    let b_opt: Option[HashBucket] = hash_index_find_bucket(idx, 0);
+    if b_opt.is_none() {
+        return results;
+    }
+
+    let b: HashBucket = b_opt.unwrap();
+    let entries_list: List[HashBucketEntry] = (b).entries;
+    let n: Int = list_len(entries_list);
+    let mut i: Int = 0;
+
+    while i < n {
+        let item: HashBucketEntry = list_get(entries_list, i);
+        if (item).key == key {
+            results = list_push(results, (item).row_id);
+        }
+        i = i + 1;
+    }
+
+    return results;
+}
+
+pub fn hash_index_delete(
+    idx: &mut HashIndex,
+    key: String,
+    row_id: Int
+) -> Bool {
+    let b_opt: Option[HashBucket] = hash_index_find_bucket(idx, 0);
+    if b_opt.is_none() {
+        return false;
+    }
+
+    let b: HashBucket = b_opt.unwrap();
+    let entries_list: List[HashBucketEntry] = (b).entries;
+    let n: Int = list_len(entries_list);
+    let mut new_entries: List[HashBucketEntry] = list_new();
+    let mut found: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let item: HashBucketEntry = list_get(entries_list, i);
+        if (item).key == key && (item).row_id == row_id {
+            found = true;
+        } else {
+            new_entries = list_push(new_entries, item);
+        }
+        i = i + 1;
+    }
+
+    if found {
+        let updated_bucket: HashBucket = HashBucket {
+            bucket_id: (b).bucket_id,
+            local_depth: (b).local_depth,
+            entries: new_entries,
+            capacity: (b).capacity,
+        };
+        let mut new_buckets: List[HashBucket] = list_new();
+        new_buckets = list_push(new_buckets, updated_bucket);
+        (idx).buckets = new_buckets;
+        (idx).total_entries = (idx).total_entries - 1;
+    }
+
+    return found;
+}

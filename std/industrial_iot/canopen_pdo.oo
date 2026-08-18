@@ -1,0 +1,95 @@
+// # CANopen Process Data Object (PDO) Protocol
+//
+// Logline: Implements real-time synchronous and asynchronous CANopen PDO communication and payload mapping.
+//
+// Setup: Pure high-speed process data serialization for industrial automation fieldbuses.
+//
+// Beats:
+//   1. Define PDO communication parameters (COB-ID, transmission type, inhibit time, event timer).
+//   2. Pack and unpack up to 8 bytes of industrial process signals into CAN data frames.
+//   3. Evaluate SYNC counters and event timers to schedule deterministic PDO transmissions.
+
+pub type CanopenPdoConfig = struct {
+    cob_id: Int,
+    transmission_type: Int,  // 0=Sync Acyclic, 1..240=Sync Cyclic, 254/255=Async Event
+    inhibit_time_100us: Int,
+    event_timer_ms: Int,
+    is_enabled: Bool,
+};
+
+pub type CanopenPdoFrame = struct {
+    cob_id: Int,
+    dlc: Int,                 // Data length code (0..8)
+    data: List[Int],
+};
+
+/// Initialize a standard TPDO configuration for a node.
+pub fn canopen_pdo_config_new(
+    base_cob_id: Int,
+    node_id: Int,
+    trans_type: Int,
+    event_timer_ms: Int
+) -> CanopenPdoConfig {
+    return CanopenPdoConfig {
+        cob_id: base_cob_id + node_id,
+        transmission_type: trans_type,
+        inhibit_time_100us: 10,
+        event_timer_ms: event_timer_ms,
+        is_enabled: true,
+    };
+}
+
+/// Pack 4 16-bit analog process values into an 8-byte PDO payload.
+pub fn canopen_pdo_pack_4x16(
+    cob_id: Int,
+    ch0: Int,
+    ch1: Int,
+    ch2: Int,
+    ch3: Int
+) -> CanopenPdoFrame {
+    let mut d: List[Int] = list_new();
+    d = list_push(d, ch0 % 256);
+    d = list_push(d, (ch0 / 256) % 256);
+    d = list_push(d, ch1 % 256);
+    d = list_push(d, (ch1 / 256) % 256);
+    d = list_push(d, ch2 % 256);
+    d = list_push(d, (ch2 / 256) % 256);
+    d = list_push(d, ch3 % 256);
+    d = list_push(d, (ch3 / 256) % 256);
+
+    return CanopenPdoFrame {
+        cob_id: cob_id,
+        dlc: 8,
+        data: d,
+    };
+}
+
+/// Unpack 4 16-bit analog values from an 8-byte PDO frame.
+pub fn canopen_pdo_unpack_4x16(frame: &CanopenPdoFrame) -> Result[List[Int], String] {
+    if (frame).dlc < 8 || list_len((frame).data) < 8 {
+        return Err("PDO frame DLC must be at least 8 bytes");
+    }
+
+    let mut vals: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 4 {
+        let lo: Int = list_get((frame).data, i * 2);
+        let hi: Int = list_get((frame).data, (i * 2) + 1);
+        let val: Int = lo + (hi * 256);
+        vals = list_push(vals, val);
+        i = i + 1;
+    }
+    return Ok(vals);
+}
+
+/// Evaluate whether cyclic sync PDO should transmit on current SYNC counter.
+pub fn canopen_pdo_should_sync_transmit(cfg: &CanopenPdoConfig, sync_counter: Int) -> Bool {
+    if !(cfg).is_enabled {
+        return false;
+    }
+    let ttype: Int = (cfg).transmission_type;
+    if ttype >= 1 && ttype <= 240 {
+        return (sync_counter % ttype) == 0;
+    }
+    return false;
+}

@@ -1,0 +1,121 @@
+// # Numerical Greeks & Cross-Derivative Sensitivity Engine
+//
+// Logline: Computes higher-order and cross-derivative option Greeks (Delta, Gamma, Vega, Theta, Vanna, Volga, Charm) using high-precision finite difference stencils.
+//
+// Setup: Pure quantitative finance module calculating model-independent risk sensitivities for arbitrary pricing functions.
+//
+// Beats:
+//   1. Define NumericalGreeksConfig and NumericalGreeksResult structures.
+//   2. Implement central finite difference perturbation stencils for spot, volatility, and time coordinates.
+//   3. Compute mixed second-order derivatives including Vanna ($\partial^2 V / \partial S \partial \sigma$) and Volga ($\partial^2 V / \partial \sigma^2$).
+
+pub type NumericalGreeksConfig = struct {
+    spot_bump_pct: Float, // e.g. 0.01 (1%)
+    vol_bump_abs: Float,  // e.g. 0.005 (0.5% vol)
+    time_bump_days: Float,// e.g. 1.0 day
+};
+
+pub type NumericalGreeksResult = struct {
+    base_price: Float,
+    delta: Float,
+    gamma: Float,
+    vega: Float,
+    theta_daily: Float,
+    vanna: Float,
+    volga: Float,
+    charm_daily: Float,
+};
+
+pub fn numerical_greeks_config_default() -> NumericalGreeksConfig {
+    return NumericalGreeksConfig {
+        spot_bump_pct: 0.005,
+        vol_bump_abs: 0.005,
+        time_bump_days: 1.0,
+    };
+}
+
+pub fn dummy_bs_eval(s: Float, k: Float, t: Float, r: Float, vol: Float) -> Float {
+    if t <= 0.0001 || vol <= 0.0001 {
+        let diff: Float = s - k;
+        if diff > 0.0 { return diff; }
+        return 0.0;
+    }
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+
+    let pi_factor: Float = 0.3989422804;
+    let mut abs_d1: Float = d1;
+    if d1 < 0.0 { abs_d1 = 0.0 - d1; }
+    let k1: Float = 1.0 / (1.0 + (0.2316419 * abs_d1));
+    let poly1: Float = k1 * (0.31938153 + (k1 * (-0.35656378 + (k1 * (1.78147794 + (k1 * (-1.82125598 + (1.33027443 * k1))))))));
+    let mut n_d1: Float = 1.0 - (pi_factor * exp(0.0 - (abs_d1 * abs_d1 / 2.0)) * poly1);
+    if d1 < 0.0 { n_d1 = 1.0 - n_d1; }
+
+    let mut abs_d2: Float = d2;
+    if d2 < 0.0 { abs_d2 = 0.0 - d2; }
+    let k2: Float = 1.0 / (1.0 + (0.2316419 * abs_d2));
+    let poly2: Float = k2 * (0.31938153 + (k2 * (-0.35656378 + (k2 * (1.78147794 + (k2 * (-1.82125598 + (1.33027443 * k2))))))));
+    let mut n_d2: Float = 1.0 - (pi_factor * exp(0.0 - (abs_d2 * abs_d2 / 2.0)) * poly2);
+    if d2 < 0.0 { n_d2 = 1.0 - n_d2; }
+
+    let df: Float = exp((0.0 - r) * t);
+    return (s * n_d1) - (k * df * n_d2);
+}
+
+pub fn compute_numerical_greeks(
+    s: Float,
+    k: Float,
+    t: Float,
+    r: Float,
+    vol: Float,
+    cfg: &NumericalGreeksConfig
+) -> NumericalGreeksResult {
+    let base_px: Float = dummy_bs_eval(s, k, t, r, vol);
+
+    let hs: Float = s * (cfg).spot_bump_pct;
+    let hv: Float = (cfg).vol_bump_abs;
+    let dt: Float = (cfg).time_bump_days / 365.0;
+
+    // Spot perturbations
+    let p_up: Float = dummy_bs_eval(s + hs, k, t, r, vol);
+    let p_dn: Float = dummy_bs_eval(s - hs, k, t, r, vol);
+
+    let delta: Float = (p_up - p_dn) / (2.0 * hs);
+    let gamma: Float = (p_up - (2.0 * base_px) + p_dn) / (hs * hs);
+
+    // Vol perturbations
+    let p_v_up: Float = dummy_bs_eval(s, k, t, r, vol + hv);
+    let p_v_dn: Float = dummy_bs_eval(s, k, t, r, vol - hv);
+
+    let vega: Float = (p_v_up - p_v_dn) / (2.0 * hv * 100.0); // per 1% vol
+    let volga: Float = (p_v_up - (2.0 * base_px) + p_v_dn) / (hv * hv);
+
+    // Time decay perturbation
+    let mut t_decay: Float = t - dt;
+    if t_decay < 0.00001 { t_decay = 0.00001; }
+    let p_t_dn: Float = dummy_bs_eval(s, k, t_decay, r, vol);
+    let theta_daily: Float = p_t_dn - base_px;
+
+    // Cross-derivative Vanna
+    let p_up_v_up: Float = dummy_bs_eval(s + hs, k, t, r, vol + hv);
+    let p_up_v_dn: Float = dummy_bs_eval(s + hs, k, t, r, vol - hv);
+    let p_dn_v_up: Float = dummy_bs_eval(s - hs, k, t, r, vol + hv);
+    let p_dn_v_dn: Float = dummy_bs_eval(s - hs, k, t, r, vol - hv);
+    let vanna: Float = (p_up_v_up - p_up_v_dn - p_dn_v_up + p_dn_v_dn) / (4.0 * hs * hv);
+
+    // Charm (dDelta / dt)
+    let delta_t_dn: Float = (dummy_bs_eval(s + hs, k, t_decay, r, vol) - dummy_bs_eval(s - hs, k, t_decay, r, vol)) / (2.0 * hs);
+    let charm_daily: Float = delta_t_dn - delta;
+
+    return NumericalGreeksResult {
+        base_price: base_px,
+        delta: delta,
+        gamma: gamma,
+        vega: vega,
+        theta_daily: theta_daily,
+        vanna: vanna,
+        volga: volga,
+        charm_daily: charm_daily,
+    };
+}

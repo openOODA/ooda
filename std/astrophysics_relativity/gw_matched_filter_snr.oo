@@ -1,0 +1,110 @@
+// # Gravitational Wave Matched Filter Signal-to-Noise Ratio (SNR)
+//
+// Logline: Calculates optimal Wiener matched filter Signal-to-Noise Ratio (SNR) across detector noise power spectral densities (PSD).
+//
+// Setup: Integrates frequency-domain strain templates h(f) against one-sided noise spectral density S_n(f) for LIGO/Virgo/LISA.
+//
+// Beats:
+//   1. Model analytical Advanced LIGO power spectral density S_n(f) noise curve.
+//   2. Compute stationary phase approximation (SPA) inspiral Fourier amplitude |h(f)| = sqrt(5/24) * (pi^(-2/3) * c / d) * (G*M_c / c^3)^(5/6) * f^(-7/6).
+//   3. Numerically integrate optimal matched-filter SNR^2 = 4 * integral( |h(f)|^2 / S_n(f) df ).
+
+import "./astro_rel_constants.oo";
+
+pub type MatchedFilterResult = struct {
+    chirp_mass_kg: Float,
+    distance_m: Float,
+    f_lower_hz: Float,
+    f_upper_hz: Float,
+    snr_optimal: Float,
+    horizon_distance_mpc: Float, // Distance where SNR = 8
+};
+
+pub fn ligo_noise_psd_approx(freq_hz: Float) -> Float {
+    if freq_hz < 10.0 || freq_hz > 5000.0 {
+        return 1.0; // Very high noise floor
+    }
+    // Analytical approximation of Advanced LIGO zero-detuning high-power PSD
+    // S_0 ~ 1e-49 Hz^-1, x = f / 215 Hz
+    let x: Float = freq_hz / 215.0;
+    let s_0: Float = 0.000000000000000000000000000000000000000000000001; // 1e-49
+
+    let term_seismic: Float = pow(x, 0.0 - 4.14);
+    let term_suspension: Float = (0.0 - 5.0) * pow(x, 0.0 - 2.0);
+    let term_shot: Float = (111.0 * (1.0 - (x * x) + (0.5 * pow(x, 4.0)))) / (1.0 + (0.5 * (x * x)));
+
+    let factor: Float = math_max(term_seismic + term_suspension + term_shot, 0.01);
+    return s_0 * factor;
+}
+
+pub fn gw_fourier_amplitude_spa(
+    chirp_mass_kg: Float,
+    distance_m: Float,
+    freq_hz: Float
+) -> Float {
+    if freq_hz <= 0.0 || distance_m <= 0.0 || chirp_mass_kg <= 0.0 {
+        return 0.0;
+    }
+    let g_val: Float = const_g();
+    let c_val: Float = const_c();
+    let c3: Float = c_val * (c_val * c_val);
+    let pi_val: Float = const_pi();
+
+    // Geometric chirp time: t_c = G * M_c / c^3
+    let t_c: Float = (g_val * chirp_mass_kg) / c3;
+
+    // Amplitude: |h(f)| = sqrt(5/24) / (pi^(2/3) * d) * (G*M_c / c^2) * (t_c * pi * f)^(-7/6) * c
+    let coeff: Float = sqrt(5.0 / 24.0) / (pow(pi_val, 0.6666666666666666) * distance_m);
+    let term_mass: Float = (g_val * chirp_mass_kg) / (c_val * c_val);
+    let arg_f: Float = t_c * pi_val * freq_hz;
+    let term_freq: Float = pow(math_max(arg_f, 0.000001), 0.0 - 1.1666666666666667);
+
+    return coeff * term_mass * term_freq * c_val;
+}
+
+pub fn gw_matched_filter_snr_compute(
+    chirp_mass_kg: Float,
+    distance_m: Float,
+    f_min_hz: Float,
+    f_max_hz: Float,
+    num_bins: Int
+) -> MatchedFilterResult {
+    let f_start: Float = math_max(f_min_hz, 15.0);
+    let f_end: Float = math_min(f_max_hz, 2000.0);
+    let bins_count: Int = if num_bins > 10 { num_bins } else { 10 };
+    let n_steps_float: Float = 100.0;
+
+    let df: Float = (f_end - f_start) / n_steps_float;
+    let mut snr_sq: Float = 0.0;
+
+    let mut step: Int = 0;
+    let mut f_curr: Float = f_start;
+
+    while step < 100 {
+        let h_f: Float = gw_fourier_amplitude_spa(chirp_mass_kg, distance_m, f_curr);
+        let s_n: Float = ligo_noise_psd_approx(f_curr);
+
+        if s_n > 0.0 {
+            // integrand = 4 * |h(f)|^2 / S_n(f) * df
+            let d_snr_sq: Float = ((4.0 * (h_f * h_f)) / s_n) * df;
+            snr_sq = snr_sq + d_snr_sq;
+        }
+        f_curr = f_curr + df;
+        step = step + 1;
+    }
+
+    let snr: Float = sqrt(math_max(snr_sq, 0.0));
+
+    // Horizon distance D_h where SNR = 8: D_h = D * (SNR / 8)
+    let d_h_m: Float = if snr > 0.0 { distance_m * (snr / 8.0) } else { 0.0 };
+    let d_h_mpc: Float = d_h_m / const_mpc();
+
+    return MatchedFilterResult {
+        chirp_mass_kg: chirp_mass_kg,
+        distance_m: distance_m,
+        f_lower_hz: f_start,
+        f_upper_hz: f_end,
+        snr_optimal: snr,
+        horizon_distance_mpc: d_h_mpc,
+    };
+}

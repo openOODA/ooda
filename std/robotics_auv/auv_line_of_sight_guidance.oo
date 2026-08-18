@@ -1,0 +1,97 @@
+// # 3D Line-of-Sight (LOS) & Integral LOS (ILOS) Path Following Guidance
+//
+// Logline: Computes 3D course angle and pitch references with integral drift compensation for ocean current cross-track rejection.
+//
+// Setup: Fossen & Pettersen Integral Line-of-Sight (ILOS) path-following guidance law for underactuated marine craft.
+//
+// Beats:
+//   1. Compute along-track s, cross-track error y_e, and vertical depth error z_e relative to straight-line waypoint segment.
+//   2. Integrate cross-track drift integrator state for steady-state ocean current crab-angle compensation.
+//   3. Calculate desired horizontal course angle chi_d = chi_path - atan((y_e + k_i * y_int) / Delta).
+//   4. Calculate desired vertical pitch angle theta_d = - atan(z_e / Delta_z).
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type LosGuidanceConfig = struct {
+    lookahead_distance_m: Float,
+    vertical_lookahead_m: Float,
+    integral_gain_ki: Float,
+    max_pitch_rad: Float,
+};
+
+pub type IlosGuidanceState = struct {
+    integral_cross_track_m: Float,
+    cross_track_error_m: Float,
+    vertical_error_m: Float,
+    desired_heading_rad: Float,
+    desired_pitch_rad: Float,
+};
+
+pub fn los_guidance_config_default() -> LosGuidanceConfig {
+    return LosGuidanceConfig {
+        lookahead_distance_m: 15.0,
+        vertical_lookahead_m: 10.0,
+        integral_gain_ki: 0.05,
+        max_pitch_rad: 0.35, // ~20 deg
+    };
+}
+
+pub fn ilos_guidance_state_init() -> IlosGuidanceState {
+    return IlosGuidanceState {
+        integral_cross_track_m: 0.0,
+        cross_track_error_m: 0.0,
+        vertical_error_m: 0.0,
+        desired_heading_rad: 0.0,
+        desired_pitch_rad: 0.0,
+    };
+}
+
+pub fn ilos_step_3d(
+    cfg: &LosGuidanceConfig,
+    state: &IlosGuidanceState,
+    current_pos: &Vector3,
+    wp_start: &Vector3,
+    wp_end: &Vector3,
+    dt: Float
+) -> IlosGuidanceState {
+    let dx_path: Float = (wp_end).x - (wp_start).x;
+    let dy_path: Float = (wp_end).y - (wp_start).y;
+    let dz_path: Float = (wp_end).z - (wp_start).z;
+
+    let path_heading: Float = math_atan2(dy_path, dx_path);
+
+    // Vector from start waypoint to vehicle
+    let px: Float = (current_pos).x - (wp_start).x;
+    let py: Float = (current_pos).y - (wp_start).y;
+
+    // Cross-track error (perpendicular to path heading)
+    let y_e: Float = (0.0 - (px * sin(path_heading))) + (py * cos(path_heading));
+
+    // Vertical error
+    let z_e: Float = (current_pos).z - (wp_start).z;
+
+    // ILOS integral accumulator update
+    let delta: Float = (cfg).lookahead_distance_m;
+    let ki: Float = (cfg).integral_gain_ki;
+    let y_int_rate: Float = (delta * y_e) / ((delta * delta) + (y_e * y_e));
+    let new_y_int: Float = (state).integral_cross_track_m + (y_int_rate * dt);
+
+    // Horizontal guidance angle
+    let steering_offset: Float = math_atan((y_e + (ki * new_y_int)) / delta);
+    let desired_psi: Float = path_heading - steering_offset;
+
+    // Vertical guidance angle
+    let delta_z: Float = (cfg).vertical_lookahead_m;
+    let pitch_raw: Float = 0.0 - math_atan(z_e / delta_z);
+    let max_pitch: Float = (cfg).max_pitch_rad;
+    let desired_theta: Float = math_clamp(pitch_raw, 0.0 - max_pitch, max_pitch);
+
+    return IlosGuidanceState {
+        integral_cross_track_m: new_y_int,
+        cross_track_error_m: y_e,
+        vertical_error_m: z_e,
+        desired_heading_rad: desired_psi,
+        desired_pitch_rad: desired_theta,
+    };
+}

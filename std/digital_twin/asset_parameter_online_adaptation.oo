@@ -1,0 +1,111 @@
+// # Online Parameter Adaptation & Recursive Least Squares
+//
+// Logline: Recursive Least Squares (RLS) with exponential forgetting factor for online digital twin physical parameter tracking.
+//
+// Setup: Tracks drifting system parameters (resistance, thermal capacity, friction coefficients) in real time.
+//
+// Beats:
+//   1. Define RlsEstimatorState, ParameterBounds, and AdaptationConfig structures.
+//   2. Compute regression regressor inner product and scalar measurement prediction error.
+//   3. Update parameter estimate vector and inverse covariance matrix with exponential forgetting factor lambda.
+
+pub type RlsState = struct {
+    num_params: Int,
+    theta_params: List[Float],
+    p_covariance_diag: List[Float],
+    forgetting_factor_lambda: Float, // typically 0.98 - 0.999
+};
+
+pub type ParameterBounds = struct {
+    param_idx: Int,
+    min_val: Float,
+    max_val: Float,
+};
+
+pub fn rls_state_new(n_params: Int, init_covar: Float, lambda: Float) -> RlsState {
+    let mut th: List[Float] = list_new();
+    let mut p: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < n_params {
+        th = list_push(th, 1.0);
+        p = list_push(p, init_covar);
+        i = i + 1;
+    }
+    return RlsState {
+        num_params: n_params,
+        theta_params: th,
+        p_covariance_diag: p,
+        forgetting_factor_lambda: lambda,
+    };
+}
+
+pub fn rls_update_step(
+    state: &RlsState,
+    regressors_phi: &List[Float],
+    measured_y: Float,
+    bounds: &List[ParameterBounds]
+) -> RlsState {
+    let n: Int = (state).num_params;
+    let lam: Float = (state).forgetting_factor_lambda;
+
+    // Predicted output y_hat = phi^T * theta
+    let mut y_hat: Float = 0.0;
+    let mut i: Int = 0;
+    while i < n {
+        let phi_i: Float = list_get(*regressors_phi, i);
+        let th_i: Float = list_get((state).theta_params, i);
+        y_hat = y_hat + (phi_i * th_i);
+        i = i + 1;
+    }
+
+    let error: Float = measured_y - y_hat;
+
+    // Denominator = lambda + sum(phi_i^2 * P_i)
+    let mut denom: Float = lam;
+    i = 0;
+    while i < n {
+        let phi_i: Float = list_get(*regressors_phi, i);
+        let p_i: Float = list_get((state).p_covariance_diag, i);
+        denom = denom + (phi_i * phi_i * p_i);
+        i = i + 1;
+    }
+
+    // Gain K_i = P_i * phi_i / denom
+    let mut next_th: List[Float] = list_new();
+    let mut next_p: List[Float] = list_new();
+
+    i = 0;
+    while i < n {
+        let phi_i: Float = list_get(*regressors_phi, i);
+        let p_i: Float = list_get((state).p_covariance_diag, i);
+        let th_i: Float = list_get((state).theta_params, i);
+
+        let k_i: Float = if denom > 0.0 { (p_i * phi_i) / denom } else { 0.0 };
+        let mut new_th_i: Float = th_i + (k_i * error);
+
+        // Apply parameter bounding if defined
+        let mut b_idx: Int = 0;
+        let n_b: Int = list_len(*bounds);
+        while b_idx < n_b {
+            let b: ParameterBounds = list_get(*bounds, b_idx);
+            if (b).param_idx == i {
+                if new_th_i < (b).min_val { new_th_i = (b).min_val; }
+                if new_th_i > (b).max_val { new_th_i = (b).max_val; }
+            }
+            b_idx = b_idx + 1;
+        }
+
+        let new_p_i: Float = if lam > 0.0 { ((1.0 - (k_i * phi_i)) * p_i) / lam } else { p_i };
+
+        next_th = list_push(next_th, new_th_i);
+        next_p = list_push(next_p, new_p_i);
+        i = i + 1;
+    }
+
+    return RlsState {
+        num_params: n,
+        theta_params: next_th,
+        p_covariance_diag: next_p,
+        forgetting_factor_lambda: lam,
+    };
+}

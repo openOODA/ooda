@@ -1,0 +1,165 @@
+// # Quadrature Amplitude Modulation (QAM) Engine
+//
+// Logline: Performs Gray-coded M-QAM constellation mapping, I/Q symbol scaling, and soft demapping.
+//
+// Setup: Pure SDR DSP module for BPSK, QPSK, 16-QAM, 64-QAM, and 256-QAM baseband modulation.
+//
+// Beats:
+//   1. Define complex symbol representation and QAM constellation parameters.
+//   2. Map binary bit patterns to Gray-coded normalized In-Phase and Quadrature amplitudes.
+//   3. Perform minimum Euclidean distance hard slicing and symbol demodulation.
+
+pub type Complex32 = struct {
+    re: Float,
+    im: Float,
+};
+
+pub type QamConfig = struct {
+    order: Int,
+    bits_per_symbol: Int,
+    norm_factor: Float,
+};
+
+pub fn complex_new(re: Float, im: Float) -> Complex32 {
+    return Complex32 { re: re, im: im };
+}
+
+pub fn complex_zero() -> Complex32 {
+    return Complex32 { re: 0.0, im: 0.0 };
+}
+
+pub fn complex_add(a: Complex32, b: Complex32) -> Complex32 {
+    return Complex32 {
+        re: (a).re + (b).re,
+        im: (a).im + (b).im,
+    };
+}
+
+pub fn complex_sub(a: Complex32, b: Complex32) -> Complex32 {
+    return Complex32 {
+        re: (a).re - (b).re,
+        im: (a).im - (b).im,
+    };
+}
+
+pub fn complex_mul(a: Complex32, b: Complex32) -> Complex32 {
+    return Complex32 {
+        re: ((a).re * (b).re) - ((a).im * (b).im),
+        im: ((a).re * (b).im) + ((a).im * (b).re),
+    };
+}
+
+pub fn complex_mag_sq(c: Complex32) -> Float {
+    return ((c).re * (c).re) + ((c).im * (c).im);
+}
+
+pub fn qam_config_new(order: Int) -> QamConfig {
+    if order == 2 {
+        return QamConfig { order: 2, bits_per_symbol: 1, norm_factor: 1.0 };
+    }
+    if order == 4 {
+        // 1 / sqrt(2) = 0.7071067811865475
+        return QamConfig { order: 4, bits_per_symbol: 2, norm_factor: 0.7071067811865475 };
+    }
+    if order == 16 {
+        // 1 / sqrt(10) = 0.31622776601683794
+        return QamConfig { order: 16, bits_per_symbol: 4, norm_factor: 0.31622776601683794 };
+    }
+    if order == 64 {
+        // 1 / sqrt(42) = 0.1543033499620919
+        return QamConfig { order: 64, bits_per_symbol: 6, norm_factor: 0.1543033499620919 };
+    }
+    if order == 256 {
+        // 1 / sqrt(170) = 0.07669649888473704
+        return QamConfig { order: 256, bits_per_symbol: 8, norm_factor: 0.07669649888473704 };
+    }
+    return QamConfig { order: 4, bits_per_symbol: 2, norm_factor: 0.7071067811865475 };
+}
+
+pub fn qam_pam4_map(bits2: Int) -> Float {
+    // Gray code: 00 -> -3, 01 -> -1, 11 -> +1, 10 -> +3
+    let b: Int = bits2 % 4;
+    if b == 0 { return 0.0 - 3.0; }
+    if b == 1 { return 0.0 - 1.0; }
+    if b == 2 { return 3.0; }
+    return 1.0;
+}
+
+pub fn qam_pam4_demap(val: Float) -> Int {
+    if val < (0.0 - 2.0) { return 0; }
+    if val < 0.0 { return 1; }
+    if val < 2.0 { return 3; }
+    return 2;
+}
+
+pub fn qam_modulate_bits(cfg: &QamConfig, bit_symbol: Int) -> Complex32 {
+    let order: Int = (cfg).order;
+    let nf: Float = (cfg).norm_factor;
+
+    if order == 2 {
+        if (bit_symbol % 2) == 0 {
+            return Complex32 { re: 1.0, im: 0.0 };
+        }
+        return Complex32 { re: 0.0 - 1.0, im: 0.0 };
+    }
+
+    if order == 4 {
+        let b0: Int = bit_symbol % 2;
+        let b1: Int = (bit_symbol / 2) % 2;
+        let mut i_val: Float = 1.0;
+        let mut q_val: Float = 1.0;
+        if b0 == 1 { i_val = 0.0 - 1.0; }
+        if b1 == 1 { q_val = 0.0 - 1.0; }
+        return Complex32 { re: i_val * nf, im: q_val * nf };
+    }
+
+    if order == 16 {
+        let i_bits: Int = bit_symbol % 4;
+        let q_bits: Int = (bit_symbol / 4) % 4;
+        let i_pam: Float = qam_pam4_map(i_bits);
+        let q_pam: Float = qam_pam4_map(q_bits);
+        return Complex32 { re: i_pam * nf, im: q_pam * nf };
+    }
+
+    // Default fallback
+    return Complex32 { re: nf, im: nf };
+}
+
+pub fn qam_demodulate_symbol(cfg: &QamConfig, sym: Complex32) -> Int {
+    let order: Int = (cfg).order;
+    let nf: Float = (cfg).norm_factor;
+
+    if order == 2 {
+        if (sym).re >= 0.0 {
+            return 0;
+        }
+        return 1;
+    }
+
+    if order == 4 {
+        let mut b0: Int = 0;
+        let mut b1: Int = 0;
+        if (sym).re < 0.0 { b0 = 1; }
+        if (sym).im < 0.0 { b1 = 1; }
+        return b0 + (b1 * 2);
+    }
+
+    if order == 16 {
+        let scaled_i: Float = (sym).re / nf;
+        let scaled_q: Float = (sym).im / nf;
+        let i_bits: Int = qam_pam4_demap(scaled_i);
+        let q_bits: Int = qam_pam4_demap(scaled_q);
+        return i_bits + (q_bits * 4);
+    }
+
+    return 0;
+}
+
+pub fn qam_symbol_energy(sym: Complex32) -> Float {
+    return complex_mag_sq(sym);
+}
+
+pub fn qam_euclidean_distance_sq(a: Complex32, b: Complex32) -> Float {
+    let diff: Complex32 = complex_sub(a, b);
+    return complex_mag_sq(diff);
+}

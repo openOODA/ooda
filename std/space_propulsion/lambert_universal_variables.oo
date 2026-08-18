@@ -1,0 +1,122 @@
+// # Lambert Universal Variables Orbital Boundary Value Solver
+//
+// Logline: Solves Lambert two-point orbital boundary value problem using universal variables formulation and Stumpff functions.
+//
+// Setup: Determines transfer orbit trajectory and initial/final velocity vectors between two position vectors for a given time-of-flight.
+//
+// Beats:
+//   1. Define primary gravitational parameter, initial position r1, final position r2, and time of flight dt.
+//   2. Formulate chord length, semi-perimeter, and universal variable transcendental time equation.
+//   3. Solve for universal variable parameter z via Newton iteration and compute Lagrange f and g velocity vectors.
+
+import "./space_propulsion_constants.oo";
+
+pub type LambertProblem = struct {
+    r1: Vector3D,
+    r2: Vector3D,
+    time_of_flight_s: Float,
+    mu: Float,
+    is_prograde: Bool,
+};
+
+pub type LambertSolution = struct {
+    v1: Vector3D,
+    v2: Vector3D,
+    semi_major_axis_m: Float,
+    eccentricity: Float,
+    parameter_p_m: Float,
+    converged: Bool,
+};
+
+pub fn lambert_problem_default_earth_mars() -> LambertProblem {
+    return LambertProblem {
+        r1: vec3_new(149597870700.0, 0.0, 0.0), // 1 AU (Earth)
+        r2: vec3_new(0.0, 227939200000.0, 0.0), // 1.524 AU (Mars at 90 deg)
+        time_of_flight_s: 22464000.0, // 260 days
+        mu: const_mu_sun(),
+        is_prograde: true,
+    };
+}
+
+fn compute_y_val(r1_n: Float, r2_n: Float, a_geom: Float, z: Float) -> Float {
+    let cz: Float = stumpff_c(z);
+    let sz: Float = stumpff_s(z);
+    let term: Float = (z * sz - 1.0) / (sqrt(cz) + 0.000001);
+    return r1_n + r2_n + (a_geom * term);
+}
+
+pub fn lambert_solve_universal(problem: LambertProblem) -> LambertSolution {
+    let r1_v: Vector3D = (problem).r1;
+    let r2_v: Vector3D = (problem).r2;
+    let dt: Float = (problem).time_of_flight_s;
+    let mu: Float = (problem).mu;
+
+    let r1_n: Float = vec3_norm(r1_v);
+    let r2_n: Float = vec3_norm(r2_v);
+
+    let cos_d_nu: Float = vec3_dot(r1_v, r2_v) / (r1_n * r2_n);
+    let cr: Vector3D = vec3_cross(r1_v, r2_v);
+    let mut sin_d_nu: Float = sqrt(math_max(0.0, 1.0 - (cos_d_nu * cos_d_nu)));
+    if (problem).is_prograde && (cr).z < 0.0 {
+        sin_d_nu = 0.0 - sin_d_nu;
+    }
+
+    let a_geom: Float = sin_d_nu * sqrt((r1_n * r2_n) / (1.0 - cos_d_nu + 0.000001));
+
+    // Newton-Raphson iteration for universal variable z
+    let mut z: Float = 0.0;
+    let mut iter: Int = 0;
+    let mut converged: Bool = false;
+
+    while iter < 25 {
+        let cz: Float = stumpff_c(z);
+        let sz: Float = stumpff_s(z);
+        let y: Float = compute_y_val(r1_n, r2_n, a_geom, z);
+        if y > 0.0 {
+            let y_sqrt: Float = sqrt(y);
+            let t_z: Float = (math_pow(y / cz, 1.5) * sz + a_geom * y_sqrt) / sqrt(mu);
+            let f_diff: Float = t_z - dt;
+            if math_abs(f_diff) < 1.0 {
+                converged = true;
+                iter = 30; // break
+            } else {
+                // Derivative approx: dtdz ~ (y/cz)^1.5 * (1/2z * (cz - 3sz/(2cz)) + 3sz^2/(4cz))
+                let dtdz: Float = (math_pow(y / cz, 1.5) * (1.0 - z * sz) + a_geom * y_sqrt) / (2.0 * z + 0.1);
+                z = z - (f_diff / (dtdz + 0.0001));
+            }
+        }
+        iter = iter + 1;
+    }
+
+    let cz_fin: Float = stumpff_c(z);
+    let y_fin: Float = compute_y_val(r1_n, r2_n, a_geom, z);
+
+    // Lagrange coefficients f, g, g_dot
+    let f_coeff: Float = 1.0 - (y_fin / r1_n);
+    let g_coeff: Float = (a_geom * sqrt(y_fin / mu));
+    let g_dot: Float = 1.0 - (y_fin / r2_n);
+
+    // v1 = (r2 - f*r1) / g
+    let f_r1: Vector3D = vec3_scale(r1_v, f_coeff);
+    let diff1: Vector3D = vec3_sub(r2_v, f_r1);
+    let v1: Vector3D = vec3_scale(diff1, 1.0 / (g_coeff + 0.0001));
+
+    // v2 = (g_dot*r2 - r1) / g
+    let gd_r2: Vector3D = vec3_scale(r2_v, g_dot);
+    let diff2: Vector3D = vec3_sub(gd_r2, r1_v);
+    let v2: Vector3D = vec3_scale(diff2, 1.0 / (g_coeff + 0.0001));
+
+    let a_sma: Float = 1.0 / ((2.0 / r1_n) - (vec3_dot(v1, v1) / mu));
+    let h_vec: Vector3D = vec3_cross(r1_v, v1);
+    let p_param: Float = vec3_dot(h_vec, h_vec) / mu;
+    let ecc: Float = sqrt(math_max(0.0, 1.0 - (p_param / a_sma)));
+
+    return LambertSolution {
+        v1: v1,
+        v2: v2,
+        semi_major_axis_m: a_sma,
+        eccentricity: ecc,
+        parameter_p_m: p_param,
+        converged: converged,
+    };
+}

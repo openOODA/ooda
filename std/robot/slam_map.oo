@@ -1,0 +1,188 @@
+// # SLAM Mapping & Loop Closure
+//
+// Logline: Landmark fusion updates, occupancy grid manipulation, keyframe tracking, and loop closure detection.
+//
+// Setup: Map representation and keyframe graph algorithms for spatial mapping.
+//
+// Beats:
+//   1. Fuse landmark measurements into accumulated landmark estimate lists.
+//   2. Convert world coordinates and update/retrieve occupancy grid probabilities.
+//   3. Insert keyframes along robot trajectories.
+//   4. Detect loop closure candidates from historic keyframe distances.
+
+import "./slam_types.oo";
+import "./slam_ops.oo";
+
+// -------------------------------------------------------------------
+// Landmark Map Fusion
+// -------------------------------------------------------------------
+
+pub fn slam_update_landmarks(landmarks: List[Landmark], obs: Observation, robot_pose: Pose2D) -> List[Landmark] {
+    let len = list_len(landmarks);
+    let mut i = 0;
+    let mut found = false;
+    let mut new_landmarks: List[Landmark] = list_new();
+
+    while i < len {
+        let lm = list_get(landmarks, i);
+        let lm_id = (lm).id;
+        let obs_lm_id = (obs).landmark_id;
+        if lm_id == obs_lm_id {
+            found = true;
+            let est = slam_landmark_global_pos(robot_pose, obs);
+            let count = (lm).observation_count;
+            let lm_x = (lm).x;
+            let est_x = (est).x;
+            let lm_y = (lm).y;
+            let est_y = (est).y;
+            let sum_x = (lm_x * count) + est_x;
+            let sum_y = (lm_y * count) + est_y;
+            let count_next = count + 1;
+            let updated_x = sum_x / count_next;
+            let updated_y = sum_y / count_next;
+            let conf = (lm).confidence;
+            let updated_conf = min_val(1000, conf + 50);
+            let lm_z = (lm).z;
+            let updated_lm = Landmark {
+                id: lm_id,
+                x: updated_x,
+                y: updated_y,
+                z: lm_z,
+                observation_count: count_next,
+                confidence: updated_conf,
+            };
+            new_landmarks = list_push(new_landmarks, updated_lm);
+        } else {
+            new_landmarks = list_push(new_landmarks, lm);
+        }
+        i = i + 1;
+    }
+
+    if found == false {
+        let new_lm = slam_landmark_global_pos(robot_pose, obs);
+        new_landmarks = list_push(new_landmarks, new_lm);
+    }
+
+    return new_landmarks;
+}
+
+// -------------------------------------------------------------------
+// Occupancy Grid Map Operations
+// -------------------------------------------------------------------
+
+pub fn grid_map_world_to_grid_x(map: &OccupancyGridMap, world_x: Int) -> Int {
+    if (map).resolution_mm <= 0 {
+        return 0;
+    }
+    return (world_x - (map).origin_x) / (map).resolution_mm;
+}
+
+pub fn grid_map_world_to_grid_y(map: &OccupancyGridMap, world_y: Int) -> Int {
+    if (map).resolution_mm <= 0 {
+        return 0;
+    }
+    return (world_y - (map).origin_y) / (map).resolution_mm;
+}
+
+pub fn grid_map_set_cell(map: OccupancyGridMap, cx: Int, cy: Int, prob: Int) -> OccupancyGridMap {
+    let len = list_len(map.cells);
+    let mut i = 0;
+    let mut found = false;
+    let mut new_cells: List[OccupancyCell] = list_new();
+    let clamped_prob = clamp_val(prob, 0, 100);
+
+    while i < len {
+        let cell = list_get(map.cells, i);
+        if cell.x == cx {
+            if cell.y == cy {
+                found = true;
+                let updated = OccupancyCell {
+                    x: cx,
+                    y: cy,
+                    probability: clamped_prob,
+                };
+                new_cells = list_push(new_cells, updated);
+            } else {
+                new_cells = list_push(new_cells, cell);
+            }
+        } else {
+            new_cells = list_push(new_cells, cell);
+        }
+        i = i + 1;
+    }
+
+    if found == false {
+        let new_cell = OccupancyCell {
+            x: cx,
+            y: cy,
+            probability: clamped_prob,
+        };
+        new_cells = list_push(new_cells, new_cell);
+    }
+
+    return OccupancyGridMap {
+        width: map.width,
+        height: map.height,
+        resolution_mm: map.resolution_mm,
+        origin_x: map.origin_x,
+        origin_y: map.origin_y,
+        cells: new_cells,
+    };
+}
+
+pub fn grid_map_get_cell(map: &OccupancyGridMap, cx: Int, cy: Int) -> Int {
+    let len = list_len((map).cells);
+    let mut i = 0;
+    while i < len {
+        let cell = list_get((map).cells, i);
+        if cell.x == cx {
+            if cell.y == cy {
+                return cell.probability;
+            }
+        }
+        i = i + 1;
+    }
+    return 50;
+}
+
+// -------------------------------------------------------------------
+// Loop Closure Detection & Keyframe Pose Graph Management
+// -------------------------------------------------------------------
+
+pub fn slam_add_keyframe(keyframes: List[Keyframe], pose: Pose2D, timestamp: Int, lm_count: Int) -> List[Keyframe] {
+    let new_id = list_len(keyframes) + 1;
+    let kf = Keyframe {
+        id: new_id,
+        pose: pose,
+        timestamp_ms: timestamp,
+        landmark_count: lm_count,
+    };
+    return list_push(keyframes, kf);
+}
+
+pub fn slam_detect_loop_closure(keyframes: List[Keyframe], current_pose: Pose2D, max_dist_mm: Int) -> Int {
+    let len = list_len(keyframes);
+    if len < 5 {
+        return -1;
+    }
+
+    let mut i = 0;
+    // Exclude recent 3 keyframes to prevent immediate false positive loops
+    let end_idx = len - 3;
+    while i < end_idx {
+        let kf = list_get(keyframes, i);
+        let kf_pose = (kf).pose;
+        let dx = (current_pose).x - (kf_pose).x;
+        let dy = (current_pose).y - (kf_pose).y;
+        let dx2 = dx * dx;
+        let dy2 = dy * dy;
+        let dist_sq = dx2 + dy2;
+        let dist = slam_isqrt(dist_sq);
+        if dist <= max_dist_mm {
+            return kf.id;
+        }
+        i = i + 1;
+    }
+
+    return -1;
+}

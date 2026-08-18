@@ -1,0 +1,80 @@
+// # IEEE 1588 PTP Clock Drift Synchronizer & PI Servo
+//
+// Logline: Sub-microsecond IEEE 1588 PTP clock synchronization, four-timestamp round-trip delay estimation, and PI frequency servo.
+//
+// Setup: Eliminates clock skew and timestamp drift between physical edge controllers and the digital twin event coordinator.
+//
+// Beats:
+//   1. Define PtpTimestamps, ClockServoState, and PtpSyncResult structures.
+//   2. Compute clock offset theta and mean path propagation delay from t1, t2, t3, and t4.
+//   3. Discipline local software oscillator frequency using a closed-loop PI phase lock servo.
+
+pub type PtpTimestamps = struct {
+    t1_master_tx_ns: Int,
+    t2_slave_rx_ns: Int,
+    t3_slave_tx_ns: Int,
+    t4_master_rx_ns: Int,
+};
+
+pub type ClockServoState = struct {
+    kp_gain: Float,
+    ki_gain: Float,
+    accumulated_phase_error_ns: Float,
+    frequency_offset_ppm: Float,
+    synchronized: Bool,
+};
+
+pub type PtpSyncResult = struct {
+    offset_ns: Float,
+    one_way_delay_ns: Float,
+    corrected_freq_ppm: Float,
+};
+
+pub fn ptp_calc_offset_and_delay(ts: &PtpTimestamps) -> PtpSyncResult {
+    // Offset = ((t2 - t1) - (t4 - t3)) / 2
+    let dt_fwd: Int = (ts).t2_slave_rx_ns - (ts).t1_master_tx_ns;
+    let dt_rev: Int = (ts).t4_master_rx_ns - (ts).t3_slave_tx_ns;
+
+    let offset: Int = (dt_fwd - dt_rev) / 2;
+    let delay: Int = (dt_fwd + dt_rev) / 2;
+
+    return PtpSyncResult {
+        offset_ns: (offset as Float),
+        one_way_delay_ns: (delay as Float),
+        corrected_freq_ppm: 0.0,
+    };
+}
+
+pub fn clock_servo_new(kp: Float, ki: Float) -> ClockServoState {
+    return ClockServoState {
+        kp_gain: kp,
+        ki_gain: ki,
+        accumulated_phase_error_ns: 0.0,
+        frequency_offset_ppm: 0.0,
+        synchronized: false,
+    };
+}
+
+pub fn clock_servo_update(servo: &ClockServoState, offset_ns: Float, dt_sec: Float) -> ClockServoState {
+    let kp: Float = (servo).kp_gain;
+    let ki: Float = (servo).ki_gain;
+
+    let new_accum: Float = (servo).accumulated_phase_error_ns + (offset_ns * dt_sec);
+
+    // PI control for frequency drift: ppm = Kp * offset + Ki * integral(offset)
+    let p_term: Float = kp * offset_ns;
+    let i_term: Float = ki * new_accum;
+    let adj_ppm: Float = p_term + i_term;
+
+    let mut off_abs: Float = offset_ns;
+    if off_abs < 0.0 { off_abs = 0.0 - off_abs; }
+    let is_synced: Bool = (off_abs < 1000.0); // < 1 microsecond
+
+    return ClockServoState {
+        kp_gain: kp,
+        ki_gain: ki,
+        accumulated_phase_error_ns: new_accum,
+        frequency_offset_ppm: adj_ppm,
+        synchronized: is_synced,
+    };
+}

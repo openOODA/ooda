@@ -1,0 +1,89 @@
+// # Limit Order Book FIFO Queue Position Estimator
+//
+// Logline: Tracks estimated position of a passive limit order within the FIFO queue based on trades, cancellations, and order flow at the price level.
+//
+// Setup: Pure high-frequency microstructure module updating queue rank and expected time-to-fill.
+//
+// Beats:
+//   1. Define QueueTrackerState, QueueEvent, and QueueEstimate structures.
+//   2. Update estimated queue position on trade executions (100% priority depletion) and cancellations (pro-rata depletion).
+//   3. Estimate fill probability conditional on current queue depth and trade arrival intensity.
+
+pub type QueueTrackerState = struct {
+    order_id: String,
+    price_level: Float,
+    order_size: Float,
+    initial_queue_ahead: Float,
+    estimated_queue_ahead: Float,
+    total_queue_size: Float,
+    is_at_head_of_queue: Bool,
+};
+
+pub type QueueEvent = struct {
+    is_trade_fill: Bool,
+    size_depleted: Float,
+    cancellation_ratio_ahead: Float,
+};
+
+pub type QueueEstimate = struct {
+    shares_ahead: Float,
+    queue_percentile: Float,
+    expected_fill_prob: Float,
+    is_next_in_line: Bool,
+};
+
+pub fn queue_tracker_new(
+    id: String,
+    price: Float,
+    size: Float,
+    initial_ahead: Float,
+    total_q: Float
+) -> QueueTrackerState {
+    let at_head: Bool = initial_ahead <= 0.0;
+    return QueueTrackerState {
+        order_id: id,
+        price_level: price,
+        order_size: size,
+        initial_queue_ahead: initial_ahead,
+        estimated_queue_ahead: initial_ahead,
+        total_queue_size: total_q,
+        is_at_head_of_queue: at_head,
+    };
+}
+
+pub fn queue_tracker_on_event(
+    state: &mut QueueTrackerState,
+    event: &QueueEvent
+) -> QueueEstimate {
+    let sz: Float = (event).size_depleted;
+
+    if (event).is_trade_fill {
+        // Trade executions directly deplete queue ahead in FIFO
+        let rem_ahead: Float = (state).estimated_queue_ahead - sz;
+        (state).estimated_queue_ahead = if rem_ahead < 0.0 { 0.0 } else { rem_ahead };
+    } else {
+        // Cancellations are distributed across the queue
+        let cancel_ahead: Float = sz * (event).cancellation_ratio_ahead;
+        let rem_ahead: Float = (state).estimated_queue_ahead - cancel_ahead;
+        (state).estimated_queue_ahead = if rem_ahead < 0.0 { 0.0 } else { rem_ahead };
+    }
+
+    let rem_tot: Float = (state).total_queue_size - sz;
+    (state).total_queue_size = if rem_tot < 0.0 { 0.0 } else { rem_tot };
+
+    if (state).estimated_queue_ahead <= 0.0 {
+        (state).is_at_head_of_queue = true;
+    }
+
+    let tot: Float = (state).total_queue_size;
+    let ahead: Float = (state).estimated_queue_ahead;
+    let percentile: Float = if tot > 0.0 { 1.0 - (ahead / tot) } else { 1.0 };
+    let fill_prob: Float = if ahead <= 0.0 { 1.0 } else { 1.0 / (1.0 + (ahead * 0.01)) };
+
+    return QueueEstimate {
+        shares_ahead: ahead,
+        queue_percentile: percentile,
+        expected_fill_prob: fill_prob,
+        is_next_in_line: (state).is_at_head_of_queue,
+    };
+}

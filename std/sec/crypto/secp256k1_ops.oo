@@ -1,0 +1,230 @@
+// # Secp256K1 Operations and Helpers
+//
+// Logline: Implements mathematical operations, parameter builders, and transformation helpers for SECP256K1.
+//
+// Setup: Imports secp256k1_types.oo for data structure definitions.
+//
+// Beats:
+//   1. Import SECP256K1 types.
+//   2. Implement core algorithmic operations and validations.
+//   3. Provide encoding, decoding, and conversion routines.
+
+import "./secp256k1_types.oo";
+
+// -------------------------------------------------------------------
+// Type Constructors & Validators
+// -------------------------------------------------------------------
+
+pub fn secp256k1_point_create(x: String, y: String, is_compressed: Bool) -> Result[Secp256k1Point, String] {
+    let x_len: Int = x.len();
+    if x_len != 32 {
+        return Err("INVALID_POINT_X_SIZE: X coordinate must be 32 bytes (256 bits)");
+    }
+    if is_compressed == false {
+        let y_len: Int = y.len();
+        if y_len != 32 {
+            return Err("INVALID_POINT_Y_SIZE: Uncompressed Y coordinate must be 32 bytes");
+        }
+    }
+    let pt = Secp256k1Point {
+        x: x,
+        y: y,
+        is_infinity: false,
+        is_compressed: is_compressed,
+        is_valid: true,
+    };
+    return Ok(pt);
+}
+
+pub fn secp256k1_point_infinity() -> Secp256k1Point {
+    return Secp256k1Point {
+        x: "",
+        y: "",
+        is_infinity: true,
+        is_compressed: false,
+        is_valid: true,
+    };
+}
+
+pub fn secp256k1_point_validate(pt: Secp256k1Point) -> Bool {
+    let is_val: Bool = pt.is_valid;
+    if is_val == false {
+        return false;
+    }
+    let inf: Bool = pt.is_infinity;
+    if inf {
+        return true;
+    }
+    let x_str: String = pt.x;
+    let x_len: Int = x_str.len();
+    if x_len != 32 {
+        return false;
+    }
+    let comp: Bool = pt.is_compressed;
+    if comp == false {
+        let y_str: String = pt.y;
+        let y_len: Int = y_str.len();
+        if y_len != 32 {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn secp256k1_public_key_create(key_id: String, raw_bytes: String) -> Result[Secp256k1PublicKey, String] {
+    let raw_len: Int = raw_bytes.len();
+    let mut is_comp: Bool = false;
+    if raw_len == 33 {
+        let prefix: Int = byte_at(raw_bytes, 0);
+        if prefix != 2 {
+            if prefix != 3 {
+                return Err("INVALID_PUBLIC_KEY_PREFIX: Compressed key must start with 0x02 or 0x03");
+            }
+        }
+        is_comp = true;
+    } else {
+        if raw_len == 65 {
+            let prefix: Int = byte_at(raw_bytes, 0);
+            if prefix != 4 {
+                return Err("INVALID_PUBLIC_KEY_PREFIX: Uncompressed key must start with 0x04");
+            }
+            is_comp = false;
+        } else {
+            return Err("INVALID_PUBLIC_KEY_SIZE: secp256k1 public key must be 33 bytes (compressed) or 65 bytes (uncompressed)");
+        }
+    }
+    let hex_val: String = secp256k1_hex_encode(raw_bytes);
+    let chk: Int = secp256k1_checksum(raw_bytes);
+
+    let mut x_buf: List[Int] = bytes_new();
+    let mut i: Int = 1;
+    while i < 33 {
+        x_buf = bytes_push(x_buf, byte_at(raw_bytes, i));
+        i = i + 1;
+    }
+    let x_str: String = bytes_to_str(x_buf);
+
+    let mut y_str: String = "";
+    if is_comp == false {
+        let mut y_buf: List[Int] = bytes_new();
+        let mut j: Int = 33;
+        while j < 65 {
+            y_buf = bytes_push(y_buf, byte_at(raw_bytes, j));
+            j = j + 1;
+        }
+        y_str = bytes_to_str(y_buf);
+    }
+
+    let pt_res: Result[Secp256k1Point, String] = secp256k1_point_create(x_str, y_str, is_comp);
+    let pt: Secp256k1Point = match pt_res {
+        Ok(p) => p,
+        Err(e) => secp256k1_point_infinity(),
+    };
+
+    let pk = Secp256k1PublicKey {
+        key_id: key_id,
+        point: pt,
+        raw_bytes: raw_bytes,
+        hex_str: hex_val,
+        is_compressed: is_comp,
+        checksum: chk,
+        is_valid: true,
+    };
+    return Ok(pk);
+}
+
+pub fn secp256k1_public_key_validate(pk: Secp256k1PublicKey) -> Bool {
+    let is_val: Bool = pk.is_valid;
+    if is_val == false {
+        return false;
+    }
+    let raw: String = pk.raw_bytes;
+    let raw_len: Int = raw.len();
+    if raw_len != 33 {
+        if raw_len != 65 {
+            return false;
+        }
+    }
+    let expected_chk: Int = secp256k1_checksum(raw);
+    let p_chk: Int = pk.checksum;
+    if p_chk != expected_chk {
+        return false;
+    }
+    return secp256k1_point_validate(pk.point);
+}
+
+pub fn secp256k1_secret_key_create(key_id: String, raw_bytes: String) -> Result[Secp256k1SecretKey, String] {
+    let raw_len: Int = raw_bytes.len();
+    if raw_len != 32 {
+        return Err("INVALID_SECRET_KEY_SIZE: secp256k1 secret key must be 32 bytes (256 bits)");
+    }
+    let hex_val: String = secp256k1_hex_encode(raw_bytes);
+    let chk: Int = secp256k1_checksum(raw_bytes);
+    let sk = Secp256k1SecretKey {
+        key_id: key_id,
+        raw_bytes: raw_bytes,
+        hex_str: hex_val,
+        checksum: chk,
+        is_wiped: false,
+    };
+    return Ok(sk);
+}
+
+pub fn secp256k1_secret_key_validate(sk: Secp256k1SecretKey) -> Bool {
+    let wiped: Bool = sk.is_wiped;
+    if wiped {
+        return false;
+    }
+    let raw: String = sk.raw_bytes;
+    let raw_len: Int = raw.len();
+    if raw_len != 32 {
+        return false;
+    }
+    let expected_chk: Int = secp256k1_checksum(raw);
+    let s_chk: Int = sk.checksum;
+    return s_chk == expected_chk;
+}
+
+pub fn secp256k1_secret_key_wipe(sk: Secp256k1SecretKey) -> Secp256k1SecretKey {
+    return Secp256k1SecretKey {
+        key_id: sk.key_id,
+        raw_bytes: "",
+        hex_str: "",
+        checksum: 0,
+        is_wiped: true,
+    };
+}
+
+pub fn secp256k1_keypair_create(
+    key_id: String,
+    public_key: Secp256k1PublicKey,
+    secret_key: Secp256k1SecretKey,
+    created_at: Int
+) -> Result[Secp256k1KeyPair, String] {
+    let p_valid: Bool = secp256k1_public_key_validate(public_key);
+    if p_valid == false {
+        return Err("INVALID_KEYPAIR: Public key failed validation");
+    }
+    let s_valid: Bool = secp256k1_secret_key_validate(secret_key);
+    if s_valid == false {
+        return Err("INVALID_KEYPAIR: Secret key failed validation");
+    }
+    let kp = Secp256k1KeyPair {
+        key_id: key_id,
+        public_key: public_key,
+        secret_key: secret_key,
+        created_at: created_at,
+        is_valid: true,
+    };
+    return Ok(kp);
+}
+
+pub fn secp256k1_keypair_validate(kp: Secp256k1KeyPair) -> Bool {
+    let k_valid: Bool = kp.is_valid;
+    if k_valid == false {
+        return false;
+    }
+    let p_valid: Bool = secp256k1_public_key_validate(kp.public_key);
+    let s_valid: Bool = secp256k1_secret_key_validate(kp.secret_key);
+    return p_valid && s_valid;
+}

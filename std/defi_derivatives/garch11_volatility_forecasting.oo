@@ -1,0 +1,133 @@
+// # GARCH(1,1) Volatility Forecasting Engine
+//
+// Logline: Implements GARCH(1,1) conditional variance updates, multi-step term structure forecasting, and maximum likelihood variance recursion.
+//
+// Setup: Pure econometrics and quantitative risk module for dynamic volatility modeling and term structure forecasting.
+//
+// Beats:
+//   1. Define Garch11Params, GarchVolatilityState, and GarchForecastResult structures.
+//   2. Compute recursive conditional variance updates from daily return innovations.
+//   3. Project forward volatility term structures and calculate long-run unconditional variance.
+
+pub type Garch11Params = struct {
+    omega: Float,      // Base constant variance weight
+    alpha: Float,      // ARCH parameter (reaction to shocks)
+    beta: Float,       // GARCH parameter (persistence)
+    annualization_factor: Float, // e.g., 365.0 for crypto or 252.0 for equities
+};
+
+pub type GarchVolatilityState = struct {
+    current_variance: Float,
+    current_volatility: Float,
+    annualized_volatility: Float,
+    step_count: Int,
+};
+
+pub type GarchForecastResult = struct {
+    horizon_steps: Int,
+    forecasted_variance: Float,
+    forecasted_volatility: Float,
+    annualized_volatility: Float,
+    long_run_volatility: Float,
+    persistence: Float,
+};
+
+pub fn garch11_params_crypto_default() -> Garch11Params {
+    return Garch11Params {
+        omega: 0.00001,
+        alpha: 0.08,
+        beta: 0.90,
+        annualization_factor: 365.0,
+    };
+}
+
+pub fn garch11_unconditional_variance(params: &Garch11Params) -> Float {
+    let persistence: Float = (params).alpha + (params).beta;
+    if persistence >= 1.0 {
+        return 0.0004; // fallback finite floor if non-stationary
+    }
+    return (params).omega / (1.0 - persistence);
+}
+
+pub fn garch11_unconditional_vol(params: &Garch11Params) -> Float {
+    let var_l: Float = garch11_unconditional_variance(params);
+    let daily_vol: Float = sqrt(var_l);
+    return daily_vol * sqrt((params).annualization_factor);
+}
+
+pub fn garch11_update(
+    current_var: Float,
+    return_shock: Float,
+    params: &Garch11Params
+) -> Float {
+    let shock_sq: Float = return_shock * return_shock;
+    let next_var: Float = (params).omega + ((params).alpha * shock_sq) + ((params).beta * current_var);
+    if next_var <= 0.0000001 {
+        return 0.0000001;
+    }
+    return next_var;
+}
+
+pub fn garch11_state_new(initial_daily_vol: Float, params: &Garch11Params) -> GarchVolatilityState {
+    let var_init: Float = initial_daily_vol * initial_daily_vol;
+    return GarchVolatilityState {
+        current_variance: var_init,
+        current_volatility: initial_daily_vol,
+        annualized_volatility: initial_daily_vol * sqrt((params).annualization_factor),
+        step_count: 0,
+    };
+}
+
+pub fn garch11_forecast(
+    current_var: Float,
+    horizon_steps: Int,
+    params: &Garch11Params
+) -> GarchForecastResult {
+    let persistence: Float = (params).alpha + (params).beta;
+    let var_long_run: Float = garch11_unconditional_variance(params);
+
+    let mut decay: Float = 1.0;
+    let mut step: Int = 0;
+    while step < horizon_steps {
+        decay = decay * persistence;
+        step = step + 1;
+    }
+
+    let forecast_var: Float = var_long_run + (decay * (current_var - var_long_run));
+    let daily_vol: Float = sqrt(forecast_var);
+    let ann_vol: Float = daily_vol * sqrt((params).annualization_factor);
+    let lr_vol: Float = sqrt(var_long_run) * sqrt((params).annualization_factor);
+
+    return GarchForecastResult {
+        horizon_steps: horizon_steps,
+        forecasted_variance: forecast_var,
+        forecasted_volatility: daily_vol,
+        annualized_volatility: ann_vol,
+        long_run_volatility: lr_vol,
+        persistence: persistence,
+    };
+}
+
+pub fn garch11_term_structure_variance(
+    current_var: Float,
+    total_steps: Int,
+    params: &Garch11Params
+) -> Float {
+    if total_steps <= 0 {
+        return current_var;
+    }
+    let mut sum_var: Float = 0.0;
+    let mut k: Int = 1;
+    while k <= total_steps {
+        let f: GarchForecastResult = garch11_forecast(current_var, k, params);
+        sum_var = sum_var + (f).forecasted_variance;
+        k = k + 1;
+    }
+    let mut count_f: Float = 0.0;
+    let mut rem: Int = total_steps;
+    while rem > 0 {
+        count_f = count_f + 1.0;
+        rem = rem - 1;
+    }
+    return sum_var / count_f;
+}

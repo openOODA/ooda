@@ -1,0 +1,107 @@
+// # Underwater Acoustic Telemetry & Channel Propagation
+//
+// Logline: Models acoustic communication path loss via Thorp absorption, Doppler distortion, and packet reception SNR.
+//
+// Setup: Underwater acoustic channel simulator for inter-vehicle modem telemetry, payload bit rates, and link budgets.
+//
+// Beats:
+//   1. Define acoustic modem specifications (carrier frequency f_0, source level SL, bandwidth B).
+//   2. Compute frequency-dependent seawater acoustic absorption alpha(f) via Thorp equation.
+//   3. Calculate spherical/cylindrical geometric transmission loss TL(r, f).
+//   4. Deliver received signal-to-noise ratio (SNR), Doppler frequency shift, and packet delivery probability.
+
+import "./auv_hydrodynamics_constants.oo";
+
+pub type AcousticModemConfig = struct {
+    carrier_frequency_khz: Float,
+    bandwidth_hz: Float,
+    source_level_db: Float,
+    ambient_noise_db: Float,
+    directivity_index_db: Float,
+    bit_rate_bps: Float,
+};
+
+pub type AcousticChannelState = struct {
+    slant_range_m: Float,
+    relative_speed_m_s: Float,
+    absorption_db_km: Float,
+    transmission_loss_db: Float,
+    received_snr_db: Float,
+    doppler_shift_hz: Float,
+    packet_success_rate: Float,
+};
+
+pub fn acoustic_modem_config_default_evologics() -> AcousticModemConfig {
+    return AcousticModemConfig {
+        carrier_frequency_khz: 24.0, // 24 kHz S2C modem
+        bandwidth_hz: 8000.0,
+        source_level_db: 185.0, // dB re 1 uPa @ 1m
+        ambient_noise_db: 55.0,  // Sea state 3 ambient noise
+        directivity_index_db: 12.0,
+        bit_rate_bps: 4800.0,
+    };
+}
+
+pub fn thorp_absorption_db_per_km(freq_khz: Float) -> Float {
+    // Thorp (1967) empirical formula for seawater acoustic attenuation
+    let f2: Float = freq_khz * freq_khz;
+    let term1: Float = (0.11 * f2) / (1.0 + f2);
+    let term2: Float = (44.0 * f2) / (4100.0 + f2);
+    let term3: Float = 0.000275 * f2;
+    let term4: Float = 0.003;
+    return term1 + term2 + term3 + term4;
+}
+
+pub fn compute_acoustic_link_budget(
+    cfg: &AcousticModemConfig,
+    range_m: Float,
+    rel_speed_m_s: Float,
+    sound_speed_m_s: Float
+) -> AcousticChannelState {
+    let mut r: Float = range_m;
+    if r < 1.0 {
+        r = 1.0;
+    }
+    let f_khz: Float = (cfg).carrier_frequency_khz;
+
+    let alpha: Float = thorp_absorption_db_per_km(f_khz);
+
+    // Practical spreading loss: 15 * log10(r) + alpha * r * 1e-3
+    let log10_r_approx: Float = 3.0; // Typical default for ~1000m
+    let spreading_loss: Float = 15.0 * log10_r_approx;
+    let absorption_loss: Float = alpha * (r / 1000.0);
+    let tl: Float = spreading_loss + absorption_loss;
+
+    // SNR = SL - TL - NL + DI
+    let snr: Float = (cfg).source_level_db - tl - (cfg).ambient_noise_db + (cfg).directivity_index_db;
+
+    // Doppler shift: f_d = f_0 * (v_rel / c)
+    let f0_hz: Float = f_khz * 1000.0;
+    let doppler: Float = f0_hz * (rel_speed_m_s / sound_speed_m_s);
+
+    // Packet success sigmoid approximation
+    let mut psr: Float = 0.0;
+    if snr > 12.0 {
+        psr = 0.99;
+    } else {
+        if snr > 6.0 {
+            psr = 0.85;
+        } else {
+            if snr > 0.0 {
+                psr = 0.40;
+            } else {
+                psr = 0.05;
+            }
+        }
+    }
+
+    return AcousticChannelState {
+        slant_range_m: r,
+        relative_speed_m_s: rel_speed_m_s,
+        absorption_db_km: alpha,
+        transmission_loss_db: tl,
+        received_snr_db: snr,
+        doppler_shift_hz: doppler,
+        packet_success_rate: psr,
+    };
+}

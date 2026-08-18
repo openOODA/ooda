@@ -1,0 +1,135 @@
+// # Pastry Prefix-Based Proximity Overlay Routing
+//
+// Logline: Implements Pastry prefix routing using base-2^b digit matching, leaf sets, and proximity routing tables.
+//
+// Setup: Scalable P2P overlay routing messages along longest common shared prefix paths towards 128-bit circular leaf sets.
+//
+// Beats:
+//   1. Resolve keys within immediate leaf set ring proximity range [L/2 left, L/2 right].
+//   2. Forward queries through routing table matching one additional base-2^b prefix digit per hop.
+//   3. Fallback to closest numeric proximity neighbor when prefix entry is empty.
+
+pub type PastryNode = struct {
+    node_id: Int,
+    base_b: Int, // e.g. 4 (base 16) or 2 (base 4)
+    leaf_set: List[Int],
+    routing_table: List[Int], // Flattened (num_digits * base_size) table
+};
+
+pub fn pastry_pow(base: Int, exp: Int) -> Int {
+    let mut res: Int = 1;
+    let mut i: Int = 0;
+    while i < exp {
+        res = res * base;
+        i = i + 1;
+    }
+    return res;
+}
+
+pub fn pastry_node_create(node_id: Int, base_b: Int, num_digits: Int) -> PastryNode {
+    let base_size: Int = pastry_pow(2, base_b);
+    let total_cells: Int = num_digits * base_size;
+    let mut table: List[Int] = list_new();
+
+    let mut i: Int = 0;
+    while i < total_cells {
+        table = list_push(table, -1);
+        i = i + 1;
+    }
+
+    let mut leaves: List[Int] = list_new();
+    leaves = list_push(leaves, node_id);
+
+    return PastryNode {
+        node_id: node_id,
+        base_b: base_b,
+        leaf_set: leaves,
+        routing_table: table,
+    };
+}
+
+pub fn pastry_get_digit(val: Int, digit_idx: Int, base_size: Int) -> Int {
+    let mut temp: Int = val;
+    let mut step: Int = 0;
+    while step < digit_idx {
+        temp = temp / base_size;
+        step = step + 1;
+    }
+    return temp % base_size;
+}
+
+pub fn pastry_common_prefix_len(id1: Int, id2: Int, base_size: Int, max_digits: Int) -> Int {
+    let mut len: Int = 0;
+    let mut idx: Int = max_digits - 1;
+    while idx >= 0 {
+        let d1: Int = pastry_get_digit(id1, idx, base_size);
+        let d2: Int = pastry_get_digit(id2, idx, base_size);
+        if d1 == d2 {
+            len = len + 1;
+        } else {
+            return len;
+        }
+        idx = idx - 1;
+    }
+    return len;
+}
+
+pub fn pastry_check_leaf_set(node: &PastryNode, key: Int) -> Int {
+    let n: Int = list_len((node).leaf_set);
+    if n == 0 {
+        return (node).node_id;
+    }
+
+    let mut min_diff: Int = 2147483647;
+    let mut best_leaf: Int = (node).node_id;
+
+    let mut i: Int = 0;
+    while i < n {
+        let leaf: Int = list_get((node).leaf_set, i);
+        let mut diff: Int = leaf - key;
+        if diff < 0 {
+            diff = 0 - diff;
+        }
+        if diff < min_diff {
+            min_diff = diff;
+            best_leaf = leaf;
+        }
+        i = i + 1;
+    }
+    return best_leaf;
+}
+
+pub fn pastry_route(node: &PastryNode, key: Int, max_digits: Int) -> Int {
+    if key == (node).node_id {
+        return (node).node_id;
+    }
+
+    let base_size: Int = pastry_pow(2, (node).base_b);
+
+    // 1. Leaf set coverage check
+    let leaf_best: Int = pastry_check_leaf_set(node, key);
+    let mut leaf_diff: Int = leaf_best - key;
+    if leaf_diff < 0 { leaf_diff = 0 - leaf_diff; }
+
+    let mut my_diff: Int = (node).node_id - key;
+    if my_diff < 0 { my_diff = 0 - my_diff; }
+
+    if leaf_diff < my_diff {
+        return leaf_best;
+    }
+
+    // 2. Routing Table prefix match
+    let l: Int = pastry_common_prefix_len((node).node_id, key, base_size, max_digits);
+    if l < max_digits {
+        let target_digit_idx: Int = max_digits - 1 - l;
+        let d: Int = pastry_get_digit(key, target_digit_idx, base_size);
+        let table_idx: Int = l * base_size + d;
+        let next_hop: Int = list_get((node).routing_table, table_idx);
+        if next_hop >= 0 {
+            return next_hop;
+        }
+    }
+
+    // 3. Rare fallback: closest leaf or self
+    return leaf_best;
+}

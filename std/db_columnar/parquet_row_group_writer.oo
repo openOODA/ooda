@@ -1,0 +1,129 @@
+// # Parquet RowGroup Writer & Buffer Flush Manager
+//
+// Logline: Manages in-memory column page buffering, row-group boundaries, and physical chunk serialization.
+//
+// Setup: Coordinates column page packing, memory budget thresholds, and row-group metadata generation.
+//
+// Beats:
+//   1. Define RowGroupWriterConfig, ColumnStagingBuffer, and ParquetRowGroupWriter structures.
+//   2. Implement column value buffering, uncompressed memory estimation, and page slicing.
+//   3. Implement row-group seal operations, offset adjustments, and chunk metadata emission.
+
+pub type RowGroupWriterConfig = struct {
+    max_row_group_rows: Int,
+    max_row_group_bytes: Int,
+    target_page_bytes: Int,
+};
+
+pub type ColumnStagingBuffer = struct {
+    column_name: String,
+    type_code: Int,
+    int_values: List[Int],
+    string_values: List[String],
+    row_count: Int,
+    buffered_bytes: Int,
+};
+
+pub type ParquetRowGroupWriter = struct {
+    config: RowGroupWriterConfig,
+    columns: List[ColumnStagingBuffer],
+    total_rows: Int,
+    total_buffered_bytes: Int,
+    is_closed: Bool,
+};
+
+pub fn default_row_group_config() -> RowGroupWriterConfig {
+    return RowGroupWriterConfig {
+        max_row_group_rows: 1048576,
+        max_row_group_bytes: 134217728,
+        target_page_bytes: 1048576,
+    };
+}
+
+pub fn column_staging_buffer_new(name: String, t_code: Int) -> ColumnStagingBuffer {
+    let empty_i: List[Int] = list_new();
+    let empty_s: List[String] = list_new();
+    return ColumnStagingBuffer {
+        column_name: name,
+        type_code: t_code,
+        int_values: empty_i,
+        string_values: empty_s,
+        row_count: 0,
+        buffered_bytes: 0,
+    };
+}
+
+pub fn row_group_writer_new(cfg: RowGroupWriterConfig) -> ParquetRowGroupWriter {
+    let empty_cols: List[ColumnStagingBuffer] = list_new();
+    return ParquetRowGroupWriter {
+        config: cfg,
+        columns: empty_cols,
+        total_rows: 0,
+        total_buffered_bytes: 0,
+        is_closed: false,
+    };
+}
+
+pub fn row_group_writer_add_column(writer: ParquetRowGroupWriter, name: String, t_code: Int) -> ParquetRowGroupWriter {
+    let buf: ColumnStagingBuffer = column_staging_buffer_new(name, t_code);
+    let updated_cols: List[ColumnStagingBuffer] = list_push((writer).columns, buf);
+    return ParquetRowGroupWriter {
+        config: (writer).config,
+        columns: updated_cols,
+        total_rows: (writer).total_rows,
+        total_buffered_bytes: (writer).total_buffered_bytes,
+        is_closed: (writer).is_closed,
+    };
+}
+
+pub fn row_group_writer_append_int(
+    writer: ParquetRowGroupWriter,
+    col_idx: Int,
+    val: Int
+) -> ParquetRowGroupWriter {
+    let cols: List[ColumnStagingBuffer] = (writer).columns;
+    let n: Int = list_len(cols);
+    if col_idx < 0 || col_idx >= n {
+        return writer;
+    }
+    let target_col: ColumnStagingBuffer = list_get(cols, col_idx);
+    let updated_ints: List[Int] = list_push((target_col).int_values, val);
+    let updated_buf: ColumnStagingBuffer = ColumnStagingBuffer {
+        column_name: (target_col).column_name,
+        type_code: (target_col).type_code,
+        int_values: updated_ints,
+        string_values: (target_col).string_values,
+        row_count: (target_col).row_count + 1,
+        buffered_bytes: (target_col).buffered_bytes + 8,
+    };
+
+    let mut new_cols: List[ColumnStagingBuffer] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        if i == col_idx {
+            new_cols = list_push(new_cols, updated_buf);
+        } else {
+            new_cols = list_push(new_cols, list_get(cols, i));
+        }
+        i = i + 1;
+    }
+
+    return ParquetRowGroupWriter {
+        config: (writer).config,
+        columns: new_cols,
+        total_rows: (writer).total_rows + 1,
+        total_buffered_bytes: (writer).total_buffered_bytes + 8,
+        is_closed: false,
+    };
+}
+
+pub fn row_group_writer_should_flush(writer: ParquetRowGroupWriter) -> Bool {
+    let cfg: RowGroupWriterConfig = (writer).config;
+    if (writer).total_rows >= (cfg).max_row_group_rows {
+        return true;
+    }
+    if (writer).total_buffered_bytes >= (cfg).max_row_group_bytes {
+        return true;
+    }
+    return false;
+}

@@ -1,0 +1,121 @@
+// # Neural Trajectory Decoding Kalman Filter
+//
+// Logline: Decodes continuous 2D cursor kinematics (position and velocity) from multi-channel cortical spike firing rates.
+//
+// Setup: Recursive Bayesian state-space filter for real-time motor prosthetic trajectory control.
+//
+// Beats:
+//   1. Define KinematicState2D (pos_x, pos_y, vel_x, vel_y) and StateCovariance2D (var_pos, var_vel).
+//   2. Predict next kinematic state using autoregressive transition dynamics x_pred = A * x.
+//   3. Update kinematic estimate using multi-unit spike rate observation residual and Kalman gain.
+
+pub type KinematicState2D = struct {
+    pos_x: Float,
+    pos_y: Float,
+    vel_x: Float,
+    vel_y: Float,
+};
+
+pub type StateCovariance2D = struct {
+    var_pos: Float,
+    var_vel: Float,
+};
+
+pub type KalmanDecoderConfig = struct {
+    a_vel_decay: Float,     // Velocity autoregressive damping (e.g. 0.95)
+    dt_sec: Float,          // Step duration in seconds (e.g. 0.05 s = 50 ms)
+    process_noise_pos: Float,
+    process_noise_vel: Float,
+    measurement_noise: Float,
+};
+
+pub type KalmanPrediction2D = struct {
+    next_state: KinematicState2D,
+    next_cov: StateCovariance2D,
+};
+
+pub type KalmanUpdateResult = struct {
+    updated_state: KinematicState2D,
+    updated_cov: StateCovariance2D,
+};
+
+pub fn kalman_decoder_config_default() -> KalmanDecoderConfig {
+    return KalmanDecoderConfig {
+        a_vel_decay: 0.95,
+        dt_sec: 0.05,
+        process_noise_pos: 0.01,
+        process_noise_vel: 0.05,
+        measurement_noise: 0.2,
+    };
+}
+
+pub fn kalman_state_zero() -> KinematicState2D {
+    return KinematicState2D {
+        pos_x: 0.0,
+        pos_y: 0.0,
+        vel_x: 0.0,
+        vel_y: 0.0,
+    };
+}
+
+pub fn kalman_cov_initial() -> StateCovariance2D {
+    return StateCovariance2D {
+        var_pos: 0.1,
+        var_vel: 0.5,
+    };
+}
+
+pub fn kalman_predict_state(
+    state: &KinematicState2D,
+    cov: &StateCovariance2D,
+    config: &KalmanDecoderConfig
+) -> KalmanPrediction2D {
+    let dt = (config).dt_sec;
+    let decay = (config).a_vel_decay;
+
+    let p_x = (state).pos_x + ((state).vel_x * dt);
+    let p_y = (state).pos_y + ((state).vel_y * dt);
+    let v_x = (state).vel_x * decay;
+    let v_y = (state).vel_y * decay;
+
+    let next_var_p = (cov).var_pos + ((cov).var_vel * (dt * dt)) + (config).process_noise_pos;
+    let next_var_v = ((cov).var_vel * decay * decay) + (config).process_noise_vel;
+
+    return KalmanPrediction2D {
+        next_state: KinematicState2D { pos_x: p_x, pos_y: p_y, vel_x: v_x, vel_y: v_y },
+        next_cov: StateCovariance2D { var_pos: next_var_p, var_vel: next_var_v },
+    };
+}
+
+pub fn kalman_update_velocity_measurement(
+    pred: &KalmanPrediction2D,
+    measured_vx: Float,
+    measured_vy: Float,
+    config: &KalmanDecoderConfig
+) -> KalmanUpdateResult {
+    let r = (config).measurement_noise;
+    let p_v = (pred).next_cov.var_vel;
+
+    // Kalman gain K = P / (P + R)
+    let k_gain = p_v / (p_v + r);
+
+    let res_x = measured_vx - (pred).next_state.vel_x;
+    let res_y = measured_vy - (pred).next_state.vel_y;
+
+    let up_vx = (pred).next_state.vel_x + (k_gain * res_x);
+    let up_vy = (pred).next_state.vel_y + (k_gain * res_y);
+    let up_cov_v = (1.0 - k_gain) * p_v;
+
+    return KalmanUpdateResult {
+        updated_state: KinematicState2D {
+            pos_x: (pred).next_state.pos_x,
+            pos_y: (pred).next_state.pos_y,
+            vel_x: up_vx,
+            vel_y: up_vy,
+        },
+        updated_cov: StateCovariance2D {
+            var_pos: (pred).next_cov.var_pos,
+            var_vel: up_cov_v,
+        },
+    };
+}

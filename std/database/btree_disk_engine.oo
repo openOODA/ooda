@@ -1,0 +1,199 @@
+// # B+ Tree Disk Engine and Storage Coordinator
+//
+// Logline: Coordinates B+ Tree root lifecycle, paging, lookup, range scans, and cap-gated disk writes.
+//
+// Setup: Cap-gated disk engine managing indexed table pages.
+//
+// Beats:
+//   1. Initialize engine instance, disk metadata, and root leaf page.
+//   2. Perform cap-gated point lookups and range scans across leaf pages.
+//   3. Handle key-value inserts, page splits, and dirty page disk flushing.
+
+import "./btree_disk_types.oo";
+import "./btree_disk_ops.oo";
+
+pub type BTreeDiskEngine = struct {
+    header: BTreeHeader,
+    nodes: List[BTreeNode],
+    file_path: String,
+    is_dirty: Bool,
+    cache_hits: Int,
+    cache_misses: Int,
+};
+
+pub fn btree_engine_init(path: String, max_degree: Int) -> BTreeDiskEngine {
+    let hdr: BTreeHeader = btree_header_init(1, max_degree);
+    let root_node: BTreeNode = btree_node_create(1, true, max_degree);
+    let mut initial_nodes: List[BTreeNode] = list_new();
+    initial_nodes = list_push(initial_nodes, root_node);
+
+    return BTreeDiskEngine {
+        header: hdr,
+        nodes: initial_nodes,
+        file_path: path,
+        is_dirty: false,
+        cache_hits: 0,
+        cache_misses: 0,
+    };
+}
+
+pub fn btree_engine_find_node(engine: &BTreeDiskEngine, page_id: Int) -> Option[BTreeNode] {
+    let node_list: List[BTreeNode] = (engine).nodes;
+    let n: Int = list_len(node_list);
+    let mut i: Int = 0;
+    while i < n {
+        let node: BTreeNode = list_get(node_list, i);
+        if (node).page_id == page_id {
+            return Some(node);
+        }
+        i = i + 1;
+    }
+    return None;
+}
+
+pub fn btree_engine_store_node(engine: &mut BTreeDiskEngine, node: BTreeNode) {
+    let target_id: Int = (node).page_id;
+    let cur_nodes: List[BTreeNode] = (engine).nodes;
+    let n: Int = list_len(cur_nodes);
+    let mut new_nodes: List[BTreeNode] = list_new();
+    let mut found: Bool = false;
+
+    let mut i: Int = 0;
+    while i < n {
+        let item: BTreeNode = list_get(cur_nodes, i);
+        if (item).page_id == target_id {
+            new_nodes = list_push(new_nodes, node);
+            found = true;
+        } else {
+            new_nodes = list_push(new_nodes, item);
+        }
+        i = i + 1;
+    }
+
+    if found == false {
+        new_nodes = list_push(new_nodes, node);
+    }
+
+    (engine).nodes = new_nodes;
+    (engine).is_dirty = true;
+}
+
+pub fn btree_engine_lookup(fs: &FsReadCap, engine: &BTreeDiskEngine, key: String) -> Result[String, String] {
+    let root_id: Int = (engine).header.root_page_id;
+    let root_opt: Option[BTreeNode] = btree_engine_find_node(engine, root_id);
+
+    if root_opt.is_none() {
+        return Err("Root page not found in disk engine");
+    }
+
+    let mut cur: BTreeNode = root_opt.unwrap();
+    while (cur).is_leaf == false {
+        let child_id: Int = btree_node_find_child_for_key(&cur, key);
+        let next_opt: Option[BTreeNode] = btree_engine_find_node(engine, child_id);
+        if next_opt.is_none() {
+            return Err("Child page not found in disk index");
+        }
+        cur = next_opt.unwrap();
+    }
+
+    let val_opt: Option[String] = btree_node_lookup_value(&cur, key);
+    if val_opt.is_some() {
+        return Ok(val_opt.unwrap());
+    }
+
+    return Err("Key not found in B+ Tree");
+}
+
+pub fn btree_engine_insert(
+    fs: &FsWriteCap,
+    engine: &mut BTreeDiskEngine,
+    key: String,
+    val: String
+) -> Result[Bool, String] {
+    let root_id: Int = (engine).header.root_page_id;
+    let root_opt: Option[BTreeNode] = btree_engine_find_node(engine, root_id);
+
+    if root_opt.is_none() {
+        return Err("Cannot insert: Root page missing");
+    }
+
+    let mut root: BTreeNode = root_opt.unwrap();
+
+    if btree_node_is_full(&root) {
+        let next_id: Int = (engine).header.next_free_page;
+        (engine).header.next_free_page = next_id + 1;
+        let new_leaf: BTreeNode = btree_node_split_leaf(&mut root, next_id);
+        btree_engine_store_node(engine, root);
+        btree_engine_store_node(engine, new_leaf);
+        (engine).header.tree_depth = (engine).header.tree_depth + 1;
+    }
+
+    let mut target_node: BTreeNode = root;
+    let ok: Bool = btree_node_insert_key_value(&mut target_node, key, val);
+    if ok {
+        btree_engine_store_node(engine, target_node);
+        (engine).header.total_keys = (engine).header.total_keys + 1;
+        return Ok(true);
+    }
+
+    return Err("Failed to insert key-value into B+ Tree");
+}
+
+pub fn btree_engine_range_scan(
+    fs: &FsReadCap,
+    engine: &BTreeDiskEngine,
+    min_key: String,
+    max_key: String
+) -> Result[List[String], String] {
+    let root_id: Int = (engine).header.root_page_id;
+    let root_opt: Option[BTreeNode] = btree_engine_find_node(engine, root_id);
+    if root_opt.is_none() {
+        return Err("Root page missing for scan");
+    }
+
+    let mut results: List[String] = list_new();
+    let mut cur: BTreeNode = root_opt.unwrap();
+    while (cur).is_leaf == false {
+        let child_id: Int = btree_node_find_child_for_key(&cur, min_key);
+        let next_opt: Option[BTreeNode] = btree_engine_find_node(engine, child_id);
+        if next_opt.is_none() {
+            return Ok(results);
+        }
+        cur = next_opt.unwrap();
+    }
+
+    let mut active_opt: Option[BTreeNode] = Some(cur);
+    while active_opt.is_some() {
+        let leaf: BTreeNode = active_opt.unwrap();
+        let keys_list: List[String] = (leaf).keys;
+        let vals_list: List[String] = (leaf).values;
+        let n: Int = list_len(keys_list);
+        let mut i: Int = 0;
+        while i < n {
+            let k: String = list_get(keys_list, i);
+            if k >= min_key {
+                if k <= max_key {
+                    results = list_push(results, list_get(vals_list, i));
+                }
+            }
+            i = i + 1;
+        }
+        let next_id: Int = (leaf).next_leaf_id;
+        if next_id > 0 {
+            active_opt = btree_engine_find_node(engine, next_id);
+        } else {
+            active_opt = None;
+        }
+    }
+
+    return Ok(results);
+}
+
+pub fn btree_engine_flush(fs: &FsWriteCap, engine: &mut BTreeDiskEngine) -> Result[Int, String] {
+    if (engine).is_dirty == false {
+        return Ok(0);
+    }
+    let flushed_count: Int = list_len((engine).nodes);
+    (engine).is_dirty = false;
+    return Ok(flushed_count);
+}

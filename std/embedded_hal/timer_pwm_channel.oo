@@ -1,0 +1,149 @@
+// # Hardware Timer & Multi-Channel PWM Generator
+//
+// Logline: Hardware timer counter modes, prescaler, auto-reload, capture/compare channels, and PWM duty cycle control.
+//
+// Setup: Timer peripheral models for pulse-width modulation, motor control, and frequency generation.
+//
+// Beats:
+//   1. Define Timer counter structures, counting directions, and clock prescalers.
+//   2. Configure Auto-Reload Register (ARR) and calculate output frequency in Hertz.
+//   3. Manage Capture/Compare Channels (CCR1-4), active polarity, and channel enable states.
+//   4. Calculate duty cycle percentage to compare counts and configure dead-time insertion.
+
+pub type PwmChannel = struct {
+    channel_num: Int,     // 1..4
+    enabled: Bool,
+    compare_value: Int,   // CCR value (0..ARR)
+    polarity_inverted: Bool,
+    complementary_enabled: Bool,
+    deadtime_ticks: Int,
+};
+
+pub type HardwareTimer = struct {
+    timer_id: Int,
+    counter_mode: Int,    // 0=Up, 1=Down, 2=CenterAligned1, 3=CenterAligned2, 4=CenterAligned3
+    clock_freq_hz: Int,
+    prescaler: Int,       // PSC (0..65535, divides by PSC+1)
+    auto_reload: Int,     // ARR (0..65535 or 32-bit)
+    counter: Int,         // Current CNT
+    channels: List[PwmChannel],
+    is_running: Bool,
+};
+
+pub fn pwm_channel_new(channel_num: Int) -> PwmChannel {
+    return PwmChannel {
+        channel_num: channel_num,
+        enabled: false,
+        compare_value: 0,
+        polarity_inverted: false,
+        complementary_enabled: false,
+        deadtime_ticks: 0,
+    };
+}
+
+pub fn hardware_timer_new(timer_id: Int, clock_freq: Int) -> HardwareTimer {
+    let mut chans: List[PwmChannel] = list_new();
+    let mut i: Int = 1;
+    while i <= 4 {
+        chans = list_push(chans, pwm_channel_new(i));
+        i = i + 1;
+    }
+    return HardwareTimer {
+        timer_id: timer_id,
+        counter_mode: 0, // Up
+        clock_freq_hz: clock_freq,
+        prescaler: 0,
+        auto_reload: 65535,
+        counter: 0,
+        channels: chans,
+        is_running: false,
+    };
+}
+
+fn update_channel_in_timer(chans: List[PwmChannel], ch_num: Int, updated: PwmChannel) -> List[PwmChannel] {
+    let mut result: List[PwmChannel] = list_new();
+    let len: Int = list_len(chans);
+    let mut i: Int = 0;
+    while i < len {
+        let ch: PwmChannel = list_get(chans, i);
+        if (ch).channel_num == ch_num {
+            result = list_push(result, updated);
+        } else {
+            result = list_push(result, ch);
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn timer_set_frequency(tim: &mut HardwareTimer, target_freq_hz: Int) {
+    if target_freq_hz > 0 {
+        let total_div: Int = (tim).clock_freq_hz / target_freq_hz;
+        if total_div > 65535 {
+            (tim).prescaler = (total_div / 65535);
+            (tim).auto_reload = (total_div / ((tim).prescaler + 1)) - 1;
+        } else {
+            (tim).prescaler = 0;
+            (tim).auto_reload = total_div - 1;
+        }
+    }
+}
+
+pub fn timer_set_channel_duty_pct(tim: &mut HardwareTimer, ch_num: Int, duty_pct: Float) {
+    if ch_num >= 1 {
+        if ch_num <= 4 {
+            let bounded_pct: Float = if duty_pct < 0.0 { 0.0 } else { if duty_pct > 100.0 { 100.0 } else { duty_pct } };
+            let arr_f: Float = (tim).auto_reload * 1.0;
+            let ccr_f: Float = (arr_f * bounded_pct) / 100.0;
+            let ccr: Int = ccr_f; // Float to int coercion
+
+            let mut ch: PwmChannel = list_get((tim).channels, ch_num - 1);
+            (ch).compare_value = ccr;
+            (tim).channels = update_channel_in_timer((tim).channels, ch_num, ch);
+        }
+    }
+}
+
+pub fn timer_channel_enable(tim: &mut HardwareTimer, ch_num: Int) {
+    if ch_num >= 1 {
+        if ch_num <= 4 {
+            let mut ch: PwmChannel = list_get((tim).channels, ch_num - 1);
+            (ch).enabled = true;
+            (tim).channels = update_channel_in_timer((tim).channels, ch_num, ch);
+        }
+    }
+}
+
+pub fn timer_channel_disable(tim: &mut HardwareTimer, ch_num: Int) {
+    if ch_num >= 1 {
+        if ch_num <= 4 {
+            let mut ch: PwmChannel = list_get((tim).channels, ch_num - 1);
+            (ch).enabled = false;
+            (tim).channels = update_channel_in_timer((tim).channels, ch_num, ch);
+        }
+    }
+}
+
+pub fn timer_start(tim: &mut HardwareTimer) {
+    (tim).is_running = true;
+}
+
+pub fn timer_stop(tim: &mut HardwareTimer) {
+    (tim).is_running = false;
+}
+
+pub fn timer_get_channel_output(tim: &HardwareTimer, ch_num: Int) -> Bool {
+    if ch_num >= 1 {
+        if ch_num <= 4 {
+            let ch: PwmChannel = list_get((tim).channels, ch_num - 1);
+            if (ch).enabled {
+                let is_high: Bool = (tim).counter < (ch).compare_value;
+                if (ch).polarity_inverted {
+                    return !is_high;
+                }
+                return is_high;
+            }
+        }
+    }
+    return false;
+}

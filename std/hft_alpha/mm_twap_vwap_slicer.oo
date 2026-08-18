@@ -1,0 +1,161 @@
+// # Algorithmic TWAP and VWAP Execution Slicer
+//
+// Logline: Slices parent orders into discrete child execution slices according to time-weighted (TWAP) and volume-weighted (VWAP) historical curves.
+//
+// Setup: Pure algorithmic execution module generating deterministic multi-interval order child slices.
+//
+// Beats:
+//   1. Define ExecutionScheduleParams, ChildSlice, and SlicerResult structures.
+//   2. Slice parent order evenly across N intervals for linear TWAP execution.
+//   3. Slices parent order proportionally according to intraday volume histogram bins for VWAP execution.
+
+pub type ExecutionScheduleParams = struct {
+    total_order_size: Float,
+    duration_seconds: Float,
+    slice_interval_seconds: Float,
+    min_child_size: Float,
+};
+
+pub type ChildSlice = struct {
+    slice_index: Int,
+    start_time_seconds: Float,
+    target_quantity: Float,
+    is_twap_slice: Bool,
+};
+
+pub type SlicerResult = struct {
+    total_quantity: Float,
+    slice_count: Int,
+    slices: List[ChildSlice],
+};
+
+pub fn slicer_params_new(
+    total_sz: Float,
+    duration_sec: Float,
+    interval_sec: Float,
+    min_sz: Float
+) -> ExecutionScheduleParams {
+    return ExecutionScheduleParams {
+        total_order_size: total_sz,
+        duration_seconds: duration_sec,
+        slice_interval_seconds: interval_sec,
+        min_child_size: min_sz,
+    };
+}
+
+pub fn slicer_generate_twap(params: &ExecutionScheduleParams) -> SlicerResult {
+    let dur: Float = (params).duration_seconds;
+    let intv: Float = (params).slice_interval_seconds;
+    let total_q: Float = (params).total_order_size;
+
+    if dur <= 0.0 || intv <= 0.0 || total_q <= 0.0 {
+        let empty_list: List[ChildSlice] = list_new();
+        return SlicerResult {
+            total_quantity: 0.0,
+            slice_count: 0,
+            slices: empty_list,
+        };
+    }
+
+    let mut n_intervals: Int = 0;
+    let mut temp_dur: Float = dur;
+    while temp_dur >= intv {
+        n_intervals = n_intervals + 1;
+        temp_dur = temp_dur - intv;
+    }
+    if n_intervals <= 0 {
+        n_intervals = 1;
+    }
+
+    let mut n_float: Float = 0.0;
+    let mut cnt: Int = n_intervals;
+    while cnt >= 10 { n_float = n_float + 10.0; cnt = cnt - 10; }
+    while cnt >= 1 { n_float = n_float + 1.0; cnt = cnt - 1; }
+    if n_float <= 0.0 { n_float = 1.0; }
+
+    let slice_q: Float = total_q / n_float;
+    let mut slices_list: List[ChildSlice] = list_new();
+    let mut i: Int = 0;
+
+    while i < n_intervals {
+        let mut i_f: Float = 0.0;
+        let mut ic: Int = i;
+        while ic >= 10 { i_f = i_f + 10.0; ic = ic - 10; }
+        while ic >= 1 { i_f = i_f + 1.0; ic = ic - 1; }
+
+        let t_start: Float = i_f * intv;
+        let slice: ChildSlice = ChildSlice {
+            slice_index: i,
+            start_time_seconds: t_start,
+            target_quantity: slice_q,
+            is_twap_slice: true,
+        };
+        slices_list = list_push(slices_list, slice);
+        i = i + 1;
+    }
+
+    return SlicerResult {
+        total_quantity: total_q,
+        slice_count: n_intervals,
+        slices: slices_list,
+    };
+}
+
+pub fn slicer_generate_vwap(
+    params: &ExecutionScheduleParams,
+    volume_weights: &List[Float]
+) -> SlicerResult {
+    let n_weights: Int = list_len(*volume_weights);
+    let total_q: Float = (params).total_order_size;
+    let intv: Float = (params).slice_interval_seconds;
+
+    if n_weights == 0 || total_q <= 0.0 {
+        let empty_list: List[ChildSlice] = list_new();
+        return SlicerResult {
+            total_quantity: 0.0,
+            slice_count: 0,
+            slices: empty_list,
+        };
+    }
+
+    let mut sum_weights: Float = 0.0;
+    let mut i: Int = 0;
+    while i < n_weights {
+        let w: Float = list_get(*volume_weights, i);
+        sum_weights = sum_weights + w;
+        i = i + 1;
+    }
+
+    if sum_weights <= 0.0 {
+        return slicer_generate_twap(params);
+    }
+
+    let mut slices_list: List[ChildSlice] = list_new();
+    let mut j: Int = 0;
+
+    while j < n_weights {
+        let mut j_f: Float = 0.0;
+        let mut jc: Int = j;
+        while jc >= 10 { j_f = j_f + 10.0; jc = jc - 10; }
+        while jc >= 1 { j_f = j_f + 1.0; jc = jc - 1; }
+
+        let w_val: Float = list_get(*volume_weights, j);
+        let target_qty: Float = (w_val / sum_weights) * total_q;
+        let t_start: Float = j_f * intv;
+
+        let slice: ChildSlice = ChildSlice {
+            slice_index: j,
+            start_time_seconds: t_start,
+            target_quantity: target_qty,
+            is_twap_slice: false,
+        };
+        slices_list = list_push(slices_list, slice);
+        j = j + 1;
+    }
+
+    return SlicerResult {
+        total_quantity: total_q,
+        slice_count: n_weights,
+        slices: slices_list,
+    };
+}

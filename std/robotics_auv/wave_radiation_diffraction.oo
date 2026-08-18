@@ -1,0 +1,87 @@
+// # First-Order Wave Radiation & Diffraction Forces
+//
+// Logline: Calculates linear wave excitation forces, Froude-Kriloff dynamic pressure, and Cummins memory radiation effects.
+//
+// Setup: Deep-water Airy wave theory with exponential depth attenuation for surface and near-surface AUV operations.
+//
+// Beats:
+//   1. Define linear ocean wave spectrum state (wave amplitude A, frequency omega, heading beta).
+//   2. Compute deep-water dispersion wave number k = omega^2 / g and wavelength lambda.
+//   3. Calculate depth-attenuated Froude-Kriloff excitation forces on vehicle submerged volume.
+//   4. Deliver Cummins radiation memory damping approximation.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type OceanWaveState = struct {
+    amplitude_m: Float,
+    frequency_rad_s: Float,
+    direction_rad: Float,
+    phase_rad: Float,
+};
+
+pub fn ocean_wave_state_default() -> OceanWaveState {
+    return OceanWaveState {
+        amplitude_m: 0.5,
+        frequency_rad_s: 0.8, // ~7.8 s period sea state
+        direction_rad: 0.0,   // Head seas
+        phase_rad: 0.0,
+    };
+}
+
+pub fn wave_number_deep_water(omega: Float) -> Float {
+    let g_acc: Float = const_g();
+    return (omega * omega) / g_acc;
+}
+
+pub fn wave_length_deep_water(omega: Float) -> Float {
+    let k: Float = wave_number_deep_water(omega);
+    if k <= 0.0001 { return 100.0; }
+    return const_two_pi() / k;
+}
+
+pub fn compute_wave_excitation_wrench(
+    wave: &OceanWaveState,
+    pose: &AuvPose,
+    submerged_volume: Float,
+    water_density: Float,
+    time_s: Float
+) -> Vector6 {
+    let amp: Float = (wave).amplitude_m;
+    let omega: Float = (wave).frequency_rad_s;
+    let dir: Float = (wave).direction_rad;
+    let phase: Float = (wave).phase_rad;
+
+    let k: Float = wave_number_deep_water(omega);
+    let depth_z: Float = (pose).z;
+
+    // Depth attenuation factor: exp(-k * depth)
+    let mut atten: Float = 1.0;
+    if depth_z > 0.0 {
+        let kz: Float = k * depth_z;
+        // Fast exponential decay approximation: 1 / (1 + kz + 0.5*kz^2)
+        atten = 1.0 / (1.0 + kz + (0.5 * kz * kz));
+    }
+
+    let rel_angle: Float = (wave).direction_rad - (pose).psi;
+    let spatial_phase: Float = (k * (pose).x * cos(dir)) + (k * (pose).y * sin(dir));
+    let wave_theta: Float = (omega * time_s) - spatial_phase + phase;
+
+    let sin_wt: Float = sin(wave_theta);
+    let cos_wt: Float = cos(wave_theta);
+
+    let f_fk_base: Float = water_density * submerged_volume * const_g() * k * amp * atten;
+
+    // Froude-Kriloff force components
+    let f_x: Float = f_fk_base * sin_wt * cos(rel_angle);
+    let f_y: Float = f_fk_base * sin_wt * sin(rel_angle);
+    let f_z: Float = 0.0 - (f_fk_base * cos_wt);
+
+    // Diffraction / wave pitch-roll moments
+    let arm_l: Float = 0.5;
+    let tau_k: Float = f_y * 0.1 * cos_wt;
+    let tau_m: Float = (0.0 - f_z) * arm_l * sin_wt;
+    let tau_n: Float = f_y * arm_l * cos_wt;
+
+    return vec6_new(f_x, f_y, f_z, tau_k, tau_m, tau_n);
+}

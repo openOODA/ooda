@@ -1,0 +1,145 @@
+// # Eulerian Fluid Grid & Navier-Stokes Cells
+//
+// Logline: Implements Eulerian staggered grid representations, pressure Poisson solvers, and advection-diffusion.
+//
+// Setup: Imports fluid_domain.oo for spatial domain boundaries and Vec3 fields.
+//
+// Beats:
+//   1. Construct 3D Eulerian fluid cells and uniform voxel velocity grids.
+//   2. Compute finite difference velocity divergence and spatial pressure gradients.
+//   3. Execute Gauss-Seidel pressure Poisson relaxation and mass-conserving projection steps.
+
+import "./fluid_domain.oo";
+
+pub type FluidCell = struct {
+    vel: Vec3,
+    pressure: f64,
+    density: f64,
+    temperature: f64,
+    divergence: f64,
+    is_obstacle: Int,
+    active: Int,
+};
+
+/// Construct a default fluid cell.
+pub fn fluid_cell_new() -> FluidCell {
+    return FluidCell {
+        vel: vec3_zero(),
+        pressure: 0.0,
+        density: 0.0,
+        temperature: 293.15,
+        divergence: 0.0,
+        is_obstacle: 0,
+        active: 1,
+    };
+}
+
+/// Set obstacle status for cell (1 = solid obstacle, 0 = fluid cell).
+pub fn fluid_cell_set_obstacle(cell: &mut FluidCell, obstacle: Int) {
+    cell.is_obstacle = obstacle;
+    if obstacle != 0 {
+        cell.vel = vec3_zero();
+    }
+}
+
+/// Set velocity of a fluid cell.
+pub fn fluid_cell_set_velocity(cell: &mut FluidCell, vel: Vec3) {
+    if ((cell).is_obstacle) == 0 {
+        cell.vel = vel;
+    }
+}
+
+/// Set scalar density of a fluid cell.
+pub fn fluid_cell_set_density(cell: &mut FluidCell, density: f64) {
+    cell.density = density;
+}
+
+/// Set cell temperature.
+pub fn fluid_cell_set_temperature(cell: &mut FluidCell, temp: f64) {
+    cell.temperature = temp;
+}
+
+pub type FluidGrid = struct {
+    dim_x: Int,
+    dim_y: Int,
+    dim_z: Int,
+    dx: f64,
+    ambient_temp: f64,
+    gravity: Vec3,
+    viscosity: f64,
+};
+
+/// Construct grid configuration properties.
+pub fn fluid_grid_new(dim_x: Int, dim_y: Int, dim_z: Int, dx: f64) -> FluidGrid {
+    return FluidGrid {
+        dim_x: dim_x,
+        dim_y: dim_y,
+        dim_z: dim_z,
+        dx: dx,
+        ambient_temp: 293.15,
+        gravity: Vec3 { x: 0.0, y: 0.0 - 9.81, z: 0.0 },
+        viscosity: 0.001,
+    };
+}
+
+/// Compute 3D central difference velocity divergence:
+/// div = ((u_right - u_left) + (v_top - v_bottom) + (w_front - w_back)) / (2 * dx).
+pub fn fluid_grid_compute_divergence(c_left: FluidCell, c_right: FluidCell, c_bottom: FluidCell, c_top: FluidCell, c_back: FluidCell, c_front: FluidCell, dx: f64) -> f64 {
+    let du = ((c_right).vel.x) - ((c_left).vel.x);
+    let dv = ((c_top).vel.y) - ((c_bottom).vel.y);
+    let dw = ((c_front).vel.z) - ((c_back).vel.z);
+    let sum = ((du) + (dv)) + (dw);
+    return (sum) / (2.0 * (dx));
+}
+
+/// Execute one Jacobi iteration relaxation step for Poisson pressure equation:
+/// p_new = (p_left + p_right + p_bottom + p_top + p_back + p_front - div) / 6.0.
+pub fn fluid_grid_pressure_jacobi_step(p_center: f64, p_left: f64, p_right: f64, p_bottom: f64, p_top: f64, p_back: f64, p_front: f64, div: f64) -> f64 {
+    let neighbor_sum = (((((p_left) + (p_right)) + (p_bottom)) + (p_top)) + (p_back)) + (p_front);
+    return ((neighbor_sum) - (div)) / 6.0;
+}
+
+/// Apply pressure gradient projection to velocity field:
+/// u_new = u - (dt / (density * 2 * dx)) * grad(P).
+pub fn fluid_grid_apply_pressure_gradient(c: &mut FluidCell, p_left: f64, p_right: f64, p_bottom: f64, p_top: f64, p_back: f64, p_front: f64, dx: f64, dt: f64, density: f64) {
+    if ((c).is_obstacle) != 0 {
+        return;
+    }
+    let rho = density;
+    if (rho) < 0.000001 {
+        return;
+    }
+    let coeff = (dt) / ((rho) * (2.0 * (dx)));
+
+    let grad_px = (p_right) - (p_left);
+    let grad_py = (p_top) - (p_bottom);
+    let grad_pz = (p_front) - (p_back);
+
+    let new_vx = ((c).vel.x) - ((coeff) * (grad_px));
+    let new_vy = ((c).vel.y) - ((coeff) * (grad_py));
+    let new_vz = ((c).vel.z) - ((coeff) * (grad_pz));
+
+    c.vel = Vec3 { x: new_vx, y: new_vy, z: new_vz };
+}
+
+/// Semi-Lagrangian advection step for scalar quantity (density / temperature).
+pub fn fluid_grid_advect_scalar(val_center: f64, val_prev: f64, vel: Vec3, dx: f64, dt: f64) -> f64 {
+    let speed = vec3_length(vel);
+    let alpha = ((speed) * (dt)) / (dx);
+    let mut weight = alpha;
+    if (weight) > 1.0 { weight = 1.0; }
+    if (weight) < 0.0 { weight = 0.0; }
+    return (((1.0 - (weight)) * (val_center))) + (((weight) * (val_prev)));
+}
+
+/// 3D Laplace diffusion step for scalar quantities (heat / viscosity diffusion):
+/// val_new = val_center + diff_coeff * (dt / dx^2) * sum(val_neighbor - val_center).
+pub fn fluid_grid_diffuse_scalar(val_center: f64, val_left: f64, val_right: f64, val_bottom: f64, val_top: f64, val_back: f64, val_front: f64, diff_coeff: f64, dt: f64, dx: f64) -> f64 {
+    let dx2 = (dx) * (dx);
+    if (dx2) < 0.000001 {
+        return val_center;
+    }
+    let lap = (((((((val_left) + (val_right)) + (val_bottom)) + (val_top)) + (val_back)) + (val_front)) - (6.0 * (val_center)));
+    let delta = (((diff_coeff) * (dt)) / (dx2)) * (lap);
+    return (val_center) + (delta);
+}

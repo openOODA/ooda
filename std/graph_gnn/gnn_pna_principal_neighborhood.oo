@@ -1,0 +1,173 @@
+// # Principal Neighbourhood Aggregation (PNA)
+//
+// Logline: Combines multiple statistical aggregators and degree-based scalers to capture continuous multiset properties.
+//
+// Setup: High-capacity GNN layer combining Mean, Min, Max, and Standard Deviation aggregators with logarithmic degree scalers.
+//
+// Beats:
+//   1. Compute 4 diverse multiset aggregators: Mean, Min, Max, and Variance / Standard Deviation.
+//   2. Apply 3 degree-based scalers: Identity S_id=1, Amplification S_amp, and Attenuation S_att.
+//   3. Project tensor product of aggregated and scaled neighborhood representations with linear layer W.
+
+pub type PNAConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    avg_degree_delta: Float, // Reference average graph degree delta
+};
+
+pub type PNALayer = struct {
+    config: PNAConfig,
+    weight: List[Float], // (12 * in_features) * out_features (4 aggregators x 3 scalers = 12 combinations)
+    bias: List[Float],   // out_features
+};
+
+pub fn pna_config_new(in_f: Int, out_f: Int, delta: Float) -> PNAConfig {
+    return PNAConfig {
+        in_features: in_f,
+        out_features: out_f,
+        avg_degree_delta: delta,
+    };
+}
+
+pub fn pna_layer_init(config: PNAConfig, seed: Int) -> PNALayer {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let total_in: Int = 12 * in_f;
+    let total_w: Int = total_in * out_f;
+    let mut state: Int = seed;
+
+    let mut w_mat: List[Float] = list_new();
+    let scale: Float = sqrt(2.0 / ((total_in + out_f) as Float));
+    let mut i: Int = 0;
+    while i < total_w {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        let val_w: Float = ((((state % 2000) as Float) / 1000.0) - 1.0) * scale;
+        w_mat = list_push(w_mat, val_w);
+        i = i + 1;
+    }
+
+    let mut b_vec: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < out_f {
+        b_vec = list_push(b_vec, 0.0);
+        j = j + 1;
+    }
+
+    return PNALayer {
+        config: config,
+        weight: w_mat,
+        bias: b_vec,
+    };
+}
+
+pub fn pna_forward_node(
+    layer: &PNALayer,
+    node_id: Int,
+    neighbor_ids: List[Int],
+    input_features: List[Float]
+) -> List[Float] {
+    let cfg: PNAConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let out_f: Int = (cfg).out_features;
+    let delta: Float = (cfg).avg_degree_delta;
+    let num_neigh: Int = list_len(neighbor_ids);
+    let deg_f: Float = num_neigh as Float;
+
+    // Calculate degree scalers
+    let s_id: Float = 1.0;
+    let ratio: Float = (deg_f + 1.0) / (delta + 1.0);
+    let s_amp: Float = sqrt(ratio);
+    let s_att: Float = 1.0 / sqrt(ratio);
+
+    // Compute aggregators for each feature dim
+    let mut mean_vec: List[Float] = list_new();
+    let mut min_vec: List[Float] = list_new();
+    let mut max_vec: List[Float] = list_new();
+    let mut std_vec: List[Float] = list_new();
+
+    let mut d: Int = 0;
+    while d < in_f {
+        let mut sum_val: Float = 0.0;
+        let mut min_val: Float = 1000000.0;
+        let mut max_val: Float = -1000000.0;
+
+        let mut n: Int = 0;
+        while n < num_neigh {
+            let n_id: Int = list_get(neighbor_ids, n);
+            let v: Float = list_get(input_features, (n_id * in_f) + d);
+            sum_val = sum_val + v;
+            if v < min_val { min_val = v; }
+            if v > max_val { max_val = v; }
+            n = n + 1;
+        }
+
+        let m_val: Float = if num_neigh > 0 { sum_val / deg_f } else { 0.0 };
+        mean_vec = list_push(mean_vec, m_val);
+        min_vec = list_push(min_vec, if num_neigh > 0 { min_val } else { 0.0 });
+        max_vec = list_push(max_vec, if num_neigh > 0 { max_val } else { 0.0 });
+
+        // Std dev
+        let mut sq_diff_sum: Float = 0.0;
+        let mut n2: Int = 0;
+        while n2 < num_neigh {
+            let n_id2: Int = list_get(neighbor_ids, n2);
+            let v2: Float = list_get(input_features, (n_id2 * in_f) + d);
+            let diff: Float = v2 - m_val;
+            sq_diff_sum = sq_diff_sum + (diff * diff);
+            n2 = n2 + 1;
+        }
+        let std_val: Float = if num_neigh > 0 { sqrt(sq_diff_sum / deg_f) } else { 0.0 };
+        std_vec = list_push(std_vec, std_val);
+
+        d = d + 1;
+    }
+
+    // Concatenate 4 aggregators x 3 scalers = 12 parts of length in_f
+    let mut combined: List[Float] = list_new();
+    let mut s_idx: Int = 0;
+    while s_idx < 3 {
+        let s_factor: Float = if s_idx == 0 { s_id } else if s_idx == 1 { s_amp } else { s_att };
+        let mut d2: Int = 0;
+        while d2 < in_f {
+            combined = list_push(combined, list_get(mean_vec, d2) * s_factor);
+            d2 = d2 + 1;
+        }
+        let mut d3: Int = 0;
+        while d3 < in_f {
+            combined = list_push(combined, list_get(min_vec, d3) * s_factor);
+            d3 = d3 + 1;
+        }
+        let mut d4: Int = 0;
+        while d4 < in_f {
+            combined = list_push(combined, list_get(max_vec, d4) * s_factor);
+            d4 = d4 + 1;
+        }
+        let mut d5: Int = 0;
+        while d5 < in_f {
+            combined = list_push(combined, list_get(std_vec, d5) * s_factor);
+            d5 = d5 + 1;
+        }
+        s_idx = s_idx + 1;
+    }
+
+    // Linear projection to out_features
+    let total_in: Int = 12 * in_f;
+    let mut out_h: List[Float] = list_new();
+    let mut o: Int = 0;
+    while o < out_f {
+        let b: Float = list_get((*layer).bias, o);
+        let mut dot: Float = 0.0;
+        let mut idx: Int = 0;
+        while idx < total_in {
+            let x: Float = list_get(combined, idx);
+            let w: Float = list_get((*layer).weight, (idx * out_f) + o);
+            dot = dot + (x * w);
+            idx = idx + 1;
+        }
+        let act: Float = if (dot + b) > 0.0 { dot + b } else { 0.0 };
+        out_h = list_push(out_h, act);
+        o = o + 1;
+    }
+    return out_h;
+}

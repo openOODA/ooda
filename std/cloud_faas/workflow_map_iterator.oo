@@ -1,0 +1,97 @@
+// # Workflow Distributed Map Iterator
+//
+// Logline: Implements parallel distributed Map state execution, item batching, and concurrency bounds.
+//
+// Setup: High-scale workflow iterator executing parallel sub-state machine iterations over large datasets.
+//
+// Beats:
+//   1. Partition large input datasets into chunked batches matching target item counts.
+//   2. Bound maximum concurrent iteration workers to prevent downstream system saturation.
+//   3. Aggregate individual iteration results and handle partial failure toleration limits.
+
+pub type MapItemBatch = struct {
+    batch_id: Int,
+    item_count: Int,
+    is_completed: Bool,
+    is_failed: Bool,
+};
+
+pub type WorkflowMapIterator = struct {
+    map_state_name: String,
+    max_concurrency: Int,
+    tolerated_failure_count: Int,
+    batches: List[MapItemBatch],
+    active_workers: Int,
+    failed_batches: Int,
+};
+
+pub fn workflow_map_iterator_new(
+    name: String,
+    concurrency: Int,
+    tolerated_failures: Int
+) -> WorkflowMapIterator {
+    let empty_batches: List[MapItemBatch] = list_new();
+    return WorkflowMapIterator {
+        map_state_name: name,
+        max_concurrency: concurrency,
+        tolerated_failure_count: tolerated_failures,
+        batches: empty_batches,
+        active_workers: 0,
+        failed_batches: 0,
+    };
+}
+
+pub fn map_iterator_add_batch(iterator: &mut WorkflowMapIterator, batch_id: Int, items: Int) {
+    let b = MapItemBatch {
+        batch_id: batch_id,
+        item_count: items,
+        is_completed: false,
+        is_failed: false,
+    };
+    (iterator).batches = list_push((iterator).batches, b);
+}
+
+pub fn map_iterator_start_batch(iterator: &mut WorkflowMapIterator) -> Bool {
+    if (iterator).active_workers >= (iterator).max_concurrency {
+        return false;
+    }
+
+    (iterator).active_workers = (iterator).active_workers + 1;
+    return true;
+}
+
+pub fn map_iterator_finish_batch(
+    iterator: &mut WorkflowMapIterator,
+    batch_id: Int,
+    success: Bool
+) -> Bool {
+    let n: Int = list_len((iterator).batches);
+    let mut i: Int = 0;
+    let mut updated: List[MapItemBatch] = list_new();
+
+    while i < n {
+        let b: MapItemBatch = list_get((iterator).batches, i);
+        if (b).batch_id == batch_id {
+            let updated_b = MapItemBatch {
+                batch_id: (b).batch_id,
+                item_count: (b).item_count,
+                is_completed: true,
+                is_failed: !success,
+            };
+            updated = list_push(updated, updated_b);
+            if !success {
+                (iterator).failed_batches = (iterator).failed_batches + 1;
+            }
+        } else {
+            updated = list_push(updated, b);
+        }
+        i = i + 1;
+    }
+
+    (iterator).batches = updated;
+    if (iterator).active_workers > 0 {
+        (iterator).active_workers = (iterator).active_workers - 1;
+    }
+
+    return (iterator).failed_batches <= (iterator).tolerated_failure_count;
+}

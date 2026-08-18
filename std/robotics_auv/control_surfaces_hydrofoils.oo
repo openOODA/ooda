@@ -1,0 +1,112 @@
+// # Hydrodynamic Control Surfaces, Rudders & Hydrofoils
+//
+// Logline: Computes 3D lift, drag, and moment generation for AUV stern planes, rudders, and fins from dynamic water flow.
+//
+// Setup: Thin airfoil theory with stall angle modeling and servo deflection rate saturation for underwater maneuvering fins.
+//
+// Beats:
+//   1. Define control foil parameters (span, chord, lift slope C_L_alpha, zero-lift drag C_D_0).
+//   2. Compute local effective angle of attack alpha = delta - atan2(v_local, u_local).
+//   3. Calculate hydrofoil lift and induced drag forces with stall saturation.
+//   4. Deliver 6-DOF control wrench at vehicle origin from fin moment arms.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type HydrofoilParams = struct {
+    area_m2: Float,
+    c_l_alpha: Float,
+    c_d_0: Float,
+    stall_angle_rad: Float,
+    lever_arm_x: Float,
+    lever_arm_y: Float,
+    lever_arm_z: Float,
+    max_deflection_rad: Float,
+    slew_rate_rad_s: Float,
+};
+
+pub type ControlSurfaceState = struct {
+    current_deflection_rad: Float,
+    lift_force_n: Float,
+    drag_force_n: Float,
+};
+
+pub type ControlSurfaceStepResult = struct {
+    new_state: ControlSurfaceState,
+    wrench: Vector6,
+};
+
+pub fn hydrofoil_params_default_rudder() -> HydrofoilParams {
+    return HydrofoilParams {
+        area_m2: 0.015,       // 150 cm^2
+        c_l_alpha: 3.5,       // per radian
+        c_d_0: 0.02,
+        stall_angle_rad: 0.35, // ~20 degrees
+        lever_arm_x: 0.0 - 0.75, // stern position
+        lever_arm_y: 0.0,
+        lever_arm_z: 0.0,
+        max_deflection_rad: 0.4363, // 25 degrees
+        slew_rate_rad_s: 1.5,
+    };
+}
+
+pub fn hydrofoil_state_zero() -> ControlSurfaceState {
+    return ControlSurfaceState {
+        current_deflection_rad: 0.0,
+        lift_force_n: 0.0,
+        drag_force_n: 0.0,
+    };
+}
+
+pub fn control_surface_step(
+    params: &HydrofoilParams,
+    state: &ControlSurfaceState,
+    delta_cmd: Float,
+    u_flow: Float,
+    v_flow: Float,
+    rho: Float,
+    dt: Float
+) -> ControlSurfaceStepResult {
+    let target_delta: Float = math_clamp(
+        delta_cmd,
+        0.0 - (params).max_deflection_rad,
+        (params).max_deflection_rad
+    );
+
+    // Slew rate limiting
+    let delta_diff: Float = target_delta - (state).current_deflection_rad;
+    let max_step: Float = (params).slew_rate_rad_s * dt;
+    let step_clamped: Float = math_clamp(delta_diff, 0.0 - max_step, max_step);
+    let new_delta: Float = (state).current_deflection_rad + step_clamped;
+
+    // Relative flow velocity and local angle of attack
+    let v_mag_sq: Float = (u_flow * u_flow) + (v_flow * v_flow);
+    let flow_angle: Float = math_atan2(v_flow, u_flow);
+    let mut alpha: Float = new_delta - flow_angle;
+    let stall: Float = (params).stall_angle_rad;
+
+    // Stall saturation
+    alpha = math_clamp(alpha, 0.0 - stall, stall);
+
+    let q_dyn: Float = 0.5 * rho * v_mag_sq;
+    let cl: Float = (params).c_l_alpha * alpha;
+    let cd: Float = (params).c_d_0 + (0.1 * cl * cl);
+
+    let lift: Float = q_dyn * (params).area_m2 * cl;
+    let drag: Float = q_dyn * (params).area_m2 * cd;
+
+    // Forces in body frame (for vertical rudder: lift produces sway force Y)
+    let f_y: Float = lift;
+    let f_x: Float = 0.0 - drag;
+    let lx: Float = (params).lever_arm_x;
+    let tau_n: Float = f_y * lx; // Yaw moment
+
+    return ControlSurfaceStepResult {
+        new_state: ControlSurfaceState {
+            current_deflection_rad: new_delta,
+            lift_force_n: lift,
+            drag_force_n: drag,
+        },
+        wrench: vec6_new(f_x, f_y, 0.0, 0.0, 0.0, tau_n),
+    };
+}

@@ -1,0 +1,91 @@
+// # GNSS Code-Minus-Carrier Multipath Detector & Hatch Filter
+//
+// Logline: Implements Code-Minus-Carrier (CMC) linear combinations, SNR fluctuation metrics, and Hatch smoothing.
+//
+// Setup: Pure GNSS signal quality monitoring module detecting ground and obstacle multipath reflections.
+//
+// Beats:
+//   1. Form Code-Minus-Carrier observable CMC = rho - lambda * Phi to isolate multipath and noise.
+//   2. Implement Hatch filter for carrier-smoothed pseudorange reduction.
+//   3. Compute elevation-dependent weighting to deweight low-elevation multipath channels.
+
+pub type HatchFilterState = struct {
+    smoothed_pseudorange_m: Float,
+    prev_carrier_phase_m: Float,
+    smoothing_window_m: Int,   // Typically 100 epochs
+    current_epoch: Int,
+    is_initialized: Int,
+};
+
+pub fn hatch_filter_state_new(window_size: Int) -> HatchFilterState {
+    return HatchFilterState {
+        smoothed_pseudorange_m: 0.0,
+        prev_carrier_phase_m: 0.0,
+        smoothing_window_m: window_size,
+        current_epoch: 0,
+        is_initialized: 0,
+    };
+}
+
+pub fn gnss_calc_code_minus_carrier_m(raw_rho_m: Float, carrier_phase_cycles: Float, wavelength_m: Float) -> Float {
+    let phase_m: Float = carrier_phase_cycles * wavelength_m;
+    return raw_rho_m - phase_m;
+}
+
+pub fn hatch_filter_update(
+    state: &mut HatchFilterState,
+    raw_rho_m: Float,
+    carrier_phase_cycles: Float,
+    wavelength_m: Float
+) -> Float {
+    let current_phase_m: Float = carrier_phase_cycles * wavelength_m;
+
+    if (*state).is_initialized == 0 {
+        (*state).smoothed_pseudorange_m = raw_rho_m;
+        (*state).prev_carrier_phase_m = current_phase_m;
+        (*state).current_epoch = 1;
+        (*state).is_initialized = 1;
+        return raw_rho_m;
+    }
+
+    (*state).current_epoch = (*state).current_epoch + 1;
+    let mut k: Int = (*state).current_epoch;
+    if k > (*state).smoothing_window_m {
+        k = (*state).smoothing_window_m;
+    }
+
+    let k_f: Float = gnss_multipath_int_to_float(k);
+    let delta_phase: Float = current_phase_m - (*state).prev_carrier_phase_m;
+    let predicted_rho: Float = (*state).smoothed_pseudorange_m + delta_phase;
+
+    // rho_smoothed = (1/k) * raw_rho + ((k-1)/k) * predicted_rho
+    let weight_code: Float = 1.0 / k_f;
+    let weight_carrier: Float = (k_f - 1.0) / k_f;
+    let smoothed: Float = (weight_code * raw_rho_m) + (weight_carrier * predicted_rho);
+
+    (*state).smoothed_pseudorange_m = smoothed;
+    (*state).prev_carrier_phase_m = current_phase_m;
+
+    return smoothed;
+}
+
+pub fn gnss_elevation_weight(elevation_deg: Float) -> Float {
+    let pi_val: Float = 3.141592653589793;
+    let elev_rad: Float = (elevation_deg * pi_val) / 180.0;
+    let sin_elev: Float = sin(elev_rad);
+    if sin_elev < 0.087 { return 0.087 * 0.087; }
+    return sin_elev * sin_elev;
+}
+
+pub fn gnss_multipath_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}

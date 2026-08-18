@@ -1,0 +1,92 @@
+// # Rocket Specific Impulse vs Altitude & Nozzle Flow Separation
+//
+// Logline: Evaluates varying atmospheric backpressure, sea-level to vacuum expansion transition, overexpansion flow separation (Summerfield criterion), and effective Isp(h).
+//
+// Setup: Solves altitude-dependent ambient pressure thrust loss, underexpansion / overexpansion regimes, and free shock separation.
+//
+// Beats:
+//   1. Define sea-level and vacuum specific impulse, throat area, expansion ratio, and chamber pressure.
+//   2. Compute US Standard Atmosphere ambient pressure as a continuous function of altitude.
+//   3. Calculate Summerfield nozzle flow separation criterion, actual exit pressure, and altitude-adjusted thrust & Isp.
+
+import "./space_propulsion_constants.oo";
+
+pub type AltitudeIspEngineSpec = struct {
+    thrust_vacuum_n: Float,
+    isp_vacuum_s: Float,
+    chamber_pressure_bar: Float,
+    expansion_ratio: Float,
+    throat_area_m2: Float,
+};
+
+pub type AltitudeThrustState = struct {
+    altitude_m: Float,
+    ambient_pressure_pa: Float,
+    thrust_at_altitude_n: Float,
+    isp_at_altitude_s: Float,
+    exit_pressure_pa: Float,
+    is_flow_separated: Bool,
+};
+
+pub fn altitude_engine_spec_default() -> AltitudeIspEngineSpec {
+    return AltitudeIspEngineSpec {
+        thrust_vacuum_n: 2200000.0, // 2.2 MN
+        isp_vacuum_s: 327.0, // Raptor 2 sea-level engine in vac
+        chamber_pressure_bar: 300.0, // 30 MPa
+        expansion_ratio: 34.0,
+        throat_area_m2: 0.040,
+    };
+}
+
+pub fn atmosphere_pressure_at_alt(alt_m: Float) -> Float {
+    if alt_m <= 0.0 { return 101325.0; }
+    if alt_m >= 80000.0 { return 0.0; }
+    // Standard exponential barometric formula: P(h) = P0 * exp(-h / H)
+    // Scale height H ~ 7200 m for Earth
+    let h_scale: Float = 7200.0;
+    return 101325.0 * math_exp(0.0 - (alt_m / h_scale));
+}
+
+pub fn altitude_compute_performance(
+    spec: AltitudeIspEngineSpec,
+    alt_m: Float
+) -> AltitudeThrustState {
+    let f_vac: Float = (spec).thrust_vacuum_n;
+    let isp_vac: Float = (spec).isp_vacuum_s;
+    let pc_bar: Float = (spec).chamber_pressure_bar;
+    let pc_pa: Float = pc_bar * 100000.0;
+    let eps: Float = (spec).expansion_ratio;
+    let a_t: Float = (spec).throat_area_m2;
+    let a_exit: Float = a_t * eps;
+
+    let p_amb: Float = atmosphere_pressure_at_alt(alt_m);
+
+    // Exit pressure estimate: Pe / Pc ~ 0.003 - 0.008 for eps = 30-40
+    let pe_ratio: Float = 0.50 * math_pow(1.0 / eps, 1.25);
+    let pe: Float = pc_pa * pe_ratio;
+
+    // Summerfield flow separation criterion: separation occurs when Pe / P_amb < 0.35 - 0.40
+    let sep_ratio: Float = pe / (p_amb + 0.0001);
+    let is_separated: Bool = sep_ratio < 0.38;
+
+    // Thrust at altitude: F(h) = F_vac - P_amb(h) * A_exit
+    // If separated, flow separates earlier, reducing the negative pressure loss term
+    let mut f_alt: Float = f_vac - (p_amb * a_exit);
+    if is_separated {
+        // Oblique shock separation recovers some pressure
+        let effective_a_exit: Float = a_exit * 0.70;
+        f_alt = f_vac - (p_amb * effective_a_exit);
+    }
+
+    // Isp(h) = Isp_vac * (F(h) / F_vac)
+    let isp_alt: Float = isp_vac * (f_alt / f_vac);
+
+    return AltitudeThrustState {
+        altitude_m: alt_m,
+        ambient_pressure_pa: p_amb,
+        thrust_at_altitude_n: f_alt,
+        isp_at_altitude_s: isp_alt,
+        exit_pressure_pa: pe,
+        is_flow_separated: is_separated,
+    };
+}

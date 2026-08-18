@@ -1,0 +1,150 @@
+// # Auto-Deleveraging (ADL) Priority Queue & Risk Allocator
+//
+// Logline: Ranks profitable counterparties by PnL percentile and effective leverage to execute automated deleveraging when insurance funds are depleted.
+//
+// Setup: Pure quantitative risk module implementing exchange-grade Auto-Deleveraging (ADL) light indicators and order matching.
+//
+// Beats:
+//   1. Define AdlCandidate, AdlRanking, and AdlExecutionSummary structures.
+//   2. Compute normalized ADL priority scores combining profit percentile and leverage factors.
+//   3. Match underwater liquidated positions against top ADL-ranked counterparties at bankruptcy price.
+
+pub type AdlCandidate = struct {
+    account_id: String,
+    position_size: Float,
+    entry_price: Float,
+    mark_price: Float,
+    margin_usd: Float,
+    effective_leverage: Float,
+    pnl_percentage: Float,
+    adl_score: Float,
+    light_indicators: Int, // 1 to 5 lights
+};
+
+pub type AdlExecutionSummary = struct {
+    bankrupt_account_id: String,
+    target_counterparty_id: String,
+    closed_size: Float,
+    bankruptcy_price: Float,
+    realized_pnl_usd: Float,
+    remaining_deficit_usd: Float,
+};
+
+pub fn calc_adl_score(
+    size: Float,
+    entry_px: Float,
+    mark_px: Float,
+    margin_usd: Float
+) -> Float {
+    if margin_usd <= 0.0 {
+        return 0.0;
+    }
+    let upnl: Float = size * (mark_px - entry_px);
+    if upnl <= 0.0 {
+        return 0.0; // Unprofitable positions are never ADL targets
+    }
+    let pnl_pct: Float = upnl / margin_usd;
+
+    let mut abs_size: Float = size;
+    if abs_size < 0.0 {
+        abs_size = 0.0 - abs_size;
+    }
+    let notional: Float = abs_size * mark_px;
+    let equity: Float = margin_usd + upnl;
+    let mut leverage: Float = 1.0;
+    if equity > 0.0 {
+        leverage = notional / equity;
+    }
+
+    return pnl_pct * leverage;
+}
+
+pub fn calc_adl_lights(score: Float) -> Int {
+    if score >= 10.0 {
+        return 5;
+    }
+    if score >= 5.0 {
+        return 4;
+    }
+    if score >= 2.0 {
+        return 3;
+    }
+    if score >= 0.5 {
+        return 2;
+    }
+    if score > 0.0 {
+        return 1;
+    }
+    return 0;
+}
+
+pub fn adl_candidate_create(
+    account_id: String,
+    size: Float,
+    entry_px: Float,
+    mark_px: Float,
+    margin_usd: Float
+) -> AdlCandidate {
+    let score: Float = calc_adl_score(size, entry_px, mark_px, margin_usd);
+    let upnl: Float = size * (mark_px - entry_px);
+    let mut pnl_pct: Float = 0.0;
+    if margin_usd > 0.0 {
+        pnl_pct = upnl / margin_usd;
+    }
+    let mut abs_size: Float = size;
+    if abs_size < 0.0 {
+        abs_size = 0.0 - abs_size;
+    }
+    let notional: Float = abs_size * mark_px;
+    let equity: Float = margin_usd + upnl;
+    let mut lev: Float = 1.0;
+    if equity > 0.0 {
+        lev = notional / equity;
+    }
+    let lights: Int = calc_adl_lights(score);
+
+    return AdlCandidate {
+        account_id: account_id,
+        position_size: size,
+        entry_price: entry_px,
+        mark_price: mark_px,
+        margin_usd: margin_usd,
+        effective_leverage: lev,
+        pnl_percentage: pnl_pct,
+        adl_score: score,
+        light_indicators: lights,
+    };
+}
+
+pub fn execute_adl_offset_step(
+    bankrupt_id: String,
+    bankrupt_size: Float,
+    bankruptcy_px: Float,
+    candidate: &AdlCandidate
+) -> AdlExecutionSummary {
+    let mut abs_bankrupt: Float = bankrupt_size;
+    if abs_bankrupt < 0.0 {
+        abs_bankrupt = 0.0 - abs_bankrupt;
+    }
+    let mut abs_candidate: Float = (candidate).position_size;
+    if abs_candidate < 0.0 {
+        abs_candidate = 0.0 - abs_candidate;
+    }
+
+    let mut fill_size: Float = abs_bankrupt;
+    if abs_candidate < fill_size {
+        fill_size = abs_candidate;
+    }
+
+    let pnl: Float = fill_size * (bankruptcy_px - (candidate).entry_price);
+    let rem: Float = (abs_bankrupt - fill_size) * bankruptcy_px;
+
+    return AdlExecutionSummary {
+        bankrupt_account_id: bankrupt_id,
+        target_counterparty_id: (candidate).account_id,
+        closed_size: fill_size,
+        bankruptcy_price: bankruptcy_px,
+        realized_pnl_usd: pnl,
+        remaining_deficit_usd: rem,
+    };
+}

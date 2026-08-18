@@ -1,0 +1,108 @@
+// # Topology Adaptive Graph Convolutional Networks (TAGCN)
+//
+// Logline: Implements topology-adaptive graph convolutions using multi-scale polynomial graph filters without Chebyshev approximation.
+//
+// Setup: Multi-hop receptive field graph operator aggregating normalized adjacency powers directly into expressive layer transformations.
+//
+// Beats:
+//   1. Traverse multi-scale graph topological neighborhoods using powers of normalized adjacency A^k.
+//   2. Learn independent filter weight matrices G_k for each diffusion hop distance k = 0, ..., K.
+//   3. Adapt filter responses dynamically to diverse topological graph structures.
+
+pub type TAGCNConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    k_hops: Int, // Max graph convolution hop size (e.g. K=3)
+    use_bias: Bool,
+};
+
+pub type TAGCNLayer = struct {
+    config: TAGCNConfig,
+    hop_weights: List[Float], // (k_hops + 1) * (in_features * out_features)
+    bias: List[Float],        // out_features
+};
+
+pub fn tagcn_config_new(
+    in_f: Int,
+    out_f: Int,
+    k_hops: Int,
+    use_bias: Bool
+) -> TAGCNConfig {
+    return TAGCNConfig {
+        in_features: in_f,
+        out_features: out_f,
+        k_hops: k_hops,
+        use_bias: use_bias,
+    };
+}
+
+pub fn tagcn_layer_init(config: TAGCNConfig, seed: Int) -> TAGCNLayer {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let k_hops: Int = (config).k_hops;
+    let num_filters: Int = k_hops + 1;
+    let mut state: Int = seed;
+
+    let total_w: Int = num_filters * in_f * out_f;
+    let mut w_mat: List[Float] = list_new();
+    let scale: Float = sqrt(2.0 / ((in_f + out_f) as Float));
+    let mut i: Int = 0;
+    while i < total_w {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        w_mat = list_push(w_mat, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale);
+        i = i + 1;
+    }
+
+    let mut b_vec: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < out_f {
+        b_vec = list_push(b_vec, 0.0);
+        j = j + 1;
+    }
+
+    return TAGCNLayer {
+        config: config,
+        hop_weights: w_mat,
+        bias: b_vec,
+    };
+}
+
+pub fn tagcn_forward_node(
+    layer: &TAGCNLayer,
+    hop_aggregated_features: List[Float] // (k_hops + 1) * in_features for target node
+) -> List[Float] {
+    let cfg: TAGCNConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let out_f: Int = (cfg).out_features;
+    let num_filters: Int = (cfg).k_hops + 1;
+
+    let mut out_h: List[Float] = list_new();
+    let mut o: Int = 0;
+    while o < out_f {
+        let b: Float = if (cfg).use_bias { list_get((*layer).bias, o) } else { 0.0 };
+        let mut accum: Float = b;
+
+        let mut k: Int = 0;
+        while k < num_filters {
+            let hop_off: Int = k * in_f;
+            let w_off: Int = (k * in_f * out_f) + o;
+
+            let mut dot: Float = 0.0;
+            let mut c: Int = 0;
+            while c < in_f {
+                let x: Float = list_get(hop_aggregated_features, hop_off + c);
+                let w: Float = list_get((*layer).hop_weights, (k * in_f * out_f) + (c * out_f) + o);
+                dot = dot + (x * w);
+                c = c + 1;
+            }
+            accum = accum + dot;
+            k = k + 1;
+        }
+
+        let act: Float = if accum > 0.0 { accum } else { 0.0 };
+        out_h = list_push(out_h, act);
+        o = o + 1;
+    }
+    return out_h;
+}

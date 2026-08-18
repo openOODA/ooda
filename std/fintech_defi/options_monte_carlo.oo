@@ -1,0 +1,142 @@
+// # Monte Carlo Option Pricing Engine
+//
+// Logline: Simulates Geometric Brownian Motion price paths to evaluate European option payoffs with statistical standard error bounds.
+//
+// Setup: Pure numerical simulation module with pseudo-random linear congruential generator.
+//
+// Beats:
+//   1. Define MonteCarloConfig, SimulationPath, and MonteCarloResult structures.
+//   2. Generate pseudo-random standard normal variates using Box-Muller transformation.
+//   3. Simulate asset paths, evaluate discounted terminal payoffs, and calculate sample variance.
+
+pub type MonteCarloConfig = struct {
+    spot: Float,
+    strike: Float,
+    time_to_expiry: Float,
+    risk_free_rate: Float,
+    volatility: Float,
+    num_simulations: Int,
+    is_call: Bool,
+    seed: Int,
+};
+
+pub type MonteCarloResult = struct {
+    estimated_price: Float,
+    standard_error: Float,
+    confidence_interval_low: Float,
+    confidence_interval_high: Float,
+    num_paths: Int,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn mc_lcg_step(seed_val: Int) -> Int {
+    let a: Int = 1664525;
+    let c: Int = 1013904223;
+    let m: Int = 2147483647;
+    return ((a * seed_val) + c) % m;
+}
+
+pub fn mc_lcg_next(state: &mut Int) -> Float {
+    let next_val: Int = mc_lcg_step(*state);
+    *state = next_val;
+    let mut clean_val: Int = next_val;
+    if clean_val < 0 {
+        clean_val = 0 - clean_val;
+    }
+    let rem: Int = clean_val % 1000000;
+    let u: Float = int_to_float(rem) / 1000000.0;
+    if u <= 0.000001 { return 0.000001; }
+    if u >= 0.999999 { return 0.999999; }
+    return u;
+}
+
+pub fn mc_box_muller(state: &mut Int) -> Float {
+    let u1: Float = mc_lcg_next(state);
+    let u2: Float = mc_lcg_next(state);
+    let pi: Float = 3.141592653589793;
+    let r: Float = sqrt((0.0 - 2.0) * ln(u1));
+    let theta: Float = 2.0 * pi * u2;
+    let mut x: Float = theta;
+    while x > pi { x = x - (2.0 * pi); }
+    while x < (0.0 - pi) { x = x + (2.0 * pi); }
+    let x2: Float = x * x;
+    let cos_x: Float = 1.0 - (x2 / 2.0) + ((x2 * x2) / 24.0) - ((x2 * x2 * x2) / 720.0);
+    return r * cos_x;
+}
+
+pub fn mc_price_european(config: &MonteCarloConfig) -> MonteCarloResult {
+    let s0: Float = (config).spot;
+    let k: Float = (config).strike;
+    let t: Float = (config).time_to_expiry;
+    let r: Float = (config).risk_free_rate;
+    let vol: Float = (config).volatility;
+    let n: Int = (config).num_simulations;
+
+    if n <= 0 || t <= 0.0 || s0 <= 0.0 {
+        return MonteCarloResult {
+            estimated_price: 0.0,
+            standard_error: 0.0,
+            confidence_interval_low: 0.0,
+            confidence_interval_high: 0.0,
+            num_paths: 0,
+        };
+    }
+
+    let drift: Float = (r - ((vol * vol) / 2.0)) * t;
+    let vol_sqrt_t: Float = vol * sqrt(t);
+    let discount: Float = exp((0.0 - r) * t);
+
+    let mut sum_payoff: Float = 0.0;
+    let mut sum_sq_payoff: Float = 0.0;
+    let mut rng_state: Int = (config).seed;
+    if rng_state == 0 {
+        rng_state = 123456789;
+    }
+
+    let mut i: Int = 0;
+    while i < n {
+        let z: Float = mc_box_muller(&mut rng_state);
+        let st: Float = s0 * exp(drift + (vol_sqrt_t * z));
+
+        let mut payoff: Float = 0.0;
+        if (config).is_call {
+            if st > k { payoff = st - k; }
+        } else {
+            if k > st { payoff = k - st; }
+        }
+
+        sum_payoff = sum_payoff + payoff;
+        sum_sq_payoff = sum_sq_payoff + (payoff * payoff);
+        i = i + 1;
+    }
+
+    let mean_payoff: Float = sum_payoff / int_to_float(n);
+    let price: Float = discount * mean_payoff;
+
+    let variance: Float = (sum_sq_payoff / int_to_float(n)) - (mean_payoff * mean_payoff);
+    let mut std_dev: Float = 0.0;
+    if variance > 0.0 {
+        std_dev = sqrt(variance);
+    }
+    let std_err: Float = (discount * std_dev) / sqrt(int_to_float(n));
+
+    return MonteCarloResult {
+        estimated_price: price,
+        standard_error: std_err,
+        confidence_interval_low: price - (1.96 * std_err),
+        confidence_interval_high: price + (1.96 * std_err),
+        num_paths: n,
+    };
+}

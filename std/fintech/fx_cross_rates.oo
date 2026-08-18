@@ -1,0 +1,154 @@
+// # Foreign Exchange (FX) Spot & Forward Cross Rates Engine
+//
+// Logline: Computes synthetic FX cross rates, detects triangular arbitrage, and calculates forward points.
+//
+// Setup: Pure foreign exchange currency pair math and Covered Interest Parity equations.
+//
+// Beats:
+//   1. Define CurrencyPair structures with bid, ask, base currency, and quote currency.
+//   2. Synthesize non-dollar cross currency pairs and compound bid-ask spreads.
+//   3. Detect triangular arbitrage profit cycles and calculate Covered Interest Parity forward rates.
+
+pub type FxPair = struct {
+    base_ccy: String,
+    quote_ccy: String,
+    bid: Float,
+    ask: Float,
+    pip_size: Float,
+};
+
+pub type ArbitrageOpportunity = struct {
+    pair_a: String,
+    pair_b: String,
+    pair_c: String,
+    profit_bps: Int,
+    is_profitable: Bool,
+};
+
+pub type FxForwardRate = struct {
+    pair_name: String,
+    spot_rate: Float,
+    forward_rate: Float,
+    forward_points: Float,
+    tenor_days: Int,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 100000 { f = f + 100000.0; count = count - 100000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn float_to_int(val: Float) -> Int {
+    let mut res: Int = 0;
+    let mut temp: Float = val;
+    if temp < 0.0 { temp = 0.0 - temp; }
+    while temp >= 1000000.0 { res = res + 1000000; temp = temp - 1000000.0; }
+    while temp >= 10000.0 { res = res + 10000; temp = temp - 10000.0; }
+    while temp >= 100.0 { res = res + 100; temp = temp - 100.0; }
+    while temp >= 1.0 { res = res + 1; temp = temp - 1.0; }
+    if val < 0.0 { return 0 - res; }
+    return res;
+}
+
+pub fn fx_pair_new(
+    base: String,
+    quote: String,
+    bid: Float,
+    ask: Float,
+    pip: Float
+) -> FxPair {
+    return FxPair {
+        base_ccy: base,
+        quote_ccy: quote,
+        bid: bid,
+        ask: ask,
+        pip_size: pip,
+    };
+}
+
+pub fn fx_pair_mid(pair: &FxPair) -> Float {
+    return ((pair).bid + (pair).ask) / 2.0;
+}
+
+pub fn fx_pair_spread_pips(pair: &FxPair) -> Float {
+    if (pair).pip_size <= 0.0 { return 0.0; }
+    return ((pair).ask - (pair).bid) / (pair).pip_size;
+}
+
+pub fn fx_cross_rate(pair_a: &FxPair, pair_b: &FxPair) -> Result[FxPair, String] {
+    if (pair_a).quote_ccy == (pair_b).base_ccy {
+        let cross_bid: Float = (pair_a).bid * (pair_b).bid;
+        let cross_ask: Float = (pair_a).ask * (pair_b).ask;
+        let cross = fx_pair_new((pair_a).base_ccy, (pair_b).quote_ccy, cross_bid, cross_ask, (pair_b).pip_size);
+        return Ok(cross);
+    }
+    if (pair_a).quote_ccy == (pair_b).quote_ccy {
+        if (pair_a).ask <= 0.0 { return Err("DIV_BY_ZERO"); }
+        let cross_bid: Float = (pair_b).bid / (pair_a).ask;
+        let cross_ask: Float = (pair_b).ask / (pair_a).bid;
+        let cross = fx_pair_new((pair_b).base_ccy, (pair_a).base_ccy, cross_bid, cross_ask, (pair_a).pip_size);
+        return Ok(cross);
+    }
+    return Err("NO_COMMON_CURRENCY");
+}
+
+pub fn detect_triangular_arbitrage(
+    p1: &FxPair,
+    p2: &FxPair,
+    p3: &FxPair
+) -> ArbitrageOpportunity {
+    let rate_forward: Float = (p1).bid * (p2).bid;
+    let final_units: Float = if (p3).ask > 0.0 { rate_forward / (p3).ask } else { 1.0 };
+    
+    let profit_ratio: Float = final_units - 1.0;
+    let profit_bps_f: Float = profit_ratio * 10000.0;
+    let bps: Int = float_to_int(profit_bps_f);
+    let is_arb: Bool = bps > 5;
+    
+    return ArbitrageOpportunity {
+        pair_a: (p1).base_ccy + "/" + (p1).quote_ccy,
+        pair_b: (p2).base_ccy + "/" + (p2).quote_ccy,
+        pair_c: (p3).base_ccy + "/" + (p3).quote_ccy,
+        profit_bps: bps,
+        is_profitable: is_arb,
+    };
+}
+
+pub fn fx_calculate_forward_rate(
+    spot: Float,
+    base_rate_bps: Int,
+    quote_rate_bps: Int,
+    tenor_days: Int
+) -> FxForwardRate {
+    let t_years: Float = int_to_float(tenor_days) / 360.0;
+    let r_base: Float = int_to_float(base_rate_bps) / 10000.0;
+    let r_quote: Float = int_to_float(quote_rate_bps) / 10000.0;
+    
+    let num: Float = 1.0 + (r_quote * t_years);
+    let den: Float = 1.0 + (r_base * t_years);
+    let fwd: Float = if den > 0.0 { spot * (num / den) } else { spot };
+    let points: Float = (fwd - spot) * 10000.0;
+    
+    return FxForwardRate {
+        pair_name: "FX/FWD",
+        spot_rate: spot,
+        forward_rate: fwd,
+        forward_points: points,
+        tenor_days: tenor_days,
+    };
+}
+
+pub fn fx_calc_pip_value(lot_size: Float, pip_size: Float, exchange_rate: Float) -> Float {
+    if exchange_rate <= 0.0 { return 0.0; }
+    return (lot_size * pip_size) / exchange_rate;
+}

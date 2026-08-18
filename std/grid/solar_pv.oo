@@ -1,0 +1,199 @@
+// # Photovoltaic Array State & Derating Engine
+//
+// Logline: Calculates PV array DC power output, thermal derating, degradation, and dirty module losses.
+//
+// Setup: Photovoltaic state and electrical calculations with by-value array state.
+//
+// Beats:
+//   1. Construct PvArray specifications with standard test conditions (STC).
+//   2. Calculate temperature-induced efficiency derating factors.
+//   3. Compute composite derate factors including soiling and inverter mismatch.
+//   4. Calculate DC power output across varying plane-of-array irradiance levels.
+
+import "./solar_math.oo";
+
+type PvArray = struct {
+    array_id: Int,
+    peak_power_kw: Float,
+    panel_count: Int,
+    efficiency_stc_pct: Float,
+    temp_coeff_pmax_pct: Float,
+    noct_c: Float,
+    voc_stc: Float,
+    isc_stc: Float,
+    vmp_stc: Float,
+    imp_stc: Float,
+    tilt_deg: Float,
+    azimuth_deg: Float,
+    shading_factor: Float,
+    degradation_pct: Float,
+    status: Int
+};
+
+type SolarIrradiance = struct {
+    dni: Float,
+    dhi: Float,
+    ghi: Float,
+    sun_elevation_deg: Float,
+    sun_azimuth_deg: Float,
+    ambient_temp_c: Float,
+    cell_temp_c: Float,
+    wind_speed_ms: Float
+};
+
+pub fn pv_array_new(
+    id: Int,
+    peak_kw: Float,
+    panel_cnt: Int,
+    eff_pct: Float,
+    temp_coeff: Float,
+    noct: Float,
+    voc: Float,
+    isc: Float,
+    vmp: Float,
+    imp: Float,
+    tilt: Float,
+    azimuth: Float
+) -> PvArray {
+    return PvArray {
+        array_id: id,
+        peak_power_kw: peak_kw,
+        panel_count: panel_cnt,
+        efficiency_stc_pct: eff_pct,
+        temp_coeff_pmax_pct: temp_coeff,
+        noct_c: noct,
+        voc_stc: voc,
+        isc_stc: isc,
+        vmp_stc: vmp,
+        imp_stc: imp,
+        tilt_deg: tilt,
+        azimuth_deg: azimuth,
+        shading_factor: 1.0,
+        degradation_pct: 0.0,
+        status: 1
+    };
+}
+
+pub fn pv_array_default() -> PvArray {
+    return pv_array_new(1, 100.0, 250, 20.5, 0.0 - 0.35, 45.0, 48.5, 11.2, 40.2, 9.95, 30.0, 180.0);
+}
+
+pub fn solar_irradiance_stc() -> SolarIrradiance {
+    return SolarIrradiance {
+        dni: 900.0,
+        dhi: 100.0,
+        ghi: 1000.0,
+        sun_elevation_deg: 90.0,
+        sun_azimuth_deg: 180.0,
+        ambient_temp_c: 25.0,
+        cell_temp_c: 25.0,
+        wind_speed_ms: 1.0
+    };
+}
+
+pub fn solar_irradiance_plane_of_array(irrad: SolarIrradiance, tilt_deg: Float, azimuth_deg: Float) -> Float {
+    let elev: Float = irrad.sun_elevation_deg;
+    if elev <= 0.0 {
+        return 0.0;
+    }
+    let sun_az: Float = irrad.sun_azimuth_deg;
+    let az_diff_rad: Float = deg_to_rad(sun_az - azimuth_deg);
+    let tilt_rad: Float = deg_to_rad(tilt_deg);
+    let elev_rad: Float = deg_to_rad(elev);
+    let cos_incidence: Float = (sin(elev_rad) * cos(tilt_rad)) + ((cos(elev_rad) * sin(tilt_rad)) * cos(az_diff_rad));
+    let mut direct_poa: Float = irrad.dni * cos_incidence;
+    if direct_poa < 0.0 {
+        direct_poa = 0.0;
+    }
+    let diffuse_poa: Float = (irrad.dhi * (1.0 + cos(tilt_rad))) / 2.0;
+    let total_poa: Float = direct_poa + diffuse_poa;
+    if total_poa < 0.0 {
+        return 0.0;
+    }
+    return total_poa;
+}
+
+pub fn pv_array_calc_dc_power(array: PvArray, irrad: SolarIrradiance) -> Float {
+    if array.status == 0 {
+        return 0.0;
+    }
+    if array.status == 3 {
+        return 0.0;
+    }
+    let poa_irradiance: Float = solar_irradiance_plane_of_array(irrad, array.tilt_deg, array.azimuth_deg);
+    if poa_irradiance <= 0.0 {
+        return 0.0;
+    }
+    let cell_t: Float = irrad.cell_temp_c;
+    let delta_t: Float = cell_t - 25.0;
+    let temp_factor: Float = 1.0 + ((array.temp_coeff_pmax_pct / 100.0) * delta_t);
+    let irrad_factor: Float = poa_irradiance / 1000.0;
+    let shade_factor: Float = array.shading_factor;
+    let deg_factor: Float = 1.0 - (array.degradation_pct / 100.0);
+    let raw_dc_kw: Float = array.peak_power_kw * irrad_factor * temp_factor * shade_factor * deg_factor;
+    if raw_dc_kw < 0.0 {
+        return 0.0;
+    }
+    return raw_dc_kw;
+}
+
+pub fn pv_array_apply_degradation(array: PvArray, years: Int, annual_rate_pct: Float) -> PvArray {
+    let mut years_f: Float = 0.0;
+    let mut i: Int = 0;
+    while i < years {
+        years_f = years_f + 1.0;
+        i = i + 1;
+    }
+    let mut total_deg: Float = array.degradation_pct + (annual_rate_pct * years_f);
+    if total_deg > 80.0 {
+        total_deg = 80.0;
+    }
+    return PvArray {
+        array_id: array.array_id,
+        peak_power_kw: array.peak_power_kw,
+        panel_count: array.panel_count,
+        efficiency_stc_pct: array.efficiency_stc_pct,
+        temp_coeff_pmax_pct: array.temp_coeff_pmax_pct,
+        noct_c: array.noct_c,
+        voc_stc: array.voc_stc,
+        isc_stc: array.isc_stc,
+        vmp_stc: array.vmp_stc,
+        imp_stc: array.imp_stc,
+        tilt_deg: array.tilt_deg,
+        azimuth_deg: array.azimuth_deg,
+        shading_factor: array.shading_factor,
+        degradation_pct: total_deg,
+        status: array.status
+    };
+}
+
+pub fn pv_array_set_shading(array: PvArray, shading_factor: Float) -> PvArray {
+    let mut s: Float = shading_factor;
+    if s < 0.0 {
+        s = 0.0;
+    }
+    if s > 1.0 {
+        s = 1.0;
+    }
+    return PvArray {
+        array_id: array.array_id,
+        peak_power_kw: array.peak_power_kw,
+        panel_count: array.panel_count,
+        efficiency_stc_pct: array.efficiency_stc_pct,
+        temp_coeff_pmax_pct: array.temp_coeff_pmax_pct,
+        noct_c: array.noct_c,
+        voc_stc: array.voc_stc,
+        isc_stc: array.isc_stc,
+        vmp_stc: array.vmp_stc,
+        imp_stc: array.imp_stc,
+        tilt_deg: array.tilt_deg,
+        azimuth_deg: array.azimuth_deg,
+        shading_factor: s,
+        degradation_pct: array.degradation_pct,
+        status: array.status
+    };
+}
+
+pub fn pv_array_remaining_capacity_kw(array: PvArray) -> Float {
+    return array.peak_power_kw * (1.0 - (array.degradation_pct / 100.0));
+}

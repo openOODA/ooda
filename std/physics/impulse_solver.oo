@@ -1,0 +1,161 @@
+// # Sequential Impulse Resolution & Friction Solver
+//
+// Logline: Resolves contact normal impulses, Coulomb friction tangents, restitution bounces, and positional Baumgarte stabilization.
+//
+// Setup: Iterative projected Gauss-Seidel sequential impulse solver for rigid body contacts.
+//
+// Beats:
+//   1. Define ImpulseConfig, ContactConstraint2D, and ImpulseResult structures.
+//   2. Calculate effective mass, normal impulse magnitude, and restitution bias with Baumgarte stabilization.
+//   3. Clamp tangential friction impulses according to Coulomb friction cones (|J_t| <= mu * J_n).
+
+pub type ImpulseConfig = struct {
+    iterations: Int,
+    baumgarte_factor: Float,
+    penetration_slop: Float,
+    restitution_velocity_threshold: Float,
+};
+
+pub type ContactConstraint2D = struct {
+    normal_x: Float,
+    normal_y: Float,
+    tangent_x: Float,
+    tangent_y: Float,
+    r_a_x: Float,
+    r_a_y: Float,
+    r_b_x: Float,
+    r_b_y: Float,
+    inv_mass_a: Float,
+    inv_mass_b: Float,
+    inv_inertia_a: Float,
+    inv_inertia_b: Float,
+    friction: Float,
+    restitution: Float,
+    penetration: Float,
+    normal_mass: Float,
+    tangent_mass: Float,
+    normal_impulse_acc: Float,
+    tangent_impulse_acc: Float,
+};
+
+pub type ImpulsePairResult = struct {
+    normal_impulse: Float,
+    tangent_impulse: Float,
+};
+
+// -------------------------------------------------------------------
+// Constructors & Defaults
+// -------------------------------------------------------------------
+
+pub fn impulse_config_default() -> ImpulseConfig {
+    return ImpulseConfig {
+        iterations: 8,
+        baumgarte_factor: 0.2,
+        penetration_slop: 0.005,
+        restitution_velocity_threshold: 1.0,
+    };
+}
+
+pub fn contact_constraint_2d_new(
+    nx: Float, ny: Float,
+    rax: Float, ray: Float,
+    rbx: Float, rby: Float,
+    inv_ma: Float, inv_mb: Float,
+    inv_ia: Float, inv_ib: Float,
+    friction: Float,
+    restitution: Float,
+    penetration: Float
+) -> ContactConstraint2D {
+    // Tangent is perpendicular to normal: (-ny, nx)
+    let tx = -ny;
+    let ty = nx;
+
+    // Normal mass: 1 / (inv_ma + inv_mb + (rax*ny - ray*nx)^2 * inv_ia + (rbx*ny - rby*nx)^2 * inv_ib)
+    let rn_a = (rax * ny) - (ray * nx);
+    let rn_b = (rbx * ny) - (rby * nx);
+    let k_normal = inv_ma + inv_mb + (rn_a * rn_a * inv_ia) + (rn_b * rn_b * inv_ib);
+    let n_mass = if k_normal > 0.000001 { 1.0 / k_normal } else { 0.0 };
+
+    // Tangent mass: 1 / (inv_ma + inv_mb + (rax*ty - ray*tx)^2 * inv_ia + (rbx*ty - rby*tx)^2 * inv_ib)
+    let rt_a = (rax * ty) - (ray * tx);
+    let rt_b = (rbx * ty) - (rby * tx);
+    let k_tangent = inv_ma + inv_mb + (rt_a * rt_a * inv_ia) + (rt_b * rt_b * inv_ib);
+    let t_mass = if k_tangent > 0.000001 { 1.0 / k_tangent } else { 0.0 };
+
+    return ContactConstraint2D {
+        normal_x: nx,
+        normal_y: ny,
+        tangent_x: tx,
+        tangent_y: ty,
+        r_a_x: rax,
+        r_a_y: ray,
+        r_b_x: rbx,
+        r_b_y: rby,
+        inv_mass_a: inv_ma,
+        inv_mass_b: inv_mb,
+        inv_inertia_a: inv_ia,
+        inv_inertia_b: inv_ib,
+        friction: friction,
+        restitution: restitution,
+        penetration: penetration,
+        normal_mass: n_mass,
+        tangent_mass: t_mass,
+        normal_impulse_acc: 0.0,
+        tangent_impulse_acc: 0.0,
+    };
+}
+
+// -------------------------------------------------------------------
+// Impulse Solving
+// -------------------------------------------------------------------
+
+pub fn impulse_solve_contact_2d(
+    c: ContactConstraint2D,
+    v_rel_x: Float,
+    v_rel_y: Float,
+    cfg: ImpulseConfig,
+    dt: Float
+) -> ImpulsePairResult {
+    // Relative velocity projected onto normal
+    let v_normal = (v_rel_x * (c).normal_x) + (v_rel_y * (c).normal_y);
+
+    // Baumgarte position stabilization bias
+    let mut bias = 0.0;
+    if (c).penetration > (cfg).penetration_slop && dt > 0.000001 {
+        let excess_pen = (c).penetration - (cfg).penetration_slop;
+        bias = ((cfg).baumgarte_factor / dt) * excess_pen;
+    }
+
+    // Restitution velocity bias
+    if v_normal < -(cfg).restitution_velocity_threshold {
+        bias = bias - ((c).restitution * v_normal);
+    }
+
+    // Compute raw normal impulse: - (v_normal - bias) * normal_mass
+    let raw_jn = (- (v_normal - bias)) * (c).normal_mass;
+    let old_jn = (c).normal_impulse_acc;
+    let mut new_jn = old_jn + raw_jn;
+    if new_jn < 0.0 {
+        new_jn = 0.0;
+    }
+    let delta_jn = new_jn - old_jn;
+
+    // Relative velocity projected onto tangent
+    let v_tangent = (v_rel_x * (c).tangent_x) + (v_rel_y * (c).tangent_y);
+    let raw_jt = (- v_tangent) * (c).tangent_mass;
+    let max_friction = (c).friction * new_jn;
+
+    let old_jt = (c).tangent_impulse_acc;
+    let mut new_jt = old_jt + raw_jt;
+    if new_jt < -max_friction {
+        new_jt = -max_friction;
+    } else if new_jt > max_friction {
+        new_jt = max_friction;
+    }
+    let delta_jt = new_jt - old_jt;
+
+    return ImpulsePairResult {
+        normal_impulse: delta_jn,
+        tangent_impulse: delta_jt,
+    };
+}

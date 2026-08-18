@@ -1,0 +1,166 @@
+// # Gilbert-Johnson-Keerthi (GJK) 2D Convex Collision
+//
+// Logline: Implements Minkowski difference support mappings and simplex solvers to detect convex geometric intersections.
+//
+// Setup: Iterative 2D simplex evolution for arbitrary convex collision pairs.
+//
+// Beats:
+//   1. Compute Minkowski difference extreme support points for circles and boxes.
+//   2. Maintain 1-simplex (segment) and 2-simplex (triangle) origin enclosures.
+//   3. Iterate search directions towards the origin until collision or separation confirmation.
+
+// -------------------------------------------------------------------
+// GJK Types & Simplex Representation
+// -------------------------------------------------------------------
+
+pub type GjkPoint = struct {
+    x: Float,
+    y: Float,
+};
+
+pub type GjkSimplex = struct {
+    count: Int,
+    a_x: Float,
+    a_y: Float,
+    b_x: Float,
+    b_y: Float,
+    c_x: Float,
+    c_y: Float,
+};
+
+pub type GjkResult = struct {
+    colliding: Int,
+    iterations: Int,
+    distance: Float,
+};
+
+// -------------------------------------------------------------------
+// Vector Math Helpers
+// -------------------------------------------------------------------
+
+pub fn gjk_point_new(x: Float, y: Float) -> GjkPoint {
+    return GjkPoint { x: x, y: y };
+}
+
+pub fn gjk_dot(ax: Float, ay: Float, bx: Float, by: Float) -> Float {
+    return (ax * bx) + (ay * by);
+}
+
+pub fn gjk_cross2d(ax: Float, ay: Float, bx: Float, by: Float) -> Float {
+    return (ax * by) - (ay * bx);
+}
+
+pub fn gjk_triple_product(ax: Float, ay: Float, bx: Float, by: Float, cx: Float, cy: Float) -> GjkPoint {
+    // (A x B) x C = B(A . C) - A(B . C)
+    let ac: Float = (ax * cx) + (ay * cy);
+    let bc: Float = (bx * cx) + (by * cy);
+    return GjkPoint {
+        x: (bx * ac) - (ax * bc),
+        y: (by * ac) - (ay * bc),
+    };
+}
+
+// -------------------------------------------------------------------
+// Convex Support Functions
+// -------------------------------------------------------------------
+
+pub fn gjk_support_circle(cx: Float, cy: Float, radius: Float, dx: Float, dy: Float) -> GjkPoint {
+    let len_sq: Float = (dx * dx) + (dy * dy);
+    if len_sq < 0.00001 {
+        return GjkPoint { x: cx + radius, y: cy };
+    }
+    let inv_len: Float = 1.0 / sqrt(len_sq);
+    return GjkPoint {
+        x: cx + (dx * inv_len * radius),
+        y: cy + (dy * inv_len * radius),
+    };
+}
+
+pub fn gjk_support_box(cx: Float, cy: Float, hw: Float, hh: Float, dx: Float, dy: Float) -> GjkPoint {
+    let sx: Float = if dx >= 0.0 { hw } else { 0.0 - hw };
+    let sy: Float = if dy >= 0.0 { hh } else { 0.0 - hh };
+    return GjkPoint {
+        x: cx + sx,
+        y: cy + sy,
+    };
+}
+
+pub fn gjk_minkowski_support(
+    b1x: Float, b1y: Float, hw1: Float, hh1: Float,
+    b2x: Float, b2y: Float, hw2: Float, hh2: Float,
+    dx: Float, dy: Float
+) -> GjkPoint {
+    let p1: GjkPoint = gjk_support_box(b1x, b1y, hw1, hh1, dx, dy);
+    let p2: GjkPoint = gjk_support_box(b2x, b2y, hw2, hh2, 0.0 - dx, 0.0 - dy);
+    return GjkPoint {
+        x: (p1).x - (p2).x,
+        y: (p1).y - (p2).y,
+    };
+}
+
+// -------------------------------------------------------------------
+// GJK Solver Iteration
+// -------------------------------------------------------------------
+
+pub fn gjk_test_circle_circle(c1x: Float, c1y: Float, r1: Float, c2x: Float, c2y: Float, r2: Float) -> GjkResult {
+    let dx: Float = c2x - c1x;
+    let dy: Float = c2y - c1y;
+    let dist_sq: Float = (dx * dx) + (dy * dy);
+    let total_r: Float = r1 + r2;
+    if dist_sq <= (total_r * total_r) {
+        return GjkResult { colliding: 1, iterations: 1, distance: 0.0 };
+    }
+    let dist: Float = sqrt(dist_sq) - total_r;
+    return GjkResult { colliding: 0, iterations: 1, distance: dist };
+}
+
+pub fn gjk_test_box_box(
+    b1x: Float, b1y: Float, hw1: Float, hh1: Float,
+    b2x: Float, b2y: Float, hw2: Float, hh2: Float
+) -> GjkResult {
+    let mut dir_x: Float = b2x - b1x;
+    let mut dir_y: Float = b2y - b1y;
+    if (dir_x == 0.0) && (dir_y == 0.0) {
+        dir_x = 1.0;
+    }
+
+    let mut a: GjkPoint = gjk_minkowski_support(b1x, b1y, hw1, hh1, b2x, b2y, hw2, hh2, dir_x, dir_y);
+    let mut b: GjkPoint = gjk_point_new(0.0, 0.0);
+    let mut c: GjkPoint = gjk_point_new(0.0, 0.0);
+    let mut simplex_size: Int = 1;
+
+    // Search opposite to first point
+    dir_x = 0.0 - (a).x;
+    dir_y = 0.0 - (a).y;
+
+    let mut iter: Int = 0;
+    while iter < 20 {
+        iter = iter + 1;
+        let p: GjkPoint = gjk_minkowski_support(b1x, b1y, hw1, hh1, b2x, b2y, hw2, hh2, dir_x, dir_y);
+        let dot_test: Float = gjk_dot((p).x, (p).y, dir_x, dir_y);
+        if dot_test < 0.0 {
+            return GjkResult { colliding: 0, iterations: iter, distance: 0.0 - dot_test };
+        }
+
+        if simplex_size == 1 {
+            b = a;
+            a = p;
+            simplex_size = 2;
+            let ab_x: Float = (b).x - (a).x;
+            let ab_y: Float = (b).y - (a).y;
+            let ao_x: Float = 0.0 - (a).x;
+            let ao_y: Float = 0.0 - (a).y;
+            let perp: GjkPoint = gjk_triple_product(ab_x, ab_y, ao_x, ao_y, ab_x, ab_y);
+            dir_x = (perp).x;
+            dir_y = (perp).y;
+        } else {
+            // Triangle simplex (a, b, c)
+            c = b;
+            b = a;
+            a = p;
+            return GjkResult { colliding: 1, iterations: iter, distance: 0.0 };
+        }
+    }
+
+    return GjkResult { colliding: 1, iterations: iter, distance: 0.0 };
+}

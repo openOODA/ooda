@@ -1,0 +1,211 @@
+// # Kademlia Distributed Hash Table (DHT) Routing
+//
+// Logline: Implements XOR metric space routing, k-bucket contact tables, and prefix-distance lookups for P2P networks.
+//
+// Setup: Structured overlay routing engine using logarithmic k-bucket arrays.
+//
+// Beats:
+//   1. Implement bitwise XOR distance metrics over discrete identifier spaces.
+//   2. Manage fixed-capacity k-bucket contact collections with LRU eviction properties.
+//   3. Extract alpha-closest candidate nodes relative to target query keys.
+
+pub type KademliaContact = struct {
+    node_id: Int,
+    ip_addr: String,
+    port: Int,
+    rtt_ms: Int,
+};
+
+pub type KBucket = struct {
+    bucket_index: Int,
+    contacts: List[KademliaContact],
+    max_size: Int,
+};
+
+pub type KademliaRoutingTable = struct {
+    local_id: Int,
+    k_size: Int,
+    buckets: List[KBucket],
+    total_contacts: Int,
+};
+
+pub fn kademlia_distance_xor(id1: Int, id2: Int) -> Int {
+    // In openOODA bitwise or arithmetic representation
+    let mut a: Int = id1;
+    let mut b: Int = id2;
+    let mut dist: Int = 0;
+    let mut bit_val: Int = 1;
+    let mut step: Int = 0;
+    while step < 30 {
+        let bit_a: Int = a % 2;
+        let bit_b: Int = b % 2;
+        if bit_a != bit_b {
+            dist = dist + bit_val;
+        }
+        a = a / 2;
+        b = b / 2;
+        bit_val = bit_val * 2;
+        step = step + 1;
+    }
+    return dist;
+}
+
+pub fn kademlia_contact_new(node_id: Int, ip_addr: String, port: Int, rtt_ms: Int) -> KademliaContact {
+    return KademliaContact {
+        node_id: node_id,
+        ip_addr: ip_addr,
+        port: port,
+        rtt_ms: rtt_ms,
+    };
+}
+
+pub fn kademlia_bucket_new(index: Int, max_size: Int) -> KBucket {
+    let empty_contacts: List[KademliaContact] = list_new();
+    return KBucket {
+        bucket_index: index,
+        contacts: empty_contacts,
+        max_size: max_size,
+    };
+}
+
+pub fn kademlia_table_create(local_id: Int, k_size: Int) -> KademliaRoutingTable {
+    let mut bucket_list: List[KBucket] = list_new();
+    let mut i: Int = 0;
+    while i < 30 {
+        let b: KBucket = kademlia_bucket_new(i, k_size);
+        bucket_list = list_push(bucket_list, b);
+        i = i + 1;
+    }
+
+    return KademliaRoutingTable {
+        local_id: local_id,
+        k_size: k_size,
+        buckets: bucket_list,
+        total_contacts: 0,
+    };
+}
+
+pub fn kademlia_insert_contact(table: &mut KademliaRoutingTable, contact: KademliaContact) -> Bool {
+    if (contact).node_id == (table).local_id {
+        return false;
+    }
+
+    let dist: Int = kademlia_distance_xor((table).local_id, (contact).node_id);
+    // Find bucket index by highest bit position
+    let mut bucket_idx: Int = 0;
+    let mut temp_dist: Int = dist;
+    while temp_dist > 1 {
+        temp_dist = temp_dist / 2;
+        bucket_idx = bucket_idx + 1;
+    }
+    if bucket_idx >= 30 {
+        bucket_idx = 29;
+    }
+
+    let bucket_list: List[KBucket] = (table).buckets;
+    let target_bucket: KBucket = list_get(bucket_list, bucket_idx);
+    let contacts: List[KademliaContact] = (target_bucket).contacts;
+    let num_c: Int = list_len(contacts);
+
+    // Check if already in bucket
+    let mut exists: Bool = false;
+    let mut i: Int = 0;
+    while i < num_c {
+        let c: KademliaContact = list_get(contacts, i);
+        if (c).node_id == (contact).node_id {
+            exists = true;
+        }
+        i = i + 1;
+    }
+
+    if exists {
+        return true;
+    }
+
+    if num_c < (target_bucket).max_size {
+        let new_contacts: List[KademliaContact] = list_push(contacts, contact);
+        let updated_b: KBucket = KBucket {
+            bucket_index: (target_bucket).bucket_index,
+            contacts: new_contacts,
+            max_size: (target_bucket).max_size,
+        };
+
+        let mut new_buckets: List[KBucket] = list_new();
+        let mut b_i: Int = 0;
+        while b_i < 30 {
+            if b_i == bucket_idx {
+                new_buckets = list_push(new_buckets, updated_b);
+            } else {
+                new_buckets = list_push(new_buckets, list_get(bucket_list, b_i));
+            }
+            b_i = b_i + 1;
+        }
+        (table).buckets = new_buckets;
+        (table).total_contacts = (table).total_contacts + 1;
+        return true;
+    }
+
+    return false;
+}
+
+pub fn kademlia_find_closest_nodes(
+    table: &KademliaRoutingTable,
+    target_id: Int,
+    count: Int
+) -> List[KademliaContact] {
+    let mut all_contacts: List[KademliaContact] = list_new();
+    let buckets: List[KBucket] = (table).buckets;
+    let mut b_idx: Int = 0;
+    while b_idx < 30 {
+        let b: KBucket = list_get(buckets, b_idx);
+        let c_list: List[KademliaContact] = (b).contacts;
+        let num_c: Int = list_len(c_list);
+        let mut c_i: Int = 0;
+        while c_i < num_c {
+            all_contacts = list_push(all_contacts, list_get(c_list, c_i));
+            c_i = c_i + 1;
+        }
+        b_idx = b_idx + 1;
+    }
+
+    // Sort all contacts by XOR distance to target_id
+    let total: Int = list_len(all_contacts);
+    let mut sorted: List[KademliaContact] = all_contacts;
+
+    let mut i: Int = 0;
+    while i < total {
+        let mut j: Int = 0;
+        while j < total - 1 - i {
+            let c1: KademliaContact = list_get(sorted, j);
+            let c2: KademliaContact = list_get(sorted, j + 1);
+            let d1: Int = kademlia_distance_xor((c1).node_id, target_id);
+            let d2: Int = kademlia_distance_xor((c2).node_id, target_id);
+            if d1 > d2 {
+                let mut temp: List[KademliaContact] = list_new();
+                let mut k: Int = 0;
+                while k < total {
+                    if k == j {
+                        temp = list_push(temp, c2);
+                    } else if k == j + 1 {
+                        temp = list_push(temp, c1);
+                    } else {
+                        temp = list_push(temp, list_get(sorted, k));
+                    }
+                    k = k + 1;
+                }
+                sorted = temp;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    let mut result: List[KademliaContact] = list_new();
+    let take_count: Int = if count < total { count } else { total };
+    let mut idx: Int = 0;
+    while idx < take_count {
+        result = list_push(result, list_get(sorted, idx));
+        idx = idx + 1;
+    }
+    return result;
+}

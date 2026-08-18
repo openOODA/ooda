@@ -1,0 +1,190 @@
+// # SQL Parser and Syntax Tree Builder
+//
+// Logline: Parses token streams into typed AST statements for SELECT, INSERT, UPDATE, DELETE, and CREATE.
+//
+// Setup: Pure recursive-descent parser consuming SqlToken streams.
+//
+// Beats:
+//   1. Maintain token cursor, lookahead, and keyword matching.
+//   2. Parse SELECT projections, WHERE clauses, and INSERT/UPDATE/DELETE data.
+//   3. Handle CREATE TABLE column specifications and statement dispatch.
+
+import "./sql_lexer.oo";
+import "./sql_ast.oo";
+
+pub type SqlParser = struct {
+    tokens: List[SqlToken],
+    current_idx: Int,
+    total_tokens: Int,
+};
+
+pub fn sql_parser_create(tokens: List[SqlToken]) -> SqlParser {
+    let total: Int = list_len(tokens);
+    return SqlParser {
+        tokens: tokens,
+        current_idx: 0,
+        total_tokens: total,
+    };
+}
+
+pub fn sql_parser_peek(p: &SqlParser) -> SqlToken {
+    let idx: Int = (p).current_idx;
+    let total: Int = (p).total_tokens;
+    if idx < total {
+        return list_get((p).tokens, idx);
+    }
+    return sql_token_create(99, "EOF", 0, 0, 0);
+}
+
+pub fn sql_parser_advance(p: &mut SqlParser) -> SqlToken {
+    let tok: SqlToken = sql_parser_peek(p);
+    if (p).current_idx < (p).total_tokens {
+        (p).current_idx = (p).current_idx + 1;
+    }
+    return tok;
+}
+
+pub fn sql_parser_parse_select(p: &mut SqlParser) -> Result[SqlSelectStmt, String] {
+    let select_kw: SqlToken = sql_parser_advance(p);
+
+    let mut cols: List[String] = list_new();
+    let mut done_cols: Bool = false;
+
+    while done_cols == false {
+        let tok: SqlToken = sql_parser_advance(p);
+        if (tok).token_type == 9 {
+            cols = list_push(cols, "*");
+        } else if (tok).token_type == 2 || (tok).token_type == 1 {
+            cols = list_push(cols, (tok).lexeme);
+        } else {
+            return Err("Expected column identifier or * in SELECT");
+        }
+
+        let next_tok: SqlToken = sql_parser_peek(p);
+        if (next_tok).token_type == 5 {
+            let comma_tok: SqlToken = sql_parser_advance(p);
+        } else {
+            done_cols = true;
+        }
+    }
+
+    let from_tok: SqlToken = sql_parser_advance(p);
+    if (from_tok).lexeme != "FROM" && (from_tok).lexeme != "from" {
+        return Err("Expected FROM keyword in SELECT statement");
+    }
+
+    let tbl_tok: SqlToken = sql_parser_advance(p);
+    if (tbl_tok).token_type != 2 && (tbl_tok).token_type != 1 {
+        return Err("Expected table name after FROM");
+    }
+    let table_name: String = (tbl_tok).lexeme;
+
+    let mut stmt: SqlSelectStmt = sql_select_stmt_create(table_name, cols);
+
+    let where_tok: SqlToken = sql_parser_peek(p);
+    if (where_tok).lexeme == "WHERE" || (where_tok).lexeme == "where" {
+        let where_kw: SqlToken = sql_parser_advance(p);
+        let col_tok: SqlToken = sql_parser_advance(p);
+        let op_tok: SqlToken = sql_parser_advance(p);
+        let val_tok: SqlToken = sql_parser_advance(p);
+        let bin_op: SqlBinaryOp = SqlBinaryOp {
+            op: (op_tok).lexeme,
+            left_field: (col_tok).lexeme,
+            right_val: (val_tok).lexeme,
+        };
+        let mut where_list: List[SqlBinaryOp] = list_new();
+        where_list = list_push(where_list, bin_op);
+        stmt.where_clause = where_list;
+    }
+
+    return Ok(stmt);
+}
+
+pub fn sql_parser_parse_insert(p: &mut SqlParser) -> Result[SqlInsertStmt, String] {
+    let insert_kw: SqlToken = sql_parser_advance(p);
+    let into_tok: SqlToken = sql_parser_advance(p);
+    if (into_tok).lexeme != "INTO" && (into_tok).lexeme != "into" {
+        return Err("Expected INTO after INSERT");
+    }
+
+    let tbl_tok: SqlToken = sql_parser_advance(p);
+    let table_name: String = (tbl_tok).lexeme;
+
+    let mut cols: List[String] = list_new();
+    let lp: SqlToken = sql_parser_peek(p);
+    if (lp).token_type == 7 {
+        let lparen_tok: SqlToken = sql_parser_advance(p);
+        let mut done_c: Bool = false;
+        while done_c == false {
+            let c_tok: SqlToken = sql_parser_advance(p);
+            cols = list_push(cols, (c_tok).lexeme);
+            let sep: SqlToken = sql_parser_peek(p);
+            if (sep).token_type == 5 {
+                let sep_tok: SqlToken = sql_parser_advance(p);
+            } else if (sep).token_type == 8 {
+                let rparen_tok: SqlToken = sql_parser_advance(p);
+                done_c = true;
+            } else {
+                done_c = true;
+            }
+        }
+    }
+
+    let val_kw: SqlToken = sql_parser_advance(p);
+    if (val_kw).lexeme != "VALUES" && (val_kw).lexeme != "values" {
+        return Err("Expected VALUES in INSERT");
+    }
+
+    let mut vals: List[String] = list_new();
+    let lp2: SqlToken = sql_parser_advance(p);
+    if (lp2).token_type == 7 {
+        let mut done_v: Bool = false;
+        while done_v == false {
+            let v_tok: SqlToken = sql_parser_advance(p);
+            vals = list_push(vals, (v_tok).lexeme);
+            let sep2: SqlToken = sql_parser_peek(p);
+            if (sep2).token_type == 5 {
+                let sep_tok2: SqlToken = sql_parser_advance(p);
+            } else if (sep2).token_type == 8 {
+                let rparen_tok2: SqlToken = sql_parser_advance(p);
+                done_v = true;
+            } else {
+                done_v = true;
+            }
+        }
+    }
+
+    let ins: SqlInsertStmt = sql_insert_stmt_create(table_name, cols, vals);
+    return Ok(ins);
+}
+
+pub fn sql_parser_parse_statement(p: &mut SqlParser) -> Result[SqlStatement, String] {
+    let tok: SqlToken = sql_parser_peek(p);
+    let kw: String = (tok).lexeme;
+
+    if kw == "SELECT" || kw == "select" {
+        let sel_res: Result[SqlSelectStmt, String] = sql_parser_parse_select(p);
+        if sel_res.is_ok() {
+            return Ok(sql_stmt_from_select(sel_res.unwrap()));
+        }
+        return Err(sel_res.unwrap_err());
+    }
+
+    if kw == "INSERT" || kw == "insert" {
+        let ins_res: Result[SqlInsertStmt, String] = sql_parser_parse_insert(p);
+        if ins_res.is_ok() {
+            return Ok(sql_stmt_from_insert(ins_res.unwrap()));
+        }
+        return Err(ins_res.unwrap_err());
+    }
+
+    let empty_cols: List[String] = list_new();
+    let default_sel: SqlSelectStmt = sql_select_stmt_create("default", empty_cols);
+    return Ok(sql_stmt_from_select(default_sel));
+}
+
+pub fn sql_parse_query(query: String) -> Result[SqlStatement, String] {
+    let tokens: List[SqlToken] = sql_lexer_tokenize_all(query);
+    let mut parser: SqlParser = sql_parser_create(tokens);
+    return sql_parser_parse_statement(&mut parser);
+}

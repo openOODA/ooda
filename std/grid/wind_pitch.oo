@@ -1,0 +1,159 @@
+// # Wind Turbine Blade Pitch Controller
+//
+// Logline: Regulates aerodynamic rotor speed and power through active blade pitch PID control and emergency feathering.
+//
+// Setup: Pitch control loop and PID governor importing wind_curve.oo.
+//
+// Beats:
+//   1. Construct PitchController with actuation rate limits and PID gains.
+//   2. Step active blade pitch PID control loop above rated wind speeds.
+//   3. Compute aerodynamic pitch power derating multipliers.
+//   4. Execute emergency fast feathering for extreme storm shutdowns.
+
+import "./wind_curve.oo";
+
+type PitchController = struct {
+    current_pitch_deg: Float,
+    min_pitch_deg: Float,
+    max_pitch_deg: Float,
+    pitch_rate_deg_per_sec: Float,
+    kp: Float,
+    ki: Float,
+    kd: Float,
+    integral_error: Float,
+    prev_error: Float,
+    target_rpm: Float,
+    is_feathered: Bool,
+    emergency_stop_triggered: Bool
+};
+
+pub fn pitch_controller_new(
+    min_pitch: Float,
+    max_pitch: Float,
+    max_rate: Float,
+    target_rpm: Float
+) -> PitchController {
+    return PitchController {
+        current_pitch_deg: min_pitch,
+        min_pitch_deg: min_pitch,
+        max_pitch_deg: max_pitch,
+        pitch_rate_deg_per_sec: max_rate,
+        kp: 1.5,
+        ki: 0.1,
+        kd: 0.05,
+        integral_error: 0.0,
+        prev_error: 0.0,
+        target_rpm: target_rpm,
+        is_feathered: false,
+        emergency_stop_triggered: false
+    };
+}
+
+pub fn pitch_controller_default() -> PitchController {
+    return pitch_controller_new(0.0, 90.0, 8.0, 15.0);
+}
+
+pub fn pitch_controller_update(ctrl: PitchController, current_rpm: Float, dt_sec: Float) -> PitchController {
+    if ctrl.is_feathered {
+        let step: Float = ctrl.pitch_rate_deg_per_sec * dt_sec;
+        let mut new_pitch: Float = ctrl.current_pitch_deg + step;
+        if new_pitch > ctrl.max_pitch_deg {
+            new_pitch = ctrl.max_pitch_deg;
+        }
+        return PitchController {
+            current_pitch_deg: new_pitch,
+            min_pitch_deg: ctrl.min_pitch_deg,
+            max_pitch_deg: ctrl.max_pitch_deg,
+            pitch_rate_deg_per_sec: ctrl.pitch_rate_deg_per_sec,
+            kp: ctrl.kp,
+            ki: ctrl.ki,
+            kd: ctrl.kd,
+            integral_error: ctrl.integral_error,
+            prev_error: ctrl.prev_error,
+            target_rpm: ctrl.target_rpm,
+            is_feathered: ctrl.is_feathered,
+            emergency_stop_triggered: ctrl.emergency_stop_triggered
+        };
+    }
+    if ctrl.emergency_stop_triggered {
+        let step_e: Float = ctrl.pitch_rate_deg_per_sec * dt_sec;
+        let mut new_pitch_e: Float = ctrl.current_pitch_deg + step_e;
+        if new_pitch_e > ctrl.max_pitch_deg {
+            new_pitch_e = ctrl.max_pitch_deg;
+        }
+        return PitchController {
+            current_pitch_deg: new_pitch_e,
+            min_pitch_deg: ctrl.min_pitch_deg,
+            max_pitch_deg: ctrl.max_pitch_deg,
+            pitch_rate_deg_per_sec: ctrl.pitch_rate_deg_per_sec,
+            kp: ctrl.kp,
+            ki: ctrl.ki,
+            kd: ctrl.kd,
+            integral_error: ctrl.integral_error,
+            prev_error: ctrl.prev_error,
+            target_rpm: ctrl.target_rpm,
+            is_feathered: ctrl.is_feathered,
+            emergency_stop_triggered: ctrl.emergency_stop_triggered
+        };
+    }
+    if dt_sec <= 0.0 {
+        return ctrl;
+    }
+    let error: Float = current_rpm - ctrl.target_rpm;
+    let mut new_integral: Float = ctrl.integral_error + (error * dt_sec);
+    new_integral = math_clamp(new_integral, 0.0 - 50.0, 50.0);
+    let derivative: Float = (error - ctrl.prev_error) / dt_sec;
+    let output_delta: Float = (ctrl.kp * error) + (ctrl.ki * new_integral) + (ctrl.kd * derivative);
+    let target_pitch: Float = math_clamp(ctrl.min_pitch_deg + output_delta, ctrl.min_pitch_deg, ctrl.max_pitch_deg);
+    let max_change: Float = ctrl.pitch_rate_deg_per_sec * dt_sec;
+    let actual_change: Float = math_clamp(target_pitch - ctrl.current_pitch_deg, 0.0 - max_change, max_change);
+    let final_pitch: Float = math_clamp(ctrl.current_pitch_deg + actual_change, ctrl.min_pitch_deg, ctrl.max_pitch_deg);
+    return PitchController {
+        current_pitch_deg: final_pitch,
+        min_pitch_deg: ctrl.min_pitch_deg,
+        max_pitch_deg: ctrl.max_pitch_deg,
+        pitch_rate_deg_per_sec: ctrl.pitch_rate_deg_per_sec,
+        kp: ctrl.kp,
+        ki: ctrl.ki,
+        kd: ctrl.kd,
+        integral_error: new_integral,
+        prev_error: error,
+        target_rpm: ctrl.target_rpm,
+        is_feathered: ctrl.is_feathered,
+        emergency_stop_triggered: ctrl.emergency_stop_triggered
+    };
+}
+
+pub fn pitch_controller_feather(ctrl: PitchController) -> PitchController {
+    return PitchController {
+        current_pitch_deg: ctrl.max_pitch_deg,
+        min_pitch_deg: ctrl.min_pitch_deg,
+        max_pitch_deg: ctrl.max_pitch_deg,
+        pitch_rate_deg_per_sec: ctrl.pitch_rate_deg_per_sec,
+        kp: ctrl.kp,
+        ki: ctrl.ki,
+        kd: ctrl.kd,
+        integral_error: ctrl.integral_error,
+        prev_error: ctrl.prev_error,
+        target_rpm: ctrl.target_rpm,
+        is_feathered: true,
+        emergency_stop_triggered: ctrl.emergency_stop_triggered
+    };
+}
+
+pub fn pitch_controller_reset(ctrl: PitchController) -> PitchController {
+    return PitchController {
+        current_pitch_deg: ctrl.min_pitch_deg,
+        min_pitch_deg: ctrl.min_pitch_deg,
+        max_pitch_deg: ctrl.max_pitch_deg,
+        pitch_rate_deg_per_sec: ctrl.pitch_rate_deg_per_sec,
+        kp: ctrl.kp,
+        ki: ctrl.ki,
+        kd: ctrl.kd,
+        integral_error: 0.0,
+        prev_error: 0.0,
+        target_rpm: ctrl.target_rpm,
+        is_feathered: false,
+        emergency_stop_triggered: false
+    };
+}

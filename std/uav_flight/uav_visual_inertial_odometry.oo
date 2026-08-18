@@ -1,0 +1,101 @@
+// # UAV Visual-Inertial Odometry (VIO) & MSCKF Feature Fusion
+//
+// Logline: Multi-State Constraint Kalman Filter (MSCKF) feature reprojection residual and camera pose sliding window management.
+//
+// Setup: High-accuracy GPS-denied visual SLAM fusing monocular / stereo visual keypoints with high-rate inertial propagation.
+//
+// Beats:
+//   1. Define Camera Intrinsic Parameters (fx, fy, cx, cy, baseline).
+//   2. Define Visual Feature Measurement (normalized pixel coordinates u, v, feature ID).
+//   3. Compute Camera Reprojection Residual: r = z_measured - h(T_wc, p_feature).
+//   4. Calculate Feature Triangulation depth and Mahalanobis outlier rejection threshold.
+
+import "./uav_coordinate_frames.oo";
+import "./uav_so3_rotation_matrix.oo";
+import "./uav_se3_rigid_body.oo";
+
+pub type CameraIntrinsics = struct {
+    fx: Float,
+    fy: Float,
+    cx: Float,
+    cy: Float,
+    image_width: Float,
+    image_height: Float,
+};
+
+pub type FeatureObservation = struct {
+    u_px: Float,
+    v_px: Float,
+    feature_id: Int,
+};
+
+pub type ReprojectionResidual = struct {
+    res_u: Float,
+    res_v: Float,
+    chi2_dist: Float,
+    is_inlier: Bool,
+};
+
+pub fn camera_intrinsics_default() -> CameraIntrinsics {
+    return CameraIntrinsics {
+        fx: 460.0,
+        fy: 460.0,
+        cx: 320.0,
+        cy: 240.0,
+        image_width: 640.0,
+        image_height: 480.0,
+    };
+}
+
+pub fn project_3d_to_pixel(
+    cam: &CameraIntrinsics,
+    pt_cam: &Vector3D
+) -> Vector3D { // returns x: u_px, y: v_px, z: depth
+    let z: Float = (pt_cam).z;
+    if z < 0.1 {
+        return Vector3D { x: 0.0, y: 0.0, z: 0.0 };
+    }
+
+    let u: Float = ((cam).fx * ((pt_cam).x / z)) + (cam).cx;
+    let v: Float = ((cam).fy * ((pt_cam).y / z)) + (cam).cy;
+
+    return Vector3D { x: u, y: v, z: z };
+}
+
+pub fn compute_reprojection_residual(
+    cam: &CameraIntrinsics,
+    t_world_cam: &Transform4x4,
+    feature_world: &Vector3D,
+    meas: &FeatureObservation
+) -> ReprojectionResidual {
+    // 1. Transform 3D world feature to camera frame: p_cam = T_cw * p_world
+    let t_cam_world: Transform4x4 = tf_inverse(t_world_cam);
+    let p_cam: Vector3D = tf_transform_point(&t_cam_world, feature_world);
+
+    if p_cam.z < 0.1 {
+        return ReprojectionResidual {
+            res_u: 0.0, res_v: 0.0, chi2_dist: 999.0, is_inlier: false,
+        };
+    }
+
+    // 2. Project to pixel plane
+    let proj: Vector3D = project_3d_to_pixel(cam, &p_cam);
+
+    // 3. Compute residual: r = meas - proj
+    let ru: Float = (meas).u_px - proj.x;
+    let rv: Float = (meas).v_px - proj.y;
+
+    // Standard camera noise sigma approx 1.5 pixels
+    let sigma_sq: Float = 2.25;
+    let chi2: Float = ((ru * ru) + (rv * rv)) / sigma_sq;
+
+    // Chi-squared 2-DOF 95% threshold = 5.991
+    let inlier: Bool = chi2 < 5.991;
+
+    return ReprojectionResidual {
+        res_u: ru,
+        res_v: rv,
+        chi2_dist: chi2,
+        is_inlier: inlier,
+    };
+}

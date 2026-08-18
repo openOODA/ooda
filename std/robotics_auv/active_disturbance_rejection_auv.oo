@@ -1,0 +1,90 @@
+// # Active Disturbance Rejection Control (ADRC) & Extended State Observer (ESO)
+//
+// Logline: Estimates and actively cancels lumped unknown hydrodynamic drag, unmodeled damping, and ocean currents in real time.
+//
+// Setup: Linear Extended State Observer (LESO) rejecting total external disturbances without requiring precise hydrodynamic plant models.
+//
+// Beats:
+//   1. Define LESO bandwidth parameters (observer bandwidth omega_o, controller bandwidth omega_c, gain factor b0).
+//   2. Propagate 2nd-order extended state observer estimating velocity state z1 and lumped disturbance z2.
+//   3. Compute feedback tracking error on filtered state.
+//   4. Deliver active disturbance rejection control command u = (u0 - z2) / b0.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type AdrcConfig = struct {
+    omega_o_observer_bw: Float,
+    omega_c_controller_bw: Float,
+    b0_control_gain: Float,
+    max_control_effort: Float,
+};
+
+pub type LesoState = struct {
+    z1_est_state: Float,
+    z2_est_disturbance: Float,
+};
+
+pub type AdrcStepResult = struct {
+    new_state: LesoState,
+    control_output: Float,
+    estimated_disturbance: Float,
+};
+
+pub fn adrc_config_default_surge() -> AdrcConfig {
+    return AdrcConfig {
+        omega_o_observer_bw: 20.0,
+        omega_c_controller_bw: 4.0,
+        b0_control_gain: 0.033, // 1 / m_total (~1 / 30 kg)
+        max_control_effort: 80.0,
+    };
+}
+
+pub fn leso_state_init(init_val: Float) -> LesoState {
+    return LesoState {
+        z1_est_state: init_val,
+        z2_est_disturbance: 0.0,
+    };
+}
+
+pub fn adrc_step(
+    cfg: &AdrcConfig,
+    state: &LesoState,
+    measured_y: Float,
+    target_y: Float,
+    last_u: Float,
+    dt: Float
+) -> AdrcStepResult {
+    let wo: Float = (cfg).omega_o_observer_bw;
+    let beta1: Float = 2.0 * wo;
+    let beta2: Float = wo * wo;
+
+    // Observer estimation error
+    let obs_err: Float = (state).z1_est_state - measured_y;
+
+    // LESO state update
+    let b0: Float = (cfg).b0_control_gain;
+    let dz1: Float = (state).z2_est_disturbance - (beta1 * obs_err) + (b0 * last_u);
+    let dz2: Float = 0.0 - (beta2 * obs_err);
+
+    let new_z1: Float = (state).z1_est_state + (dz1 * dt);
+    let new_z2: Float = (state).z2_est_disturbance + (dz2 * dt);
+
+    // Feedback control law: u0 = kp * (r - z1)
+    let kp: Float = (cfg).omega_c_controller_bw;
+    let u0: Float = kp * (target_y - new_z1);
+
+    // Disturbance rejection
+    let u_raw: Float = (u0 - new_z2) / b0;
+    let max_u: Float = (cfg).max_control_effort;
+    let u_cmd: Float = math_clamp(u_raw, 0.0 - max_u, max_u);
+
+    return AdrcStepResult {
+        new_state: LesoState {
+            z1_est_state: new_z1,
+            z2_est_disturbance: new_z2,
+        },
+        control_output: u_cmd,
+        estimated_disturbance: new_z2,
+    };
+}

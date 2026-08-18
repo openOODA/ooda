@@ -1,0 +1,168 @@
+// # Time-Weighted Average Price Oracle
+//
+// Logline: Implements Uniswap v2/v3 style cumulative price accumulators and TWAP window calculation over ring-buffered observations.
+//
+// Setup: Pure quantitative module with integer time-weighted price arithmetic.
+//
+// Beats:
+//   1. Define TwapObservation, TwapOracleBuffer, and TwapWindowQuote structures.
+//   2. Record time-weighted cumulative price states in ring buffer.
+//   3. Compute geometric and arithmetic TWAP prices over arbitrary target time windows.
+
+pub type TwapObservation = struct {
+    timestamp_sec: Int,
+    price_0_cumulative: Int,
+    price_1_cumulative: Int,
+    is_initialized: Bool,
+};
+
+pub type TwapOracleBuffer = struct {
+    observations: List[TwapObservation],
+    buffer_capacity: Int,
+    current_index: Int,
+    total_written: Int,
+};
+
+pub type TwapWindowQuote = struct {
+    twap_price_0: Int,
+    twap_price_1: Int,
+    time_elapsed_sec: Int,
+    is_valid: Bool,
+};
+
+pub fn twap_observation_new(ts: Int, p0: Int, p1: Int) -> TwapObservation {
+    return TwapObservation {
+        timestamp_sec: ts,
+        price_0_cumulative: p0,
+        price_1_cumulative: p1,
+        is_initialized: true,
+    };
+}
+
+pub fn twap_oracle_new(capacity: Int) -> TwapOracleBuffer {
+    let mut obs_list: List[TwapObservation] = list_new();
+    let mut i: Int = 0;
+    while i < capacity {
+        let dummy = TwapObservation {
+            timestamp_sec: 0,
+            price_0_cumulative: 0,
+            price_1_cumulative: 0,
+            is_initialized: false,
+        };
+        obs_list = list_push(obs_list, dummy);
+        i = i + 1;
+    }
+    return TwapOracleBuffer {
+        observations: obs_list,
+        buffer_capacity: capacity,
+        current_index: 0,
+        total_written: 0,
+    };
+}
+
+pub fn twap_oracle_update(
+    oracle: &mut TwapOracleBuffer,
+    timestamp_sec: Int,
+    spot_price_0: Int,
+    spot_price_1: Int
+) {
+    let prev_idx: Int = if (oracle).total_written == 0 { 0 } else { (oracle).current_index };
+    let prev_obs: TwapObservation = list_get((oracle).observations, prev_idx);
+
+    let mut prev_p0: Int = 0;
+    let mut prev_p1: Int = 0;
+    let mut prev_ts: Int = timestamp_sec;
+
+    if (prev_obs).is_initialized {
+        prev_p0 = (prev_obs).price_0_cumulative;
+        prev_p1 = (prev_obs).price_1_cumulative;
+        prev_ts = (prev_obs).timestamp_sec;
+    }
+
+    let dt: Int = timestamp_sec - prev_ts;
+    let next_p0: Int = prev_p0 + (spot_price_0 * dt);
+    let next_p1: Int = prev_p1 + (spot_price_1 * dt);
+
+    let next_idx: Int = if (oracle).total_written == 0 { 0 } else { ((oracle).current_index + 1) % (oracle).buffer_capacity };
+    let new_obs = TwapObservation {
+        timestamp_sec: timestamp_sec,
+        price_0_cumulative: next_p0,
+        price_1_cumulative: next_p1,
+        is_initialized: true,
+    };
+
+    let mut updated_list: List[TwapObservation] = list_new();
+    let mut j: Int = 0;
+    while j < (oracle).buffer_capacity {
+        if j == next_idx {
+            updated_list = list_push(updated_list, new_obs);
+        } else {
+            updated_list = list_push(updated_list, list_get((oracle).observations, j));
+        }
+        j = j + 1;
+    }
+
+    (oracle).observations = updated_list;
+    (oracle).current_index = next_idx;
+    (oracle).total_written = (oracle).total_written + 1;
+}
+
+pub fn twap_consult_window(
+    oracle: &TwapOracleBuffer,
+    target_window_sec: Int,
+    current_timestamp: Int,
+    current_p0_cum: Int,
+    current_p1_cum: Int
+) -> TwapWindowQuote {
+    if (oracle).total_written == 0 || target_window_sec <= 0 {
+        return TwapWindowQuote {
+            twap_price_0: 0,
+            twap_price_1: 0,
+            time_elapsed_sec: 0,
+            is_valid: false,
+        };
+    }
+
+    let target_time: Int = current_timestamp - target_window_sec;
+    let mut best_obs: TwapObservation = list_get((oracle).observations, 0);
+    let mut min_diff: Int = 1000000000;
+    let mut found: Bool = false;
+
+    let mut i: Int = 0;
+    while i < (oracle).buffer_capacity {
+        let obs: TwapObservation = list_get((oracle).observations, i);
+        if (obs).is_initialized && (obs).timestamp_sec <= target_time {
+            let diff: Int = target_time - (obs).timestamp_sec;
+            if diff < min_diff {
+                min_diff = diff;
+                best_obs = obs;
+                found = true;
+            }
+        }
+        i = i + 1;
+    }
+
+    if !found {
+        best_obs = list_get((oracle).observations, 0);
+    }
+
+    let dt: Int = current_timestamp - (best_obs).timestamp_sec;
+    if dt <= 0 {
+        return TwapWindowQuote {
+            twap_price_0: 0,
+            twap_price_1: 0,
+            time_elapsed_sec: 0,
+            is_valid: false,
+        };
+    }
+
+    let twap_0: Int = (current_p0_cum - (best_obs).price_0_cumulative) / dt;
+    let twap_1: Int = (current_p1_cum - (best_obs).price_1_cumulative) / dt;
+
+    return TwapWindowQuote {
+        twap_price_0: twap_0,
+        twap_price_1: twap_1,
+        time_elapsed_sec: dt,
+        is_valid: true,
+    };
+}

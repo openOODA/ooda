@@ -1,0 +1,225 @@
+// # Power Grid Load Flow Engine & Branch Flow
+//
+// Logline: Computes branch admittance, power flows, and linear DC approximation network solutions.
+//
+// Setup: AC branch admittance calculations importing loadflow_ops.oo.
+//
+// Beats:
+//   1. Calculate branch series and shunt admittance values from line parameters.
+//   2. Compute forward and reverse complex power flows across transmission lines.
+//   3. Solve DC linear power flow equations for rapid network angle estimation.
+
+
+import "./loadflow_ops.oo";
+
+
+// -------------------------------------------------------------------
+// 5. Admittance Matrix & Power Equations
+// -------------------------------------------------------------------
+
+/// Compute Branch Admittance Y_series = G_series + j*B_series from R and X parameters
+pub fn calculate_branch_admittance(line: TransmissionLine) -> BranchAdmittance {
+    let r_val: Float = (line).r;
+    let x_val: Float = (line).x;
+    let z_sq: Float = (r_val * r_val) + (x_val * x_val);
+    if z_sq == 0.0 {
+        return BranchAdmittance {
+            g_series: 0.0,
+            b_series: 0.0,
+            b_charging: (line).b_shunt,
+            g_total: 0.0,
+            b_total: 0.0,
+        };
+    }
+
+    let g_s: Float = r_val / z_sq;
+    let b_s: Float = (0.0 - x_val) / z_sq;
+    let b_ch: Float = (line).b_shunt / 2.0;
+
+    return BranchAdmittance {
+        g_series: g_s,
+        b_series: b_s,
+        b_charging: b_ch,
+        g_total: g_s,
+        b_total: b_s + b_ch,
+    };
+}
+
+/// Calculate net active power injection P_net = P_gen - P_load
+pub fn bus_net_active_power(bus: BusState) -> Float {
+    return (bus).p_gen - (bus).p_load;
+}
+
+/// Calculate net reactive power injection Q_net = Q_gen - Q_load
+pub fn bus_net_reactive_power(bus: BusState) -> Float {
+    return (bus).q_gen - (bus).q_load;
+}
+
+/// Compute active power flow equation between two buses:
+/// P_calc_1 = V1 * V1 * G11 + V1 * V2 * (G12 * cos(ang1 - ang2) + B12 * sin(ang1 - ang2))
+pub fn calculate_calculated_active_power(
+    v1: Float,
+    ang1: Float,
+    v2: Float,
+    ang2: Float,
+    g_ij: Float,
+    b_ij: Float
+) -> Float {
+    let ang_diff: Float = ang1 - ang2;
+    let term1: Float = g_ij * cos(ang_diff);
+    let term2: Float = b_ij * sin(ang_diff);
+    return (v1 * v2) * (term1 + term2);
+}
+
+/// Compute reactive power flow equation between two buses:
+/// Q_calc_1 = -V1 * V1 * B11 + V1 * V2 * (G12 * sin(ang1 - ang2) - B12 * cos(ang1 - ang2))
+pub fn calculate_calculated_reactive_power(
+    v1: Float,
+    ang1: Float,
+    v2: Float,
+    ang2: Float,
+    g_ij: Float,
+    b_ij: Float
+) -> Float {
+    let ang_diff: Float = ang1 - ang2;
+    let term1: Float = g_ij * sin(ang_diff);
+    let term2: Float = b_ij * cos(ang_diff);
+    return (v1 * v2) * (term1 - term2);
+}
+
+/// Evaluate power mismatches at a bus:
+/// Delta_P = P_specified - P_calculated
+/// Delta_Q = Q_specified - Q_calculated
+pub fn calculate_power_mismatch(
+    bus1: BusState,
+    bus2: BusState,
+    adm: BranchAdmittance
+) -> PowerMismatch {
+    let p_spec: Float = bus_net_active_power(bus1);
+    let q_spec: Float = bus_net_reactive_power(bus1);
+
+    // Self admittance + mutual admittance active power calculation
+    let g_self: Float = (adm).g_series;
+    let b_self: Float = 0.0 - ((adm).b_series + (adm).b_charging);
+    let g_mut: Float = 0.0 - (adm).g_series;
+    let b_mut: Float = 0.0 - (adm).b_series;
+
+    let v1: Float = (bus1).v_mag;
+    let ang1: Float = (bus1).v_ang;
+    let v2: Float = (bus2).v_mag;
+    let ang2: Float = (bus2).v_ang;
+
+    let p_self: Float = (v1 * v1) * g_self;
+    let p_mut: Float = calculate_calculated_active_power(v1, ang1, v2, ang2, g_mut, b_mut);
+    let p_calc: Float = p_self + p_mut;
+
+    let q_self: Float = (v1 * v1) * (0.0 - b_self);
+    let q_mut: Float = calculate_calculated_reactive_power(v1, ang1, v2, ang2, g_mut, b_mut);
+    let q_calc: Float = q_self + q_mut;
+
+    return PowerMismatch {
+        bus_id: (bus1).bus_id,
+        delta_p: p_spec - p_calc,
+        delta_q: q_spec - q_calc,
+    };
+}
+
+
+pub fn calculate_branch_flow(
+    bus1: BusState,
+    bus2: BusState,
+    line: TransmissionLine,
+    base_mva: Float
+) -> BranchFlow {
+    if (line).status == 0 {
+        return BranchFlow {
+            line_id: (line).line_id,
+            p_from_to: 0.0,
+            q_from_to: 0.0,
+            p_to_from: 0.0,
+            q_to_from: 0.0,
+            p_loss: 0.0,
+            q_loss: 0.0,
+            loading_percent: 0.0,
+        };
+    }
+
+    let adm: BranchAdmittance = calculate_branch_admittance(line);
+    let v1: Float = (bus1).v_mag;
+    let ang1: Float = (bus1).v_ang;
+    let v2: Float = (bus2).v_mag;
+    let ang2: Float = (bus2).v_ang;
+
+    // Complex bus phasor voltages
+    let V1_c: ComplexNum = ComplexNum { re: v1 * cos(ang1), im: v1 * sin(ang1) };
+    let V2_c: ComplexNum = ComplexNum { re: v2 * cos(ang2), im: v2 * sin(ang2) };
+
+    // Series admittance Y_s = g_series + j*b_series
+    let Y_s: ComplexNum = ComplexNum { re: (adm).g_series, im: (adm).b_series };
+
+    // Shunt admittance Y_sh = 0 + j*b_charging
+    let Y_sh: ComplexNum = ComplexNum { re: 0.0, im: (adm).b_charging };
+
+    // Current from bus 1 to bus 2: I_12 = (V1 - V2)*Y_s + V1*Y_sh
+    let V_diff: ComplexNum = complex_sub(V1_c, V2_c);
+    let I_series: ComplexNum = complex_mul(V_diff, Y_s);
+    let I_shunt1: ComplexNum = complex_mul(V1_c, Y_sh);
+    let I_12: ComplexNum = complex_add(I_series, I_shunt1);
+
+    // Complex power S_12 = V1 * conj(I_12)
+    let S_12: ComplexNum = complex_mul(V1_c, complex_conj(I_12));
+
+    // Current from bus 2 to bus 1: I_21 = (V2 - V1)*Y_s + V2*Y_sh
+    let V_diff2: ComplexNum = complex_sub(V2_c, V1_c);
+    let I_series2: ComplexNum = complex_mul(V_diff2, Y_s);
+    let I_shunt2: ComplexNum = complex_mul(V2_c, Y_sh);
+    let I_21: ComplexNum = complex_add(I_series2, I_shunt2);
+
+    // Complex power S_21 = V2 * conj(I_21)
+    let S_21: ComplexNum = complex_mul(V2_c, complex_conj(I_21));
+
+    let p_loss_val: Float = (S_12).re + (S_21).re;
+    let q_loss_val: Float = (S_12).im + (S_21).im;
+
+    let s_mag_12: Float = complex_mag(S_12);
+    let s_mva: Float = pu_to_mw(s_mag_12, base_mva);
+    let mut loading: Float = 0.0;
+    if (line).rating_mva > 0.0 {
+        loading = (s_mva / (line).rating_mva) * 100.0;
+    }
+
+    return BranchFlow {
+        line_id: (line).line_id,
+        p_from_to: (S_12).re,
+        q_from_to: (S_12).im,
+        p_to_from: (S_21).re,
+        q_to_from: (S_21).im,
+        p_loss: p_loss_val,
+        q_loss: q_loss_val,
+        loading_percent: loading,
+    };
+}
+
+// -------------------------------------------------------------------
+// 7. DC Load Flow Solver (Linearized DC Power Flow)
+// -------------------------------------------------------------------
+
+/// Compute linearized DC Power Flow phase angle difference and power flow:
+/// P_12 = (theta1 - theta2) / X
+pub fn solve_dc_loadflow_2bus(
+    bus1: BusState,
+    bus2: BusState,
+    line: TransmissionLine
+) -> Float {
+    if (line).status == 0 {
+        return 0.0;
+    }
+    let x_val: Float = (line).x;
+    if x_val == 0.0 {
+        return 0.0;
+    }
+    let ang_diff: Float = (bus1).v_ang - (bus2).v_ang;
+    return ang_diff / x_val;
+}
+
+

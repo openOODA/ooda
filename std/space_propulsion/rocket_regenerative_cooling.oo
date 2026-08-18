@@ -1,0 +1,104 @@
+// # Rocket Regenerative Cooling & Bartz Convective Heat Transfer
+//
+// Logline: Models 1D Bartz equation convective gas-side heat flux, channel wall conduction, coolant bulk enthalpy rise, and pressure drop.
+//
+// Setup: Solves coupled thermal-hydraulic equilibrium across copper/nickel-alloy cooling channels in liquid rocket thrust chambers.
+//
+// Beats:
+//   1. Define thrust chamber thermal boundary conditions and coolant channel geometry.
+//   2. Compute gas-side heat transfer coefficient via Bartz empirical correlation.
+//   3. Solve 1D steady-state wall conduction, hot-gas wall temperature, and coolant temperature rise.
+
+import "./space_propulsion_constants.oo";
+
+pub type RegenCoolingChannel = struct {
+    channel_width_m: Float,
+    channel_height_m: Float,
+    wall_thickness_m: Float,
+    wall_thermal_conductivity: Float, // W/(m*K) (e.g. 350 for CuCrZr)
+    num_channels: Int,
+    coolant_mass_flow_kg_s: Float,
+    coolant_cp: Float, // J/(kg*K)
+};
+
+pub type RegenThermalResult = struct {
+    gas_side_heat_flux_w_m2: Float,
+    t_wall_hot_gas_k: Float,
+    t_wall_coolant_k: Float,
+    coolant_temp_out_k: Float,
+    pressure_drop_bar: Float,
+};
+
+pub fn regen_channel_default() -> RegenCoolingChannel {
+    return RegenCoolingChannel {
+        channel_width_m: 0.002, // 2 mm
+        channel_height_m: 0.005, // 5 mm
+        wall_thickness_m: 0.001, // 1 mm
+        wall_thermal_conductivity: 350.0, // CuCrZr
+        num_channels: 180,
+        coolant_mass_flow_kg_s: 45.0, // Methane or Hydrogen
+        coolant_cp: 3500.0,
+    };
+}
+
+pub fn bartz_heat_transfer_coeff(
+    pc_pa: Float,
+    c_star_m_s: Float,
+    r_throat_m: Float,
+    t_gas_k: Float
+) -> Float {
+    // Bartz simplified correlation: h_g ~ 0.026 / D_t^0.2 * (mu^0.2 * cp / Pr^0.6) * (Pc / c*)^0.8 * (D_t / r_curv)^0.1
+    let d_t: Float = 2.0 * r_throat_m;
+    let pc_term: Float = math_pow(pc_pa / c_star_m_s, 0.8);
+    let dt_term: Float = math_pow(1.0 / d_t, 0.2);
+    let h_g: Float = 0.026 * dt_term * pc_term * 1.5;
+    return h_g;
+}
+
+pub fn regen_solve_heat_transfer(
+    channel: RegenCoolingChannel,
+    hg: Float,
+    t_gas_k: Float,
+    t_coolant_in_k: Float,
+    channel_length_m: Float
+) -> RegenThermalResult {
+    let kw: Float = (channel).wall_thermal_conductivity;
+    let tw: Float = (channel).wall_thickness_m;
+    let n_chan: Float = (channel).num_channels + 0.0;
+    let w_ch: Float = (channel).channel_width_m;
+    let h_ch: Float = (channel).channel_height_m;
+    let m_dot: Float = (channel).coolant_mass_flow_kg_s;
+    let cp: Float = (channel).coolant_cp;
+
+    // Coolant side convective coefficient (Dittus-Boelter approx)
+    let a_flow_total: Float = n_chan * w_ch * h_ch;
+    let vel_coolant: Float = m_dot / (420.0 * a_flow_total); // approx liquid density 420 kg/m^3
+    let h_c: Float = 15000.0 + (50.0 * vel_coolant);
+
+    // Overall thermal resistance: R = 1/hg + tw/kw + 1/hc
+    let r_total: Float = (1.0 / hg) + (tw / kw) + (1.0 / h_c);
+    let q_flux: Float = (t_gas_k - t_coolant_in_k) / r_total;
+
+    let t_wh: Float = t_gas_k - (q_flux / hg);
+    let t_wc: Float = t_wh - (q_flux * (tw / kw));
+
+    // Coolant total heat absorbed
+    let a_w_total: Float = n_chan * (w_ch + (2.0 * h_ch)) * channel_length_m;
+    let q_total: Float = q_flux * a_w_total;
+    let dt_coolant: Float = q_total / (m_dot * cp);
+    let t_out: Float = t_coolant_in_k + dt_coolant;
+
+    // Darcy friction pressure drop approx
+    let d_hyd: Float = (2.0 * w_ch * h_ch) / (w_ch + h_ch);
+    let f_darcy: Float = 0.02;
+    let dp_pa: Float = f_darcy * (channel_length_m / d_hyd) * (0.5 * 420.0 * (vel_coolant * vel_coolant));
+    let dp_bar: Float = dp_pa / 100000.0;
+
+    return RegenThermalResult {
+        gas_side_heat_flux_w_m2: q_flux,
+        t_wall_hot_gas_k: t_wh,
+        t_wall_coolant_k: t_wc,
+        coolant_temp_out_k: t_out,
+        pressure_drop_bar: dp_bar,
+    };
+}

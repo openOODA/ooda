@@ -1,0 +1,138 @@
+// # Multi-Channel Audio Mixer & Stereo Summing Bus
+//
+// Logline: Implements multi-track channel strips, constant-power stereo panning, solo/mute logic, and master summing.
+//
+// Setup: Pure digital signal processing mixer module for multi-track audio routing and summing.
+//
+// Beats:
+//   1. Define MixerTrack channel strip (gain, pan, mute, solo) and MixerMaster bus.
+//   2. Calculate constant-power equal-loudness stereo panning coefficients (L/R).
+//   3. Sum active audio tracks into stereo master buffer with headroom limiting.
+
+pub type MixerTrack = struct {
+    track_id: Int,
+    name: String,
+    gain: Float,
+    pan: Float,       // [-1.0 (Full Left) .. 1.0 (Full Right)]
+    is_muted: Bool,
+    is_soloed: Bool,
+};
+
+pub type MixerMaster = struct {
+    master_gain: Float,
+    limiter_enabled: Bool,
+    limiter_ceiling: Float,
+};
+
+pub type AudioMixerState = struct {
+    tracks: List[MixerTrack],
+    master: MixerMaster,
+};
+
+pub fn mixer_pi() -> Float {
+    return 3.14159265358979323846;
+}
+
+pub fn mixer_track_new(id: Int, name: String) -> MixerTrack {
+    return MixerTrack {
+        track_id: id,
+        name: name,
+        gain: 1.0,
+        pan: 0.0, // Center
+        is_muted: false,
+        is_soloed: false,
+    };
+}
+
+pub fn mixer_master_new() -> MixerMaster {
+    return MixerMaster {
+        master_gain: 1.0,
+        limiter_enabled: true,
+        limiter_ceiling: 0.99,
+    };
+}
+
+pub fn mixer_state_new() -> AudioMixerState {
+    return AudioMixerState {
+        tracks: list_new(),
+        master: mixer_master_new(),
+    };
+}
+
+pub fn mixer_calc_pan_gains(pan: Float) -> List[Float] {
+    let mut p: Float = pan;
+    if p < -1.0 { p = -1.0; }
+    if p > 1.0 { p = 1.0; }
+
+    // Constant power pan law: angle in [0 .. pi/2]
+    // angle = (p + 1.0) * (pi / 4.0)
+    let angle: Float = (p + 1.0) * (mixer_pi() / 4.0);
+    let left_gain: Float = cos(angle);
+    let right_gain: Float = sin(angle);
+
+    let mut gains: List[Float] = list_new();
+    gains = list_push(gains, left_gain);
+    gains = list_push(gains, right_gain);
+    return gains;
+}
+
+pub fn mixer_has_soloed_track(tracks: List[MixerTrack]) -> Bool {
+    let n: Int = list_len(tracks);
+    let mut i: Int = 0;
+    while i < n {
+        let t: MixerTrack = list_get(tracks, i);
+        if (t).is_soloed {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn mixer_track_is_audible(track: &MixerTrack, any_soloed: Bool) -> Bool {
+    if (track).is_muted {
+        return false;
+    }
+    if any_soloed {
+        return (track).is_soloed;
+    }
+    return true;
+}
+
+pub fn mixer_sum_frame(tracks: List[MixerTrack], track_samples: List[Float], master: &MixerMaster) -> List[Float] {
+    let any_solo: Bool = mixer_has_soloed_track(tracks);
+    let mut sum_l: Float = 0.0;
+    let mut sum_r: Float = 0.0;
+    let n: Int = list_len(tracks);
+
+    let mut i: Int = 0;
+    while i < n {
+        let t: MixerTrack = list_get(tracks, i);
+        if mixer_track_is_audible(&t, any_solo) {
+            let in_sample: Float = list_get(track_samples, i);
+            let pan_gains: List[Float] = mixer_calc_pan_gains((t).pan);
+            let l_gain: Float = list_get(pan_gains, 0) * (t).gain;
+            let r_gain: Float = list_get(pan_gains, 1) * (t).gain;
+            sum_l = sum_l + (in_sample * l_gain);
+            sum_r = sum_r + (in_sample * r_gain);
+        }
+        i = i + 1;
+    }
+
+    let mut out_l: Float = sum_l * (master).master_gain;
+    let mut out_r: Float = sum_r * (master).master_gain;
+
+    if (master).limiter_enabled {
+        let ceil: Float = (master).limiter_ceiling;
+        let neg_ceil: Float = 0.0 - ceil;
+        if out_l > ceil { out_l = ceil; }
+        if out_l < neg_ceil { out_l = neg_ceil; }
+        if out_r > ceil { out_r = ceil; }
+        if out_r < neg_ceil { out_r = neg_ceil; }
+    }
+
+    let mut out_frame: List[Float] = list_new();
+    out_frame = list_push(out_frame, out_l);
+    out_frame = list_push(out_frame, out_r);
+    return out_frame;
+}

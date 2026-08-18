@@ -1,0 +1,134 @@
+// # Gamma Process Stochastic Monotonic Degradation
+//
+// Logline: Models strictly monotonic wear, crack propagation, and corrosion using stochastic Gamma process increments.
+//
+// Setup: Estimates shape parameter alpha and scale beta from degradation increments to compute expected first-passage RUL.
+//
+// Beats:
+//   1. Define GammaProcessModel and GammaRulEstimate structures.
+//   2. Fit shape $\alpha$ and scale $\beta$ using method of moments across wear increments.
+//   3. Compute expected time to failure and remaining useful life probability density.
+
+pub type GammaProcessModel = struct {
+    alpha_shape_rate: Float,
+    beta_scale: Float,
+    current_wear: Float,
+    wear_threshold: Float,
+};
+
+pub type GammaRulEstimate = struct {
+    expected_rul_hours: Float,
+    variance_rul: Float,
+    current_health_pct: Float,
+    is_breached: Bool,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn math_sqrt(x: Float) -> Float {
+    if x <= 0.0 { return 0.0; }
+    let mut g: Float = if x > 1.0 { x / 2.0 } else { x };
+    let mut i: Int = 0;
+    while i < 12 {
+        g = 0.5 * (g + (x / g));
+        i = i + 1;
+    }
+    return g;
+}
+
+pub fn gamma_process_fit(
+    time_deltas: &List[Float],
+    wear_increments: &List[Float],
+    current_w: Float,
+    thresh: Float,
+) -> GammaProcessModel {
+    let n: Int = list_len(*time_deltas);
+    let ny: Int = list_len(*wear_increments);
+
+    if n == 0 || n != ny {
+        return GammaProcessModel {
+            alpha_shape_rate: 1.0,
+            beta_scale: 1.0,
+            current_wear: current_w,
+            wear_threshold: thresh,
+        };
+    }
+
+    let n_f: Float = int_to_float(n);
+    let mut sum_inc: Float = 0.0;
+    let mut sum_dt: Float = 0.0;
+
+    let mut i: Int = 0;
+    while i < n {
+        let inc: Float = list_get(*wear_increments, i);
+        let dt: Float = list_get(*time_deltas, i);
+        sum_inc = sum_inc + (if inc > 0.0 { inc } else { 0.0 });
+        sum_dt = sum_dt + dt;
+        i = i + 1;
+    }
+
+    let mean_inc: Float = sum_inc / n_f;
+    let mean_dt: Float = sum_dt / n_f;
+
+    let mut sum_diff_sq: Float = 0.0;
+    i = 0;
+    while i < n {
+        let inc: Float = list_get(*wear_increments, i);
+        let diff: Float = inc - mean_inc;
+        sum_diff_sq = sum_diff_sq + (diff * diff);
+        i = i + 1;
+    }
+
+    let var_inc: Float = sum_diff_sq / n_f;
+    let beta: Float = if var_inc > 0.000001 { mean_inc / var_inc } else { 1.0 };
+    let alpha: Float = if mean_dt > 0.0 { (mean_inc * beta) / mean_dt } else { 1.0 };
+
+    return GammaProcessModel {
+        alpha_shape_rate: alpha,
+        beta_scale: beta,
+        current_wear: current_w,
+        wear_threshold: thresh,
+    };
+}
+
+pub fn gamma_process_estimate_rul(model: &GammaProcessModel) -> GammaRulEstimate {
+    let w_cur: Float = (model).current_wear;
+    let w_th: Float = (model).wear_threshold;
+    let alpha: Float = (model).alpha_shape_rate;
+    let beta: Float = (model).beta_scale;
+
+    if w_cur >= w_th {
+        return GammaRulEstimate {
+            expected_rul_hours: 0.0,
+            variance_rul: 0.0,
+            current_health_pct: 0.0,
+            is_breached: true,
+        };
+    }
+
+    let remaining_wear: Float = w_th - w_cur;
+    // Mean wear rate = alpha / beta (wear per hour)
+    let wear_rate: Float = if beta > 0.0 { alpha / beta } else { 0.01 };
+    let exp_rul: Float = if wear_rate > 0.000001 { remaining_wear / wear_rate } else { 0.0 };
+
+    let var_rul: Float = if alpha > 0.0 { (remaining_wear * beta) / (alpha * alpha) } else { 0.0 };
+    let health_pct: Float = if w_th > 0.0 { (1.0 - (w_cur / w_th)) * 100.0 } else { 0.0 };
+
+    return GammaRulEstimate {
+        expected_rul_hours: exp_rul,
+        variance_rul: var_rul,
+        current_health_pct: health_pct,
+        is_breached: false,
+    };
+}

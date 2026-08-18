@@ -1,0 +1,155 @@
+// # Order Book Depth and BBO Aggregator
+//
+// Logline: Computes aggregated Level 2 depth ladders, Best Bid/Offer (BBO), micro-spreads, and cumulative liquidity notionals.
+//
+// Setup: Imports order_book_snapshot.oo for PriceLevel definitions.
+//
+// Beats:
+//   1. Define BboQuote, DepthLadderLevel, and MarketDepthSummary structures.
+//   2. Calculate Best-Bid-Offer spread, mid-price, and weighted micro-price.
+//   3. Aggregate cumulative volume and cumulative notional depth ladders up to N levels.
+
+import "./order_book_snapshot.oo";
+
+pub type BboQuote = struct {
+    bid_price: Int,
+    bid_qty: Int,
+    ask_price: Int,
+    ask_qty: Int,
+    spread_ticks: Int,
+    mid_price: Int,
+    micro_price: Int,
+};
+
+pub type DepthLadderLevel = struct {
+    level_index: Int,
+    price: Int,
+    qty: Int,
+    cum_qty: Int,
+    cum_notional: Int,
+};
+
+pub type MarketDepthSummary = struct {
+    symbol: String,
+    bbo: BboQuote,
+    total_bid_depth_qty: Int,
+    total_ask_depth_qty: Int,
+    imbalance_ratio_scaled: Int,
+};
+
+pub fn depth_compute_bbo(
+    bids: List[PriceLevel],
+    asks: List[PriceLevel]
+) -> BboQuote {
+    let num_bids: Int = list_len(bids);
+    let num_asks: Int = list_len(asks);
+
+    if num_bids == 0 || num_asks == 0 {
+        return BboQuote {
+            bid_price: 0,
+            bid_qty: 0,
+            ask_price: 0,
+            ask_qty: 0,
+            spread_ticks: 0,
+            mid_price: 0,
+            micro_price: 0,
+        };
+    }
+
+    let top_bid: PriceLevel = list_get(bids, 0);
+    let top_ask: PriceLevel = list_get(asks, 0);
+
+    let bp: Int = (top_bid).price;
+    let bq: Int = (top_bid).qty;
+    let ap: Int = (top_ask).price;
+    let aq: Int = (top_ask).qty;
+
+    let spread: Int = ap - bp;
+    let mid: Int = (bp + ap) / 2;
+
+    let mut micro: Int = mid;
+    let total_q: Int = bq + aq;
+    if total_q > 0 {
+        micro = ((bp * aq) + (ap * bq)) / total_q;
+    }
+
+    return BboQuote {
+        bid_price: bp,
+        bid_qty: bq,
+        ask_price: ap,
+        ask_qty: aq,
+        spread_ticks: spread,
+        mid_price: mid,
+        micro_price: micro,
+    };
+}
+
+pub fn depth_build_ladder(
+    levels: List[PriceLevel],
+    max_depth: Int
+) -> List[DepthLadderLevel] {
+    let mut ladder: List[DepthLadderLevel] = list_new();
+    let num_levels: Int = list_len(levels);
+    let mut cum_q: Int = 0;
+    let mut cum_notional: Int = 0;
+    let mut i: Int = 0;
+
+    while i < num_levels && i < max_depth {
+        let lvl: PriceLevel = list_get(levels, i);
+        let p: Int = (lvl).price;
+        let q: Int = (lvl).qty;
+        cum_q = cum_q + q;
+        cum_notional = cum_notional + (p * q);
+
+        let item = DepthLadderLevel {
+            level_index: i + 1,
+            price: p,
+            qty: q,
+            cum_qty: cum_q,
+            cum_notional: cum_notional,
+        };
+        ladder = list_push(ladder, item);
+        i = i + 1;
+    }
+    return ladder;
+}
+
+pub fn depth_summarize_market(
+    symbol: String,
+    bids: List[PriceLevel],
+    asks: List[PriceLevel]
+) -> MarketDepthSummary {
+    let bbo_quote: BboQuote = depth_compute_bbo(bids, asks);
+    let mut tot_bids: Int = 0;
+    let mut tot_asks: Int = 0;
+
+    let n_b: Int = list_len(bids);
+    let mut i: Int = 0;
+    while i < n_b {
+        let b: PriceLevel = list_get(bids, i);
+        tot_bids = tot_bids + (b).qty;
+        i = i + 1;
+    }
+
+    let n_a: Int = list_len(asks);
+    let mut j: Int = 0;
+    while j < n_a {
+        let a: PriceLevel = list_get(asks, j);
+        tot_asks = tot_asks + (a).qty;
+        j = j + 1;
+    }
+
+    let mut imb_ratio: Int = 0;
+    let tot_liquidity: Int = tot_bids + tot_asks;
+    if tot_liquidity > 0 {
+        imb_ratio = ((tot_bids - tot_asks) * 10000) / tot_liquidity;
+    }
+
+    return MarketDepthSummary {
+        symbol: symbol,
+        bbo: bbo_quote,
+        total_bid_depth_qty: tot_bids,
+        total_ask_depth_qty: tot_asks,
+        imbalance_ratio_scaled: imb_ratio,
+    };
+}

@@ -1,0 +1,116 @@
+// # Forward-Looking Sonar (FLS) 3D Obstacle Detection & Avoidance
+//
+// Logline: Converts 2D/3D forward-looking acoustic sonar beam pings into obstacle point clusters and computes reactive avoidance yaw maneuvers.
+//
+// Setup: Acoustic obstacle perception system processing multibeam sonar returns to protect AUV from subsea terrain, reefs, and moorings.
+//
+// Beats:
+//   1. Define Forward Looking Sonar (FLS) field-of-view parameters (max range, horizontal aperture, num beams).
+//   2. Transform acoustic range-bearing return pings into vehicle-relative Cartesian coordinate points.
+//   3. Evaluate safety corridor clearance and identify closest threatening obstacle cluster.
+//   4. Calculate repulsive potential avoidance heading delta and speed reduction commands.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type FlsConfig = struct {
+    max_range_m: Float,
+    min_range_m: Float,
+    horizontal_fov_rad: Float, // e.g. 120 deg (2.094 rad)
+    safety_clearance_m: Float,
+    emergency_stop_range_m: Float,
+};
+
+pub type SonarObstaclePing = struct {
+    range_m: Float,
+    bearing_rad: Float,
+    intensity_db: Float,
+};
+
+pub type AvoidanceCommand = struct {
+    recommended_heading_delta_rad: Float,
+    surge_speed_scale: Float,
+    obstacle_detected: Bool,
+    emergency_stop: Bool,
+    closest_distance_m: Float,
+};
+
+pub fn fls_config_default() -> FlsConfig {
+    return FlsConfig {
+        max_range_m: 60.0,
+        min_range_m: 0.8,
+        horizontal_fov_rad: 2.094395, // 120 deg
+        safety_clearance_m: 10.0,
+        emergency_stop_range_m: 2.5,
+    };
+}
+
+pub fn sonar_ping_to_cartesian(ping: &SonarObstaclePing) -> Vector3 {
+    let r: Float = (ping).range_m;
+    let b: Float = (ping).bearing_rad;
+    return vec3_new(r * cos(b), r * sin(b), 0.0);
+}
+
+pub fn compute_obstacle_avoidance_response(
+    cfg: &FlsConfig,
+    closest_ping: &SonarObstaclePing
+) -> AvoidanceCommand {
+    let r: Float = (closest_ping).range_m;
+    let b: Float = (closest_ping).bearing_rad;
+    let snr: Float = (closest_ping).intensity_db;
+
+    // Check if target is a valid acoustic reflector
+    if (snr < 10.0) || (r < (cfg).min_range_m) || (r > (cfg).max_range_m) {
+        return AvoidanceCommand {
+            recommended_heading_delta_rad: 0.0,
+            surge_speed_scale: 1.0,
+            obstacle_detected: false,
+            emergency_stop: false,
+            closest_distance_m: 99.0,
+        };
+    }
+
+    let is_emergency: Bool = r <= (cfg).emergency_stop_range_m;
+    let is_threat: Bool = r <= (cfg).safety_clearance_m;
+
+    if is_emergency {
+        let mut emerg_delta: Float = 0.785;
+        if b >= 0.0 {
+            emerg_delta = 0.0 - 0.785;
+        }
+        return AvoidanceCommand {
+            recommended_heading_delta_rad: emerg_delta,
+            surge_speed_scale: 0.0, // Full stop / reverse
+            obstacle_detected: true,
+            emergency_stop: true,
+            closest_distance_m: r,
+        };
+    }
+
+    if is_threat {
+        // Steer away from obstacle bearing
+        let urgency: Float = 1.0 - (r / (cfg).safety_clearance_m);
+        let mut steer_dir: Float = 0.5236; // 30 deg turn
+        if b >= 0.0 {
+            steer_dir = 0.0 - 0.5236; // Obstacle on right -> steer left
+        }
+        let heading_delta: Float = steer_dir * urgency;
+        let speed_scale: Float = math_clamp(1.0 - (0.7 * urgency), 0.2, 1.0);
+
+        return AvoidanceCommand {
+            recommended_heading_delta_rad: heading_delta,
+            surge_speed_scale: speed_scale,
+            obstacle_detected: true,
+            emergency_stop: false,
+            closest_distance_m: r,
+        };
+    }
+
+    return AvoidanceCommand {
+        recommended_heading_delta_rad: 0.0,
+        surge_speed_scale: 1.0,
+        obstacle_detected: false,
+        emergency_stop: false,
+        closest_distance_m: r,
+    };
+}

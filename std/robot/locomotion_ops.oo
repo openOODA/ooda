@@ -1,0 +1,208 @@
+// # Locomotion Kinematic & Control Operations
+//
+// Logline: Forward and inverse kinematics, legged gait stepping, and PID feedback math.
+//
+// Setup: Pure algorithmic transforms operating on locomotion types.
+//
+// Beats:
+//   1. Implement differential drive forward and inverse kinematics.
+//   2. Implement Ackermann and Mecanum forward and inverse kinematics.
+//   3. Implement quadruped gait stepping, foot height, and analytical leg inverse kinematics.
+//   4. Implement PID controller reset and anti-windup update calculations.
+
+import "./locomotion_types.oo";
+
+// -------------------------------------------------------------------
+// Differential Drive Kinematics
+// -------------------------------------------------------------------
+
+/// Computes forward kinematics for a differential drive robot.
+/// Returns resultant Twist (linear velocity x and angular velocity z).
+pub fn diff_drive_forward(w_left: Float, w_right: Float, wheel_radius: Float, track_width: Float) -> Twist {
+    let vx: Float = (wheel_radius * 0.5) * (w_left + w_right);
+    let wz: Float = (wheel_radius / track_width) * (w_right - w_left);
+    return twist_new(vx, 0.0, 0.0, 0.0, 0.0, wz);
+}
+
+/// Computes required left wheel speed for differential drive inverse kinematics.
+pub fn diff_drive_inverse_left(vx: Float, wz: Float, wheel_radius: Float, track_width: Float) -> Float {
+    if wheel_radius < 0.000001 {
+        return 0.0;
+    }
+    return (vx - ((track_width * 0.5) * wz)) / wheel_radius;
+}
+
+/// Computes required right wheel speed for differential drive inverse kinematics.
+pub fn diff_drive_inverse_right(vx: Float, wz: Float, wheel_radius: Float, track_width: Float) -> Float {
+    if wheel_radius < 0.000001 {
+        return 0.0;
+    }
+    return (vx + ((track_width * 0.5) * wz)) / wheel_radius;
+}
+
+// -------------------------------------------------------------------
+// Ackermann Kinematics
+// -------------------------------------------------------------------
+
+/// Forward kinematics for Ackermann drive given rear drive speed and steering angle.
+pub fn ackermann_forward(v_linear: Float, steer_angle: Float, wheelbase: Float) -> Twist {
+    if wheelbase < 0.000001 {
+        return twist_new(v_linear, 0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+    let sin_steer: Float = sin(steer_angle);
+    let cos_steer: Float = cos(steer_angle);
+    let tan_from_trig: Float = sin_steer / cos_steer;
+    let tan_steer: Float = if cos_steer > 0.000001 { tan_from_trig } else { steer_angle };
+    let wz: Float = (v_linear / wheelbase) * tan_steer;
+    return twist_new(v_linear, 0.0, 0.0, 0.0, 0.0, wz);
+}
+
+/// Inverse kinematics: returns steering angle required for target linear and angular speeds.
+pub fn ackermann_inverse_steer(vx: Float, wz: Float, wheelbase: Float, max_steer: Float) -> Float {
+    if vx < 0.000001 {
+        if vx > (0.0 - 0.000001) {
+            return 0.0;
+        }
+    }
+    let target_tan: Float = (wz * wheelbase) / vx;
+    let hi_steer: Float = if target_tan > max_steer { max_steer } else { target_tan };
+    let neg_max: Float = 0.0 - max_steer;
+    let steer: Float = if hi_steer < neg_max { neg_max } else { hi_steer };
+    return steer;
+}
+
+// -------------------------------------------------------------------
+// Mecanum Drive Kinematics
+// -------------------------------------------------------------------
+
+/// Computes inverse kinematics for 4-wheel Mecanum drive.
+pub fn mecanum_inverse_wheel_speeds(vx: Float, vy: Float, wz: Float, wheel_radius: Float, wheelbase: Float, track_width: Float) -> WheelSpeeds {
+    if wheel_radius < 0.000001 {
+        return WheelSpeeds { w1: 0.0, w2: 0.0, w3: 0.0, w4: 0.0 };
+    }
+    let l_sum: Float = (wheelbase + track_width) * 0.5;
+    let inv_r: Float = 1.0 / wheel_radius;
+    let w1: Float = inv_r * ((vx - vy) - (l_sum * wz));
+    let w2: Float = inv_r * ((vx + vy) + (l_sum * wz));
+    let w3: Float = inv_r * ((vx + vy) - (l_sum * wz));
+    let w4: Float = inv_r * ((vx - vy) + (l_sum * wz));
+    return WheelSpeeds { w1: w1, w2: w2, w3: w3, w4: w4 };
+}
+
+/// Computes forward kinematics for 4-wheel Mecanum drive from wheel speeds.
+pub fn mecanum_forward(ws: WheelSpeeds, wheel_radius: Float, wheelbase: Float, track_width: Float) -> Twist {
+    let r_quarter: Float = wheel_radius * 0.25;
+    let vx: Float = r_quarter * ((((ws).w1 + (ws).w2) + (ws).w3) + (ws).w4);
+    let vy: Float = r_quarter * ((((0.0 - (ws).w1) + (ws).w2) + (ws).w3) - (ws).w4);
+    let l_sum: Float = (wheelbase + track_width) * 0.5;
+    let wz: Float = if l_sum > 0.000001 { (r_quarter / l_sum) * ((((0.0 - (ws).w1) + (ws).w2) - (ws).w3) + (ws).w4) } else { 0.0 };
+    return twist_new(vx, vy, 0.0, 0.0, 0.0, wz);
+}
+
+// -------------------------------------------------------------------
+// Legged Gait & Joint Trajectory Generation
+// -------------------------------------------------------------------
+
+/// Wraps gait phase into [0, 1) the same way the prior while-subtract did.
+pub fn gait_wrap_phase(phase: Float) -> Float {
+    if phase >= 1.0 {
+        return gait_wrap_phase(phase - 1.0);
+    }
+    return phase;
+}
+
+/// Advances quadruped gait phase state by delta time dt.
+pub fn quadruped_gait_step(gait: QuadrupedGaitState, dt: Float) -> QuadrupedGaitState {
+    let raw_phase: Float = (gait).phase + ((gait).frequency_hz * dt);
+    let phase: Float = gait_wrap_phase(raw_phase);
+    return QuadrupedGaitState {
+        gait_type: (gait).gait_type,
+        step_height: (gait).step_height,
+        duty_cycle: (gait).duty_cycle,
+        frequency_hz: (gait).frequency_hz,
+        phase: phase,
+    };
+}
+
+/// Computes vertical swing foot height for gait phase.
+pub fn quadruped_compute_foot_height(phase: Float, step_height: Float, duty_cycle: Float) -> Float {
+    if phase < duty_cycle {
+        return 0.0;
+    }
+    let swing_duration: Float = 1.0 - duty_cycle;
+    if swing_duration < 0.000001 {
+        return 0.0;
+    }
+    let p: Float = (phase - duty_cycle) / swing_duration;
+    return (4.0 * step_height) * (p * (1.0 - p));
+}
+
+/// Analytical planar 2-link leg inverse kinematics.
+pub fn leg_kinematics_inverse(target_x: Float, target_z: Float, l1: Float, l2: Float) -> LegJoints {
+    let dist_sq: Float = (target_x * target_x) + (target_z * target_z);
+    let dist: Float = sqrt(dist_sq);
+    let max_reach: Float = l1 + l2;
+    let clamped_dist: Float = if dist > max_reach { max_reach } else { dist };
+
+    let cos_knee: Float = ((clamped_dist * clamped_dist) - ((l1 * l1) + (l2 * l2))) / ((2.0 * l1) * l2);
+    let knee_angle: Float = 3.14159265 - sqrt(1.0 - (cos_knee * cos_knee));
+    let hip_angle: Float = (target_x / clamped_dist) - (knee_angle * 0.5);
+
+    return leg_joints_new(hip_angle, 0.0, knee_angle);
+}
+
+// -------------------------------------------------------------------
+// PID Feedback Controller
+// -------------------------------------------------------------------
+
+type PidStep = struct {
+    pid: PidController,
+    output: Float,
+};
+
+pub fn pid_reset(pid: PidController) -> PidController {
+    return PidController {
+        kp: (pid).kp,
+        ki: (pid).ki,
+        kd: (pid).kd,
+        integral_accum: 0.0,
+        prev_error: 0.0,
+        output_limit: (pid).output_limit,
+    };
+}
+
+pub fn pid_update(pid: PidController, setpoint: Float, measurement: Float, dt: Float) -> PidStep {
+    if dt < 0.000001 {
+        return PidStep {
+            pid: pid,
+            output: 0.0,
+        };
+    }
+    let error: Float = setpoint - measurement;
+    let integral_raw: Float = (pid).integral_accum + (error * dt);
+    let limit: Float = (pid).output_limit;
+    let integral_hi: Float = if integral_raw > limit { limit } else { integral_raw };
+    let neg_limit: Float = 0.0 - limit;
+    let integral: Float = if integral_hi < neg_limit { neg_limit } else { integral_hi };
+
+    let derivative: Float = (error - (pid).prev_error) / dt;
+    let output_raw: Float = (((pid).kp * error) + ((pid).ki * integral)) + ((pid).kd * derivative);
+    let output_hi: Float = if output_raw > limit { limit } else { output_raw };
+    let output: Float = if output_hi < neg_limit { neg_limit } else { output_hi };
+
+    return PidStep {
+        pid: PidController {
+            kp: (pid).kp,
+            ki: (pid).ki,
+            kd: (pid).kd,
+            integral_accum: integral,
+            prev_error: error,
+            output_limit: (pid).output_limit,
+        },
+        output: output,
+    };
+}
+
+pub fn pid_step_output(step: PidStep) -> Float {
+    return (step).output;
+}

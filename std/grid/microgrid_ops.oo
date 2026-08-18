@@ -1,0 +1,279 @@
+// # Microgrid Islanding & Inverter Droop Operations
+//
+// Logline: Executes islanding fault detection, grid reconnection checks, and P-f/Q-V inverter droop regulation.
+//
+// Setup: Pure microgrid operational logic with by-value state.
+//
+// Beats:
+//   1. Detect mains utility voltage and frequency threshold violations.
+//   2. Initiate transition to autonomous islanded microgrid operation.
+//   3. Check voltage, frequency, and phase alignment for grid reconnection.
+//   4. Compute active and reactive power setpoints using P-f and Q-V droop.
+//   5. Manage load shedding and restoration across priority groups.
+
+type IslandingStatus = struct {
+    is_islanded: Bool,
+    grid_connected: Bool,
+    status_code: Int,
+    seamless_transition_active: Bool,
+    frequency_hz: Float,
+    voltage_pu: Float,
+    phase_angle_deg: Float,
+    reconnection_delay_sec: Float
+};
+
+type DroopControl = struct {
+    is_enabled: Bool,
+    p_nominal_kw: Float,
+    f_nominal_hz: Float,
+    f_deadband_hz: Float,
+    kp_droop: Float,
+    p_max_kw: Float,
+    p_actual_kw: Float,
+    q_nominal_kvar: Float,
+    v_nominal_pu: Float,
+    v_deadband_pu: Float,
+    kq_droop: Float,
+    q_max_kvar: Float,
+    q_actual_kvar: Float
+};
+
+type LoadPriorityGroup = struct {
+    group_id: Int,
+    priority: Int,
+    total_load_kw: Float,
+    allocated_load_kw: Float,
+    is_shed: Bool
+};
+
+pub fn microgrid_abs(val: Float) -> Float {
+    if val < 0.0 {
+        return 0.0 - val;
+    }
+    return val;
+}
+
+pub fn microgrid_clamp(val: Float, lo: Float, hi: Float) -> Float {
+    if val < lo {
+        return lo;
+    }
+    if val > hi {
+        return hi;
+    }
+    return val;
+}
+
+pub fn islanding_status_default() -> IslandingStatus {
+    return IslandingStatus {
+        is_islanded: false,
+        grid_connected: true,
+        status_code: 0,
+        seamless_transition_active: false,
+        frequency_hz: 60.0,
+        voltage_pu: 1.0,
+        phase_angle_deg: 0.0,
+        reconnection_delay_sec: 0.0
+    };
+}
+
+pub fn droop_control_default() -> DroopControl {
+    return DroopControl {
+        is_enabled: true,
+        p_nominal_kw: 500.0,
+        f_nominal_hz: 60.0,
+        f_deadband_hz: 0.036,
+        kp_droop: 100.0,
+        p_max_kw: 1000.0,
+        p_actual_kw: 500.0,
+        q_nominal_kvar: 200.0,
+        v_nominal_pu: 1.0,
+        v_deadband_pu: 0.01,
+        kq_droop: 50.0,
+        q_max_kvar: 400.0,
+        q_actual_kvar: 200.0
+    };
+}
+
+pub fn load_priority_group_new(group_id: Int, priority: Int, load_kw: Float) -> LoadPriorityGroup {
+    return LoadPriorityGroup {
+        group_id: group_id,
+        priority: priority,
+        total_load_kw: load_kw,
+        allocated_load_kw: load_kw,
+        is_shed: false
+    };
+}
+
+/// IEEE 1547-style mains failure: V < 0.88 pu or V > 1.12 pu, or f < 58.5 / f > 61.5 Hz.
+pub fn islanding_detect_mains_failure(status: IslandingStatus, v_pu: Float, f_hz: Float) -> IslandingStatus {
+    if status.grid_connected == false {
+        return status;
+    }
+    let mut is_fault: Bool = false;
+    if v_pu < 0.88 {
+        is_fault = true;
+    }
+    if v_pu > 1.12 {
+        is_fault = true;
+    }
+    if f_hz < 58.5 {
+        is_fault = true;
+    }
+    if f_hz > 61.5 {
+        is_fault = true;
+    }
+    if is_fault == false {
+        return status;
+    }
+    return IslandingStatus {
+        is_islanded: status.is_islanded,
+        grid_connected: status.grid_connected,
+        status_code: 1,
+        seamless_transition_active: true,
+        frequency_hz: status.frequency_hz,
+        voltage_pu: status.voltage_pu,
+        phase_angle_deg: status.phase_angle_deg,
+        reconnection_delay_sec: status.reconnection_delay_sec
+    };
+}
+
+pub fn islanding_initiate_island(status: IslandingStatus) -> IslandingStatus {
+    return IslandingStatus {
+        is_islanded: true,
+        grid_connected: false,
+        status_code: 2,
+        seamless_transition_active: false,
+        frequency_hz: status.frequency_hz,
+        voltage_pu: status.voltage_pu,
+        phase_angle_deg: status.phase_angle_deg,
+        reconnection_delay_sec: status.reconnection_delay_sec
+    };
+}
+
+pub fn islanding_check_synchronization(status: IslandingStatus, grid_v_pu: Float, grid_f_hz: Float, grid_phase_deg: Float) -> Bool {
+    if status.is_islanded == false {
+        return false;
+    }
+    let v_diff: Float = microgrid_abs(status.voltage_pu - grid_v_pu);
+    let f_diff: Float = microgrid_abs(status.frequency_hz - grid_f_hz);
+    let p_diff: Float = microgrid_abs(status.phase_angle_deg - grid_phase_deg);
+    if v_diff > 0.05 {
+        return false;
+    }
+    if f_diff > 0.10 {
+        return false;
+    }
+    if p_diff > 10.0 {
+        return false;
+    }
+    return true;
+}
+
+pub fn islanding_attempt_reconnection(status: IslandingStatus, grid_v_pu: Float, grid_f_hz: Float, grid_phase_deg: Float) -> IslandingStatus {
+    let synced: Bool = islanding_check_synchronization(status, grid_v_pu, grid_f_hz, grid_phase_deg);
+    if synced == false {
+        return IslandingStatus {
+            is_islanded: status.is_islanded,
+            grid_connected: status.grid_connected,
+            status_code: 2,
+            seamless_transition_active: status.seamless_transition_active,
+            frequency_hz: status.frequency_hz,
+            voltage_pu: status.voltage_pu,
+            phase_angle_deg: status.phase_angle_deg,
+            reconnection_delay_sec: status.reconnection_delay_sec
+        };
+    }
+    return IslandingStatus {
+        is_islanded: false,
+        grid_connected: true,
+        status_code: 0,
+        seamless_transition_active: false,
+        frequency_hz: status.frequency_hz,
+        voltage_pu: status.voltage_pu,
+        phase_angle_deg: status.phase_angle_deg,
+        reconnection_delay_sec: 0.0
+    };
+}
+
+/// P_set = P_nom - Kp * (f - f_nom) with deadband.
+pub fn droop_control_calculate_p(droop: DroopControl, current_f_hz: Float) -> Float {
+    if droop.is_enabled == false {
+        return droop.p_nominal_kw;
+    }
+    let dev: Float = current_f_hz - droop.f_nominal_hz;
+    let abs_dev: Float = microgrid_abs(dev);
+    let db: Float = droop.f_deadband_hz;
+    if abs_dev <= db {
+        return droop.p_nominal_kw;
+    }
+    let mut eff_dev: Float = 0.0;
+    if dev > db {
+        eff_dev = dev - db;
+    } else {
+        eff_dev = dev + db;
+    }
+    let p_target: Float = droop.p_nominal_kw - (droop.kp_droop * eff_dev);
+    return microgrid_clamp(p_target, 0.0, droop.p_max_kw);
+}
+
+/// Q_set = Q_nom - Kq * (V - V_nom) with deadband.
+pub fn droop_control_calculate_q(droop: DroopControl, current_v_pu: Float) -> Float {
+    if droop.is_enabled == false {
+        return droop.q_nominal_kvar;
+    }
+    let dev: Float = current_v_pu - droop.v_nominal_pu;
+    let abs_dev: Float = microgrid_abs(dev);
+    let db: Float = droop.v_deadband_pu;
+    if abs_dev <= db {
+        return droop.q_nominal_kvar;
+    }
+    let mut eff_dev: Float = 0.0;
+    if dev > db {
+        eff_dev = dev - db;
+    } else {
+        eff_dev = dev + db;
+    }
+    let q_target: Float = droop.q_nominal_kvar - (droop.kq_droop * eff_dev);
+    let neg_q_max: Float = 0.0 - droop.q_max_kvar;
+    return microgrid_clamp(q_target, neg_q_max, droop.q_max_kvar);
+}
+
+pub fn droop_control_update_response(droop: DroopControl, current_f_hz: Float, current_v_pu: Float) -> DroopControl {
+    let p_res: Float = droop_control_calculate_p(droop, current_f_hz);
+    let q_res: Float = droop_control_calculate_q(droop, current_v_pu);
+    return DroopControl {
+        is_enabled: droop.is_enabled,
+        p_nominal_kw: droop.p_nominal_kw,
+        f_nominal_hz: droop.f_nominal_hz,
+        f_deadband_hz: droop.f_deadband_hz,
+        kp_droop: droop.kp_droop,
+        p_max_kw: droop.p_max_kw,
+        p_actual_kw: p_res,
+        q_nominal_kvar: droop.q_nominal_kvar,
+        v_nominal_pu: droop.v_nominal_pu,
+        v_deadband_pu: droop.v_deadband_pu,
+        kq_droop: droop.kq_droop,
+        q_max_kvar: droop.q_max_kvar,
+        q_actual_kvar: q_res
+    };
+}
+
+pub fn load_priority_group_shed(group: LoadPriorityGroup) -> LoadPriorityGroup {
+    return LoadPriorityGroup {
+        group_id: group.group_id,
+        priority: group.priority,
+        total_load_kw: group.total_load_kw,
+        allocated_load_kw: 0.0,
+        is_shed: true
+    };
+}
+
+pub fn load_priority_group_restore(group: LoadPriorityGroup) -> LoadPriorityGroup {
+    return LoadPriorityGroup {
+        group_id: group.group_id,
+        priority: group.priority,
+        total_load_kw: group.total_load_kw,
+        allocated_load_kw: group.total_load_kw,
+        is_shed: false
+    };
+}

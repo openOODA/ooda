@@ -1,0 +1,299 @@
+// # UART DMA Circular Ring Buffer
+//
+// Logline: UART serial driver with DMA circular ring buffer, head/tail index tracking, and overrun handling.
+//
+// Setup: High-throughput non-blocking UART serial transceiver with DMA transfer descriptors.
+//
+// Beats:
+//   1. Define UART peripheral parameters, baud rate configuration, and circular ring buffer structures.
+//   2. Implement circular buffer push, pop, peek, and capacity management.
+//   3. Handle DMA hardware pointer updates and detect buffer overrun/overflow conditions.
+//   4. Implement non-blocking multi-byte block transmission and line framing checks.
+
+type UartConfig = struct {
+    uart_id: Int,
+    baud_rate: Int,
+    data_bits: Int,
+    stop_bits: Int,
+    parity: Int,
+    flow_control: Int,
+};
+
+type UartRingBuffer = struct {
+    config: UartConfig,
+    buffer: List[Int],
+    capacity: Int,
+    head: Int,
+    tail: Int,
+    overrun_count: Int,
+    framing_errors: Int,
+    dma_enabled: Bool,
+    last_ok: Bool,
+    last_byte: Int,
+    last_count: Int,
+    last_read: List[Int],
+};
+
+pub fn uart_config_new(id: Int, baud: Int) -> UartConfig {
+    return UartConfig {
+        uart_id: id,
+        baud_rate: baud,
+        data_bits: 8,
+        stop_bits: 1,
+        parity: 0,
+        flow_control: 0,
+    };
+}
+
+pub fn uart_ring_buffer_new(config: UartConfig, capacity: Int) -> UartRingBuffer {
+    let mut initial_buf: List[Int] = list_new();
+    let cap: Int = if capacity < 4 { 4 } else { capacity };
+    let mut i: Int = 0;
+    while i < cap {
+        initial_buf = list_push(initial_buf, 0);
+        i = i + 1;
+    }
+    let empty: List[Int] = list_new();
+    return UartRingBuffer {
+        config: config,
+        buffer: initial_buf,
+        capacity: cap,
+        head: 0,
+        tail: 0,
+        overrun_count: 0,
+        framing_errors: 0,
+        dma_enabled: false,
+        last_ok: true,
+        last_byte: 0,
+        last_count: 0,
+        last_read: empty,
+    };
+}
+
+fn list_set_element(list_in: List[Int], idx: Int, val: Int) -> List[Int] {
+    let mut result: List[Int] = list_new();
+    let len: Int = list_len(list_in);
+    let mut i: Int = 0;
+    while i < len {
+        if i == idx {
+            result = list_push(result, val);
+        } else {
+            result = list_push(result, list_get(list_in, i));
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn uart_ring_available(ring: UartRingBuffer) -> Int {
+    let h: Int = (ring).head;
+    let t: Int = (ring).tail;
+    if h >= t {
+        return h - t;
+    }
+    return (ring).capacity - (t - h);
+}
+
+pub fn uart_ring_free_space(ring: UartRingBuffer) -> Int {
+    return ((ring).capacity - 1) - uart_ring_available(ring);
+}
+
+pub fn uart_ring_push_byte(ring: UartRingBuffer, byte: Int) -> UartRingBuffer {
+    let next_head: Int = ((ring).head + 1) % (ring).capacity;
+    if next_head == (ring).tail {
+        return UartRingBuffer {
+            config: (ring).config,
+            buffer: (ring).buffer,
+            capacity: (ring).capacity,
+            head: (ring).head,
+            tail: (ring).tail,
+            overrun_count: (ring).overrun_count + 1,
+            framing_errors: (ring).framing_errors,
+            dma_enabled: (ring).dma_enabled,
+            last_ok: false,
+            last_byte: (ring).last_byte,
+            last_count: (ring).last_count,
+            last_read: (ring).last_read,
+        };
+    }
+    return UartRingBuffer {
+        config: (ring).config,
+        buffer: list_set_element((ring).buffer, (ring).head, byte % 256),
+        capacity: (ring).capacity,
+        head: next_head,
+        tail: (ring).tail,
+        overrun_count: (ring).overrun_count,
+        framing_errors: (ring).framing_errors,
+        dma_enabled: (ring).dma_enabled,
+        last_ok: true,
+        last_byte: byte % 256,
+        last_count: (ring).last_count,
+        last_read: (ring).last_read,
+    };
+}
+
+pub fn uart_ring_pop_byte(ring: UartRingBuffer) -> UartRingBuffer {
+    if (ring).head == (ring).tail {
+        return UartRingBuffer {
+            config: (ring).config,
+            buffer: (ring).buffer,
+            capacity: (ring).capacity,
+            head: (ring).head,
+            tail: (ring).tail,
+            overrun_count: (ring).overrun_count,
+            framing_errors: (ring).framing_errors,
+            dma_enabled: (ring).dma_enabled,
+            last_ok: false,
+            last_byte: 0 - 1,
+            last_count: (ring).last_count,
+            last_read: (ring).last_read,
+        };
+    }
+    let byte: Int = list_get((ring).buffer, (ring).tail);
+    return UartRingBuffer {
+        config: (ring).config,
+        buffer: (ring).buffer,
+        capacity: (ring).capacity,
+        head: (ring).head,
+        tail: ((ring).tail + 1) % (ring).capacity,
+        overrun_count: (ring).overrun_count,
+        framing_errors: (ring).framing_errors,
+        dma_enabled: (ring).dma_enabled,
+        last_ok: true,
+        last_byte: byte,
+        last_count: (ring).last_count,
+        last_read: (ring).last_read,
+    };
+}
+
+pub fn uart_ring_peek_byte(ring: UartRingBuffer) -> Int {
+    if (ring).head == (ring).tail {
+        return 0 - 1;
+    }
+    return list_get((ring).buffer, (ring).tail);
+}
+
+pub fn uart_ring_dma_update_head(ring: UartRingBuffer, dma_remaining_bytes: Int) -> UartRingBuffer {
+    let new_head: Int = (ring).capacity - dma_remaining_bytes;
+    if new_head >= 0 {
+        if new_head < (ring).capacity {
+            return UartRingBuffer {
+                config: (ring).config,
+                buffer: (ring).buffer,
+                capacity: (ring).capacity,
+                head: new_head,
+                tail: (ring).tail,
+                overrun_count: (ring).overrun_count,
+                framing_errors: (ring).framing_errors,
+                dma_enabled: (ring).dma_enabled,
+                last_ok: true,
+                last_byte: (ring).last_byte,
+                last_count: (ring).last_count,
+                last_read: (ring).last_read,
+            };
+        }
+    }
+    return ring;
+}
+
+pub fn uart_ring_write_bytes(ring: UartRingBuffer, data: List[Int]) -> UartRingBuffer {
+    let len: Int = list_len(data);
+    let mut acc: UartRingBuffer = ring;
+    let mut count: Int = 0;
+    let mut i: Int = 0;
+    while i < len {
+        let b: Int = list_get(data, i);
+        acc = uart_ring_push_byte(acc, b);
+        if (acc).last_ok {
+            count = count + 1;
+        } else {
+            return UartRingBuffer {
+                config: (acc).config,
+                buffer: (acc).buffer,
+                capacity: (acc).capacity,
+                head: (acc).head,
+                tail: (acc).tail,
+                overrun_count: (acc).overrun_count,
+                framing_errors: (acc).framing_errors,
+                dma_enabled: (acc).dma_enabled,
+                last_ok: false,
+                last_byte: (acc).last_byte,
+                last_count: count,
+                last_read: (acc).last_read,
+            };
+        }
+        i = i + 1;
+    }
+    return UartRingBuffer {
+        config: (acc).config,
+        buffer: (acc).buffer,
+        capacity: (acc).capacity,
+        head: (acc).head,
+        tail: (acc).tail,
+        overrun_count: (acc).overrun_count,
+        framing_errors: (acc).framing_errors,
+        dma_enabled: (acc).dma_enabled,
+        last_ok: true,
+        last_byte: (acc).last_byte,
+        last_count: count,
+        last_read: (acc).last_read,
+    };
+}
+
+pub fn uart_ring_read_bytes(ring: UartRingBuffer, max_bytes: Int) -> UartRingBuffer {
+    let mut acc: UartRingBuffer = ring;
+    let mut out: List[Int] = list_new();
+    let mut count: Int = 0;
+    while count < max_bytes {
+        acc = uart_ring_pop_byte(acc);
+        if (acc).last_byte < 0 {
+            return UartRingBuffer {
+                config: (acc).config,
+                buffer: (acc).buffer,
+                capacity: (acc).capacity,
+                head: (acc).head,
+                tail: (acc).tail,
+                overrun_count: (acc).overrun_count,
+                framing_errors: (acc).framing_errors,
+                dma_enabled: (acc).dma_enabled,
+                last_ok: true,
+                last_byte: (acc).last_byte,
+                last_count: count,
+                last_read: out,
+            };
+        }
+        out = list_push(out, (acc).last_byte);
+        count = count + 1;
+    }
+    return UartRingBuffer {
+        config: (acc).config,
+        buffer: (acc).buffer,
+        capacity: (acc).capacity,
+        head: (acc).head,
+        tail: (acc).tail,
+        overrun_count: (acc).overrun_count,
+        framing_errors: (acc).framing_errors,
+        dma_enabled: (acc).dma_enabled,
+        last_ok: true,
+        last_byte: (acc).last_byte,
+        last_count: count,
+        last_read: out,
+    };
+}
+
+pub fn uart_ring_flush(ring: UartRingBuffer) -> UartRingBuffer {
+    return UartRingBuffer {
+        config: (ring).config,
+        buffer: (ring).buffer,
+        capacity: (ring).capacity,
+        head: 0,
+        tail: 0,
+        overrun_count: (ring).overrun_count,
+        framing_errors: (ring).framing_errors,
+        dma_enabled: (ring).dma_enabled,
+        last_ok: true,
+        last_byte: (ring).last_byte,
+        last_count: 0,
+        last_read: (ring).last_read,
+    };
+}

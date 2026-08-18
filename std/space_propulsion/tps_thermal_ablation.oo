@@ -1,0 +1,97 @@
+// # Thermal Protection System (TPS) Ablation & Pyrolysis Dynamics
+//
+// Logline: Models carbon-phenolic / PICA thermal protection ablation, pyrolysis front progression, surface char layer recession, and bondline temperature.
+//
+// Setup: Solves 1D ablative thermal response, endothermic polymer resin pyrolysis decomposition, and char surface oxidation recession.
+//
+// Beats:
+//   1. Define ablator material properties (PICA / Carbon-Phenolic density, heat of ablation, char thermal conductivity).
+//   2. Compute surface heat balance with blowing blockage reduction and radiative re-radiation.
+//   3. Calculate surface char recession depth, pyrolysis gas generation, and vehicle aluminum substrate bondline temperature.
+
+import "./space_propulsion_constants.oo";
+
+pub type AblatorMaterialSpec = struct {
+    virgin_density_kg_m3: Float, // e.g. 270 kg/m3 for PICA, 1450 kg/m3 for Carbon-Phenolic
+    heat_of_ablation_mj_kg: Float, // e.g. 30.0 MJ/kg effective heat of ablation Q*
+    char_thermal_conductivity: Float, // e.g. 0.45 W/(m*K)
+    resin_mass_fraction: Float, // e.g. 0.35
+    initial_thickness_mm: Float, // e.g. 50 mm heatshield tile
+};
+
+pub type AblationResponseResult = struct {
+    surface_recession_mm: Float,
+    pyrolysis_depth_mm: Float,
+    blowing_reduction_factor: Float,
+    bondline_temperature_k: Float,
+    remaining_thickness_mm: Float,
+    is_bondline_safe: Bool,
+};
+
+pub fn ablator_spec_default_pica() -> AblatorMaterialSpec {
+    return AblatorMaterialSpec {
+        virgin_density_kg_m3: 270.0, // Phenolic Impregnated Carbon Ablator
+        heat_of_ablation_mj_kg: 28.0,
+        char_thermal_conductivity: 0.35,
+        resin_mass_fraction: 0.32,
+        initial_thickness_mm: 65.0,
+    };
+}
+
+pub fn ablation_compute_response(
+    spec: AblatorMaterialSpec,
+    heat_flux_total_w_cm2: Float,
+    entry_duration_s: Float
+) -> AblationResponseResult {
+    let rho_v: Float = (spec).virgin_density_kg_m3;
+    let q_star_j: Float = (spec).heat_of_ablation_mj_kg * 1000000.0;
+    let k_char: Float = (spec).char_thermal_conductivity;
+    let f_resin: Float = (spec).resin_mass_fraction;
+    let t_init_mm: Float = (spec).initial_thickness_mm;
+    let t_init_m: Float = t_init_mm * 0.001;
+
+    let q_in_w_m2: Float = heat_flux_total_w_cm2 * 10000.0;
+
+    // Integrated total heat load: Q_load = q_dot * dt (J/m^2)
+    let q_load_j_m2: Float = q_in_w_m2 * entry_duration_s;
+
+    // Surface mass loss per unit area: m_loss = Q_load / Q_star
+    let m_loss_kg_m2: Float = q_load_j_m2 / (q_star_j + 0.0001);
+
+    // Surface recession depth: s_rec = m_loss / rho_virgin
+    let s_rec_m: Float = m_loss_kg_m2 / rho_v;
+    let s_rec_mm: Float = s_rec_m * 1000.0;
+
+    // Pyrolysis gas blowing blockage factor: psi = 1 / (1 + 0.6 * B')
+    // Reduces convective heating by up to 40%
+    let b_prime: Float = 0.85;
+    let psi_blowing: Float = 1.0 / (1.0 + (0.60 * b_prime));
+
+    // Pyrolysis front penetration depth into virgin material
+    let s_pyro_m: Float = s_rec_m * 1.65;
+    let s_pyro_mm: Float = s_pyro_m * 1000.0;
+
+    // Remaining heatshield thickness
+    let t_rem_m: Float = math_max(0.005, t_init_m - s_rec_m);
+    let t_rem_mm: Float = t_rem_m * 1000.0;
+
+    // 1D transient thermal diffusion into structure:
+    // T_bondline ~ T0 + (q_residual * t_entry / (rho * Cp * thickness))
+    let cp_mat: Float = 1600.0; // J/(kg*K)
+    let alpha_diff: Float = k_char / (rho_v * cp_mat);
+    let fourier_num: Float = (alpha_diff * entry_duration_s) / (t_rem_m * t_rem_m);
+
+    let t_ambient: Float = 295.0; // 22 C initial
+    let t_bond_k: Float = t_ambient + (120.0 * fourier_num);
+
+    let safe: Bool = t_bond_k <= 525.0; // Aluminum structure max temperature limit ~ 250 C (523 K)
+
+    return AblationResponseResult {
+        surface_recession_mm: s_rec_mm,
+        pyrolysis_depth_mm: s_pyro_mm,
+        blowing_reduction_factor: psi_blowing,
+        bondline_temperature_k: t_bond_k,
+        remaining_thickness_mm: t_rem_mm,
+        is_bondline_safe: safe,
+    };
+}

@@ -1,0 +1,202 @@
+// # Ultra-Short Baseline (USBL) Acoustic Positioning
+//
+// Logline: TWTT slant range plus phase-difference direction cosine. Int milli destub.
+//
+// Setup: r = c * TWTT / 2; u = dphi / (2 pi f d / c); p = r u.
+//
+// Beats:
+//   1. Carrier, baseline, sound speed, max range, SNR gate.
+//   2. Reject SNR < 6 dB or r outside 1 m .. max.
+//   3. Clamp direction cosines; u_z = sqrt(1 - ux^2 - uy^2).
+//   4. Azimuth/elevation via integer atan2; Cartesian r*u.
+
+type UsblTransceiverConfig = struct {
+    carrier_frequency_hz: Int,
+    hydrophone_spacing_mm: Int,
+    sound_speed_mm_s: Int,
+    max_slant_range_mm: Int,
+    phase_wrap_guard_mrad: Int
+};
+
+type UsblAcousticPing = struct {
+    two_way_travel_time_ms: Int,
+    phase_diff_x_mrad: Int,
+    phase_diff_y_mrad: Int,
+    snr_db: Int
+};
+
+type UsblFixSolution = struct {
+    slant_range_mm: Int,
+    azimuth_mrad: Int,
+    elevation_mrad: Int,
+    target_rel_x_mm: Int,
+    target_rel_y_mm: Int,
+    target_rel_z_mm: Int,
+    is_valid: Bool
+};
+
+pub fn usbl_config_default() -> UsblTransceiverConfig {
+    return UsblTransceiverConfig {
+        carrier_frequency_hz: 25000,
+        hydrophone_spacing_mm: 30,
+        sound_speed_mm_s: 1500000,
+        max_slant_range_mm: 3000000,
+        phase_wrap_guard_mrad: 3142
+    };
+}
+
+pub fn usbl_invalid_fix(r_mm: Int) -> UsblFixSolution {
+    return UsblFixSolution {
+        slant_range_mm: r_mm,
+        azimuth_mrad: 0,
+        elevation_mrad: 0,
+        target_rel_x_mm: 0,
+        target_rel_y_mm: 0,
+        target_rel_z_mm: 0,
+        is_valid: false
+    };
+}
+
+pub fn usbl_clamp_dir(v: Int) -> Int {
+    if v < (0 - 1000) {
+        return 0 - 1000;
+    }
+    if v > 1000 {
+        return 1000;
+    }
+    return v;
+}
+
+pub fn usbl_abs_int(v: Int) -> Int {
+    if v < 0 {
+        return 0 - v;
+    }
+    return v;
+}
+
+pub fn usbl_isqrt_seed(n: Int, g: Int) -> Int {
+    let g2: Int = g * 2;
+    if g2 <= 0 {
+        return g;
+    }
+    if (g2 * g2) > n {
+        return g;
+    }
+    if g2 <= g {
+        return g;
+    }
+    return usbl_isqrt_seed(n, g2);
+}
+
+pub fn usbl_isqrt_iter(n: Int, guess: Int, steps: Int) -> Int {
+    if steps <= 0 {
+        return guess;
+    }
+    if guess <= 0 {
+        return 0;
+    }
+    let next: Int = (guess + (n / guess)) / 2;
+    let diff: Int = next - guess;
+    if diff == 0 {
+        return next;
+    }
+    if diff < 0 {
+        if (0 - diff) <= 1 {
+            return next;
+        }
+        return usbl_isqrt_iter(n, next, steps - 1);
+    }
+    if diff <= 1 {
+        return guess;
+    }
+    return usbl_isqrt_iter(n, next, steps - 1);
+}
+
+pub fn usbl_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if n < 4 {
+        return 1;
+    }
+    let seed: Int = usbl_isqrt_seed(n, 1);
+    return usbl_isqrt_iter(n, seed, 8);
+}
+
+pub fn usbl_atan_unit_mrad(z_milli: Int) -> Int {
+    let z2_term: Int = (28 * z_milli * z_milli) / 100000;
+    let den: Int = 1000 + z2_term;
+    let den_use: Int = if den < 1 { 1 } else { den };
+    return (z_milli * 1000) / den_use;
+}
+
+pub fn usbl_atan2_mrad(y: Int, x: Int) -> Int {
+    if x == 0 {
+        if y > 0 {
+            return 1571;
+        }
+        if y < 0 {
+            return 0 - 1571;
+        }
+        return 0;
+    }
+    let z_milli: Int = (y * 1000) / x;
+    let abs_z: Int = usbl_abs_int(z_milli);
+    let atan_abs: Int = if abs_z <= 1000 {
+        usbl_atan_unit_mrad(abs_z)
+    } else {
+        1571 - usbl_atan_unit_mrad(1000000 / abs_z)
+    };
+    if x > 0 {
+        if y < 0 {
+            return 0 - atan_abs;
+        }
+        return atan_abs;
+    }
+    if y >= 0 {
+        return 3142 - atan_abs;
+    }
+    return atan_abs - 3142;
+}
+
+pub fn usbl_solve_fix(cfg: UsblTransceiverConfig, ping: UsblAcousticPing) -> UsblFixSolution {
+    if ping.snr_db < 6 {
+        return usbl_invalid_fix(0);
+    }
+    let c: Int = if cfg.sound_speed_mm_s < 1 { 1 } else { cfg.sound_speed_mm_s };
+    let twtt: Int = if ping.two_way_travel_time_ms < 0 { 0 } else { ping.two_way_travel_time_ms };
+    let r_slant: Int = (c * twtt) / 2000;
+    if r_slant < 1000 {
+        return usbl_invalid_fix(r_slant);
+    }
+    if r_slant > cfg.max_slant_range_mm {
+        return usbl_invalid_fix(r_slant);
+    }
+    let f0: Int = cfg.carrier_frequency_hz;
+    let d: Int = cfg.hydrophone_spacing_mm;
+    let k_phase: Int = ((6283 * f0) * d) / c;
+    if k_phase <= 0 {
+        return usbl_invalid_fix(r_slant);
+    }
+    let u_dir_x: Int = usbl_clamp_dir((ping.phase_diff_x_mrad * 1000) / k_phase);
+    let u_dir_y: Int = usbl_clamp_dir((ping.phase_diff_y_mrad * 1000) / k_phase);
+    let horiz_e6: Int = (u_dir_x * u_dir_x) + (u_dir_y * u_dir_y);
+    if horiz_e6 > 1000000 {
+        return usbl_invalid_fix(r_slant);
+    }
+    let u_dir_z: Int = usbl_isqrt(1000000 - horiz_e6);
+    let horiz_milli: Int = usbl_isqrt(horiz_e6);
+    let az: Int = usbl_atan2_mrad(u_dir_y, u_dir_x);
+    let el: Int = usbl_atan2_mrad(u_dir_z, horiz_milli);
+    let wrap: Int = cfg.phase_wrap_guard_mrad;
+    let az_use: Int = if usbl_abs_int(az) > wrap { wrap } else { az };
+    return UsblFixSolution {
+        slant_range_mm: r_slant,
+        azimuth_mrad: az_use,
+        elevation_mrad: el,
+        target_rel_x_mm: (r_slant * u_dir_x) / 1000,
+        target_rel_y_mm: (r_slant * u_dir_y) / 1000,
+        target_rel_z_mm: (r_slant * u_dir_z) / 1000,
+        is_valid: true
+    };
+}

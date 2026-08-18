@@ -1,0 +1,126 @@
+// # Backward Differentiation Formula (BDF) DAE Integrator
+//
+// Logline: Multi-step BDF Gear's method (orders 1 to 5) for stiff index-1 differential-algebraic equations.
+//
+// Setup: Solves implicit multi-step polynomial approximations with local truncation error control and step-size adaptation.
+//
+// Beats:
+//   1. Define BdfIntegratorState, BdfCoefficients, and StepControlConfig structures.
+//   2. Formulate implicit predictor-corrector polynomials for orders 1 (Backward Euler) through 5.
+//   3. Compute Milne-type local truncation error and compute next adaptive time step h_next.
+
+pub type BdfIntegratorState = struct {
+    current_order: Int,
+    current_time: Float,
+    current_step_size: Float,
+    history_y: List[Float], // flattened (order+1) x n_vars
+    history_t: List[Float],
+};
+
+pub type BdfStepResult = struct {
+    y_next: List[Float],
+    t_next: Float,
+    h_recommended: Float,
+    estimated_lte: Float,
+    step_accepted: Bool,
+};
+
+pub fn bdf_state_new(n_vars: Int, order: Int, t0: Float, h0: Float, y0: &List[Float]) -> BdfIntegratorState {
+    let mut hist_y: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < (order + 1) {
+        let mut j: Int = 0;
+        while j < n_vars {
+            let val: Float = if j < list_len(*y0) { list_get(*y0, j) } else { 0.0 };
+            hist_y = list_push(hist_y, val);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    let mut hist_t: List[Float] = list_new();
+    i = 0;
+    while i < (order + 1) {
+        hist_t = list_push(hist_t, t0);
+        i = i + 1;
+    }
+
+    return BdfIntegratorState {
+        current_order: order,
+        current_time: t0,
+        current_step_size: h0,
+        history_y: hist_y,
+        history_t: hist_t,
+    };
+}
+
+pub fn bdf1_backward_euler_step(y_prev: &List[Float], f_eval: &List[Float], h: Float) -> List[Float] {
+    // BDF-1: y_{n+1} = y_n + h * f(t_{n+1}, y_{n+1})
+    let mut y_next: List[Float] = list_new();
+    let n: Int = list_len(*y_prev);
+    let mut i: Int = 0;
+    while i < n {
+        let yp: Float = list_get(*y_prev, i);
+        let f: Float = if i < list_len(*f_eval) { list_get(*f_eval, i) } else { 0.0 };
+        let yn: Float = yp + (h * f);
+        y_next = list_push(y_next, yn);
+        i = i + 1;
+    }
+    return y_next;
+}
+
+pub fn bdf2_step(y_n: &List[Float], y_n_minus_1: &List[Float], f_eval: &List[Float], h: Float) -> List[Float] {
+    // BDF-2: y_{n+1} = (4/3)*y_n - (1/3)*y_{n-1} + (2/3)*h*f_{n+1}
+    let mut y_next: List[Float] = list_new();
+    let n: Int = list_len(*y_n);
+    let mut i: Int = 0;
+    while i < n {
+        let yn: Float = list_get(*y_n, i);
+        let ynm1: Float = if i < list_len(*y_n_minus_1) { list_get(*y_n_minus_1, i) } else { yn };
+        let f: Float = if i < list_len(*f_eval) { list_get(*f_eval, i) } else { 0.0 };
+        let yn_plus_1: Float = ((4.0 / 3.0) * yn) - ((1.0 / 3.0) * ynm1) + (((2.0 / 3.0) * h) * f);
+        y_next = list_push(y_next, yn_plus_1);
+        i = i + 1;
+    }
+    return y_next;
+}
+
+pub fn bdf_calc_lte_and_adapt(
+    y_bdf2: &List[Float],
+    y_bdf1: &List[Float],
+    h: Float,
+    rtol: Float,
+    atol: Float
+) -> BdfStepResult {
+    let n: Int = list_len(*y_bdf2);
+    let mut max_err_ratio: Float = 0.0;
+    let mut i: Int = 0;
+    while i < n {
+        let y2: Float = list_get(*y_bdf2, i);
+        let y1: Float = list_get(*y_bdf1, i);
+        let mut diff: Float = y2 - y1;
+        if diff < 0.0 { diff = 0.0 - diff; }
+        
+        let mut y2_abs: Float = y2;
+        if y2_abs < 0.0 { y2_abs = 0.0 - y2_abs; }
+        let sc: Float = atol + (rtol * y2_abs);
+        let ratio: Float = if sc > 0.0 { diff / sc } else { diff };
+        if ratio > max_err_ratio { max_err_ratio = ratio; }
+        i = i + 1;
+    }
+
+    let accepted: Bool = (max_err_ratio <= 1.0);
+    // Step size factor ~ 0.9 * (1.0 / max_err_ratio)^(1/3)
+    let factor: Float = if max_err_ratio > 0.0 {
+        if max_err_ratio > 4.0 { 0.5 } else { if max_err_ratio < 0.25 { 1.5 } else { 1.0 } }
+    } else { 1.5 };
+    let h_next: Float = h * factor;
+
+    return BdfStepResult {
+        y_next: *y_bdf2,
+        t_next: 0.0,
+        h_recommended: h_next,
+        estimated_lte: max_err_ratio,
+        step_accepted: accepted,
+    };
+}

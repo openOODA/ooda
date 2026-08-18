@@ -1,0 +1,139 @@
+// # Shamir Share and Share Management
+//
+// Logline: Splits secrets and reconstructs polynomials across distributed shares for SHAMIR.
+//
+// Setup: Imports companion modules for secret sharing operations.
+//
+// Beats:
+//   1. Generate secret shares using polynomial evaluation.
+//   2. Collect and validate shares from distributed participants.
+//   3. Reconstruct original secret using Lagrange interpolation.
+
+import "./shamir_engine.oo";
+
+// -------------------------------------------------------------------
+// Share Collection & Engine Infrastructure
+// -------------------------------------------------------------------
+
+pub fn shamir_share_set_init(set_id: String, threshold: Int) -> ShamirShareSet {
+    let empty_shares: List[SecretShare] = list_new();
+    return ShamirShareSet {
+        set_id: set_id,
+        shares: empty_shares,
+        share_count: 0,
+        threshold: threshold,
+        is_complete: false,
+    };
+}
+
+pub fn shamir_share_set_add(set_ref: &mut ShamirShareSet, share: SecretShare) -> Result[Bool, String] {
+    let sh_ref = &share;
+    let sh_valid: Bool = secret_share_validate(sh_ref);
+    if sh_valid == false {
+        return Err("INVALID_SHARE: Secret share failed integrity validation");
+    }
+
+    let existing: List[SecretShare] = (set_ref).shares;
+    let new_list: List[SecretShare] = list_push(existing, share);
+    let new_count: Int = list_len(new_list);
+
+    (set_ref).shares = new_list;
+    (set_ref).share_count = new_count;
+
+    let thresh: Int = (set_ref).threshold;
+    if new_count >= thresh {
+        (set_ref).is_complete = true;
+    }
+    return Ok(true);
+}
+
+pub fn shamir_share_set_validate(set_ref: &ShamirShareSet) -> Bool {
+    let c: Int = (set_ref).share_count;
+    let shs: List[SecretShare] = (set_ref).shares;
+    let l_len: Int = list_len(shs);
+    return c == l_len;
+}
+
+pub fn shamir_engine_init(engine_id: String, config: ShamirConfig) -> ShamirEngine {
+    let cfg_ref = &config;
+    let valid: Bool = shamir_config_validate(cfg_ref);
+    return ShamirEngine {
+        engine_id: engine_id,
+        config: config,
+        shares_generated: 0,
+        secrets_reconstructed: 0,
+        failed_attempts: 0,
+        strict_mode: true,
+        is_active: valid,
+    };
+}
+
+pub fn shamir_engine_register_share(engine: &mut ShamirEngine, share: SecretShare) -> Result[Bool, String] {
+    let eng_active: Bool = (engine).is_active;
+    if eng_active == false {
+        return Err("ENGINE_INACTIVE: Shamir engine is disabled or uninitialized");
+    }
+    let sh_ref = &share;
+    let s_valid: Bool = secret_share_validate(sh_ref);
+    if s_valid == false {
+        let cur_fail: Int = (engine).failed_attempts;
+        (engine).failed_attempts = cur_fail + 1;
+        return Err("INVALID_SHARE: Share verification failed");
+    }
+    let cur_gen: Int = (engine).shares_generated;
+    (engine).shares_generated = cur_gen + 1;
+    return Ok(true);
+}
+
+pub fn shamir_engine_do_work(engine: &ShamirEngine) -> Int {
+    let sg: Int = (engine).shares_generated;
+    let sr: Int = (engine).secrets_reconstructed;
+    let fa: Int = (engine).failed_attempts;
+    return sg + (sr * 2) - fa;
+}
+
+// -------------------------------------------------------------------
+// Pure Polynomial Secret Reconstruction (Prime Field)
+// -------------------------------------------------------------------
+
+pub fn shamir_reconstruct_secret_int(
+    shares: List[SecretShare],
+    config: &ShamirConfig
+) -> Result[Int, String] {
+    let shares_len: Int = list_len(shares);
+    let threshold: Int = (config).threshold;
+    if shares_len < threshold {
+        return Err("INSUFFICIENT_SHARES: Required threshold shares not met");
+    }
+    let modulus: Int = (config).prime_modulus;
+    if modulus <= 1 {
+        return Err("INVALID_MODULUS: Prime modulus must be > 1");
+    }
+
+    let mut x_coords: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < threshold {
+        let sh: SecretShare = list_get(shares, i);
+        let sh_ref = &sh;
+        let sh_valid: Bool = secret_share_validate(sh_ref);
+        if sh_valid == false {
+            return Err("INVALID_SHARE: Corrupted share detected during reconstruction");
+        }
+        let sx: Int = sh.x;
+        x_coords = list_push(x_coords, sx);
+        i = i + 1;
+    }
+
+    let mut secret: Int = 0;
+    let mut k: Int = 0;
+    while k < threshold {
+        let sh_k: SecretShare = list_get(shares, k);
+        let y_k: Int = sh_k.y_value;
+        let l_k: Int = lagrange_basis_at_zero(k, x_coords, modulus);
+        let term: Int = shamir_mod_mul(y_k, l_k, modulus);
+        secret = shamir_mod_add(secret, term, modulus);
+        k = k + 1;
+    }
+
+    return Ok(secret);
+}

@@ -1,0 +1,165 @@
+// # Bulletproofs Range and Range Proofs
+//
+// Logline: Generates and validates zero-knowledge range proofs for BULLETPROOFS.
+//
+// Setup: Imports companion modules for range proof operations.
+//
+// Beats:
+//   1. Construct range proofs over committed secret values.
+//   2. Implement inner product arguments and vector commitments.
+//   3. Verify range bounds and commitment consistency.
+
+import "./bulletproofs_engine.oo";
+
+pub fn bulletproof_range_prove(
+    val: Int,
+    min_val: Int,
+    max_val: Int,
+    blinding: Int,
+    bit_len: Int,
+    gens: BulletproofGenerators,
+    modulus: Int
+) -> RangeProof {
+    let empty_l: List[Int] = [];
+    let empty_r: List[Int] = [];
+    let empty_ipp: InnerProductProof = InnerProductProof {
+        l_vec: empty_l,
+        r_vec: empty_r,
+        a_final: 0,
+        b_final: 0,
+        is_valid: false,
+    };
+
+    if val < min_val {
+        return RangeProof {
+            commitment: 0,
+            a_commitment: 0,
+            s_commitment: 0,
+            t1_commitment: 0,
+            t2_commitment: 0,
+            tau_x: 0,
+            mu: 0,
+            t_hat: 0,
+            ipp: empty_ipp,
+            bit_length: bit_len,
+            min_value: min_val,
+            max_value: max_val,
+            is_valid: false,
+        };
+    }
+
+    if val > max_val {
+        return RangeProof {
+            commitment: 0,
+            a_commitment: 0,
+            s_commitment: 0,
+            t1_commitment: 0,
+            t2_commitment: 0,
+            tau_x: 0,
+            mu: 0,
+            t_hat: 0,
+            ipp: empty_ipp,
+            bit_length: bit_len,
+            min_value: min_val,
+            max_value: max_val,
+            is_valid: false,
+        };
+    }
+
+    let pcomm: PedersenCommitment = pedersen_commitment_create(gens.g_base, gens.h_base, val, blinding, modulus);
+
+    let mut a_L: List[Int] = [];
+    let mut a_R: List[Int] = [];
+    let mut temp_v: Int = val - min_val;
+    let mut b_idx: Int = 0;
+
+    while b_idx < bit_len {
+        let bit: Int = temp_v % 2;
+        a_L = list_push(a_L, bit);
+        let bit_minus_1: Int = bp_mod_sub(bit, 1, modulus);
+        a_R = list_push(a_R, bit_minus_1);
+        temp_v = temp_v / 2;
+        b_idx = b_idx + 1;
+    }
+
+    let alpha: Int = bp_hash_challenge(val, blinding, modulus);
+    let rho: Int = bp_hash_challenge(blinding, bit_len, modulus);
+
+    let g_vec_ref: List[Int] = gens.g_vec;
+    let h_vec_ref: List[Int] = gens.h_vec;
+
+    let a_comm_val: Int = bp_mod_add(bp_vector_dot_product(a_L, g_vec_ref, modulus), bp_mod_pow(gens.h_base, alpha, modulus), modulus);
+    let s_comm_val: Int = bp_mod_add(bp_vector_dot_product(a_R, h_vec_ref, modulus), bp_mod_pow(gens.h_base, rho, modulus), modulus);
+
+    let p_comm_val: Int = pcomm.commitment;
+    let y_chal: Int = bp_hash_challenge(a_comm_val, s_comm_val, modulus);
+    let z_chal: Int = bp_hash_challenge(y_chal, p_comm_val, modulus);
+
+    let t1_val: Int = bp_hash_challenge(z_chal, 1, modulus);
+    let t2_val: Int = bp_hash_challenge(z_chal, 2, modulus);
+
+    let x_chal: Int = bp_hash_challenge(t1_val, t2_val, modulus);
+
+    let tau1: Int = bp_hash_challenge(x_chal, alpha, modulus);
+    let tau2: Int = bp_hash_challenge(x_chal, rho, modulus);
+
+    let x_sq: Int = bp_mod_mul(x_chal, x_chal, modulus);
+    let z_sq: Int = bp_mod_mul(z_chal, z_chal, modulus);
+
+    let tau_x_calculated: Int = bp_mod_add(bp_mod_add(bp_mod_mul(tau2, x_sq, modulus), bp_mod_mul(tau1, x_chal, modulus), modulus), bp_mod_mul(blinding, z_sq, modulus), modulus);
+    let mu_calculated: Int = bp_mod_add(alpha, bp_mod_mul(rho, x_chal, modulus), modulus);
+
+    let t_hat_calculated: Int = bp_vector_dot_product(a_L, a_R, modulus);
+
+    let ipp_proof: InnerProductProof = inner_product_prove(a_L, a_R, gens, modulus);
+
+    return RangeProof {
+        commitment: p_comm_val,
+        a_commitment: a_comm_val,
+        s_commitment: s_comm_val,
+        t1_commitment: t1_val,
+        t2_commitment: t2_val,
+        tau_x: tau_x_calculated,
+        mu: mu_calculated,
+        t_hat: t_hat_calculated,
+        ipp: ipp_proof,
+        bit_length: bit_len,
+        min_value: min_val,
+        max_value: max_val,
+        is_valid: true,
+    };
+}
+
+pub fn bulletproof_range_verify(
+    proof: RangeProof,
+    commitment_v: Int,
+    gens: BulletproofGenerators,
+    modulus: Int
+) -> Bool {
+    if (proof.is_valid) == false {
+        return false;
+    }
+    if (proof.min_value) > (proof.max_value) {
+        return false;
+    }
+    if (proof.commitment) <= 0 {
+        return false;
+    }
+    if (proof.commitment) != commitment_v {
+        return false;
+    }
+
+    let proof_ipp: InnerProductProof = proof.ipp;
+    let proof_comm: Int = proof.commitment;
+    let ipp_valid: Bool = inner_product_verify(proof_ipp, proof_comm, gens, modulus);
+    if ipp_valid == false {
+        return false;
+    }
+
+    let lhs: Int = bp_mod_add(bp_mod_pow(gens.g_base, proof.t_hat, modulus), bp_mod_pow(gens.h_base, proof.tau_x, modulus), modulus);
+    if lhs <= 0 {
+        return false;
+    }
+
+    return true;
+}

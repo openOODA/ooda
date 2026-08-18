@@ -1,0 +1,133 @@
+// # Lindblad Master Equation Runge-Kutta ODE Integrator
+//
+// Logline: Implements 4th-order Runge-Kutta (RK4) integration for Markovian Lindblad master equations with coherent Hamiltonians and jump dissipators.
+//
+// Setup: Numerical ODE solver for two-level density matrices evolving under unitary drive and multiple Lindblad collapse channels.
+//
+// Beats:
+//   1. Construct 2x2 complex density matrices and Hamiltonian commutators.
+//   2. Implement Lindblad jump dissipators D[L]rho = L rho L^dagger - 0.5 {L^dagger L, rho}.
+//   3. Perform Runge-Kutta 4th order (RK4) time integration step preserving unit trace and positivity.
+
+pub type Complex = struct {
+    real: Float,
+    imag: Float,
+};
+
+pub fn c_new(r: Float, i: Float) -> Complex {
+    return Complex { real: r, imag: i };
+}
+
+pub fn c_add(a: Complex, b: Complex) -> Complex {
+    return Complex { real: a.real + b.real, imag: a.imag + b.imag };
+}
+
+pub fn c_sub(a: Complex, b: Complex) -> Complex {
+    return Complex { real: a.real - b.real, imag: a.imag - b.imag };
+}
+
+pub fn c_mul(a: Complex, b: Complex) -> Complex {
+    let ar: Float = a.real;
+    let ai: Float = a.imag;
+    let br: Float = b.real;
+    let bi: Float = b.imag;
+    return Complex {
+        real: (ar * br) - (ai * bi),
+        imag: (ar * bi) + (ai * br),
+    };
+}
+
+pub fn c_scale(a: Complex, s: Float) -> Complex {
+    return Complex { real: a.real * s, imag: a.imag * s };
+}
+
+pub type DensityMatrix2x2 = struct {
+    rho00: Complex,
+    rho01: Complex,
+    rho10: Complex,
+    rho11: Complex,
+};
+
+pub fn density_matrix_new(r00: Complex, r01: Complex, r10: Complex, r11: Complex) -> DensityMatrix2x2 {
+    return DensityMatrix2x2 { rho00: r00, rho01: r01, rho10: r10, rho11: r11 };
+}
+
+pub fn density_matrix_add(a: DensityMatrix2x2, b: DensityMatrix2x2) -> DensityMatrix2x2 {
+    return DensityMatrix2x2 {
+        rho00: c_add(a.rho00, b.rho00),
+        rho01: c_add(a.rho01, b.rho01),
+        rho10: c_add(a.rho10, b.rho10),
+        rho11: c_add(a.rho11, b.rho11),
+    };
+}
+
+pub fn density_matrix_scale(a: DensityMatrix2x2, s: Float) -> DensityMatrix2x2 {
+    return DensityMatrix2x2 {
+        rho00: c_scale(a.rho00, s),
+        rho01: c_scale(a.rho01, s),
+        rho10: c_scale(a.rho10, s),
+        rho11: c_scale(a.rho11, s),
+    };
+}
+
+pub type LindbladDissipator2x2 = struct {
+    gamma_down: Float,
+    gamma_up: Float,
+    gamma_phi: Float,
+};
+
+pub fn lindblad_dissipator_default() -> LindbladDissipator2x2 {
+    return LindbladDissipator2x2 {
+        gamma_down: 0.1,
+        gamma_up: 0.01,
+        gamma_phi: 0.05,
+    };
+}
+
+pub fn lindblad_derivative(rho: DensityMatrix2x2, omega_rabi: Float, detuning: Float, diss: LindbladDissipator2x2) -> DensityMatrix2x2 {
+    let h00: Float = detuning * 0.5;
+    let h11: Float = 0.0 - h00;
+    let h01: Float = omega_rabi * 0.5;
+
+    let diff_10_01: Complex = c_sub(rho.rho10, rho.rho01);
+    let comm00: Complex = c_mul(c_new(0.0, 0.0 - 1.0), c_scale(diff_10_01, h01));
+    let comm11: Complex = c_scale(comm00, 0.0 - 1.0);
+
+    let comm01_term1: Complex = c_scale(rho.rho01, h00 - h11);
+    let comm01_term2: Complex = c_scale(c_sub(rho.rho11, rho.rho00), h01);
+    let comm01: Complex = c_mul(c_new(0.0, 0.0 - 1.0), c_add(comm01_term1, comm01_term2));
+    let comm10: Complex = c_new(comm01.real, 0.0 - comm01.imag);
+
+    let r11_c: Complex = rho.rho11;
+    let r00_c: Complex = rho.rho00;
+    let d00: Complex = c_new((diss.gamma_down * r11_c.real) - (diss.gamma_up * r00_c.real), 0.0);
+    let d11: Complex = c_new((diss.gamma_up * r00_c.real) - (diss.gamma_down * r11_c.real), 0.0);
+    
+    let dephase_rate: Float = (0.5 * (diss.gamma_down + diss.gamma_up)) + (2.0 * diss.gamma_phi);
+    let d01: Complex = c_scale(rho.rho01, 0.0 - dephase_rate);
+    let d10: Complex = c_scale(rho.rho10, 0.0 - dephase_rate);
+
+    return DensityMatrix2x2 {
+        rho00: c_add(comm00, d00),
+        rho01: c_add(comm01, d01),
+        rho10: c_add(comm10, d10),
+        rho11: c_add(comm11, d11),
+    };
+}
+
+pub fn lindblad_rk4_step(rho: DensityMatrix2x2, omega: Float, delta: Float, diss: LindbladDissipator2x2, dt: Float) -> DensityMatrix2x2 {
+    let k1: DensityMatrix2x2 = lindblad_derivative(rho, omega, delta, diss);
+    let rho_k2: DensityMatrix2x2 = density_matrix_add(rho, density_matrix_scale(k1, dt * 0.5));
+    let k2: DensityMatrix2x2 = lindblad_derivative(rho_k2, omega, delta, diss);
+    let rho_k3: DensityMatrix2x2 = density_matrix_add(rho, density_matrix_scale(k2, dt * 0.5));
+    let k3: DensityMatrix2x2 = lindblad_derivative(rho_k3, omega, delta, diss);
+    let rho_k4: DensityMatrix2x2 = density_matrix_add(rho, density_matrix_scale(k3, dt));
+    let k4: DensityMatrix2x2 = lindblad_derivative(rho_k4, omega, delta, diss);
+
+    let sum_k: DensityMatrix2x2 = density_matrix_add(
+        density_matrix_add(k1, density_matrix_scale(k2, 2.0)),
+        density_matrix_add(density_matrix_scale(k3, 2.0), k4)
+    );
+    let delta_rho: DensityMatrix2x2 = density_matrix_scale(sum_k, dt / 6.0);
+    return density_matrix_add(rho, delta_rho);
+}

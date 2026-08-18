@@ -1,0 +1,183 @@
+// # FASTQ Quality Scores & Sequencing Phred Metrics
+//
+// Logline: Phred+33/+64 decode, P(error)≈10^(-Q/10), Q20/Q30 tallies. Destubbed off pub type / String.
+//
+// Setup: ASCII Int in; packed Q scores base-64. P scaled per 100000.
+//
+// Beats:
+//   1. Q = ASCII-33 (Sanger) or ASCII-64 (Illumina 1.3).
+//   2. Q10/20/30/40 → 10000/1000/100/10; else p *= 794/1000 per Q.
+//   3. Stats: min/max/avg and Q20/Q30 percents.
+
+type FastqRecord = struct {
+    id: Int,
+    seq_pack: Int,
+    qual_pack: Int,
+    seq_n: Int,
+    is_valid: Int
+};
+
+type FastqStats = struct {
+    min_quality: Int,
+    max_quality: Int,
+    avg_quality: Int,
+    n_q20: Int,
+    n_q30: Int,
+    total_bases: Int,
+    q20_pct: Int,
+    q30_pct: Int
+};
+
+type QWalk = struct {
+    min_q: Int,
+    max_q: Int,
+    sum_q: Int,
+    n_q20: Int,
+    n_q30: Int
+};
+
+pub fn int_pow64(n: Int) -> Int {
+    if n <= 0 {
+        return 1;
+    }
+    return 64 * int_pow64(n - 1);
+}
+
+pub fn q_at(packed: Int, idx: Int) -> Int {
+    let div: Int = packed / int_pow64(idx);
+    return div % 64;
+}
+
+pub fn q_pack4(q0: Int, q1: Int, q2: Int, q3: Int) -> Int {
+    return q0 + (q1 * 64) + (q2 * 4096) + (q3 * 262144);
+}
+
+pub fn fastq_phred33_to_score(ascii: Int) -> Int {
+    let q: Int = ascii - 33;
+    if q < 0 {
+        return 0;
+    }
+    return q;
+}
+
+pub fn fastq_phred64_to_score(ascii: Int) -> Int {
+    let q: Int = ascii - 64;
+    if q < 0 {
+        return 0;
+    }
+    return q;
+}
+
+pub fn phred_approx_p(q_score: Int, step: Int, p: Int) -> Int {
+    if step >= q_score {
+        return p;
+    }
+    return phred_approx_p(q_score, step + 1, (p * 794) / 1000);
+}
+
+pub fn fastq_error_probability_pct_x1000(q_score: Int) -> Int {
+    if q_score <= 0 {
+        return 100000;
+    }
+    if q_score == 10 {
+        return 10000;
+    }
+    if q_score == 20 {
+        return 1000;
+    }
+    if q_score == 30 {
+        return 100;
+    }
+    if q_score == 40 {
+        return 10;
+    }
+    if q_score > 40 {
+        return 1;
+    }
+    return phred_approx_p(q_score, 0, 100000);
+}
+
+pub fn fastq_record_new(id: Int, seq_pack: Int, qual_pack: Int, seq_n: Int, qual_n: Int) -> FastqRecord {
+    let valid: Int = if seq_n > 0 { if seq_n == qual_n { 1 } else { 0 } } else { 0 };
+    return FastqRecord {
+        id: id,
+        seq_pack: seq_pack,
+        qual_pack: qual_pack,
+        seq_n: seq_n,
+        is_valid: valid
+    };
+}
+
+pub fn fastq_record_valid(r: FastqRecord) -> Int {
+    return r.is_valid;
+}
+
+pub fn qwalk_empty() -> QWalk {
+    return QWalk {
+        min_q: 999,
+        max_q: 0,
+        sum_q: 0,
+        n_q20: 0,
+        n_q30: 0
+    };
+}
+
+pub fn q_scan(packed: Int, n: Int, i: Int, st: QWalk) -> QWalk {
+    if i >= n {
+        return st;
+    }
+    let q: Int = q_at(packed, i);
+    let min_q: Int = if q < st.min_q { q } else { st.min_q };
+    let max_q: Int = if q > st.max_q { q } else { st.max_q };
+    let n20: Int = if q >= 20 { st.n_q20 + 1 } else { st.n_q20 };
+    let n30: Int = if q >= 30 { st.n_q30 + 1 } else { st.n_q30 };
+    let nxt: QWalk = QWalk {
+        min_q: min_q,
+        max_q: max_q,
+        sum_q: st.sum_q + q,
+        n_q20: n20,
+        n_q30: n30
+    };
+    return q_scan(packed, n, i + 1, nxt);
+}
+
+pub fn fastq_stats_empty() -> FastqStats {
+    return FastqStats {
+        min_quality: 0,
+        max_quality: 0,
+        avg_quality: 0,
+        n_q20: 0,
+        n_q30: 0,
+        total_bases: 0,
+        q20_pct: 0,
+        q30_pct: 0
+    };
+}
+
+pub fn fastq_compute_stats(qual_pack: Int, n: Int) -> FastqStats {
+    if n == 0 {
+        return fastq_stats_empty();
+    }
+    let st: QWalk = q_scan(qual_pack, n, 0, qwalk_empty());
+    let avg: Int = st.sum_q / n;
+    let q20_pct: Int = (st.n_q20 * 100) / n;
+    let q30_pct: Int = (st.n_q30 * 100) / n;
+    return FastqStats {
+        min_quality: st.min_q,
+        max_quality: st.max_q,
+        avg_quality: avg,
+        n_q20: st.n_q20,
+        n_q30: st.n_q30,
+        total_bases: n,
+        q20_pct: q20_pct,
+        q30_pct: q30_pct
+    };
+}
+
+pub fn fastq_stats_avg(s: FastqStats) -> Int {
+    return s.avg_quality;
+}
+
+pub fn fastq_stats_q20_pct(s: FastqStats) -> Int {
+    return s.q20_pct;
+}

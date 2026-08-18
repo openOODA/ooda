@@ -1,0 +1,158 @@
+// # First and Second Order Option Greeks Calculator
+//
+// Logline: Evaluates analytical and numerical Greeks including Delta, Gamma, Theta, Vega, Rho, Vanna, and Volga.
+//
+// Setup: Imports black_scholes.oo for underlying pricing and probability density functions.
+//
+// Beats:
+//   1. Derive first-order Greeks (Delta, Theta, Vega, Rho) measuring directional and time sensitivities.
+//   2. Calculate second-order curvature Greeks (Gamma, Vanna, Volga/Vomma).
+//   3. Provide bump-and-reprice finite difference validations for risk management hedges.
+
+import "./black_scholes.oo";
+
+pub type OptionGreeks = struct {
+    delta: Float,
+    gamma: Float,
+    theta: Float,
+    vega: Float,
+    rho: Float,
+    vanna: Float,
+    volga: Float,
+};
+
+pub fn calculate_analytic_greeks(option: &EuropeanOption) -> OptionGreeks {
+    let s: Float = (option).spot;
+    let k: Float = (option).strike;
+    let t: Float = (option).time_to_expiry;
+    let r: Float = (option).risk_free_rate;
+    let q: Float = (option).dividend_yield;
+    let vol: Float = (option).volatility;
+    
+    if (t <= 0.0) || (vol <= 0.0) || (s <= 0.0) {
+        let intrinsic_delta: Float = if (option).is_call {
+            if s > k { 1.0 } else { 0.0 }
+        } else {
+            if s < k { -1.0 } else { 0.0 }
+        };
+        return OptionGreeks {
+            delta: intrinsic_delta,
+            gamma: 0.0,
+            theta: 0.0,
+            vega: 0.0,
+            rho: 0.0,
+            vanna: 0.0,
+            volga: 0.0,
+        };
+    }
+    
+    let d1: Float = calc_d1(s, k, t, r, q, vol);
+    let d2: Float = calc_d2(d1, vol, t);
+    let pdf_d1: Float = norm_pdf(d1);
+    let exp_qt: Float = exp((0.0 - q) * t);
+    let exp_rt: Float = exp((0.0 - r) * t);
+    let sqrt_t: Float = sqrt(t);
+    
+    // Delta
+    let delta: Float = if (option).is_call {
+        exp_qt * norm_cdf(d1)
+    } else {
+        0.0 - (exp_qt * norm_cdf(0.0 - d1))
+    };
+    
+    // Gamma (same for Call & Put)
+    let gamma: Float = (exp_qt * pdf_d1) / (s * vol * sqrt_t);
+    
+    // Vega (same for Call & Put, per 1% vol change = / 100)
+    let vega: Float = s * exp_qt * pdf_d1 * sqrt_t;
+    
+    // Theta
+    let theta_common: Float = (0.0 - (s * exp_qt * pdf_d1 * vol)) / (2.0 * sqrt_t);
+    let theta: Float = if (option).is_call {
+        theta_common - (r * k * exp_rt * norm_cdf(d2)) + (q * s * exp_qt * norm_cdf(d1))
+    } else {
+        theta_common + (r * k * exp_rt * norm_cdf(0.0 - d2)) - (q * s * exp_qt * norm_cdf(0.0 - d1))
+    };
+    
+    // Rho
+    let rho: Float = if (option).is_call {
+        k * t * exp_rt * norm_cdf(d2)
+    } else {
+        0.0 - (k * t * exp_rt * norm_cdf(0.0 - d2))
+    };
+    
+    // Vanna: d(Delta)/d(vol) = d(Vega)/d(Spot)
+    let vanna: Float = (0.0 - (exp_qt * pdf_d1 * d2)) / vol;
+    
+    // Volga / Vomma: d(Vega)/d(vol)
+    let volga: Float = (vega * d1 * d2) / vol;
+    
+    return OptionGreeks {
+        delta: delta,
+        gamma: gamma,
+        theta: theta,
+        vega: vega,
+        rho: rho,
+        vanna: vanna,
+        volga: volga,
+    };
+}
+
+pub fn finite_diff_delta(option: &EuropeanOption, bump_pct: Float) -> Float {
+    let s: Float = (option).spot;
+    let h: Float = s * bump_pct;
+    
+    let mut up_opt = EuropeanOption {
+        is_call: (option).is_call,
+        spot: s + h,
+        strike: (option).strike,
+        time_to_expiry: (option).time_to_expiry,
+        risk_free_rate: (option).risk_free_rate,
+        dividend_yield: (option).dividend_yield,
+        volatility: (option).volatility,
+    };
+    let mut dn_opt = EuropeanOption {
+        is_call: (option).is_call,
+        spot: s - h,
+        strike: (option).strike,
+        time_to_expiry: (option).time_to_expiry,
+        risk_free_rate: (option).risk_free_rate,
+        dividend_yield: (option).dividend_yield,
+        volatility: (option).volatility,
+    };
+    
+    let up_res = black_scholes_price(&up_opt);
+    let dn_res = black_scholes_price(&dn_opt);
+    
+    return (up_res.price - dn_res.price) / (2.0 * h);
+}
+
+pub fn finite_diff_gamma(option: &EuropeanOption, bump_pct: Float) -> Float {
+    let s: Float = (option).spot;
+    let h: Float = s * bump_pct;
+    
+    let mid_res = black_scholes_price(option);
+    let mut up_opt = EuropeanOption {
+        is_call: (option).is_call,
+        spot: s + h,
+        strike: (option).strike,
+        time_to_expiry: (option).time_to_expiry,
+        risk_free_rate: (option).risk_free_rate,
+        dividend_yield: (option).dividend_yield,
+        volatility: (option).volatility,
+    };
+    let mut dn_opt = EuropeanOption {
+        is_call: (option).is_call,
+        spot: s - h,
+        strike: (option).strike,
+        time_to_expiry: (option).time_to_expiry,
+        risk_free_rate: (option).risk_free_rate,
+        dividend_yield: (option).dividend_yield,
+        volatility: (option).volatility,
+    };
+    
+    let up_res = black_scholes_price(&up_opt);
+    let dn_res = black_scholes_price(&dn_opt);
+    
+    return (up_res.price - (2.0 * mid_res.price) + dn_res.price) / (h * h);
+}

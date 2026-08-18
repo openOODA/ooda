@@ -1,0 +1,130 @@
+// # Diffusion Noise and Velocity Predictor Loss Formulations
+//
+// Logline: Converts between epsilon-prediction, x0-prediction, and v-prediction targets with SNR-weighted loss terms.
+//
+// Setup: Parameterization transforms and training objective metrics for diffusion models.
+//
+// Beats:
+//   1. Define NoisePredictorConfig and NoiseLossOutput structs.
+//   2. Compute v-prediction target v = sqrt(alpha_bar) * eps - sqrt(1 - alpha_bar) * x0.
+//   3. Provide loss metrics with SNR weighting and Min-SNR gamma clamping.
+
+pub type NoisePredictorConfig = struct {
+    prediction_type: Int,
+    snr_gamma: Float,
+    use_min_snr: Bool,
+};
+
+pub type NoiseLossOutput = struct {
+    loss: Float,
+    snr: Float,
+    weight: Float,
+};
+
+pub fn noise_predictor_config_new(
+    pred_type: Int,
+    gamma: Float,
+    min_snr: Bool
+) -> NoisePredictorConfig {
+    return NoisePredictorConfig {
+        prediction_type: pred_type,
+        snr_gamma: gamma,
+        use_min_snr: min_snr,
+    };
+}
+
+pub fn diffusion_compute_snr(alpha_bar: Float) -> Float {
+    let a: Float = if alpha_bar > 0.9999 { 0.9999 } else { if alpha_bar < 0.00001 { 0.00001 } else { alpha_bar } };
+    return a / (1.0 - a);
+}
+
+pub fn diffusion_v_target(x0: List[Float], noise: List[Float], alpha_bar: Float) -> List[Float] {
+    let a: Float = if alpha_bar > 0.9999 { 0.9999 } else { if alpha_bar < 0.00001 { 0.00001 } else { alpha_bar } };
+    let sqrt_a: Float = sqrt(a);
+    let sqrt_one_minus_a: Float = sqrt(1.0 - a);
+
+    let mut target: List[Float] = list_new();
+    let len: Int = list_len(x0);
+    let mut i: Int = 0;
+    while i < len {
+        let x_val: Float = list_get(x0, i);
+        let eps_val: Float = if i < list_len(noise) { list_get(noise, i) } else { 0.0 };
+        // v = sqrt(alpha_bar) * eps - sqrt(1 - alpha_bar) * x0
+        let v: Float = (sqrt_a * eps_val) - (sqrt_one_minus_a * x_val);
+        target = list_push(target, v);
+        i = i + 1;
+    }
+    return target;
+}
+
+pub fn diffusion_x0_from_eps(noisy_sample: List[Float], eps_pred: List[Float], alpha_bar: Float) -> List[Float] {
+    let a: Float = if alpha_bar > 0.9999 { 0.9999 } else { if alpha_bar < 0.00001 { 0.00001 } else { alpha_bar } };
+    let sqrt_a: Float = sqrt(a);
+    let sqrt_one_minus_a: Float = sqrt(1.0 - a);
+
+    let mut x0_pred: List[Float] = list_new();
+    let len: Int = list_len(noisy_sample);
+    let mut i: Int = 0;
+    while i < len {
+        let x_t: Float = list_get(noisy_sample, i);
+        let eps: Float = if i < list_len(eps_pred) { list_get(eps_pred, i) } else { 0.0 };
+        let x0: Float = (x_t - (sqrt_one_minus_a * eps)) / sqrt_a;
+        x0_pred = list_push(x0_pred, x0);
+        i = i + 1;
+    }
+    return x0_pred;
+}
+
+pub fn diffusion_compute_loss(
+    cfg: &NoisePredictorConfig,
+    pred: List[Float],
+    target: List[Float],
+    alpha_bar: Float
+) -> NoiseLossOutput {
+    let snr: Float = diffusion_compute_snr(alpha_bar);
+    let mut weight: Float = 1.0;
+
+    if (cfg).use_min_snr {
+        let gamma: Float = (cfg).snr_gamma;
+        if (cfg).prediction_type == 0 {
+            // Epsilon prediction: weight = min(snr, gamma) / snr
+            let min_val: Float = if snr < gamma { snr } else { gamma };
+            weight = min_val / (if snr > 0.0001 { snr } else { 0.0001 });
+        } else {
+            // V-prediction: weight = min(snr, gamma) / (snr + 1.0)
+            let min_val: Float = if snr < gamma { snr } else { gamma };
+            weight = min_val / (snr + 1.0);
+        }
+    }
+
+    let len: Int = list_len(pred);
+    let mut sum_sq: Float = 0.0;
+    let mut i: Int = 0;
+    while i < len {
+        let p: Float = list_get(pred, i);
+        let t: Float = if i < list_len(target) { list_get(target, i) } else { 0.0 };
+        let diff: Float = p - t;
+        sum_sq = sum_sq + (diff * diff);
+        i = i + 1;
+    }
+
+    let mut len_f: Float = 0.0;
+    let mut count: Int = len;
+    while count >= 1000 { len_f = len_f + 1000.0; count = count - 1000; }
+    while count >= 100 { len_f = len_f + 100.0; count = count - 100; }
+    while count >= 10 { len_f = len_f + 10.0; count = count - 10; }
+    while count >= 1 { len_f = len_f + 1.0; count = count - 1; }
+
+    let mse: Float = if len_f > 0.0 { sum_sq / len_f } else { 0.0 };
+    let final_loss: Float = mse * weight;
+
+    return NoiseLossOutput {
+        loss: final_loss,
+        snr: snr,
+        weight: weight,
+    };
+}
+
+pub fn noise_predictor_marker() -> Int {
+    return 1;
+}

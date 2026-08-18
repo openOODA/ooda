@@ -1,0 +1,155 @@
+// # Keplerian to Cartesian Orbital Transforms
+//
+// Logline: Converts between classical orbital elements and Cartesian Earth-Centered Inertial (ECI) states.
+//
+// Setup: Orbital coordinate conversion logic importing orbit_kepler.oo.
+//
+// Beats:
+//   1. Transform Keplerian orbital elements into Cartesian ECI position and velocity.
+//   2. Extract orbital elements from Cartesian position and velocity state vectors.
+//   3. Compute perifocal-to-inertial transformation matrices.
+
+import "./orbit_kepler.oo";
+
+pub fn keplerian_to_eci(elem: KeplerianElements, mu: Float) -> EciState {
+    let a: Float = (elem).semi_major_axis;
+    let e: Float = (elem).eccentricity;
+    let inc: Float = (elem).inclination;
+    let raan: Float = (elem).raan;
+    let argp: Float = (elem).arg_of_perigee;
+    let nu: Float = (elem).true_anomaly;
+
+    let p: Float = a * (1.0 - (e * e));
+    let r_mag: Float = p / (1.0 + (e * cos(nu)));
+
+    // Position in orbital perifocal plane
+    let x_orb: Float = r_mag * cos(nu);
+    let y_orb: Float = r_mag * sin(nu);
+
+    // Velocity in orbital perifocal plane
+    let v_factor: Float = sqrt(mu / p);
+    let vx_orb: Float = (0.0 - v_factor) * sin(nu);
+    let vy_orb: Float = v_factor * (e + cos(nu));
+
+    // Orbital plane to ECI rotation matrix components
+    let cos_raan: Float = cos(raan);
+    let sin_raan: Float = sin(raan);
+    let cos_inc: Float = cos(inc);
+    let sin_inc: Float = sin(inc);
+    let cos_argp: Float = cos(argp);
+    let sin_argp: Float = sin(argp);
+
+    let r11: Float = (cos_raan * cos_argp) - ((sin_raan * sin_argp) * cos_inc);
+    let r12: Float = ((0.0 - cos_raan) * sin_argp) - ((sin_raan * cos_argp) * cos_inc);
+    
+    let r21: Float = (sin_raan * cos_argp) + ((cos_raan * sin_argp) * cos_inc);
+    let r22: Float = ((0.0 - sin_raan) * sin_argp) + ((cos_raan * cos_argp) * cos_inc);
+
+    let r31: Float = sin_argp * sin_inc;
+    let r32: Float = cos_argp * sin_inc;
+
+    // Transform position to ECI frame
+    let x_eci: Float = (r11 * x_orb) + (r12 * y_orb);
+    let y_eci: Float = (r21 * x_orb) + (r22 * y_orb);
+    let z_eci: Float = (r31 * x_orb) + (r32 * y_orb);
+
+    // Transform velocity to ECI frame
+    let vx_eci: Float = (r11 * vx_orb) + (r12 * vy_orb);
+    let vy_eci: Float = (r21 * vx_orb) + (r22 * vy_orb);
+    let vz_eci: Float = (r31 * vx_orb) + (r32 * vy_orb);
+
+    let pos: Vec3 = vec3_new(x_eci, y_eci, z_eci);
+    let vel: Vec3 = vec3_new(vx_eci, vy_eci, vz_eci);
+
+    return eci_state_new(pos, vel, 0.0);
+}
+
+/// Convert ECI Position and Velocity to Keplerian Orbital Elements
+pub fn eci_to_keplerian(state: EciState, mu: Float) -> KeplerianElements {
+    let r_vec: Vec3 = (state).position;
+    let v_vec: Vec3 = (state).velocity;
+
+    let r_mag: Float = vec3_length(r_vec);
+    let v_mag: Float = vec3_length(v_vec);
+
+    if r_mag < 0.000001 {
+        return keplerian_new(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+
+    // Specific angular momentum h = r x v
+    let h_vec: Vec3 = vec3_cross(r_vec, v_vec);
+    let h_mag: Float = vec3_length(h_vec);
+
+    // Node vector n = k x h = [-h.y, h.x, 0]
+    let n_vec: Vec3 = vec3_new(0.0 - (h_vec).y, (h_vec).x, 0.0);
+    let n_mag: Float = vec3_length(n_vec);
+
+    // Inclination i = acos(h.z / h)
+    let mut inc: Float = 0.0;
+    if h_mag > 0.000001 {
+        inc = math_acos((h_vec).z / h_mag);
+    }
+
+    // RAAN (Right Ascension of Ascending Node) Omega
+    let mut raan: Float = 0.0;
+    if n_mag > 0.000001 {
+        raan = math_acos((n_vec).x / n_mag);
+        if (n_vec).y < 0.0 {
+            raan = math_two_pi() - raan;
+        }
+    }
+
+    // Eccentricity vector e_vec = ((v^2 - mu/r)*r - (r.v)*v) / mu
+    let r_dot_v: Float = vec3_dot(r_vec, v_vec);
+    let v_sq: Float = v_mag * v_mag;
+    let term_r: Float = v_sq - (mu / r_mag);
+    
+    let part1: Vec3 = vec3_scale(r_vec, term_r);
+    let part2: Vec3 = vec3_scale(v_vec, r_dot_v);
+    let e_vec: Vec3 = vec3_scale(vec3_sub(part1, part2), 1.0 / mu);
+    let e_mag: Float = vec3_length(e_vec);
+
+    // Specific orbital energy
+    let energy: Float = (v_sq / 2.0) - (mu / r_mag);
+    let mut a: Float = 0.0;
+    if math_abs(energy) > 0.000000001 {
+        a = (0.0 - mu) / (2.0 * energy);
+    }
+
+    // Argument of Perigee omega
+    let mut argp: Float = 0.0;
+    if e_mag > 0.000001 {
+        if n_mag > 0.000001 {
+            let dot_n_e: Float = vec3_dot(n_vec, e_vec) / (n_mag * e_mag);
+            argp = math_acos(dot_n_e);
+            if (e_vec).z < 0.0 {
+                argp = math_two_pi() - argp;
+            }
+        }
+    }
+
+    // True Anomaly nu
+    let mut nu: Float = 0.0;
+    if e_mag > 0.000001 {
+        let dot_e_r: Float = vec3_dot(e_vec, r_vec) / (e_mag * r_mag);
+        nu = math_acos(dot_e_r);
+        if r_dot_v < 0.0 {
+            nu = math_two_pi() - nu;
+        }
+    } else {
+        if n_mag > 0.000001 {
+            let dot_n_r: Float = vec3_dot(n_vec, r_vec) / (n_mag * r_mag);
+            nu = math_acos(dot_n_r);
+            if (r_vec).z < 0.0 {
+                nu = math_two_pi() - nu;
+            }
+        } else {
+            nu = math_atan2((r_vec).y, (r_vec).x);
+            if nu < 0.0 {
+                nu = nu + math_two_pi();
+            }
+        }
+    }
+
+    return keplerian_new(a, e_mag, inc, raan, argp, nu);
+}

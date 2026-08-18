@@ -1,0 +1,122 @@
+// # 3D Tracklet Lifecycle & Track State Machine Manager
+//
+// Logline: Manages multi-target tracklet progression across Tentative, Confirmed, Coasted, and Deleted operational states.
+//
+// Setup: Lifecycle state machine maintaining obstacle track stability, false-alarm rejection, and track termination.
+//
+// Beats:
+//   1. Define discrete track states (TENTATIVE=0, CONFIRMED=1, COASTED=2, DELETED=3).
+//   2. Track hit counts, consecutive misses, age, and continuous confidence scores.
+//   3. Promote tentative tracks to confirmed status after M-out-of-N successful detection associations.
+//   4. Coast occluded obstacles and cull stale tracklets exceeding maximum miss limits.
+
+import "./point_types.oo";
+import "./kalman_multi_object_tracker.oo";
+
+pub type Tracklet = struct {
+    track_id: Int,
+    state: Int, // 0=Tentative, 1=Confirmed, 2=Coasted, 3=Deleted
+    kalman_state: KalmanState8D,
+    box_size: Point3D, // l, w, h
+    class_id: Int,
+    confidence: Float,
+    age_frames: Int,
+    hit_count: Int,
+    consecutive_misses: Int,
+};
+
+pub type TrackletManagerConfig = struct {
+    min_hits_to_confirm: Int,
+    max_consecutive_misses: Int,
+    max_age_frames: Int,
+};
+
+pub fn tracklet_manager_config_default() -> TrackletManagerConfig {
+    return TrackletManagerConfig {
+        min_hits_to_confirm: 3,
+        max_consecutive_misses: 4,
+        max_age_frames: 10000,
+    };
+}
+
+pub fn tracklet_new(id: Int, box: &BoundingBox3D) -> Tracklet {
+    let k_state: KalmanState8D = kalman_state_new(
+        (box).center_x, (box).center_y, (box).center_z,
+        (box).heading_rad
+    );
+    let size: Point3D = Point3D {
+        x: (box).size_x,
+        y: (box).size_y,
+        z: (box).size_z,
+    };
+
+    return Tracklet {
+        track_id: id,
+        state: 0, // Tentative
+        kalman_state: k_state,
+        box_size: size,
+        class_id: (box).class_id,
+        confidence: (box).confidence,
+        age_frames: 1,
+        hit_count: 1,
+        consecutive_misses: 0,
+    };
+}
+
+pub fn tracklet_register_hit(
+    trk: &Tracklet,
+    updated_k: &KalmanState8D,
+    cfg: &TrackletManagerConfig
+) -> Tracklet {
+    let new_hits: Int = (trk).hit_count + 1;
+    let mut new_state: Int = (trk).state;
+
+    if ((trk).state == 0) && (new_hits >= (cfg).min_hits_to_confirm) {
+        new_state = 1; // Confirmed
+    } else {
+        if (trk).state == 2 {
+            new_state = 1; // Recovered from Coasted
+        }
+    }
+
+    return Tracklet {
+        track_id: (trk).track_id,
+        state: new_state,
+        kalman_state: *updated_k,
+        box_size: (trk).box_size,
+        class_id: (trk).class_id,
+        confidence: 0.95,
+        age_frames: (trk).age_frames + 1,
+        hit_count: new_hits,
+        consecutive_misses: 0,
+    };
+}
+
+pub fn tracklet_register_miss(
+    trk: &Tracklet,
+    pred_k: &KalmanState8D,
+    cfg: &TrackletManagerConfig
+) -> Tracklet {
+    let misses: Int = (trk).consecutive_misses + 1;
+    let mut new_state: Int = (trk).state;
+
+    if misses >= (cfg).max_consecutive_misses {
+        new_state = 3; // Deleted
+    } else {
+        if (trk).state == 1 {
+            new_state = 2; // Coasted
+        }
+    }
+
+    return Tracklet {
+        track_id: (trk).track_id,
+        state: new_state,
+        kalman_state: *pred_k,
+        box_size: (trk).box_size,
+        class_id: (trk).class_id,
+        confidence: (trk).confidence * 0.8,
+        age_frames: (trk).age_frames + 1,
+        hit_count: (trk).hit_count,
+        consecutive_misses: misses,
+    };
+}

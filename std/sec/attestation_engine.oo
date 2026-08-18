@@ -1,0 +1,183 @@
+// # Attestation Engine and Policy Management
+//
+// Logline: Manages execution engine lifecycle, security policies, and performance accounting for ATTESTATION.
+//
+// Setup: Imports companion modules for validated ATTESTATION operations.
+//
+// Beats:
+//   1. Import ATTESTATION operations and types.
+//   2. Initialize security policies and execution engine contexts.
+//   3. Compute engine workload telemetry and operation metrics.
+
+import "./attestation_types.oo";
+import "./attestation_quote.oo";
+
+// -------------------------------------------------------------------
+// Engine Lifecycle & Operations
+// -------------------------------------------------------------------
+
+pub fn attestation_engine_init(engine_id: String, policy: AttestationPolicy) -> AttestationEngine {
+    let empty_quotes: List[AttestationQuote] = [];
+    let empty_tokens: List[AttestationToken] = [];
+    return AttestationEngine {
+        engine_id: engine_id,
+        policy: policy,
+        quotes: empty_quotes,
+        tokens: empty_tokens,
+        verified_count: 0,
+        rejected_count: 0,
+        revoked_count: 0,
+        total_attestations: 0,
+        system_halted: false,
+    };
+}
+
+pub fn attestation_engine_register_quote(mut_engine: &mut AttestationEngine, target_quote: AttestationQuote) -> Bool {
+    if mut_engine.system_halted {
+        return false;
+    }
+    let cur_quotes: List[AttestationQuote] = mut_engine.quotes;
+    let new_quotes: List[AttestationQuote] = list_push(cur_quotes, target_quote);
+    mut_engine.quotes = new_quotes;
+    return true;
+}
+
+pub fn attestation_engine_evaluate(
+    sys: &SysCap,
+    mut_engine: &mut AttestationEngine,
+    eval_quote_id: String,
+    current_time: Int
+) -> Result[AttestationToken, String] {
+    if mut_engine.system_halted {
+        return Err("Attestation engine is halted");
+    }
+    let pol: AttestationPolicy = mut_engine.policy;
+    if pol.is_active == false {
+        return Err("Attestation policy is inactive");
+    }
+
+    let quotes_list: List[AttestationQuote] = mut_engine.quotes;
+    let q_count: Int = list_len(quotes_list);
+    let mut i: Int = 0;
+    let mut found: Bool = false;
+    let mut target_quote: AttestationQuote = attestation_quote_create("", "", "", "", 0);
+
+    while i < q_count {
+        let q_item: AttestationQuote = list_get(quotes_list, i);
+        let qid: String = q_item.quote_id;
+        if qid == eval_quote_id {
+            target_quote = q_item;
+            found = true;
+        }
+        i = i + 1;
+    }
+
+    if found == false {
+        mut_engine.rejected_count = mut_engine.rejected_count + 1;
+        mut_engine.total_attestations = mut_engine.total_attestations + 1;
+        let fc: Bool = pol.fail_closed;
+        if fc {
+            mut_engine.system_halted = true;
+        }
+        return Err("Quote not found");
+    }
+
+    let score: Int = attestation_quote_calculate_trust_score(&target_quote);
+    let min_score: Int = pol.min_trust_score;
+    if score < min_score {
+        mut_engine.rejected_count = mut_engine.rejected_count + 1;
+        mut_engine.total_attestations = mut_engine.total_attestations + 1;
+        let fc: Bool = pol.fail_closed;
+        if fc {
+            mut_engine.system_halted = true;
+        }
+        return Err("Trust score below policy threshold");
+    }
+
+    let ts_str: String = current_time.to_string();
+    let tok_id: String = "tok_" + eval_quote_id + "_" + ts_str;
+    let pk_id: String = target_quote.public_key_id;
+    let eng_id: String = mut_engine.engine_id;
+    let token: AttestationToken = attestation_token_create(
+        tok_id,
+        pk_id,
+        eng_id,
+        eval_quote_id,
+        score,
+        current_time,
+        3600
+    );
+
+    let cur_tokens: List[AttestationToken] = mut_engine.tokens;
+    let new_tokens: List[AttestationToken] = list_push(cur_tokens, token);
+    mut_engine.tokens = new_tokens;
+    mut_engine.verified_count = mut_engine.verified_count + 1;
+    mut_engine.total_attestations = mut_engine.total_attestations + 1;
+
+    return Ok(token);
+}
+
+pub fn attestation_engine_revoke_token(mut_engine: &mut AttestationEngine, target_tok_id: String) -> Bool {
+    if mut_engine.system_halted {
+        return false;
+    }
+    let cur_tokens: List[AttestationToken] = mut_engine.tokens;
+    let count: Int = list_len(cur_tokens);
+    let mut i: Int = 0;
+    let mut found: Bool = false;
+
+    while i < count {
+        let t_item: AttestationToken = list_get(cur_tokens, i);
+        let tid: String = t_item.token_id;
+        if tid == target_tok_id {
+            found = true;
+        }
+        i = i + 1;
+    }
+
+    if found {
+        mut_engine.revoked_count = mut_engine.revoked_count + 1;
+    }
+
+    return found;
+}
+
+pub fn attestation_engine_generate_report(eng_ref: &AttestationEngine, current_time: Int) -> AttestationReport {
+    let tot: Int = eng_ref.total_attestations;
+    let ver: Int = eng_ref.verified_count;
+    let rej: Int = eng_ref.rejected_count;
+    let pol: AttestationPolicy = eng_ref.policy;
+    let min_score: Int = pol.min_trust_score;
+    let mut score: Int = 100;
+    if tot > 0 {
+        score = (ver * 100) / tot;
+    }
+    let is_comp: Bool = score >= min_score;
+    let eng_id: String = eng_ref.engine_id;
+    let ts_str: String = current_time.to_string();
+    let rep_id: String = "rep_" + eng_id + "_" + ts_str;
+
+    return AttestationReport {
+        report_id: rep_id,
+        total_quotes: tot,
+        passed_quotes: ver,
+        failed_quotes: rej,
+        compliance_score: score,
+        is_compliant: is_comp,
+        timestamp: current_time,
+    };
+}
+
+pub fn attestation_engine_halt(mut_engine: &mut AttestationEngine) {
+    mut_engine.system_halted = true;
+}
+
+pub fn attestation_engine_do_work(eng_ref: &AttestationEngine) -> Int {
+    let quotes_list: List[AttestationQuote] = eng_ref.quotes;
+    let tokens_list: List[AttestationToken] = eng_ref.tokens;
+    let n_q: Int = list_len(quotes_list);
+    let n_t: Int = list_len(tokens_list);
+    let v_cnt: Int = eng_ref.verified_count;
+    let r_cnt: Int = eng_ref.rejected_count;
+    return n_q + n_t * 2 + v_cnt * 3 + r_cnt * 5;
+}

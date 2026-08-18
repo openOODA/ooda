@@ -1,0 +1,105 @@
+// # Service Mesh Peer Authentication Policy Resolver
+//
+// Logline: Resolves mesh mTLS peer authentication modes (STRICT vs PERMISSIVE) with port-level overrides.
+//
+// Setup: Security filter determining TLS handshake requirements for incoming socket connections.
+//
+// Beats:
+//   1. Configure global, namespace, and workload-level peer authentication policies.
+//   2. Support STRICT (mTLS required), PERMISSIVE (mTLS or plaintext accepted), and DISABLE modes.
+//   3. Match incoming destination ports against port-level TLS override exceptions.
+
+pub type PortTlsMode = struct {
+    port_number: Int,
+    mode: Int, // 1: STRICT, 2: PERMISSIVE, 3: DISABLE
+};
+
+pub type PeerAuthPolicy = struct {
+    namespace: String,
+    workload_selector: String,
+    default_mode: Int,
+    port_overrides: List[PortTlsMode],
+};
+
+pub type PeerAuthResolver = struct {
+    policies: List[PeerAuthPolicy],
+    connections_evaluated: Int,
+    strict_enforced: Int,
+    permissive_accepted: Int,
+    rejected_count: Int,
+};
+
+pub fn peer_auth_resolver_new() -> PeerAuthResolver {
+    let empty_pols: List[PeerAuthPolicy] = list_new();
+    return PeerAuthResolver {
+        policies: empty_pols,
+        connections_evaluated: 0,
+        strict_enforced: 0,
+        permissive_accepted: 0,
+        rejected_count: 0,
+    };
+}
+
+pub fn peer_auth_add_policy(
+    resolver: &mut PeerAuthResolver,
+    ns: String,
+    workload: String,
+    mode: Int
+) {
+    let empty_ports: List[PortTlsMode] = list_new();
+    let p = PeerAuthPolicy {
+        namespace: ns,
+        workload_selector: workload,
+        default_mode: mode,
+        port_overrides: empty_ports,
+    };
+    (resolver).policies = list_push((resolver).policies, p);
+}
+
+pub fn peer_auth_evaluate_connection(
+    resolver: &mut PeerAuthResolver,
+    ns: String,
+    workload: String,
+    dst_port: Int,
+    is_tls: Bool
+) -> Bool {
+    (resolver).connections_evaluated = (resolver).connections_evaluated + 1;
+    let n: Int = list_len((resolver).policies);
+    let mut effective_mode: Int = 2; // PERMISSIVE by default
+    let mut i: Int = 0;
+
+    while i < n {
+        let p: PeerAuthPolicy = list_get((resolver).policies, i);
+        if (p).namespace == ns && ((p).workload_selector == "*" || (p).workload_selector == workload) {
+            effective_mode = (p).default_mode;
+            let n_ports: Int = list_len((p).port_overrides);
+            let mut j: Int = 0;
+            while j < n_ports {
+                let override: PortTlsMode = list_get((p).port_overrides, j);
+                if (override).port_number == dst_port {
+                    effective_mode = (override).mode;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    if effective_mode == 1 { // STRICT
+        if is_tls {
+            (resolver).strict_enforced = (resolver).strict_enforced + 1;
+            return true;
+        } else {
+            (resolver).rejected_count = (resolver).rejected_count + 1;
+            return false;
+        }
+    }
+
+    if effective_mode == 2 { // PERMISSIVE
+        (resolver).permissive_accepted = (resolver).permissive_accepted + 1;
+        return true;
+    }
+
+    // DISABLE (plaintext only or TLS allowed)
+    return true;
+}

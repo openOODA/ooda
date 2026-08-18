@@ -1,0 +1,107 @@
+// # Multi-Collateral CDP Vault Engine
+//
+// Logline: Manages Collateralized Debt Positions (CDP), collateral deposits/withdrawals, normalized debt tracking, and stability fee compounding.
+//
+// Setup: Pure DeFi vault module for decentralized stablecoin issuance.
+//
+// Beats:
+//   1. Define CollateralType, UserVault, and VaultActionQuote structures.
+//   2. Compound stability fee rate accumulator Ray (10^27 fixed-point representation).
+//   3. Validate debt ceilings, maximum mintable stablecoin amounts, and minimum collateralization ratios.
+
+pub type CollateralType = struct {
+    asset_symbol: String,
+    total_deposited: Int,
+    debt_ceiling: Int,
+    current_debt: Int,
+    min_collat_ratio_bps: Int, // e.g. 15000 for 150%
+    stability_fee_rate_ray: Int,
+    cumulative_rate_ray: Int,
+    price_feed_usd: Int,
+};
+
+pub type UserVault = struct {
+    vault_id: Int,
+    owner: String,
+    asset_symbol: String,
+    locked_collateral: Int,
+    normalized_debt: Int,
+};
+
+pub type VaultActionQuote = struct {
+    can_mint: Bool,
+    max_mintable_amount: Int,
+    current_collat_ratio_bps: Int,
+    is_safe: Bool,
+};
+
+pub fn collateral_type_new(
+    symbol: String,
+    ceiling: Int,
+    min_ratio_bps: Int,
+    price_usd: Int
+) -> CollateralType {
+    let ray_unit: Int = 1000000;
+    return CollateralType {
+        asset_symbol: symbol,
+        total_deposited: 0,
+        debt_ceiling: ceiling,
+        current_debt: 0,
+        min_collat_ratio_bps: min_ratio_bps,
+        stability_fee_rate_ray: 1000002, // ~2% annual
+        cumulative_rate_ray: ray_unit,
+        price_feed_usd: price_usd,
+    };
+}
+
+pub fn user_vault_new(id: Int, owner: String, symbol: String) -> UserVault {
+    return UserVault {
+        vault_id: id,
+        owner: owner,
+        asset_symbol: symbol,
+        locked_collateral: 0,
+        normalized_debt: 0,
+    };
+}
+
+pub fn vault_compound_rate(collat: &mut CollateralType, time_delta_sec: Int) {
+    let rate_inc: Int = ((collat).stability_fee_rate_ray - 1000000) * time_delta_sec;
+    (collat).cumulative_rate_ray = (collat).cumulative_rate_ray + rate_inc;
+}
+
+pub fn vault_get_debt_usd(vault: &UserVault, collat: &CollateralType) -> Int {
+    return ((vault).normalized_debt * (collat).cumulative_rate_ray) / 1000000;
+}
+
+pub fn vault_check_safety(
+    vault: &UserVault,
+    collat: &CollateralType
+) -> VaultActionQuote {
+    let actual_debt: Int = vault_get_debt_usd(vault, collat);
+    let collat_val_usd: Int = ((vault).locked_collateral * (collat).price_feed_usd) / 1000000;
+
+    if actual_debt <= 0 {
+        return VaultActionQuote {
+            can_mint: true,
+            max_mintable_amount: (collat_val_usd * 10000) / (collat).min_collat_ratio_bps,
+            current_collat_ratio_bps: 999999,
+            is_safe: true,
+        };
+    }
+
+    let current_ratio_bps: Int = (collat_val_usd * 10000) / actual_debt;
+    let safe: Bool = current_ratio_bps >= (collat).min_collat_ratio_bps;
+
+    let max_total_debt: Int = (collat_val_usd * 10000) / (collat).min_collat_ratio_bps;
+    let mut add_mint: Int = 0;
+    if max_total_debt > actual_debt {
+        add_mint = max_total_debt - actual_debt;
+    }
+
+    return VaultActionQuote {
+        can_mint: safe && (add_mint > 0),
+        max_mintable_amount: add_mint,
+        current_collat_ratio_bps: current_ratio_bps,
+        is_safe: safe,
+    };
+}

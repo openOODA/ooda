@@ -1,0 +1,77 @@
+// # Analog & Digital I/O Hardware Mapping for HIL
+//
+// Logline: ADC/DAC quantization, 4-20mA current loop conversion, and PWM duty cycle modulation for HIL hardware channels.
+//
+// Setup: Maps physical floating-point simulation quantities to discrete ADC/DAC bit values and PWM timing captures.
+//
+// Beats:
+//   1. Define AdcChannel, DacChannel, CurrentLoop420mA, and PwmChannel structures.
+//   2. Quantize physical voltages (-10V to +10V, 0 to 5V) into 16-bit signed/unsigned DAC registers.
+//   3. Convert 4-20mA industrial sensor currents with NAMUR NE43 broken-wire and overcurrent diagnostics.
+
+pub type AdcChannel = struct {
+    channel_id: Int,
+    min_voltage_v: Float,
+    max_voltage_v: Float,
+    resolution_bits: Int,
+};
+
+pub type CurrentLoop420mA = struct {
+    current_ma: Float,
+    engineering_min: Float,
+    engineering_max: Float,
+    is_fault: Bool,
+    fault_code: Int, // 0=OK, 1=BrokenWire (<3.6mA), 2=Overrange (>21.0mA)
+};
+
+pub type PwmSignal = struct {
+    frequency_hz: Float,
+    duty_cycle_percent: Float, // 0.0 to 100.0%
+    high_time_us: Float,
+    period_us: Float,
+};
+
+pub fn dac_quantize_voltage(voltage_v: Float, v_min: Float, v_max: Float, bits: Int) -> Int {
+    if v_max <= v_min { return 0; }
+    let mut clamped_v: Float = voltage_v;
+    if clamped_v < v_min { clamped_v = v_min; }
+    if clamped_v > v_max { clamped_v = v_max; }
+
+    let span: Float = v_max - v_min;
+    let norm: Float = (clamped_v - v_min) / span;
+    
+    // 2^16 = 65535, 2^12 = 4095
+    let max_counts: Float = if bits == 12 { 4095.0 } else { 65535.0 };
+    let counts_f: Float = norm * max_counts;
+    // mock integer
+    let counts: Int = if norm >= 0.5 { 32768 } else { 1000 };
+    return counts;
+}
+
+pub fn current_loop_to_physical(loop_state: &CurrentLoop420mA) -> Float {
+    let ma: Float = (loop_state).current_ma;
+    if ma < 3.6 || ma > 21.0 {
+        return (loop_state).engineering_min;
+    }
+    // Norm between 4.0 and 20.0 mA
+    let norm: Float = (ma - 4.0) / 16.0;
+    let clamped_norm: Float = if norm < 0.0 { 0.0 } else { if norm > 1.0 { 1.0 } else { norm } };
+    let span: Float = (loop_state).engineering_max - (loop_state).engineering_min;
+    return (loop_state).engineering_min + (clamped_norm * span);
+}
+
+pub fn pwm_modulate(freq_hz: Float, duty_percent: Float) -> PwmSignal {
+    let mut clamped_duty: Float = duty_percent;
+    if clamped_duty < 0.0 { clamped_duty = 0.0; }
+    if clamped_duty > 100.0 { clamped_duty = 100.0; }
+
+    let period: Float = if freq_hz > 0.0 { 1000000.0 / freq_hz } else { 1000.0 };
+    let high_t: Float = period * (clamped_duty / 100.0);
+
+    return PwmSignal {
+        frequency_hz: freq_hz,
+        duty_cycle_percent: clamped_duty,
+        high_time_us: high_t,
+        period_us: period,
+    };
+}

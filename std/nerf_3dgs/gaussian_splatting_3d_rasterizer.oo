@@ -1,0 +1,87 @@
+// # 3D Gaussian Splatting Tile-Based Rasterizer
+//
+// Logline: Hardware tile-parallel alpha blending rasterizer with front-to-back sorting and early transmittance termination.
+//
+// Setup: Core rendering algorithm evaluating 2D Gaussian splat color contributions per pixel.
+//
+// Beats:
+//   1. Invert 2D screen covariance matrix Sigma_2D and compute 2D Mahalanobis distance power.
+//   2. Compute per-pixel Gaussian alpha response alpha = opacity * exp(-0.5 * d^T Sigma_inv d).
+//   3. Alpha-blend RGB colors front-to-back with early saturation threshold T < 0.0001.
+
+import "./vec3_math.oo";
+import "./gaussian_projective_2d.oo";
+
+pub type RasterPixelState = struct {
+    rgb: Vec3,
+    transmittance: Float,
+    accumulated_alpha: Float,
+};
+
+pub fn raster_pixel_init() -> RasterPixelState {
+    return RasterPixelState {
+        rgb: vec3_zero(),
+        transmittance: 1.0,
+        accumulated_alpha: 0.0,
+    };
+}
+
+pub fn invert_covariance_2d(cov: &Covariance2D) -> Covariance2D {
+    let det: Float = (cov).cov_xx * (cov).cov_yy - (cov).cov_xy * (cov).cov_xy;
+    if det <= 0.000001 {
+        return Covariance2D { cov_xx: 0.0, cov_xy: 0.0, cov_yy: 0.0 };
+    }
+    let inv_det: Float = 1.0 / det;
+    return Covariance2D {
+        cov_xx: (cov).cov_yy * inv_det,
+        cov_xy: -(cov).cov_xy * inv_det,
+        cov_yy: (cov).cov_xx * inv_det,
+    };
+}
+
+pub fn evaluate_gaussian_2d_alpha(
+    px: Float,
+    py: Float,
+    mean_x: Float,
+    mean_y: Float,
+    inv_cov: &Covariance2D,
+    opacity: Float,
+) -> Float {
+    let dx: Float = px - mean_x;
+    let dy: Float = py - mean_y;
+
+    // Power = -0.5 * (dx^2 * inv_xx + 2*dx*dy*inv_xy + dy^2 * inv_yy)
+    let power: Float = -0.5 * (dx * dx * (inv_cov).cov_xx + 2.0 * dx * dy * (inv_cov).cov_xy + dy * dy * (inv_cov).cov_yy);
+    if power > 0.0 || power < -15.0 {
+        return 0.0;
+    }
+
+    let g_val: Float = math_exp(power);
+    let alpha: Float = opacity * g_val;
+    if alpha < (1.0 / 255.0) {
+        return 0.0;
+    }
+    return math_clamp(alpha, 0.0, 0.99);
+}
+
+pub fn raster_blend_gaussian(
+    state: &RasterPixelState,
+    color: &Vec3,
+    alpha: Float,
+) -> RasterPixelState {
+    if (state).transmittance <= 0.0001 || alpha <= 0.0 {
+        return *state; // Early termination / no contribution
+    }
+
+    let weight: Float = (state).transmittance * alpha;
+    let contrib: Vec3 = vec3_scale(color, weight);
+    let new_rgb: Vec3 = vec3_add(&(state).rgb, &contrib);
+    let new_trans: Float = (state).transmittance * (1.0 - alpha);
+    let new_alpha: Float = (state).accumulated_alpha + weight;
+
+    return RasterPixelState {
+        rgb: new_rgb,
+        transmittance: new_trans,
+        accumulated_alpha: new_alpha,
+    };
+}

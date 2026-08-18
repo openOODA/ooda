@@ -1,0 +1,87 @@
+// # UAV Active Disturbance Rejection Controller (ADRC) & LESO
+//
+// Logline: Real-time total disturbance estimation and active cancellation using a 3rd-order Linear Extended State Observer (LESO).
+//
+// Setup: Treats unmodeled dynamics, parameter variations, and aerodynamic wind gusts as a generalized disturbance to actively reject.
+//
+// Beats:
+//   1. Define ADRC Parameters (observer bandwidth omega_o, controller bandwidth omega_c, control gain b0).
+//   2. Define LESO 3-State Vector: z1 (estimated pos), z2 (estimated vel), z3 (total generalized disturbance f_ext).
+//   3. Propagate LESO observer states using innovation error: e_obs = z1 - y_measured.
+//   4. Calculate Disturbance-Rejection control law u = (u0 - z3) / b0, where u0 = kp*(r - z1) - kd*z2.
+
+import "./uav_coordinate_frames.oo";
+
+pub type AdrcConfig = struct {
+    omega_observer: Float,
+    omega_controller: Float,
+    b0_gain: Float,
+};
+
+pub type LesoState1D = struct {
+    z1_pos: Float,
+    z2_vel: Float,
+    z3_disturb: Float,
+};
+
+pub type AdrcOutput1D = struct {
+    control_u: Float,
+    new_leso: LesoState1D,
+    estimated_disturb: Float,
+};
+
+pub fn adrc_config_default(b0: Float) -> AdrcConfig {
+    return AdrcConfig {
+        omega_observer: 40.0, // Observer bandwidth
+        omega_controller: 8.0, // Controller bandwidth
+        b0_gain: b0,
+    };
+}
+
+pub fn leso_state_init() -> LesoState1D {
+    return LesoState1D { z1_pos: 0.0, z2_vel: 0.0, z3_disturb: 0.0 };
+}
+
+pub fn adrc_step_1d(
+    cfg: &AdrcConfig,
+    state: &LesoState1D,
+    pos_meas: Float,
+    pos_ref: Float,
+    prev_u: Float,
+    dt: Float
+) -> AdrcOutput1D {
+    let wo: Float = (cfg).omega_observer;
+    let wc: Float = (cfg).omega_controller;
+    let b0: Float = (cfg).b0_gain;
+
+    // LESO observer gains: beta1 = 3*wo, beta2 = 3*wo^2, beta3 = wo^3
+    let beta1: Float = 3.0 * wo;
+    let beta2: Float = 3.0 * wo * wo;
+    let beta3: Float = wo * wo * wo;
+
+    // Innovation error
+    let e: Float = (state).z1_pos - pos_meas;
+
+    // LESO state update
+    let dz1: Float = (state).z2_vel - (beta1 * e);
+    let dz2: Float = (state).z3_disturb + (b0 * prev_u) - (beta2 * e);
+    let dz3: Float = 0.0 - (beta3 * e);
+
+    let next_z1: Float = (state).z1_pos + (dz1 * dt);
+    let next_z2: Float = (state).z2_vel + (dz2 * dt);
+    let next_z3: Float = (state).z3_disturb + (dz3 * dt);
+
+    // Virtual PD control law: u0 = kp*(r - z1) - kd*z2
+    let kp: Float = wc * wc;
+    let kd: Float = 2.0 * wc;
+    let u0: Float = (kp * (pos_ref - next_z1)) - (kd * next_z2);
+
+    // Disturbance rejection: u = (u0 - z3) / b0
+    let u_cmd: Float = (u0 - next_z3) / b0;
+
+    return AdrcOutput1D {
+        control_u: u_cmd,
+        new_leso: LesoState1D { z1_pos: next_z1, z2_vel: next_z2, z3_disturb: next_z3 },
+        estimated_disturb: next_z3,
+    };
+}

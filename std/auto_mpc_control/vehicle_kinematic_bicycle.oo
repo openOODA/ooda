@@ -1,0 +1,143 @@
+// # Kinematic Bicycle Vehicle Model & State Propagation
+//
+// Logline: Simulates slip-free planar kinematic bicycle motion at CG, front axle, and rear axle reference frames.
+//
+// Setup: Low-to-moderate speed kinematic vehicle model ideal for motion planning, Pure Pursuit, and geometric MPC tracking.
+//
+// Beats:
+//   1. Formulate kinematic bicycle geometry (wheelbase, front overhang, rear overhang, steer limits).
+//   2. Compute slip-free body sideslip angle beta at the vehicle center of gravity.
+//   3. Propagate 4-state vehicle kinematic trajectories using Euler and Runge-Kutta 4th-order (RK4) integration.
+//   4. Calculate instantaneous turning curvature, radius, and Ackermann steer geometry.
+
+import "./vehicle_coordinate_frames.oo";
+
+pub type KinematicBicycleParams = struct {
+    wheelbase: Float,
+    dist_cg_to_front: Float,
+    dist_cg_to_rear: Float,
+    max_steer_rad: Float,
+    max_accel_ms2: Float,
+};
+
+pub type KinematicState = struct {
+    x: Float,
+    y: Float,
+    yaw: Float,
+    v: Float,
+};
+
+pub type KinematicControlInput = struct {
+    accel: Float,
+    steer: Float,
+};
+
+pub fn kinematic_bicycle_params_default() -> KinematicBicycleParams {
+    return KinematicBicycleParams {
+        wheelbase: 2.8,
+        dist_cg_to_front: 1.3,
+        dist_cg_to_rear: 1.5,
+        max_steer_rad: 0.6,
+        max_accel_ms2: 4.0,
+    };
+}
+
+pub fn kinematic_state_new(x: Float, y: Float, yaw: Float, v: Float) -> KinematicState {
+    return KinematicState { x: x, y: y, yaw: yaw, v: v };
+}
+
+pub fn kinematic_state_zero() -> KinematicState {
+    return KinematicState { x: 0.0, y: 0.0, yaw: 0.0, v: 0.0 };
+}
+
+pub fn kinematic_control_new(accel: Float, steer: Float) -> KinematicControlInput {
+    return KinematicControlInput { accel: accel, steer: steer };
+}
+
+pub fn compute_kinematic_sideslip(
+    steer_rad: Float,
+    params: &KinematicBicycleParams
+) -> Float {
+    let lr: Float = (params).dist_cg_to_rear;
+    let l_tot: Float = (params).wheelbase;
+    let tan_delta: Float = sin(steer_rad) / cos(steer_rad);
+    let ratio: Float = (lr / l_tot) * tan_delta;
+    let ratio_sq: Float = ratio * ratio;
+    let beta: Float = ratio * (1.0 - (0.33333333 * ratio_sq));
+    return beta;
+}
+
+pub fn kinematic_bicycle_deriv(
+    state: &KinematicState,
+    ctrl: &KinematicControlInput,
+    params: &KinematicBicycleParams
+) -> KinematicState {
+    let beta: Float = compute_kinematic_sideslip((ctrl).steer, params);
+    let heading_plus_beta: Float = (state).yaw + beta;
+    let dx: Float = (state).v * cos(heading_plus_beta);
+    let dy: Float = (state).v * sin(heading_plus_beta);
+    let dyaw: Float = ((state).v / (params).wheelbase) * cos(beta) * sin((ctrl).steer);
+    let dv: Float = (ctrl).accel;
+    return KinematicState { x: dx, y: dy, yaw: dyaw, v: dv };
+}
+
+pub fn kinematic_step_euler(
+    state: &KinematicState,
+    ctrl: &KinematicControlInput,
+    dt: Float,
+    params: &KinematicBicycleParams
+) -> KinematicState {
+    let deriv: KinematicState = kinematic_bicycle_deriv(state, ctrl, params);
+    let next_x: Float = (state).x + ((deriv).x * dt);
+    let next_y: Float = (state).y + ((deriv).y * dt);
+    let next_yaw: Float = (state).yaw + ((deriv).yaw * dt);
+    let next_v_raw: Float = (state).v + ((deriv).v * dt);
+    let next_v: Float = if next_v_raw < 0.0 { 0.0 } else { next_v_raw };
+    return KinematicState {
+        x: next_x,
+        y: next_y,
+        yaw: next_yaw,
+        v: next_v,
+    };
+}
+
+pub fn kinematic_step_rk4(
+    s: &KinematicState,
+    u: &KinematicControlInput,
+    dt: Float,
+    p: &KinematicBicycleParams
+) -> KinematicState {
+    let k1: KinematicState = kinematic_bicycle_deriv(s, u, p);
+    
+    let s2: KinematicState = KinematicState {
+        x: (s).x + (0.5 * dt * (k1).x),
+        y: (s).y + (0.5 * dt * (k1).y),
+        yaw: (s).yaw + (0.5 * dt * (k1).yaw),
+        v: (s).v + (0.5 * dt * (k1).v),
+    };
+    let k2: KinematicState = kinematic_bicycle_deriv(&s2, u, p);
+
+    let s3: KinematicState = KinematicState {
+        x: (s).x + (0.5 * dt * (k2).x),
+        y: (s).y + (0.5 * dt * (k2).y),
+        yaw: (s).yaw + (0.5 * dt * (k2).yaw),
+        v: (s).v + (0.5 * dt * (k2).v),
+    };
+    let k3: KinematicState = kinematic_bicycle_deriv(&s3, u, p);
+
+    let s4: KinematicState = KinematicState {
+        x: (s).x + (dt * (k3).x),
+        y: (s).y + (dt * (k3).y),
+        yaw: (s).yaw + (dt * (k3).yaw),
+        v: (s).v + (dt * (k3).v),
+    };
+    let k4: KinematicState = kinematic_bicycle_deriv(&s4, u, p);
+
+    let nx: Float = (s).x + ((dt / 6.0) * ((k1).x + (2.0 * (k2).x) + (2.0 * (k3).x) + (k4).x));
+    let ny: Float = (s).y + ((dt / 6.0) * ((k1).y + (2.0 * (k2).y) + (2.0 * (k3).y) + (k4).y));
+    let nyaw: Float = (s).yaw + ((dt / 6.0) * ((k1).yaw + (2.0 * (k2).yaw) + (2.0 * (k3).yaw) + (k4).yaw));
+    let nv_raw: Float = (s).v + ((dt / 6.0) * ((k1).v + (2.0 * (k2).v) + (2.0 * (k3).v) + (k4).v));
+    let nv: Float = if nv_raw < 0.0 { 0.0 } else { nv_raw };
+
+    return KinematicState { x: nx, y: ny, yaw: nyaw, v: nv };
+}

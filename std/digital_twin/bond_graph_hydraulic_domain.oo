@@ -1,0 +1,103 @@
+// # Hydraulic Domain Bond Graph Modeling
+//
+// Logline: Fluid power bond graph components modeling pressure, volumetric flow, fluid inertance, compliance, and pump transformations.
+//
+// Setup: Implements laminar/turbulent pipe resistance, fluid compressibility bulk modulus compliance, and positive displacement pump transformers.
+//
+// Beats:
+//   1. Define hydraulic fluid properties, accumulator compliance, and pipe inertance structures.
+//   2. Compute laminar Hagen-Poiseuille and turbulent orifice pressure drop constitutive relations.
+//   3. Formulate positive displacement pump/motor mechanical-hydraulic transformer TF couplings.
+
+pub type HydraulicFluid = struct {
+    density_kg_m3: Float,
+    bulk_modulus_pa: Float,
+    dynamic_viscosity_pa_s: Float,
+};
+
+pub type HydraulicPipe = struct {
+    length_m: Float,
+    diameter_m: Float,
+    area_m2: Float,
+    fluid_inertance: Float, // I = rho * L / A
+    laminar_resistance: Float, // R = 128 * mu * L / (pi * D^4)
+};
+
+pub type HydraulicAccumulator = struct {
+    gas_precharge_pressure_pa: Float,
+    total_volume_m3: Float,
+    current_fluid_volume_m3: Float,
+};
+
+pub type HydraulicPumpTF = struct {
+    displacement_m3_per_rad: Float, // D_p
+    volumetric_efficiency: Float,
+    mechanical_efficiency: Float,
+};
+
+pub fn math_sqrt_approx(x: Float) -> Float {
+    if x <= 0.0 { return 0.0; }
+    let mut g: Float = if x > 1.0 { x / 2.0 } else { x };
+    let mut i: Int = 0;
+    while i < 12 {
+        g = 0.5 * (g + (x / g));
+        i = i + 1;
+    }
+    return g;
+}
+
+pub fn hydraulic_pipe_new(fluid: &HydraulicFluid, length_m: Float, diameter_m: Float) -> HydraulicPipe {
+    let pi: Float = 3.141592653589793;
+    let r: Float = diameter_m / 2.0;
+    let area: Float = pi * r * r;
+    let inertance: Float = if area > 0.0 { ((fluid).density_kg_m3 * length_m) / area } else { 0.0 };
+    
+    let d2: Float = diameter_m * diameter_m;
+    let d4: Float = d2 * d2;
+    let resistance: Float = if (pi * d4) > 0.0 { (128.0 * (fluid).dynamic_viscosity_pa_s * length_m) / (pi * d4) } else { 0.0 };
+
+    return HydraulicPipe {
+        length_m: length_m,
+        diameter_m: diameter_m,
+        area_m2: area,
+        fluid_inertance: inertance,
+        laminar_resistance: resistance,
+    };
+}
+
+pub fn hydraulic_eval_orifice_pressure_drop(flow_m3_s: Float, cd: Float, area_m2: Float, density_kg_m3: Float) -> Float {
+    // Q = Cd * A * sqrt(2 * Delta_P / rho) => Delta_P = 0.5 * rho * (Q / (Cd * A))^2
+    let denom: Float = cd * area_m2;
+    if denom <= 0.0 { return 0.0; }
+    let v: Float = flow_m3_s / denom;
+    let sign: Float = if flow_m3_s >= 0.0 { 1.0 } else { 0.0 - 1.0 };
+    let dp: Float = 0.5 * density_kg_m3 * v * v * sign;
+    return dp;
+}
+
+pub fn hydraulic_accumulator_pressure(acc: &HydraulicAccumulator, gamma: Float) -> Float {
+    // Adiabatic/Polytropic gas compliance: P * (V_tot - V_fluid)^gamma = P0 * V0^gamma
+    let gas_vol: Float = (acc).total_volume_m3 - (acc).current_fluid_volume_m3;
+    if gas_vol <= 0.0001 { return (acc).gas_precharge_pressure_pa * 10.0; }
+    let ratio: Float = (acc).total_volume_m3 / gas_vol;
+    let mut factor: Float = ratio;
+    if gamma > 1.2 {
+        factor = ratio * math_sqrt_approx(ratio);
+    }
+    return (acc).gas_precharge_pressure_pa * factor;
+}
+
+pub fn hydraulic_pump_eval(pump: &HydraulicPumpTF, shaft_speed_rad_s: Float, delta_p_pa: Float) -> List[Float] {
+    // Q = D_p * omega * eta_vol
+    // Torque = (D_p * Delta_P) / eta_mech
+    let eta_v: Float = if (pump).volumetric_efficiency > 0.0 { (pump).volumetric_efficiency } else { 1.0 };
+    let eta_m: Float = if (pump).mechanical_efficiency > 0.0 { (pump).mechanical_efficiency } else { 1.0 };
+
+    let flow_q: Float = (pump).displacement_m3_per_rad * shaft_speed_rad_s * eta_v;
+    let torque_tau: Float = ((pump).displacement_m3_per_rad * delta_p_pa) / eta_m;
+
+    let mut res: List[Float] = list_new();
+    res = list_push(res, flow_q);
+    res = list_push(res, torque_tau);
+    return res;
+}

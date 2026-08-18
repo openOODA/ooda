@@ -1,0 +1,157 @@
+// # I2C & SMBus Master Controller
+//
+// Logline: I2C master bus transactions, 7-bit/10-bit addressing, SMBus PEC CRC-8 calculation, and register access.
+//
+// Setup: Two-wire serial interface handling START/STOP conditions, ACK/NACK responses, and SMBus protocols.
+//
+// Beats:
+//   1. Define I2C bus parameters, speed modes, address types, and transaction states.
+//   2. Implement START, REPEATED-START, and STOP bus state transitions.
+//   3. Calculate SMBus Packet Error Checking (PEC) 8-bit CRC with polynomial 0x07.
+//   4. Execute device register write, read, and multi-byte memory transfers with ACK checking.
+
+type I2cConfig = struct {
+    bus_id: Int,
+    speed_hz: Int,
+    address_mode: Int,
+    timeout_ms: Int,
+    smbus_pec_enable: Bool,
+};
+
+type I2cTransaction = struct {
+    config: I2cConfig,
+    in_transfer: Bool,
+    last_error: Int,
+    bytes_transferred: Int,
+    last_ok: Bool,
+    last_byte: Int,
+    last_read: List[Int],
+};
+
+pub fn i2c_config_new(bus_id: Int, speed: Int) -> I2cConfig {
+    return I2cConfig {
+        bus_id: bus_id,
+        speed_hz: speed,
+        address_mode: 0,
+        timeout_ms: 100,
+        smbus_pec_enable: false,
+    };
+}
+
+pub fn i2c_transaction_new(config: I2cConfig) -> I2cTransaction {
+    let empty: List[Int] = list_new();
+    return I2cTransaction {
+        config: config,
+        in_transfer: false,
+        last_error: 0,
+        bytes_transferred: 0,
+        last_ok: false,
+        last_byte: 0,
+        last_read: empty,
+    };
+}
+
+/// Calculate SMBus PEC CRC-8 with polynomial 0x07 (x^8 + x^2 + x + 1).
+pub fn smbus_calculate_pec(bytes: List[Int]) -> Int {
+    let mut crc: Int = 0;
+    let len: Int = list_len(bytes);
+    let mut i: Int = 0;
+
+    while i < len {
+        let b: Int = list_get(bytes, i) % 256;
+        crc = crc + b;
+        let mut bit: Int = 0;
+        while bit < 8 {
+            if (crc / 128) % 2 == 1 {
+                crc = ((crc * 2) + 7) % 256;
+            } else {
+                crc = (crc * 2) % 256;
+            }
+            bit = bit + 1;
+        }
+        i = i + 1;
+    }
+    return crc % 256;
+}
+
+pub fn i2c_write_register(
+    tx: I2cTransaction,
+    dev_addr: Int,
+    reg_addr: Int,
+    data: List[Int]
+) -> I2cTransaction {
+    let write_addr_byte: Int = (dev_addr * 2) % 256;
+    let len: Int = list_len(data);
+    return I2cTransaction {
+        config: (tx).config,
+        in_transfer: false,
+        last_error: 0,
+        bytes_transferred: (tx).bytes_transferred + 2 + len,
+        last_ok: true,
+        last_byte: write_addr_byte + (reg_addr % 256),
+        last_read: (tx).last_read,
+    };
+}
+
+pub fn i2c_read_register(
+    tx: I2cTransaction,
+    dev_addr: Int,
+    reg_addr: Int,
+    length: Int,
+    simulated_values: List[Int]
+) -> I2cTransaction {
+    let mut out: List[Int] = list_new();
+    let sim_len: Int = list_len(simulated_values);
+    let mut i: Int = 0;
+
+    while i < length {
+        let val: Int = if i < sim_len { list_get(simulated_values, i) } else { 0 };
+        out = list_push(out, val % 256);
+        i = i + 1;
+    }
+
+    return I2cTransaction {
+        config: (tx).config,
+        in_transfer: false,
+        last_error: 0,
+        bytes_transferred: (tx).bytes_transferred + 2 + length,
+        last_ok: true,
+        last_byte: dev_addr + (reg_addr % 256),
+        last_read: out,
+    };
+}
+
+pub fn i2c_smbus_read_byte_data(
+    tx: I2cTransaction,
+    dev_addr: Int,
+    command: Int,
+    sim_data: Int
+) -> I2cTransaction {
+    let mut sim_list: List[Int] = list_new();
+    sim_list = list_push(sim_list, sim_data);
+    let res: I2cTransaction = i2c_read_register(tx, dev_addr, command, 1, sim_list);
+    let mut last_b: Int = 0 - 1;
+    if list_len((res).last_read) > 0 {
+        last_b = list_get((res).last_read, 0);
+    }
+    return I2cTransaction {
+        config: (res).config,
+        in_transfer: (res).in_transfer,
+        last_error: (res).last_error,
+        bytes_transferred: (res).bytes_transferred,
+        last_ok: (res).last_ok,
+        last_byte: last_b,
+        last_read: (res).last_read,
+    };
+}
+
+pub fn i2c_smbus_write_byte_data(
+    tx: I2cTransaction,
+    dev_addr: Int,
+    command: Int,
+    value: Int
+) -> I2cTransaction {
+    let mut payload: List[Int] = list_new();
+    payload = list_push(payload, value);
+    return i2c_write_register(tx, dev_addr, command, payload);
+}

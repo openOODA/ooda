@@ -1,0 +1,136 @@
+// # Everlasting Continuous Funding Options Engine
+//
+// Logline: Prices non-expiring everlasting options by evaluating geometric infinite series of European options rolled at continuous funding intervals.
+//
+// Setup: Pure quantitative finance module implementing Dave White / Paradigm everlasting continuous options pricing and funding rates.
+//
+// Beats:
+//   1. Define EverlastingContract and EverlastingResult structures.
+//   2. Compute geometric probability distribution over effective rolling horizons.
+//   3. Value infinite series sum of European components and calculate instantaneous funding rate obligations.
+
+pub type EverlastingContract = struct {
+    strike: Float,
+    spot_price: Float,
+    volatility: Float,
+    risk_free_rate: Float,
+    funding_period_days: Float, // e.g. 1.0 day or 0.333 days (8h)
+    is_call: Bool,
+};
+
+pub type EverlastingResult = struct {
+    everlasting_price: Float,
+    equivalent_regular_expiry_days: Float,
+    funding_rate_daily_pct: Float,
+    delta: Float,
+    gamma: Float,
+    series_terms_summed: Int,
+};
+
+pub fn ev_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn ev_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (ev_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn ev_bs_eval(s: Float, k: Float, t: Float, r: Float, vol: Float, is_call: Bool) -> Float {
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    let df: Float = exp((0.0 - r) * t);
+
+    if is_call {
+        return (s * ev_norm_cdf(d1)) - (k * df * ev_norm_cdf(d2));
+    }
+    return (k * df * ev_norm_cdf(0.0 - d2)) - (s * ev_norm_cdf(0.0 - d1));
+}
+
+pub fn everlasting_contract_new(
+    k: Float,
+    s: Float,
+    vol: Float,
+    r: Float,
+    funding_days: Float,
+    is_call: Bool
+) -> EverlastingContract {
+    return EverlastingContract {
+        strike: k,
+        spot_price: s,
+        volatility: vol,
+        risk_free_rate: r,
+        funding_period_days: funding_days,
+        is_call: is_call,
+    };
+}
+
+pub fn evaluate_everlasting_option(
+    c: &EverlastingContract,
+    max_terms: Int
+) -> EverlastingResult {
+    let s: Float = (c).spot_price;
+    let k: Float = (c).strike;
+    let vol: Float = (c).volatility;
+    let r: Float = (c).risk_free_rate;
+    let dt_days: Float = (c).funding_period_days;
+    let dt_years: Float = dt_days / 365.0;
+
+    // Geometric weighting decay: w = dt / (dt + funding_period) = 0.5 for 1-day roll
+    let alpha: Float = dt_years / (dt_years + dt_years); // 0.5
+
+    let mut total_px: Float = 0.0;
+    let mut total_delta: Float = 0.0;
+    let mut total_gamma: Float = 0.0;
+    let mut weight: Float = 1.0 - alpha;
+
+    let mut n: Int = 1;
+    while n <= max_terms {
+        let mut n_fl: Float = 0.0;
+        let mut rem_n: Int = n;
+        while rem_n > 0 { n_fl = n_fl + 1.0; rem_n = rem_n - 1; }
+
+        let t_n: Float = n_fl * dt_years;
+        let p_n: Float = ev_bs_eval(s, k, t_n, r, vol, (c).is_call);
+
+        let term_weight: Float = alpha * weight;
+        total_px = total_px + (term_weight * p_n);
+
+        let sqrt_tn: Float = sqrt(t_n);
+        let d1_n: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t_n)) / (vol * sqrt_tn);
+        let delta_n: Float = ev_norm_cdf(d1_n);
+        let gamma_n: Float = ev_norm_pdf(d1_n) / (s * vol * sqrt_tn);
+
+        total_delta = total_delta + (term_weight * delta_n);
+        total_gamma = total_gamma + (term_weight * gamma_n);
+
+        weight = weight * (1.0 - alpha);
+        n = n + 1;
+    }
+
+    // Daily funding rate = (Everlasting Price - Intrinsic Value) / Spot
+    let mut intrinsic: Float = 0.0;
+    if (c).is_call {
+        if s > k { intrinsic = s - k; }
+    } else {
+        if k > s { intrinsic = k - s; }
+    }
+
+    let funding_rate_pct: Float = (total_px - intrinsic) / (s * dt_days);
+
+    return EverlastingResult {
+        everlasting_price: total_px,
+        equivalent_regular_expiry_days: dt_days * 2.0,
+        funding_rate_daily_pct: funding_rate_pct,
+        delta: total_delta,
+        gamma: total_gamma,
+        series_terms_summed: max_terms,
+    };
+}

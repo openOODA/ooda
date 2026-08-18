@@ -1,0 +1,166 @@
+// # High-Frequency Market Data Tick Analytics
+//
+// Logline: Processes tick feeds, classifies trade directions with the Lee-Ready rule, and calculates VPIN toxicity.
+//
+// Setup: Pure high-frequency tick processing and order flow metrics.
+//
+// Beats:
+//   1. Parse top-of-book and trade execution ticks with nanosecond timestamps.
+//   2. Classify trade side using tick test and quote rule (Lee-Ready algorithm).
+//   3. Compute volume-synchronized probability of toxicity (VPIN) and order flow imbalance.
+
+pub type TickRecord = struct {
+    symbol: String,
+    price: Int,
+    volume: Int,
+    bid_price: Int,
+    ask_price: Int,
+    bid_size: Int,
+    ask_size: Int,
+    timestamp_ns: Int,
+    side: Int, // 1 = Buy, 2 = Sell, 0 = Indeterminate
+};
+
+pub type TickMetrics = struct {
+    total_volume: Int,
+    buy_volume: Int,
+    sell_volume: Int,
+    vwap: Float,
+    micro_price: Float,
+    vpin_toxicity: Float,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 100000 { f = f + 100000.0; count = count - 100000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn tick_record_new(
+    symbol: String,
+    price: Int,
+    volume: Int,
+    bid: Int,
+    ask: Int,
+    b_sz: Int,
+    a_sz: Int,
+    time_ns: Int
+) -> TickRecord {
+    return TickRecord {
+        symbol: symbol,
+        price: price,
+        volume: volume,
+        bid_price: bid,
+        ask_price: ask,
+        bid_size: b_sz,
+        ask_size: a_sz,
+        timestamp_ns: time_ns,
+        side: 0,
+    };
+}
+
+pub fn classify_tick_direction(
+    current_px: Int,
+    prev_px: Int,
+    bid: Int,
+    ask: Int
+) -> Int {
+    // Quote Rule
+    if (bid > 0) && (ask > 0) {
+        let mid: Int = (bid + ask) / 2;
+        if current_px > mid {
+            return 1; // Buy (buyer-initiated)
+        }
+        if current_px < mid {
+            return 2; // Sell (seller-initiated)
+        }
+    }
+    // Tick Rule
+    if current_px > prev_px {
+        return 1; // Uptick -> Buy
+    }
+    if current_px < prev_px {
+        return 2; // Downtick -> Sell
+    }
+    return 0; // Zero-tick indeterminate
+}
+
+pub fn tick_compute_spread(tick: &TickRecord) -> Int {
+    if ((tick).ask_price > 0) && ((tick).bid_price > 0) {
+        return (tick).ask_price - (tick).bid_price;
+    }
+    return 0;
+}
+
+pub fn tick_compute_micro_price(tick: &TickRecord) -> Float {
+    let b_sz: Float = int_to_float((tick).bid_size);
+    let a_sz: Float = int_to_float((tick).ask_size);
+    let total_sz: Float = b_sz + a_sz;
+    if total_sz <= 0.0 {
+        return int_to_float((tick).price);
+    }
+    let b_px: Float = int_to_float((tick).bid_price);
+    let a_px: Float = int_to_float((tick).ask_price);
+    return ((b_sz * a_px) + (a_sz * b_px)) / total_sz;
+}
+
+pub fn calculate_vpin(buy_vol: Int, sell_vol: Int, total_vol: Int) -> Float {
+    if total_vol <= 0 { return 0.0; }
+    let mut diff: Int = buy_vol - sell_vol;
+    if diff < 0 { diff = 0 - diff; }
+    let diff_f: Float = int_to_float(diff);
+    let tot_f: Float = int_to_float(total_vol);
+    return diff_f / tot_f;
+}
+
+pub fn process_tick_stream(ticks: List[TickRecord]) -> TickMetrics {
+    let n: Int = list_len(ticks);
+    let mut tot_vol: Int = 0;
+    let mut buy_vol: Int = 0;
+    let mut sell_vol: Int = 0;
+    let mut total_notional: Float = 0.0;
+    let mut last_micro: Float = 0.0;
+    let mut prev_px: Int = 0;
+    
+    let mut i: Int = 0;
+    while i < n {
+        let mut t: TickRecord = list_get(ticks, i);
+        let px: Int = (t).price;
+        let sz: Int = (t).volume;
+        let side: Int = classify_tick_direction(px, prev_px, (t).bid_price, (t).ask_price);
+        
+        tot_vol = tot_vol + sz;
+        total_notional = total_notional + (int_to_float(px) * int_to_float(sz));
+        
+        if side == 1 {
+            buy_vol = buy_vol + sz;
+        } else if side == 2 {
+            sell_vol = sell_vol + sz;
+        }
+        
+        last_micro = tick_compute_micro_price(&t);
+        prev_px = px;
+        i = i + 1;
+    }
+    
+    let vwap: Float = if tot_vol > 0 { total_notional / int_to_float(tot_vol) } else { 0.0 };
+    let vpin: Float = calculate_vpin(buy_vol, sell_vol, tot_vol);
+    
+    return TickMetrics {
+        total_volume: tot_vol,
+        buy_volume: buy_vol,
+        sell_volume: sell_vol,
+        vwap: vwap,
+        micro_price: last_micro,
+        vpin_toxicity: vpin,
+    };
+}

@@ -1,0 +1,95 @@
+// # Generalized Born Surface Area (GBSA) Implicit Solvent
+//
+// Logline: Calculates Generalized Born electrostatic solvation energy and non-polar SASA hydrophobic transfer terms.
+//
+// Setup: Implicit continuum solvent model computing effective Born radii via Hawkins-Cramer-Truhlar / OBC integrations.
+//
+// Beats:
+//   1. Define GbParams, GbAtom, and GbSolvationResult data structures.
+//   2. Calculate effective Born radii R_i using pairwise desolvation integral approximations.
+//   3. Compute Generalized Born polar polarization energy and LCPO non-polar cavitation terms.
+
+pub type GbParams = struct {
+    eps_solute: Float,
+    eps_solvent: Float,
+    gamma_surface_tension: Float, // kcal / (mol * A^2)
+    offset_energy: Float,
+    coulomb_const: Float,
+};
+
+pub type GbAtom = struct {
+    atom_id: Int,
+    partial_charge: Float,
+    intrinsic_radius_a: Float,
+    effective_born_radius_a: Float,
+    sasa_a2: Float,
+};
+
+pub type GbSolvationResult = struct {
+    polar_gb_energy_kcal: Float,
+    nonpolar_sasa_energy_kcal: Float,
+    total_solvation_energy_kcal: Float,
+};
+
+pub fn gb_sqrt(val: Float) -> Float {
+    if val <= 0.0 { return 0.0; }
+    let mut guess = val / 2.0;
+    if guess < 0.1 { guess = 0.1; }
+    let mut iter = 0;
+    while iter < 10 {
+        guess = 0.5 * (guess + (val / guess));
+        iter = iter + 1;
+    }
+    return guess;
+}
+
+pub fn gb_params_obc_default() -> GbParams {
+    return GbParams {
+        eps_solute: 1.0,
+        eps_solvent: 78.5,
+        gamma_surface_tension: 0.0072, // 7.2 cal/(mol*A^2)
+        offset_energy: 0.0,
+        coulomb_const: 332.0637,
+    };
+}
+
+pub fn gb_calc_f_gb(r_ij: Float, r_born_i: Float, r_born_j: Float) -> Float {
+    // f_GB = sqrt(r_ij^2 + R_i * R_j * exp(-r_ij^2 / (4 * R_i * R_j)))
+    let r2 = r_ij * r_ij;
+    let prod = r_born_i * r_born_j;
+    if prod <= 0.0001 { return gb_sqrt(r2); }
+
+    let expo = -1.0 * r2 / (4.0 * prod);
+    // exp(expo) approx
+    let neg_e = -1.0 * expo;
+    let exp_term = 1.0 / (1.0 + neg_e + (0.5 * neg_e * neg_e));
+
+    let f_sq = r2 + (prod * exp_term);
+    return gb_sqrt(f_sq);
+}
+
+pub fn gb_pair_polar_energy(
+    atom_i: &GbAtom,
+    atom_j: &GbAtom,
+    r_ij: Float,
+    params: &GbParams,
+) -> Float {
+    let f_gb = gb_calc_f_gb(r_ij, (atom_i).effective_born_radius_a, (atom_j).effective_born_radius_a);
+    if f_gb <= 0.001 { return 0.0; }
+
+    let dielectric_factor = (1.0 / (params).eps_solute) - (1.0 / (params).eps_solvent);
+    let q_prod = (atom_i).partial_charge * (atom_j).partial_charge;
+
+    // E_GB_pair = - 0.5 * (1/eps_in - 1/eps_out) * q_i * q_j * C / f_GB
+    let energy = -0.5 * dielectric_factor * (params).coulomb_const * q_prod / f_gb;
+    return energy;
+}
+
+pub fn gb_evaluate_solvation(polar_e: Float, total_sasa: Float, params: &GbParams) -> GbSolvationResult {
+    let np_e = ((params).gamma_surface_tension * total_sasa) + (params).offset_energy;
+    return GbSolvationResult {
+        polar_gb_energy_kcal: polar_e,
+        nonpolar_sasa_energy_kcal: np_e,
+        total_solvation_energy_kcal: polar_e + np_e,
+    };
+}

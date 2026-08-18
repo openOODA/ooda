@@ -1,0 +1,123 @@
+// # Implied Volatility Newton-Raphson & Halley Inverter
+//
+// Logline: Rapidly solves Black-Scholes implied volatility from market option quotes using second-order Halley and Newton-Raphson root-finding.
+//
+// Setup: Pure quantitative finance module implementing fast iterative volatility inversion for European derivatives.
+//
+// Beats:
+//   1. Define IvSolverConfig and IvSolverResult structures.
+//   2. Compute analytical Vega and Volga derivatives to accelerate convergence steps.
+//   3. Execute bounded Halley quadratic corrections with adaptive step damping.
+
+pub type IvSolverConfig = struct {
+    max_iterations: Int,
+    tolerance: Float,
+    initial_vol_guess: Float,
+    min_vol: Float,
+    max_vol: Float,
+};
+
+pub type IvSolverResult = struct {
+    implied_volatility: Float,
+    iterations_used: Int,
+    final_error: Float,
+    is_converged: Bool,
+};
+
+pub fn iv_solver_config_default() -> IvSolverConfig {
+    return IvSolverConfig {
+        max_iterations: 20,
+        tolerance: 0.00001,
+        initial_vol_guess: 0.50,
+        min_vol: 0.001,
+        max_vol: 10.0,
+    };
+}
+
+pub fn iv_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn iv_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (iv_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn solve_iv_halley(
+    target_price: Float,
+    spot: Float,
+    strike: Float,
+    t: Float,
+    r: Float,
+    is_call: Bool,
+    cfg: &IvSolverConfig
+) -> IvSolverResult {
+    let mut vol: Float = (cfg).initial_vol_guess;
+    let sqrt_t: Float = sqrt(t);
+    let df: Float = exp((0.0 - r) * t);
+
+    let mut iter: Int = 0;
+    let mut err: Float = 1.0;
+
+    while iter < (cfg).max_iterations {
+        let d1: Float = (ln(spot / strike) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+        let d2: Float = d1 - (vol * sqrt_t);
+
+        let n_d1: Float = iv_norm_cdf(d1);
+        let n_d2: Float = iv_norm_cdf(d2);
+        let pdf_d1: Float = iv_norm_pdf(d1);
+
+        let mut price_model: Float = 0.0;
+        if is_call {
+            price_model = (spot * n_d1) - (strike * df * n_d2);
+        } else {
+            price_model = (strike * df * iv_norm_cdf(0.0 - d2)) - (spot * iv_norm_cdf(0.0 - d1));
+        }
+
+        let diff: Float = price_model - target_price;
+        let mut abs_diff: Float = diff;
+        if abs_diff < 0.0 { abs_diff = 0.0 - abs_diff; }
+        err = abs_diff;
+
+        if abs_diff < (cfg).tolerance {
+            return IvSolverResult {
+                implied_volatility: vol,
+                iterations_used: iter,
+                final_error: err,
+                is_converged: true,
+            };
+        }
+
+        let vega: Float = spot * sqrt_t * pdf_d1;
+        if vega < 0.000001 {
+            // Degenerate Vega: step damped
+            vol = vol - (diff * 0.01);
+        } else {
+            // Halley correction
+            let volga_over_vega: Float = (d1 * d2) / vol;
+            let halley_denom: Float = 1.0 - (0.5 * (diff / vega) * volga_over_vega);
+            let mut step: Float = (diff / vega) / halley_denom;
+            if step > 0.5 { step = 0.5; }
+            if step < (0.0 - 0.5) { step = 0.0 - 0.5; }
+            vol = vol - step;
+        }
+
+        if vol < (cfg).min_vol { vol = (cfg).min_vol; }
+        if vol > (cfg).max_vol { vol = (cfg).max_vol; }
+
+        iter = iter + 1;
+    }
+
+    return IvSolverResult {
+        implied_volatility: vol,
+        iterations_used: iter,
+        final_error: err,
+        is_converged: false,
+    };
+}

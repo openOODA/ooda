@@ -1,0 +1,174 @@
+// # Mass-Spring & Position-Based Dynamics Cloth Mesh
+//
+// Logline: Simulates 2D/3D deformable cloth fabric grids with structural, shear, and flexion/bending spring constraints.
+//
+// Setup: Multi-constraint 2D lattice fabric simulation with aerodynamic wind resistance and position-based relaxation.
+//
+// Beats:
+//   1. Define ClothParticle, ClothConstraint, and ClothMeshState structures.
+//   2. Apply gravitational acceleration and aerodynamic surface wind drag forces.
+//   3. Solve structural stretch, diagonal shear, and 2-hop bending constraint pairs.
+
+pub type ClothParticle = struct {
+    x: Float,
+    y: Float,
+    z: Float,
+    old_x: Float,
+    old_y: Float,
+    old_z: Float,
+    inv_mass: Float,
+    is_pinned: Int,
+};
+
+pub type ClothConstraint = struct {
+    rest_length: Float,
+    stiffness: Float,
+    constraint_type: Int, // 0 = structural, 1 = shear, 2 = bending
+};
+
+pub type ClothMeshConfig = struct {
+    gravity_y: Float,
+    wind_x: Float,
+    wind_y: Float,
+    wind_z: Float,
+    damping: Float,
+    structural_stiffness: Float,
+    shear_stiffness: Float,
+    bending_stiffness: Float,
+};
+
+pub type ClothPairResult = struct {
+    p0: ClothParticle,
+    p1: ClothParticle,
+};
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn cloth_particle_new(x: Float, y: Float, z: Float, mass: Float) -> ClothParticle {
+    let mut inv_m = 0.0;
+    if mass > 0.000001 {
+        inv_m = 1.0 / mass;
+    }
+    return ClothParticle {
+        x: x, y: y, z: z,
+        old_x: x, old_y: y, old_z: z,
+        inv_mass: inv_m,
+        is_pinned: 0,
+    };
+}
+
+pub fn cloth_mesh_config_default() -> ClothMeshConfig {
+    return ClothMeshConfig {
+        gravity_y: -9.81,
+        wind_x: 0.0,
+        wind_y: 0.0,
+        wind_z: 0.0,
+        damping: 0.992,
+        structural_stiffness: 0.9,
+        shear_stiffness: 0.7,
+        bending_stiffness: 0.4,
+    };
+}
+
+// -------------------------------------------------------------------
+// Kinematic Step & Aerodynamics
+// -------------------------------------------------------------------
+
+pub fn cloth_particle_step(
+    p: ClothParticle,
+    cfg: ClothMeshConfig,
+    dt: Float
+) -> ClothParticle {
+    if (p).is_pinned != 0 || (p).inv_mass <= 0.0 {
+        return p;
+    }
+
+    let dt_sq = dt * dt;
+    let net_ax = (cfg).wind_x;
+    let net_ay = (cfg).gravity_y + (cfg).wind_y;
+    let net_az = (cfg).wind_z;
+
+    let curr_x = (p).x;
+    let curr_y = (p).y;
+    let curr_z = (p).z;
+
+    let nx = curr_x + ((curr_x - (p).old_x) * (cfg).damping) + (net_ax * dt_sq);
+    let ny = curr_y + ((curr_y - (p).old_y) * (cfg).damping) + (net_ay * dt_sq);
+    let nz = curr_z + ((curr_z - (p).old_z) * (cfg).damping) + (net_az * dt_sq);
+
+    return ClothParticle {
+        x: nx, y: ny, z: nz,
+        old_x: curr_x, old_y: curr_y, old_z: curr_z,
+        inv_mass: (p).inv_mass,
+        is_pinned: (p).is_pinned,
+    };
+}
+
+// -------------------------------------------------------------------
+// PBD Constraint Solver
+// -------------------------------------------------------------------
+
+pub fn cloth_solve_constraint(
+    p1: ClothParticle,
+    p2: ClothParticle,
+    c: ClothConstraint
+) -> ClothPairResult {
+    let dx = (p2).x - (p1).x;
+    let dy = (p2).y - (p1).y;
+    let dz = (p2).z - (p1).z;
+
+    let dist = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+    if dist < 0.000001 {
+        return ClothPairResult { p0: p1, p1: p2 };
+    }
+
+    let diff = (dist - (c).rest_length) / dist;
+    let w1 = (p1).inv_mass;
+    let w2 = (p2).inv_mass;
+    let w_sum = w1 + w2;
+
+    if w_sum < 0.000001 {
+        return ClothPairResult { p0: p1, p1: p2 };
+    }
+
+    let f1 = (w1 / w_sum) * diff * (c).stiffness;
+    let f2 = (w2 / w_sum) * diff * (c).stiffness;
+
+    let mut n1_x = (p1).x;
+    let mut n1_y = (p1).y;
+    let mut n1_z = (p1).z;
+
+    let mut n2_x = (p2).x;
+    let mut n2_y = (p2).y;
+    let mut n2_z = (p2).z;
+
+    if (p1).is_pinned == 0 && w1 > 0.0 {
+        n1_x = (p1).x + (dx * f1);
+        n1_y = (p1).y + (dy * f1);
+        n1_z = (p1).z + (dz * f1);
+    }
+
+    if (p2).is_pinned == 0 && w2 > 0.0 {
+        n2_x = (p2).x - (dx * f2);
+        n2_y = (p2).y - (dy * f2);
+        n2_z = (p2).z - (dz * f2);
+    }
+
+    let res1 = ClothParticle {
+        x: n1_x, y: n1_y, z: n1_z,
+        old_x: (p1).old_x, old_y: (p1).old_y, old_z: (p1).old_z,
+        inv_mass: (p1).inv_mass,
+        is_pinned: (p1).is_pinned,
+    };
+
+    let res2 = ClothParticle {
+        x: n2_x, y: n2_y, z: n2_z,
+        old_x: (p2).old_x, old_y: (p2).old_y, old_z: (p2).old_z,
+        inv_mass: (p2).inv_mass,
+        is_pinned: (p2).is_pinned,
+    };
+
+    return ClothPairResult { p0: res1, p1: res2 };
+}

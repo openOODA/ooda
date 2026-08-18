@@ -1,0 +1,113 @@
+// # Virtio-Vsock Multiplexed Stream
+//
+// Logline: Implements VirtIO vsock guest-to-host CID:port channel multiplexing with credit-based flow control.
+//
+// Setup: Low-latency communication stream connecting host invocation router to guest runtime agents.
+//
+// Beats:
+//   1. Maintain guest Context ID (CID) and port multiplexing channel table.
+//   2. Track peer buffer credits to prevent packet drops and buffer overflows.
+//   3. Packetize invocation payloads and handle credit acknowledgment updates.
+
+pub type VsockChannel = struct {
+    channel_id: Int,
+    peer_cid: Int,
+    peer_port: Int,
+    peer_credits: Int,
+    bytes_sent: Int,
+    is_open: Bool,
+};
+
+pub type VsockMultiplexer = struct {
+    local_cid: Int,
+    channels: List[VsockChannel],
+    next_channel_id: Int,
+    total_packets_routed: Int,
+};
+
+pub fn vsock_multiplexer_new(local_cid: Int) -> VsockMultiplexer {
+    let empty_chans: List[VsockChannel] = list_new();
+    return VsockMultiplexer {
+        local_cid: local_cid,
+        channels: empty_chans,
+        next_channel_id: 1,
+        total_packets_routed: 0,
+    };
+}
+
+pub fn vsock_open_channel(mux: &mut VsockMultiplexer, peer_cid: Int, peer_port: Int, initial_credits: Int) -> Int {
+    let chan_id: Int = (mux).next_channel_id;
+    (mux).next_channel_id = (mux).next_channel_id + 1;
+
+    let chan = VsockChannel {
+        channel_id: chan_id,
+        peer_cid: peer_cid,
+        peer_port: peer_port,
+        peer_credits: initial_credits,
+        bytes_sent: 0,
+        is_open: true,
+    };
+
+    (mux).channels = list_push((mux).channels, chan);
+    return chan_id;
+}
+
+pub fn vsock_send_payload(mux: &mut VsockMultiplexer, chan_id: Int, payload_len: Int) -> Bool {
+    let n: Int = list_len((mux).channels);
+    let mut i: Int = 0;
+    let mut updated: List[VsockChannel] = list_new();
+    let mut sent: Bool = false;
+
+    while i < n {
+        let chan: VsockChannel = list_get((mux).channels, i);
+        if (chan).channel_id == chan_id && (chan).is_open {
+            if (chan).peer_credits >= payload_len {
+                let updated_chan = VsockChannel {
+                    channel_id: (chan).channel_id,
+                    peer_cid: (chan).peer_cid,
+                    peer_port: (chan).peer_port,
+                    peer_credits: (chan).peer_credits - payload_len,
+                    bytes_sent: (chan).bytes_sent + payload_len,
+                    is_open: true,
+                };
+                updated = list_push(updated, updated_chan);
+                (mux).total_packets_routed = (mux).total_packets_routed + 1;
+                sent = true;
+            } else {
+                updated = list_push(updated, chan);
+            }
+        } else {
+            updated = list_push(updated, chan);
+        }
+        i = i + 1;
+    }
+
+    (mux).channels = updated;
+    return sent;
+}
+
+pub fn vsock_grant_credits(mux: &mut VsockMultiplexer, chan_id: Int, added_credits: Int) {
+    let n: Int = list_len((mux).channels);
+    let mut i: Int = 0;
+    let mut updated: List[VsockChannel] = list_new();
+
+    while i < n {
+        let chan: VsockChannel = list_get((mux).channels, i);
+        if (chan).channel_id == chan_id {
+            let updated_chan = VsockChannel {
+                channel_id: (chan).channel_id,
+                peer_cid: (chan).peer_cid,
+                peer_port: (chan).peer_port,
+                peer_credits: (chan).peer_credits + added_credits,
+                bytes_sent: (chan).bytes_sent,
+                is_open: (chan).is_open,
+            };
+            updated = list_push(updated, updated_chan);
+        } else {
+            updated = list_push(updated, chan);
+        }
+        i = i + 1;
+    }
+
+    (mux).channels = updated;
+}

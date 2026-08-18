@@ -1,0 +1,134 @@
+// # Navier-Stokes Pressure Poisson Solver
+//
+// Logline: Solves elliptic pressure Poisson equations using Jacobi and Successive Over-Relaxation (SOR) with velocity divergence sources.
+//
+// Setup: Pressure projection step enforcing incompressibility (div u = 0) on staggered MAC grids.
+//
+// Beats:
+//   1. Compute discrete cell velocity divergence from staggered face fluxes.
+//   2. Perform Jacobi and SOR relaxation iterations for pressure correction.
+//   3. Project pressure gradients to correct intermediate non-solenoidal velocity fields.
+
+pub type PoissonSolverConfig = struct {
+    max_iterations: Int,
+    tolerance: Float,
+    sor_omega: Float, // Over-relaxation factor [1.0, 1.9]
+    density_rho: Float,
+};
+
+pub type DivergenceSample = struct {
+    div: Float,
+    is_fluid: Int,
+};
+
+pub type PressureUpdateResult = struct {
+    new_pressure: Float,
+    residual: Float,
+};
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn poisson_solver_config_default() -> PoissonSolverConfig {
+    return PoissonSolverConfig {
+        max_iterations: 40,
+        tolerance: 0.0001,
+        sor_omega: 1.5,
+        density_rho: 1000.0, // Water default kg/m^3
+    };
+}
+
+// -------------------------------------------------------------------
+// Discrete Divergence & Source Terms
+// -------------------------------------------------------------------
+
+pub fn compute_cell_divergence(
+    u_east: Float,
+    u_west: Float,
+    v_north: Float,
+    v_south: Float,
+    dx: Float,
+    dy: Float
+) -> Float {
+    let du_dx: Float = (u_east - u_west) / dx;
+    let dv_dy: Float = (v_north - v_south) / dy;
+    return du_dx + dv_dy;
+}
+
+pub fn poisson_rhs_source(
+    divergence: Float,
+    density_rho: Float,
+    dt: Float
+) -> Float {
+    return (0.0 - (density_rho / dt)) * divergence;
+}
+
+// -------------------------------------------------------------------
+// Jacobi & SOR Iteration Kernels
+// -------------------------------------------------------------------
+
+pub fn poisson_jacobi_step_cell(
+    p_center: Float,
+    p_east: Float,
+    p_west: Float,
+    p_north: Float,
+    p_south: Float,
+    rhs_source: Float,
+    dx: Float,
+    dy: Float
+) -> PressureUpdateResult {
+    let dx2: Float = dx * dx;
+    let dy2: Float = dy * dy;
+    let denom: Float = (2.0 * dx2) + (2.0 * dy2);
+    let numerator: Float = ((p_east + p_west) * dy2) + ((p_north + p_south) * dx2) - (rhs_source * dx2 * dy2);
+    let p_new: Float = numerator / denom;
+    let mut diff: Float = p_new - p_center;
+    if diff < 0.0 {
+        diff = 0.0 - diff;
+    }
+    return PressureUpdateResult {
+        new_pressure: p_new,
+        residual: diff,
+    };
+}
+
+pub fn poisson_sor_step_cell(
+    p_center: Float,
+    p_east: Float,
+    p_west: Float,
+    p_north: Float,
+    p_south: Float,
+    rhs_source: Float,
+    dx: Float,
+    dy: Float,
+    omega: Float
+) -> PressureUpdateResult {
+    let jacobi_res: PressureUpdateResult = poisson_jacobi_step_cell(
+        p_center, p_east, p_west, p_north, p_south, rhs_source, dx, dy
+    );
+    let p_jacobi: Float = (jacobi_res).new_pressure;
+    let p_sor: Float = ((1.0 - omega) * p_center) + (omega * p_jacobi);
+    let mut diff: Float = p_sor - p_center;
+    if diff < 0.0 {
+        diff = 0.0 - diff;
+    }
+    return PressureUpdateResult {
+        new_pressure: p_sor,
+        residual: diff,
+    };
+}
+
+// -------------------------------------------------------------------
+// Velocity Projection
+// -------------------------------------------------------------------
+
+pub fn project_face_u(u_star: Float, p_curr: Float, p_west: Float, rho: Float, dt: Float, dx: Float) -> Float {
+    let dp_dx: Float = (p_curr - p_west) / dx;
+    return u_star - ((dt / rho) * dp_dx);
+}
+
+pub fn project_face_v(v_star: Float, p_curr: Float, p_south: Float, rho: Float, dt: Float, dy: Float) -> Float {
+    let dp_dy: Float = (p_curr - p_south) / dy;
+    return v_star - ((dt / rho) * dp_dy);
+}

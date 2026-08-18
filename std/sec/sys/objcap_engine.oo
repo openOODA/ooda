@@ -1,0 +1,163 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::sys::objcap_engine
+// Registry revoke, exercise, audit, do_work
+// (split from objcap.oo, M172)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+import "./objcap_registry.oo";
+
+pub fn objcap_registry_revoke(
+    mut_reg_ref: &mut ObjectCapabilityRegistry,
+    target_cap_id_val: String,
+    issuer_id_val: String,
+    reason_val: String,
+    current_time: Int
+) -> Result[Bool, String] {
+    if (mut_reg_ref).is_halted {
+        return Err("OBJCAP_REGISTRY_ERR: Registry is halted");
+    }
+    let revs = (mut_reg_ref).revocations;
+    let n: Int = list_len(revs);
+    let mut i: Int = 0;
+    let mut updated_revs: List[CapabilityRevocation] = list_new();
+    let mut found: Bool = false;
+
+    while i < n {
+        let mut item = list_get(revs, i);
+        let r_cid: String = item.cap_id;
+        if r_cid == target_cap_id_val {
+            item.is_revoked = true;
+            item.revoked_at = current_time;
+            item.reason = reason_val;
+            found = true;
+        }
+        updated_revs = list_push(updated_revs, item);
+        i = i + 1;
+    }
+
+    if found == false {
+        let new_rev = CapabilityRevocation {
+            revocation_id: "rev_" + target_cap_id_val,
+            cap_id: target_cap_id_val,
+            issuer_id: issuer_id_val,
+            is_revoked: true,
+            revoked_at: current_time,
+            reason: reason_val,
+            cascade_to_children: true,
+        };
+        updated_revs = list_push(updated_revs, new_rev);
+    }
+
+    (mut_reg_ref).revocations = updated_revs;
+    let prev_tot_rev: Int = (mut_reg_ref).total_revoked;
+    (mut_reg_ref).total_revoked = prev_tot_rev + 1;
+
+    let audit = CapabilityAuditRecord {
+        record_id: "aud_" + target_cap_id_val + "_" + current_time.to_string(),
+        cap_id: target_cap_id_val,
+        action: "REVOKE",
+        principal_id: issuer_id_val,
+        timestamp: current_time,
+        outcome: "SUCCESS",
+    };
+    let cur_audits = (mut_reg_ref).audits;
+    (mut_reg_ref).audits = list_push(cur_audits, audit);
+
+    return Ok(true);
+}
+
+pub fn objcap_registry_exercise(
+    mut_reg_ref: &mut ObjectCapabilityRegistry,
+    cap_id_val: String,
+    required_right_val: Int,
+    current_time: Int
+) -> Result[Bool, String] {
+    if (mut_reg_ref).is_halted {
+        return Err("OBJCAP_REGISTRY_ERR: Registry is halted");
+    }
+
+    let lookup_res: Result[ObjectCapability, String] = objcap_registry_lookup(mut_reg_ref, cap_id_val);
+    let cap: ObjectCapability = match lookup_res {
+        Ok(c) => c,
+        Err(e) => return Err(e),
+    };
+
+    let owner: String = cap.owner_id;
+
+    if objcap_validate(&cap, current_time) == false {
+        let audit = CapabilityAuditRecord {
+            record_id: "aud_fail_" + cap_id_val + "_" + current_time.to_string(),
+            cap_id: cap_id_val,
+            action: "EXERCISE",
+            principal_id: owner,
+            timestamp: current_time,
+            outcome: "DENIED_INVALID_CAP",
+        };
+        let cur_audits = (mut_reg_ref).audits;
+        (mut_reg_ref).audits = list_push(cur_audits, audit);
+        return Err("OBJCAP_EXERCISE_ERR: Capability validation failed (expired or invalid)");
+    }
+
+    if objcap_registry_is_revoked(mut_reg_ref, cap_id_val) {
+        let audit = CapabilityAuditRecord {
+            record_id: "aud_fail_" + cap_id_val + "_" + current_time.to_string(),
+            cap_id: cap_id_val,
+            action: "EXERCISE",
+            principal_id: owner,
+            timestamp: current_time,
+            outcome: "DENIED_REVOKED",
+        };
+        let cur_audits = (mut_reg_ref).audits;
+        (mut_reg_ref).audits = list_push(cur_audits, audit);
+        return Err("OBJCAP_EXERCISE_ERR: Capability has been revoked");
+    }
+
+    if objcap_has_right(&cap, required_right_val) == false {
+        let audit = CapabilityAuditRecord {
+            record_id: "aud_fail_" + cap_id_val + "_" + current_time.to_string(),
+            cap_id: cap_id_val,
+            action: "EXERCISE",
+            principal_id: owner,
+            timestamp: current_time,
+            outcome: "DENIED_RIGHTS_DEFICIT",
+        };
+        let cur_audits = (mut_reg_ref).audits;
+        (mut_reg_ref).audits = list_push(cur_audits, audit);
+        return Err("OBJCAP_EXERCISE_ERR: Insufficient rights for required operation");
+    }
+
+    let prev_tot_ex: Int = (mut_reg_ref).total_exercised;
+    (mut_reg_ref).total_exercised = prev_tot_ex + 1;
+    let audit = CapabilityAuditRecord {
+        record_id: "aud_ok_" + cap_id_val + "_" + current_time.to_string(),
+        cap_id: cap_id_val,
+        action: "EXERCISE",
+        principal_id: owner,
+        timestamp: current_time,
+        outcome: "SUCCESS",
+    };
+    let cur_audits = (mut_reg_ref).audits;
+    (mut_reg_ref).audits = list_push(cur_audits, audit);
+
+    return Ok(true);
+}
+
+pub fn objcap_registry_audit_count(reg_ref: &ObjectCapabilityRegistry) -> Int {
+    let auds = (reg_ref).audits;
+    return list_len(auds);
+}
+
+pub fn objcap_registry_do_work(reg_ref: &ObjectCapabilityRegistry) -> Int {
+    let caps = (reg_ref).capabilities;
+    let revs = (reg_ref).revocations;
+    let atts = (reg_ref).attenuations;
+    let auds = (reg_ref).audits;
+    let n_c: Int = list_len(caps);
+    let n_r: Int = list_len(revs);
+    let n_a: Int = list_len(atts);
+    let n_aud: Int = list_len(auds);
+    let tot_ex: Int = (reg_ref).total_exercised;
+    return n_c + n_r * 2 + n_a * 3 + n_aud * 4 + tot_ex;
+}

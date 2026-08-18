@@ -1,0 +1,131 @@
+// # Zero Curve Bootstrapping Engine
+//
+// Logline: Bootstraps continuous zero-coupon yield curves sequentially from money market deposits, futures/FRAs, and par swap rates.
+//
+// Setup: Pure quantitative finance module with iterative discounting cashflow calibration.
+//
+// Beats:
+//   1. Define MarketInstrument, InstrumentType, and BootstrappedZeroCurve structures.
+//   2. Extract short-end zero rates directly from deposit simple interest rates.
+//   3. Bootstrap medium and long-term discount factors iteratively from par swap annuity streams.
+
+pub type MarketInstrument = struct {
+    instrument_name: String,
+    tenor_years: Float,
+    quote_rate: Float,
+    coupon_frequency: Int,
+    is_swap: Bool,
+};
+
+pub type ZeroRatePoint = struct {
+    tenor: Float,
+    zero_rate: Float,
+    discount_factor: Float,
+};
+
+pub type BootstrappedZeroCurve = struct {
+    curve_name: String,
+    points: List[ZeroRatePoint],
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn zero_curve_new(name: String) -> BootstrappedZeroCurve {
+    let empty_pts: List[ZeroRatePoint] = list_new();
+    return BootstrappedZeroCurve {
+        curve_name: name,
+        points: empty_pts,
+    };
+}
+
+pub fn zero_curve_add_deposit(
+    curve: &mut BootstrappedZeroCurve,
+    tenor: Float,
+    simple_rate: Float
+) {
+    let df: Float = 1.0 / (1.0 + (simple_rate * tenor));
+    let zero_r: Float = (0.0 - ln(df)) / tenor;
+    let pt = ZeroRatePoint {
+        tenor: tenor,
+        zero_rate: zero_r,
+        discount_factor: df,
+    };
+    (curve).points = list_push((curve).points, pt);
+}
+
+pub fn zero_curve_bootstrap_swap(
+    curve: &mut BootstrappedZeroCurve,
+    swap_tenor: Float,
+    par_swap_rate: Float,
+    frequency: Int
+) {
+    let mut sum_pv_known: Float = 0.0;
+    let n_known: Int = list_len((curve).points);
+    let freq_f: Float = int_to_float(frequency);
+    let dt: Float = 1.0 / freq_f;
+
+    let mut i: Int = 0;
+    while i < n_known {
+        let pt: ZeroRatePoint = list_get((curve).points, i);
+        if (pt).tenor < swap_tenor {
+            sum_pv_known = sum_pv_known + ((pt).discount_factor * dt);
+        }
+        i = i + 1;
+    }
+
+    let num_remaining: Float = 1.0 - (par_swap_rate * sum_pv_known);
+    let den_remaining: Float = 1.0 + (par_swap_rate * dt);
+    let df_target: Float = num_remaining / den_remaining;
+
+    let mut zero_r: Float = 0.0;
+    if swap_tenor > 0.0 && df_target > 0.0 {
+        zero_r = (0.0 - ln(df_target)) / swap_tenor;
+    }
+
+    let new_pt = ZeroRatePoint {
+        tenor: swap_tenor,
+        zero_rate: zero_r,
+        discount_factor: df_target,
+    };
+    (curve).points = list_push((curve).points, new_pt);
+}
+
+pub fn zero_curve_get_df(curve: &BootstrappedZeroCurve, t: Float) -> Float {
+    let n: Int = list_len((curve).points);
+    if n == 0 {
+        return 1.0;
+    }
+    let first: ZeroRatePoint = list_get((curve).points, 0);
+    if t <= (first).tenor {
+        return (first).discount_factor;
+    }
+    let last: ZeroRatePoint = list_get((curve).points, n - 1);
+    if t >= (last).tenor {
+        return (last).discount_factor;
+    }
+
+    let mut i: Int = 0;
+    while i < (n - 1) {
+        let p0: ZeroRatePoint = list_get((curve).points, i);
+        let p1: ZeroRatePoint = list_get((curve).points, i + 1);
+        if t >= (p0).tenor && t <= (p1).tenor {
+            let frac: Float = (t - (p0).tenor) / ((p1).tenor - (p0).tenor);
+            let interp_rate: Float = ((1.0 - frac) * (p0).zero_rate) + (frac * (p1).zero_rate);
+            return exp((0.0 - interp_rate) * t);
+        }
+        i = i + 1;
+    }
+
+    return (last).discount_factor;
+}

@@ -1,0 +1,119 @@
+// # Ultra-Low-Latency Pre-Trade Risk Sentinel
+//
+// Logline: Enforces pre-trade risk controls (fat-finger checks, maximum gross notional, daily drawdown limit, max position size) with zero heap allocation.
+//
+// Setup: Pure high-speed pre-trade verification module rejecting risky orders before exchange gateway dispatch.
+//
+// Beats:
+//   1. Define HftRiskConfig, AccountRiskState, and RiskCheckResult structures.
+//   2. Validate proposed order size, price band deviation against NBBO, and cumulative notional.
+//   3. Check portfolio drawdown against hard circuit breakers and return pass/fail decision.
+
+pub type HftRiskConfig = struct {
+    max_single_order_shares: Float,
+    max_single_order_notional: Float,
+    max_gross_position_shares: Float,
+    max_daily_drawdown_usd: Float,
+    max_price_band_pct: Float,
+};
+
+pub type AccountRiskState = struct {
+    current_net_position: Float,
+    current_gross_position: Float,
+    daily_realized_pnl: Float,
+    daily_unrealized_pnl: Float,
+    is_kill_switch_active: Bool,
+};
+
+pub type RiskCheckResult = struct {
+    is_approved: Bool,
+    rejection_code: Int, // 0 = Approved, 1 = Fat Finger Size, 2 = Price Band, 3 = Drawdown, 4 = Kill Switch
+    rejection_reason: String,
+};
+
+pub fn hft_risk_config_default() -> HftRiskConfig {
+    return HftRiskConfig {
+        max_single_order_shares: 5000.0,
+        max_single_order_notional: 250000.0,
+        max_gross_position_shares: 20000.0,
+        max_daily_drawdown_usd: 50000.0,
+        max_price_band_pct: 0.05,
+    };
+}
+
+pub fn hft_risk_verify_order(
+    shares: Float,
+    price: Float,
+    is_buy: Bool,
+    reference_mid: Float,
+    account: &AccountRiskState,
+    config: &HftRiskConfig
+) -> RiskCheckResult {
+    // 1. Kill switch check
+    if (account).is_kill_switch_active {
+        return RiskCheckResult {
+            is_approved: false,
+            rejection_code: 4,
+            rejection_reason: "KILL_SWITCH_ACTIVE",
+        };
+    }
+
+    // 2. Max drawdown check
+    let total_pnl: Float = (account).daily_realized_pnl + (account).daily_unrealized_pnl;
+    if total_pnl < (0.0 - (config).max_daily_drawdown_usd) {
+        return RiskCheckResult {
+            is_approved: false,
+            rejection_code: 3,
+            rejection_reason: "MAX_DAILY_DRAWDOWN_EXCEEDED",
+        };
+    }
+
+    // 3. Single order size and notional
+    if shares > (config).max_single_order_shares {
+        return RiskCheckResult {
+            is_approved: false,
+            rejection_code: 1,
+            rejection_reason: "FAT_FINGER_SHARES_LIMIT",
+        };
+    }
+
+    let notional: Float = shares * price;
+    if notional > (config).max_single_order_notional {
+        return RiskCheckResult {
+            is_approved: false,
+            rejection_code: 1,
+            rejection_reason: "FAT_FINGER_NOTIONAL_LIMIT",
+        };
+    }
+
+    // 4. Price band check relative to mid
+    if reference_mid > 0.0 {
+        let diff: Float = price - reference_mid;
+        let abs_diff: Float = if diff < 0.0 { 0.0 - diff } else { diff };
+        let pct_diff: Float = abs_diff / reference_mid;
+        if pct_diff > (config).max_price_band_pct {
+            return RiskCheckResult {
+                is_approved: false,
+                rejection_code: 2,
+                rejection_reason: "PRICE_BAND_OUT_OF_BOUNDS",
+            };
+        }
+    }
+
+    // 5. Gross position check
+    let new_pos: Float = if is_buy { (account).current_net_position + shares } else { (account).current_net_position - shares };
+    let abs_pos: Float = if new_pos < 0.0 { 0.0 - new_pos } else { new_pos };
+    if abs_pos > (config).max_gross_position_shares {
+        return RiskCheckResult {
+            is_approved: false,
+            rejection_code: 1,
+            rejection_reason: "MAX_GROSS_POSITION_EXCEEDED",
+        };
+    }
+
+    return RiskCheckResult {
+        is_approved: true,
+        rejection_code: 0,
+        rejection_reason: "OK",
+    };
+}

@@ -1,0 +1,102 @@
+// # DeFi Liquidation Engine
+//
+// Logline: Evaluates borrower health factors, identifies under-collateralized positions, and computes seized collateral with liquidation incentives.
+//
+// Setup: Pure DeFi lending protocol risk engine with multi-asset oracle valuations.
+//
+// Beats:
+//   1. Define LendingPosition, CollateralAsset, and LiquidationExecution structures.
+//   2. Compute aggregate position Health Factor H = sum(Collateral_i * LTV_i) / Total_Debt.
+//   3. Execute liquidation seizing max close factor fraction with liquidation bonus discount.
+
+pub type CollateralAsset = struct {
+    asset_id: String,
+    deposited_amount: Int,
+    oracle_price_usd: Int,
+    liquidation_threshold_bps: Int, // e.g. 8000 for 80%
+    liquidation_bonus_bps: Int,     // e.g. 500 for 5% bonus
+};
+
+pub type LendingPosition = struct {
+    account: String,
+    collaterals: List[CollateralAsset],
+    total_debt_usd: Int,
+};
+
+pub type LiquidationExecution = struct {
+    account: String,
+    is_liquidatable: Bool,
+    health_factor_scaled: Int, // 10000 = 1.0
+    max_repay_allowed_usd: Int,
+    seized_collateral_usd: Int,
+    liquidator_profit_usd: Int,
+};
+
+pub fn lending_position_new(account: String, debt: Int) -> LendingPosition {
+    let empty_c: List[CollateralAsset] = list_new();
+    return LendingPosition {
+        account: account,
+        collaterals: empty_c,
+        total_debt_usd: debt,
+    };
+}
+
+pub fn lending_position_add_collateral(
+    pos: &mut LendingPosition,
+    asset: CollateralAsset
+) {
+    (pos).collaterals = list_push((pos).collaterals, asset);
+}
+
+pub fn liquidation_compute_health(pos: &LendingPosition) -> Int {
+    if (pos).total_debt_usd <= 0 {
+        return 999999; // Infinite health
+    }
+
+    let mut total_collateral_adjusted: Int = 0;
+    let n: Int = list_len((pos).collaterals);
+    let mut i: Int = 0;
+
+    while i < n {
+        let c: CollateralAsset = list_get((pos).collaterals, i);
+        let val_usd: Int = ((c).deposited_amount * (c).oracle_price_usd) / 1000000;
+        let adj_val: Int = (val_usd * (c).liquidation_threshold_bps) / 10000;
+        total_collateral_adjusted = total_collateral_adjusted + adj_val;
+        i = i + 1;
+    }
+
+    return (total_collateral_adjusted * 10000) / (pos).total_debt_usd;
+}
+
+pub fn liquidation_execute(
+    pos: &LendingPosition,
+    close_factor_bps: Int
+) -> LiquidationExecution {
+    let hf: Int = liquidation_compute_health(pos);
+    let is_liq: Bool = hf < 10000;
+
+    if !is_liq || (pos).total_debt_usd <= 0 {
+        return LiquidationExecution {
+            account: (pos).account,
+            is_liquidatable: false,
+            health_factor_scaled: hf,
+            max_repay_allowed_usd: 0,
+            seized_collateral_usd: 0,
+            liquidator_profit_usd: 0,
+        };
+    }
+
+    let max_repay: Int = ((pos).total_debt_usd * close_factor_bps) / 10000;
+    let bonus_bps: Int = 500; // 5% bonus
+    let seized_usd: Int = (max_repay * (10000 + bonus_bps)) / 10000;
+    let profit_usd: Int = seized_usd - max_repay;
+
+    return LiquidationExecution {
+        account: (pos).account,
+        is_liquidatable: true,
+        health_factor_scaled: hf,
+        max_repay_allowed_usd: max_repay,
+        seized_collateral_usd: seized_usd,
+        liquidator_profit_usd: profit_usd,
+    };
+}

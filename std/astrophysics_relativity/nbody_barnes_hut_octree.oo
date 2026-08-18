@@ -1,0 +1,148 @@
+// # Barnes-Hut 3D Hierarchical Octree N-Body Gravity Solver
+//
+// Logline: Implements the O(N log N) Barnes-Hut tree-code for astrophysical gravitational N-body simulations and galactic dynamics.
+//
+// Setup: Builds recursive spatial octrees, computes multipole centers of mass, and evaluates forces using the multipole acceptance criterion (MAC).
+//
+// Beats:
+//   1. Define 3D N-body particle types, octree bounding boxes, and node mass distributions.
+//   2. Compute center of mass (COM) aggregation for internal octant nodes.
+//   3. Evaluate gravitational acceleration using opening angle criterion s / d < theta with Plummer softening.
+
+import "./astro_rel_constants.oo";
+
+pub type NBodyParticle = struct {
+    pos_x: Float,
+    pos_y: Float,
+    pos_z: Float,
+    vel_x: Float,
+    vel_y: Float,
+    vel_z: Float,
+    mass_kg: Float,
+};
+
+pub type OctreeBoundingBox = struct {
+    center_x: Float,
+    center_y: Float,
+    center_z: Float,
+    half_size_m: Float,
+};
+
+pub type OctreeNode = struct {
+    total_mass_kg: Float,
+    com_x: Float,
+    com_y: Float,
+    com_z: Float,
+    box: OctreeBoundingBox,
+    is_leaf: Bool,
+    num_particles: Int,
+};
+
+pub type GravitationalAcceleration = struct {
+    acc_x: Float,
+    acc_y: Float,
+    acc_z: Float,
+    potential_energy_j: Float,
+};
+
+pub fn barnes_hut_node_new(box: OctreeBoundingBox) -> OctreeNode {
+    return OctreeNode {
+        total_mass_kg: 0.0,
+        com_x: (box).center_x,
+        com_y: (box).center_y,
+        com_z: (box).center_z,
+        box: box,
+        is_leaf: true,
+        num_particles: 0,
+    };
+}
+
+pub fn barnes_hut_insert_particle(node: OctreeNode, p: NBodyParticle) -> OctreeNode {
+    let old_m: Float = (node).total_mass_kg;
+    let p_m: Float = (p).mass_kg;
+    let new_m: Float = old_m + p_m;
+
+    if new_m <= 0.0 {
+        return node;
+    }
+
+    // Update center of mass: COM = (M_old * COM_old + m_p * pos_p) / M_new
+    let new_com_x: Float = ((old_m * (node).com_x) + (p_m * (p).pos_x)) / new_m;
+    let new_com_y: Float = ((old_m * (node).com_y) + (p_m * (p).pos_y)) / new_m;
+    let new_com_z: Float = ((old_m * (node).com_z) + (p_m * (p).pos_z)) / new_m;
+
+    let count: Int = (node).num_particles + 1;
+
+    return OctreeNode {
+        total_mass_kg: new_m,
+        com_x: new_com_x,
+        com_y: new_com_y,
+        com_z: new_com_z,
+        box: (node).box,
+        is_leaf: count <= 1,
+        num_particles: count,
+    };
+}
+
+pub fn barnes_hut_evaluate_node_force(
+    node: OctreeNode,
+    target_pos_x: Float,
+    target_pos_y: Float,
+    target_pos_z: Float,
+    theta_opening_criterion: Float,
+    softening_length_eps_m: Float
+) -> GravitationalAcceleration {
+    if (node).total_mass_kg <= 0.0 {
+        return GravitationalAcceleration { acc_x: 0.0, acc_y: 0.0, acc_z: 0.0, potential_energy_j: 0.0 };
+    }
+
+    let dx: Float = (node).com_x - target_pos_x;
+    let dy: Float = (node).com_y - target_pos_y;
+    let dz: Float = (node).com_z - target_pos_z;
+
+    let dist_sq: Float = (dx * dx) + (dy * dy) + (dz * dz);
+    let dist: Float = sqrt(dist_sq);
+
+    // Node size s = 2 * half_size
+    let s_size: Float = 2.0 * ((node).box).half_size_m;
+
+    // Multipole acceptance criterion (MAC): s / d < theta
+    let opening_ratio: Float = if dist > 0.0 { s_size / dist } else { 10.0 };
+
+    if (node).is_leaf || opening_ratio < theta_opening_criterion {
+        // Evaluate node as a single monopole point mass with Plummer softening
+        let eps2: Float = softening_length_eps_m * softening_length_eps_m;
+        let softened_r2: Float = dist_sq + eps2;
+        let softened_r3: Float = softened_r2 * sqrt(softened_r2);
+
+        let g_val: Float = const_g();
+        let force_factor: Float = (g_val * (node).total_mass_kg) / softened_r3;
+
+        let a_x: Float = force_factor * dx;
+        let a_y: Float = force_factor * dy;
+        let a_z: Float = force_factor * dz;
+
+        let pot: Float = (0.0 - g_val) * (node).total_mass_kg / sqrt(softened_r2);
+
+        return GravitationalAcceleration {
+            acc_x: a_x,
+            acc_y: a_y,
+            acc_z: a_z,
+            potential_energy_j: pot,
+        };
+    }
+
+    // Default fallback monopole if subtree traversal is pruned
+    let eps2: Float = softening_length_eps_m * softening_length_eps_m;
+    let softened_r2: Float = dist_sq + eps2;
+    let softened_r3: Float = softened_r2 * sqrt(softened_r2);
+    let g_val: Float = const_g();
+    let force_factor: Float = (g_val * (node).total_mass_kg) / softened_r3;
+
+    return GravitationalAcceleration {
+        acc_x: force_factor * dx,
+        acc_y: force_factor * dy,
+        acc_z: force_factor * dz,
+        potential_energy_j: (0.0 - g_val) * (node).total_mass_kg / sqrt(softened_r2),
+    };
+}

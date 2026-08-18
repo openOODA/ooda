@@ -1,0 +1,207 @@
+// # Database Page Cache and Eviction Engine
+//
+// Logline: Implements page pinning, LRU eviction queue, dirty state tracking, and cache telemetry.
+//
+// Setup: Pure memory page cache manager supporting variable eviction strategies.
+//
+// Beats:
+//   1. Define cached page frame descriptor and cache configuration.
+//   2. Manage page lookup, insertion, hit/miss accounting, and LRU recency updates.
+//   3. Handle page pin reference counting and candidate eviction selection.
+
+pub type CachePage = struct {
+    page_id: Int,
+    pin_count: Int,
+    is_dirty: Bool,
+    access_count: Int,
+    last_access_time: Int,
+    data: String,
+    checksum: Int,
+};
+
+pub type PageCacheConfig = struct {
+    max_pages: Int,
+    page_size: Int,
+    eviction_policy: Int,
+};
+
+pub type PageCache = struct {
+    config: PageCacheConfig,
+    pages: List[CachePage],
+    lru_order: List[Int],
+    total_lookups: Int,
+    cache_hits: Int,
+    cache_misses: Int,
+    dirty_count: Int,
+};
+
+pub fn cache_page_create(page_id: Int, data: String, ts: Int) -> CachePage {
+    let d_len: Int = data.len();
+    let csum: Int = page_id * 31 + d_len;
+    return CachePage {
+        page_id: page_id,
+        pin_count: 0,
+        is_dirty: false,
+        access_count: 1,
+        last_access_time: ts,
+        data: data,
+        checksum: csum,
+    };
+}
+
+pub fn page_cache_create(config: PageCacheConfig) -> PageCache {
+    let empty_pages: List[CachePage] = list_new();
+    let empty_lru: List[Int] = list_new();
+    return PageCache {
+        config: config,
+        pages: empty_pages,
+        lru_order: empty_lru,
+        total_lookups: 0,
+        cache_hits: 0,
+        cache_misses: 0,
+        dirty_count: 0,
+    };
+}
+
+pub fn page_cache_get(
+    cache: &mut PageCache,
+    page_id: Int,
+    now: Int
+) -> Option[CachePage] {
+    (cache).total_lookups = (cache).total_lookups + 1;
+    let pages_list: List[CachePage] = (cache).pages;
+    let n: Int = list_len(pages_list);
+    let mut i: Int = 0;
+
+    while i < n {
+        let p: CachePage = list_get(pages_list, i);
+        if (p).page_id == page_id {
+            (cache).cache_hits = (cache).cache_hits + 1;
+            let updated_p: CachePage = CachePage {
+                page_id: (p).page_id,
+                pin_count: (p).pin_count,
+                is_dirty: (p).is_dirty,
+                access_count: (p).access_count + 1,
+                last_access_time: now,
+                data: (p).data,
+                checksum: (p).checksum,
+            };
+
+            let mut new_pages: List[CachePage] = list_new();
+            let mut j: Int = 0;
+            while j < n {
+                if j == i {
+                    new_pages = list_push(new_pages, updated_p);
+                } else {
+                    new_pages = list_push(new_pages, list_get(pages_list, j));
+                }
+                j = j + 1;
+            }
+            (cache).pages = new_pages;
+
+            let cur_lru: List[Int] = (cache).lru_order;
+            let n_lru: Int = list_len(cur_lru);
+            let mut new_lru: List[Int] = list_new();
+            let mut k: Int = 0;
+            while k < n_lru {
+                let id_val: Int = list_get(cur_lru, k);
+                if id_val != page_id {
+                    new_lru = list_push(new_lru, id_val);
+                }
+                k = k + 1;
+            }
+            new_lru = list_push(new_lru, page_id);
+            (cache).lru_order = new_lru;
+
+            return Some(updated_p);
+        }
+        i = i + 1;
+    }
+
+    (cache).cache_misses = (cache).cache_misses + 1;
+    return None;
+}
+
+pub fn page_cache_pin(cache: &mut PageCache, page_id: Int) -> Bool {
+    let pages_list: List[CachePage] = (cache).pages;
+    let n: Int = list_len(pages_list);
+    let mut i: Int = 0;
+    let mut found: Bool = false;
+    let mut new_pages: List[CachePage] = list_new();
+
+    while i < n {
+        let p: CachePage = list_get(pages_list, i);
+        if (p).page_id == page_id {
+            found = true;
+            let updated_p: CachePage = CachePage {
+                page_id: (p).page_id,
+                pin_count: (p).pin_count + 1,
+                is_dirty: (p).is_dirty,
+                access_count: (p).access_count,
+                last_access_time: (p).last_access_time,
+                data: (p).data,
+                checksum: (p).checksum,
+            };
+            new_pages = list_push(new_pages, updated_p);
+        } else {
+            new_pages = list_push(new_pages, p);
+        }
+        i = i + 1;
+    }
+
+    if found {
+        (cache).pages = new_pages;
+    }
+    return found;
+}
+
+pub fn page_cache_unpin(
+    cache: &mut PageCache,
+    page_id: Int,
+    mark_dirty: Bool
+) -> Bool {
+    let pages_list: List[CachePage] = (cache).pages;
+    let n: Int = list_len(pages_list);
+    let mut i: Int = 0;
+    let mut found: Bool = false;
+    let mut new_pages: List[CachePage] = list_new();
+
+    while i < n {
+        let p: CachePage = list_get(pages_list, i);
+        if (p).page_id == page_id {
+            found = true;
+            let mut new_pins: Int = (p).pin_count;
+            if new_pins > 0 {
+                new_pins = new_pins - 1;
+            }
+            let is_d: Bool = (p).is_dirty || mark_dirty;
+            let updated_p: CachePage = CachePage {
+                page_id: (p).page_id,
+                pin_count: new_pins,
+                is_dirty: is_d,
+                access_count: (p).access_count,
+                last_access_time: (p).last_access_time,
+                data: (p).data,
+                checksum: (p).checksum,
+            };
+            new_pages = list_push(new_pages, updated_p);
+        } else {
+            new_pages = list_push(new_pages, p);
+        }
+        i = i + 1;
+    }
+
+    if found {
+        (cache).pages = new_pages;
+    }
+    return found;
+}
+
+pub fn page_cache_hit_ratio(cache: &PageCache) -> Int {
+    let total: Int = (cache).total_lookups;
+    if total == 0 {
+        return 100;
+    }
+    let hits: Int = (cache).cache_hits;
+    return (hits * 100) / total;
+}

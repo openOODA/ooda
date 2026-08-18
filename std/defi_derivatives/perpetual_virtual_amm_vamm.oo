@@ -1,0 +1,145 @@
+// # Virtual Automated Market Maker (vAMM) Perpetual Engine
+//
+// Logline: Implements perpetual virtual AMM price discovery curves ($x \cdot y = k$), dynamic liquidity depth scaling, and slippage calculations.
+//
+// Setup: Pure quantitative DeFi derivatives module modeling synthetic vAMM execution pools (Perp Protocol v1 / Drift style).
+//
+// Beats:
+//   1. Define VammPool, VammSwapResult, and VammLiquidityAdjustment structures.
+//   2. Compute constant-product virtual pool swaps, price impact, and terminal mark prices.
+//   3. Scale invariant $k$ dynamically to adjust market depth while preserving spot price continuity.
+
+pub type VammPool = struct {
+    market_symbol: String,
+    base_asset_reserve: Float,  // Virtual x (e.g. ETH)
+    quote_asset_reserve: Float, // Virtual y (e.g. USDC)
+    fee_rate: Float,            // e.g. 0.001 (0.1%)
+    total_position_notional_usd: Float,
+};
+
+pub type VammSwapResult = struct {
+    amount_in: Float,
+    amount_out: Float,
+    entry_price: Float,
+    new_mark_price: Float,
+    price_impact_pct: Float,
+    fee_paid: Float,
+    is_buy: Bool,
+};
+
+pub type VammLiquidityAdjustment = struct {
+    old_k: Float,
+    new_k: Float,
+    scaling_factor: Float,
+    preserved_price: Float,
+};
+
+pub fn vamm_pool_new(
+    symbol: String,
+    initial_base_reserve: Float,
+    initial_quote_reserve: Float,
+    fee_rate: Float
+) -> VammPool {
+    return VammPool {
+        market_symbol: symbol,
+        base_asset_reserve: initial_base_reserve,
+        quote_asset_reserve: initial_quote_reserve,
+        fee_rate: fee_rate,
+        total_position_notional_usd: 0.0,
+    };
+}
+
+pub fn vamm_get_mark_price(pool: &VammPool) -> Float {
+    if (pool).base_asset_reserve <= 0.0 {
+        return 0.0;
+    }
+    return (pool).quote_asset_reserve / (pool).base_asset_reserve;
+}
+
+pub fn vamm_swap_quote_exact_in(
+    pool: &mut VammPool,
+    quote_amount_in: Float,
+    is_buy: Bool
+) -> VammSwapResult {
+    let old_price: Float = vamm_get_mark_price(pool);
+    let fee: Float = quote_amount_in * (pool).fee_rate;
+    let net_quote_in: Float = quote_amount_in - fee;
+
+    let k: Float = (pool).base_asset_reserve * (pool).quote_asset_reserve;
+    let mut base_delta: Float = 0.0;
+    let mut new_quote_res: Float = (pool).quote_asset_reserve;
+    let mut new_base_res: Float = (pool).base_asset_reserve;
+
+    if is_buy {
+        // Trader puts in quote to receive base
+        new_quote_res = (pool).quote_asset_reserve + net_quote_in;
+        new_base_res = k / new_quote_res;
+        base_delta = (pool).base_asset_reserve - new_base_res;
+    } else {
+        // Trader closes/shorts: puts in base or reduces quote
+        new_quote_res = (pool).quote_asset_reserve - net_quote_in;
+        if new_quote_res <= 0.0001 {
+            new_quote_res = 0.0001;
+        }
+        new_base_res = k / new_quote_res;
+        base_delta = new_base_res - (pool).base_asset_reserve;
+    }
+
+    (pool).quote_asset_reserve = new_quote_res;
+    (pool).base_asset_reserve = new_base_res;
+
+    let new_price: Float = vamm_get_mark_price(pool);
+    let mut avg_entry: Float = 0.0;
+    if base_delta > 0.0 {
+        avg_entry = quote_amount_in / base_delta;
+    }
+
+    let mut impact: Float = 0.0;
+    if old_price > 0.0 {
+        let diff: Float = new_price - old_price;
+        let mut abs_diff: Float = diff;
+        if abs_diff < 0.0 {
+            abs_diff = 0.0 - abs_diff;
+        }
+        impact = abs_diff / old_price;
+    }
+
+    return VammSwapResult {
+        amount_in: quote_amount_in,
+        amount_out: base_delta,
+        entry_price: avg_entry,
+        new_mark_price: new_price,
+        price_impact_pct: impact,
+        fee_paid: fee,
+        is_buy: is_buy,
+    };
+}
+
+pub fn vamm_scale_k(
+    pool: &mut VammPool,
+    scaling_multiplier: Float
+) -> VammLiquidityAdjustment {
+    if scaling_multiplier <= 0.0 {
+        return VammLiquidityAdjustment {
+            old_k: 0.0,
+            new_k: 0.0,
+            scaling_factor: 1.0,
+            preserved_price: 0.0,
+        };
+    }
+    let old_k: Float = (pool).base_asset_reserve * (pool).quote_asset_reserve;
+    let old_px: Float = vamm_get_mark_price(pool);
+
+    let sqrt_mult: Float = sqrt(scaling_multiplier);
+    (pool).base_asset_reserve = (pool).base_asset_reserve * sqrt_mult;
+    (pool).quote_asset_reserve = (pool).quote_asset_reserve * sqrt_mult;
+
+    let new_k: Float = (pool).base_asset_reserve * (pool).quote_asset_reserve;
+
+    return VammLiquidityAdjustment {
+        old_k: old_k,
+        new_k: new_k,
+        scaling_factor: scaling_multiplier,
+        preserved_price: old_px,
+    };
+}

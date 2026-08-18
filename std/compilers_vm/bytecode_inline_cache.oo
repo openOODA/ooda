@@ -1,0 +1,109 @@
+// # Virtual Machine Inline Cache Engine
+//
+// Logline: Monomorphic, polymorphic (up to 4 classes), and megamorphic Inline Cache (IC) stubs for dynamic property access.
+//
+// Setup: Speeds up dynamic property lookups and method dispatches by caching class shapes and field offsets at call sites.
+//
+// Beats:
+//   1. Define InlineCacheEntry, InlineCacheSite, and IcState classification.
+//   2. Fast-path lookup against cached shape tags and direct memory offsets.
+//   3. Transition cache states: UNINITIALIZED -> MONOMORPHIC -> POLYMORPHIC -> MEGAMORPHIC on cache misses.
+
+pub type InlineCacheEntry = struct {
+    cached_shape_id: Int,
+    field_offset: Int,
+    method_address: Int,
+    hit_count: Int,
+};
+
+pub type InlineCacheSite = struct {
+    site_id: Int,
+    ic_state: Int, // 0: UNINIT, 1: MONO, 2: POLY (<= 4), 3: MEGA
+    entries: List[InlineCacheEntry],
+    entry_count: Int,
+    total_hits: Int,
+    total_misses: Int,
+};
+
+// -------------------------------------------------------------------
+// IC State Constants
+// -------------------------------------------------------------------
+
+pub fn ic_state_uninitialized() -> Int { return 0; }
+pub fn ic_state_monomorphic() -> Int { return 1; }
+pub fn ic_state_polymorphic() -> Int { return 2; }
+pub fn ic_state_megamorphic() -> Int { return 3; }
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn ic_entry_new(shape_id: Int, offset: Int, method_addr: Int) -> InlineCacheEntry {
+    return InlineCacheEntry {
+        cached_shape_id: shape_id,
+        field_offset: offset,
+        method_address: method_addr,
+        hit_count: 0,
+    };
+}
+
+pub fn ic_site_new(site_id: Int) -> InlineCacheSite {
+    let empty_entries: List[InlineCacheEntry] = list_new();
+    return InlineCacheSite {
+        site_id: site_id,
+        ic_state: 0, // Uninitialized
+        entries: empty_entries,
+        entry_count: 0,
+        total_hits: 0,
+        total_misses: 0,
+    };
+}
+
+// -------------------------------------------------------------------
+// Fast-Path Lookup & State Transition
+// -------------------------------------------------------------------
+
+pub fn ic_lookup_offset(mut site: InlineCacheSite, shape_id: Int) -> Int {
+    let count: Int = (site).entry_count;
+    let mut i: Int = 0;
+    while i < count {
+        let entry: InlineCacheEntry = list_get((site).entries, i);
+        if (entry).cached_shape_id == shape_id {
+            site.total_hits = (site).total_hits + 1;
+            return (entry).field_offset;
+        }
+        i = i + 1;
+    }
+    return -1; // Cache Miss
+}
+
+pub fn ic_handle_miss(
+    mut site: InlineCacheSite,
+    shape_id: Int,
+    offset: Int,
+    method_addr: Int
+) -> InlineCacheSite {
+    site.total_misses = (site).total_misses + 1;
+    
+    // If Megamorphic, do not record individual shapes
+    if (site).ic_state == 3 {
+        return site;
+    }
+    
+    let new_entry: InlineCacheEntry = ic_entry_new(shape_id, offset, method_addr);
+    let mut ents: List[InlineCacheEntry] = (site).entries;
+    ents = list_push(ents, new_entry);
+    site.entries = ents;
+    site.entry_count = (site).entry_count + 1;
+    
+    let new_count: Int = (site).entry_count;
+    if new_count == 1 {
+        site.ic_state = 1; // Monomorphic
+    } else if new_count <= 4 {
+        site.ic_state = 2; // Polymorphic
+    } else {
+        site.ic_state = 3; // Megamorphic
+    }
+    
+    return site;
+}

@@ -1,0 +1,96 @@
+// # Kalman Filter Dynamic Hedge Ratio and Spread
+//
+// Logline: Tracks dynamic hedge ratios and mean-reverting cointegration spreads in real time using 2D state-space Kalman filtering.
+//
+// Setup: Pure statistical filtering module updating state mean vector [alpha, beta] and error covariance P.
+//
+// Beats:
+//   1. Define KalmanFilterState, KalmanParams, and SpreadObservation structures.
+//   2. Perform state prediction step: extrapolate dynamic hedge ratio and transition variance.
+//   3. Compute Kalman gain, update state estimates from asset pair prices, and output filtered spread residual.
+
+pub type KalmanFilterState = struct {
+    intercept_alpha: Float,
+    hedge_ratio_beta: Float,
+    cov_alpha_alpha: Float,
+    cov_alpha_beta: Float,
+    cov_beta_beta: Float,
+    spread_residual: Float,
+};
+
+pub type KalmanParams = struct {
+    trans_cov_w_alpha: Float,
+    trans_cov_w_beta: Float,
+    obs_cov_v: Float,
+};
+
+pub type SpreadObservation = struct {
+    price_y: Float,
+    price_x: Float,
+};
+
+pub fn kalman_filter_state_new(
+    init_alpha: Float,
+    init_beta: Float
+) -> KalmanFilterState {
+    return KalmanFilterState {
+        intercept_alpha: init_alpha,
+        hedge_ratio_beta: init_beta,
+        cov_alpha_alpha: 1.0,
+        cov_alpha_beta: 0.0,
+        cov_beta_beta: 1.0,
+        spread_residual: 0.0,
+    };
+}
+
+pub fn kalman_params_default() -> KalmanParams {
+    return KalmanParams {
+        trans_cov_w_alpha: 0.0001,
+        trans_cov_w_beta: 0.0001,
+        obs_cov_v: 0.001,
+    };
+}
+
+pub fn kalman_update_step(
+    state: &mut KalmanFilterState,
+    obs: &SpreadObservation,
+    params: &KalmanParams
+) -> Float {
+    let y: Float = (obs).price_y;
+    let x: Float = (obs).price_x;
+
+    // 1. Predict state covariance: P_pred = P + W
+    let p_aa: Float = (state).cov_alpha_alpha + (params).trans_cov_w_alpha;
+    let p_ab: Float = (state).cov_alpha_beta;
+    let p_bb: Float = (state).cov_beta_beta + (params).trans_cov_w_beta;
+
+    // 2. Observation matrix H = [1, x]
+    // Innovation variance F = H * P_pred * H^T + V
+    // F = p_aa + 2 * x * p_ab + x^2 * p_bb + V
+    let f_var: Float = p_aa + (2.0 * x * p_ab) + (x * x * p_bb) + (params).obs_cov_v;
+
+    // 3. Predicted measurement y_pred = alpha + beta * x
+    let y_pred: Float = (state).intercept_alpha + ((state).hedge_ratio_beta * x);
+    let error_y: Float = y - y_pred;
+
+    // 4. Kalman Gain K = P_pred * H^T / F
+    // K_alpha = (p_aa + x * p_ab) / F
+    // K_beta  = (p_ab + x * p_bb) / F
+    let k_alpha: Float = if f_var > 0.000001 { (p_aa + (x * p_ab)) / f_var } else { 0.0 };
+    let k_beta: Float = if f_var > 0.000001 { (p_ab + (x * p_bb)) / f_var } else { 0.0 };
+
+    // 5. Update state
+    (state).intercept_alpha = (state).intercept_alpha + (k_alpha * error_y);
+    (state).hedge_ratio_beta = (state).hedge_ratio_beta + (k_beta * error_y);
+
+    // 6. Update covariance: P = (I - K * H) * P_pred
+    (state).cov_alpha_alpha = p_aa - (k_alpha * (p_aa + (x * p_ab)));
+    (state).cov_alpha_beta = p_ab - (k_alpha * (p_ab + (x * p_bb)));
+    (state).cov_beta_beta = p_bb - (k_beta * (p_ab + (x * p_bb)));
+
+    // 7. Update spread residual
+    let spread: Float = y - ((state).intercept_alpha + ((state).hedge_ratio_beta * x));
+    (state).spread_residual = spread;
+
+    return spread;
+}

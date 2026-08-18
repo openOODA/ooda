@@ -1,0 +1,211 @@
+// # ARM Cortex-M NVIC Interrupt Controller
+//
+// Logline: Interrupt enable, pending state management, priority grouping, and exception priority configuration for ARM Cortex-M cores.
+//
+// Setup: Memory-mapped register abstractions for ISER, ICER, ISPR, ICPR, IPR, and SCB SHPR registers.
+//
+// Beats:
+//   1. Define NVIC register representations, interrupt descriptors, and priority grouping models.
+//   2. Initialize and configure interrupt priorities, enable states, and pending flags.
+//   3. Implement preemption and sub-priority decoding based on PRIGROUP settings.
+//   4. Manage system exception priorities for SysTick, PendSV, and SVCall handlers.
+
+pub type NvicIrqState = struct {
+    irq_num: Int,
+    enabled: Bool,
+    pending: Bool,
+    active: Bool,
+    raw_priority: Int,
+    preempt_priority: Int,
+    sub_priority: Int,
+};
+
+pub type NvicController = struct {
+    num_irqs: Int,
+    priority_bits: Int,
+    priority_group: Int, // PRIGROUP: 0..7 (determines preemption vs subpriority split)
+    irq_states: List[NvicIrqState],
+    systick_priority: Int,
+    pendsv_priority: Int,
+    svcall_priority: Int,
+};
+
+pub fn nvic_irq_state_new(irq: Int) -> NvicIrqState {
+    return NvicIrqState {
+        irq_num: irq,
+        enabled: false,
+        pending: false,
+        active: false,
+        raw_priority: 0,
+        preempt_priority: 0,
+        sub_priority: 0,
+    };
+}
+
+pub fn nvic_controller_new(num_irqs: Int, prio_bits: Int) -> NvicController {
+    let mut states: List[NvicIrqState] = list_new();
+    let mut i: Int = 0;
+    while i < num_irqs {
+        states = list_push(states, nvic_irq_state_new(i));
+        i = i + 1;
+    }
+    return NvicController {
+        num_irqs: num_irqs,
+        priority_bits: prio_bits,
+        priority_group: 3, // Default NVIC_PRIORITYGROUP_4 (4 bits preempt, 0 sub)
+        irq_states: states,
+        systick_priority: 0,
+        pendsv_priority: 0,
+        svcall_priority: 0,
+    };
+}
+
+fn nvic_update_state(states: List[NvicIrqState], irq: Int, new_state: NvicIrqState) -> List[NvicIrqState] {
+    let mut result: List[NvicIrqState] = list_new();
+    let len: Int = list_len(states);
+    let mut i: Int = 0;
+    while i < len {
+        if i == irq {
+            result = list_push(result, new_state);
+        } else {
+            result = list_push(result, list_get(states, i));
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn nvic_set_priority_grouping(nvic: &mut NvicController, prigroup: Int) {
+    (nvic).priority_group = prigroup % 8;
+}
+
+pub fn nvic_enable_irq(nvic: &mut NvicController, irq: Int) {
+    if irq >= 0 {
+        if irq < (nvic).num_irqs {
+            let mut state: NvicIrqState = list_get((nvic).irq_states, irq);
+            (state).enabled = true;
+            (nvic).irq_states = nvic_update_state((nvic).irq_states, irq, state);
+        }
+    }
+}
+
+pub fn nvic_disable_irq(nvic: &mut NvicController, irq: Int) {
+    if irq >= 0 {
+        if irq < (nvic).num_irqs {
+            let mut state: NvicIrqState = list_get((nvic).irq_states, irq);
+            (state).enabled = false;
+            (nvic).irq_states = nvic_update_state((nvic).irq_states, irq, state);
+        }
+    }
+}
+
+pub fn nvic_set_pending_irq(nvic: &mut NvicController, irq: Int) {
+    if irq >= 0 {
+        if irq < (nvic).num_irqs {
+            let mut state: NvicIrqState = list_get((nvic).irq_states, irq);
+            (state).pending = true;
+            (nvic).irq_states = nvic_update_state((nvic).irq_states, irq, state);
+        }
+    }
+}
+
+pub fn nvic_clear_pending_irq(nvic: &mut NvicController, irq: Int) {
+    if irq >= 0 {
+        if irq < (nvic).num_irqs {
+            let mut state: NvicIrqState = list_get((nvic).irq_states, irq);
+            (state).pending = false;
+            (nvic).irq_states = nvic_update_state((nvic).irq_states, irq, state);
+        }
+    }
+}
+
+pub fn nvic_is_irq_enabled(nvic: &NvicController, irq: Int) -> Bool {
+    if irq >= 0 {
+        if irq < (nvic).num_irqs {
+            let state: NvicIrqState = list_get((nvic).irq_states, irq);
+            return (state).enabled;
+        }
+    }
+    return false;
+}
+
+pub fn nvic_is_irq_pending(nvic: &NvicController, irq: Int) -> Bool {
+    if irq >= 0 {
+        if irq < (nvic).num_irqs {
+            let state: NvicIrqState = list_get((nvic).irq_states, irq);
+            return (state).pending;
+        }
+    }
+    return false;
+}
+
+pub fn nvic_encode_priority(prigroup: Int, preempt: Int, sub: Int) -> Int {
+    let mut shift: Int = 7 - prigroup;
+    if shift < 0 {
+        shift = 0;
+    }
+    let mut mask: Int = 1;
+    let mut s: Int = 0;
+    while s < shift {
+        mask = mask * 2;
+        s = s + 1;
+    }
+    let raw: Int = (preempt * mask) + (sub % mask);
+    return raw % 256;
+}
+
+pub fn nvic_set_priority(nvic: &mut NvicController, irq: Int, preempt: Int, sub: Int) {
+    if irq >= 0 {
+        if irq < (nvic).num_irqs {
+            let mut state: NvicIrqState = list_get((nvic).irq_states, irq);
+            let raw: Int = nvic_encode_priority((nvic).priority_group, preempt, sub);
+            (state).raw_priority = raw;
+            (state).preempt_priority = preempt;
+            (state).sub_priority = sub;
+            (nvic).irq_states = nvic_update_state((nvic).irq_states, irq, state);
+        }
+    }
+}
+
+pub fn nvic_get_priority(nvic: &NvicController, irq: Int) -> Int {
+    if irq >= 0 {
+        if irq < (nvic).num_irqs {
+            let state: NvicIrqState = list_get((nvic).irq_states, irq);
+            return (state).raw_priority;
+        }
+    }
+    return 0;
+}
+
+pub fn nvic_set_system_handler_priority(nvic: &mut NvicController, handler_id: Int, prio: Int) {
+    if handler_id == 0 {
+        (nvic).svcall_priority = prio % 256;
+    } else {
+        if handler_id == 1 {
+            (nvic).pendsv_priority = prio % 256;
+        } else {
+            if handler_id == 2 {
+                (nvic).systick_priority = prio % 256;
+            }
+        }
+    }
+}
+
+pub fn nvic_get_highest_pending_irq(nvic: &NvicController) -> Int {
+    let mut best_irq: Int = 0 - 1;
+    let mut best_prio: Int = 999999;
+    let mut i: Int = 0;
+    while i < (nvic).num_irqs {
+        let state: NvicIrqState = list_get((nvic).irq_states, i);
+        if (state).enabled {
+            if (state).pending {
+                if (state).raw_priority < best_prio {
+                    best_prio = (state).raw_priority;
+                    best_irq = i;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best_irq;
+}

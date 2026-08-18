@@ -1,0 +1,95 @@
+// # UAV Lithium Battery State-of-Charge (SOC) & Sag Estimator
+//
+// Logline: Coulomb count fused with sag-compensated OCV. Int milli destub.
+//
+// Setup: Remaining mAh, fused SoC, flight-time estimate, RTL flags.
+//
+// Beats:
+//   1. Capacity, S-count, ESR, cutoff / nominal cell V.
+//   2. V_ocv = V_meas + I R.
+//   3. dQ = I dt / 3600; SoC_c = rem / C.
+//   4. Fuse 90% coulomb + 10% voltage; warn <25% or 3.5 V/cell.
+
+type BatteryParams = struct {
+    capacity_mah: Int,
+    cell_count_s: Int,
+    internal_res_mohm: Int,
+    cutoff_voltage_mv: Int,
+    nominal_voltage_mv: Int
+};
+
+type BatteryState = struct {
+    soc_milli: Int,
+    remaining_capacity_mah: Int,
+    voltage_ocv_mv: Int,
+    estimated_flight_time_s: Int,
+    is_low_battery_warning: Bool,
+    is_critical_land_now: Bool
+};
+
+pub fn battery_params_default() -> BatteryParams {
+    return BatteryParams {
+        capacity_mah: 4500,
+        cell_count_s: 4,
+        internal_res_mohm: 24,
+        cutoff_voltage_mv: 3300,
+        nominal_voltage_mv: 3700
+    };
+}
+
+pub fn battery_state_init(params: BatteryParams) -> BatteryState {
+    let cells: Int = if params.cell_count_s < 1 { 1 } else { params.cell_count_s };
+    let full_v: Int = cells * 4200;
+    return BatteryState {
+        soc_milli: 1000,
+        remaining_capacity_mah: params.capacity_mah,
+        voltage_ocv_mv: full_v,
+        estimated_flight_time_s: 1320,
+        is_low_battery_warning: false,
+        is_critical_land_now: false
+    };
+}
+
+pub fn update_battery_soc(
+    params: BatteryParams,
+    current_state: BatteryState,
+    measured_voltage_mv: Int,
+    measured_current_ma: Int,
+    dt_s: Int
+) -> BatteryState {
+    let sag_mv: Int = (measured_current_ma * params.internal_res_mohm) / 1000;
+    let v_ocv: Int = measured_voltage_mv + sag_mv;
+    let cells: Int = if params.cell_count_s < 1 { 1 } else { params.cell_count_s };
+    let v_cell: Int = v_ocv / cells;
+    let dt_use: Int = if dt_s < 0 { 0 } else { dt_s };
+    let mah_used: Int = (measured_current_ma * dt_use) / 3600;
+    let rem_raw: Int = current_state.remaining_capacity_mah - mah_used;
+    let rem_mah: Int = if rem_raw < 0 { 0 } else { rem_raw };
+    let cap: Int = if params.capacity_mah < 1 { 1 } else { params.capacity_mah };
+    let soc_coulomb: Int = (rem_mah * 1000) / cap;
+    let span: Int = 4200 - params.cutoff_voltage_mv;
+    let safe_span: Int = if span < 1 { 1 } else { span };
+    let soc_v_raw: Int = ((v_cell - params.cutoff_voltage_mv) * 1000) / safe_span;
+    let soc_v_hi: Int = if soc_v_raw > 1000 { 1000 } else { soc_v_raw };
+    let soc_v: Int = if soc_v_hi < 0 { 0 } else { soc_v_hi };
+    let soc_fused: Int = ((90 * soc_coulomb) + (10 * soc_v)) / 100;
+    let rem_time: Int = if measured_current_ma > 500 {
+        (rem_mah * 3600) / measured_current_ma
+    } else {
+        current_state.estimated_flight_time_s
+    };
+    let low_soc: Bool = soc_fused < 250;
+    let low_v: Bool = v_cell < 3500;
+    let low_warn: Bool = if low_soc { true } else { low_v };
+    let crit_soc: Bool = soc_fused < 100;
+    let crit_v: Bool = v_cell < 3350;
+    let crit_land: Bool = if crit_soc { true } else { crit_v };
+    return BatteryState {
+        soc_milli: soc_fused,
+        remaining_capacity_mah: rem_mah,
+        voltage_ocv_mv: v_ocv,
+        estimated_flight_time_s: rem_time,
+        is_low_battery_warning: low_warn,
+        is_critical_land_now: crit_land
+    };
+}

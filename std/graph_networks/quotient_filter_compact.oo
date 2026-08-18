@@ -1,0 +1,171 @@
+// # Quotient Filter Compact Hash Index
+//
+// Logline: Implements Quotient Filters using quotient-remainder fingerprint partitioning and cluster run shifting.
+//
+// Setup: Cache-friendly approximate membership structure storing remainder fingerprints in quotient-addressed slots.
+//
+// Beats:
+//   1. Partition item hash into q-bit quotient address and r-bit remainder fingerprint.
+//   2. Insert remainder into canonical run with linear probing cluster shifting.
+//   3. Lookup fingerprints across shifted run boundaries without full key storage.
+
+pub type QuotientSlot = struct {
+    is_occupied: Bool,
+    is_continuation: Bool,
+    is_shifted: Bool,
+    remainder: Int,
+};
+
+pub type QuotientFilter = struct {
+    q_bits: Int,
+    r_bits: Int,
+    num_slots: Int,
+    slots: List[QuotientSlot],
+    item_count: Int,
+};
+
+pub fn qf_power_of_two(exp: Int) -> Int {
+    let mut res: Int = 1;
+    let mut i: Int = 0;
+    while i < exp {
+        res = res * 2;
+        i = i + 1;
+    }
+    return res;
+}
+
+pub fn qf_create(q_bits: Int, r_bits: Int) -> QuotientFilter {
+    let mut q: Int = q_bits;
+    let mut r: Int = r_bits;
+    if q < 4 {
+        q = 6;
+    }
+    if r < 4 {
+        r = 8;
+    }
+    let n: Int = qf_power_of_two(q);
+    let mut s: List[QuotientSlot] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let empty_slot: QuotientSlot = QuotientSlot {
+            is_occupied: false,
+            is_continuation: false,
+            is_shifted: false,
+            remainder: 0,
+        };
+        s = list_push(s, empty_slot);
+        i = i + 1;
+    }
+    return QuotientFilter {
+        q_bits: q,
+        r_bits: r,
+        num_slots: n,
+        slots: s,
+        item_count: 0,
+    };
+}
+
+pub fn qf_split_hash(item: Int, q_bits: Int, r_bits: Int) -> List[Int] {
+    let mut pos_item: Int = item;
+    if pos_item < 0 {
+        pos_item = 0 - pos_item;
+    }
+    let full_hash: Int = (pos_item * 2654435761 + 1013904223) % 2147483647;
+    let r_mask: Int = qf_power_of_two(r_bits);
+    let remainder: Int = full_hash % r_mask;
+    let q_mask: Int = qf_power_of_two(q_bits);
+    let quotient: Int = (full_hash / r_mask) % q_mask;
+
+    let mut result: List[Int] = list_new();
+    result = list_push(result, quotient);
+    result = list_push(result, remainder);
+    return result;
+}
+
+pub fn qf_update_slot(slots: List[QuotientSlot], idx: Int, new_slot: QuotientSlot) -> List[QuotientSlot] {
+    let mut next_list: List[QuotientSlot] = list_new();
+    let n: Int = list_len(slots);
+    let mut i: Int = 0;
+    while i < n {
+        if i == idx {
+            next_list = list_push(next_list, new_slot);
+        } else {
+            next_list = list_push(next_list, list_get(slots, i));
+        }
+        i = i + 1;
+    }
+    return next_list;
+}
+
+pub fn qf_insert(qf: &mut QuotientFilter, item: Int) -> Bool {
+    let qr: List[Int] = qf_split_hash(item, (qf).q_bits, (qf).r_bits);
+    let q: Int = list_get(qr, 0);
+    let r: Int = list_get(qr, 1);
+    let n: Int = (qf).num_slots;
+
+    let mut cur_slot: QuotientSlot = list_get((qf).slots, q);
+    if !(cur_slot).is_occupied && (cur_slot).remainder == 0 {
+        // Direct insertion
+        let updated: QuotientSlot = QuotientSlot {
+            is_occupied: true,
+            is_continuation: false,
+            is_shifted: false,
+            remainder: r,
+        };
+        (qf).slots = qf_update_slot((qf).slots, q, updated);
+        (qf).item_count = (qf).item_count + 1;
+        return true;
+    }
+
+    // Mark original slot occupied
+    cur_slot = QuotientSlot {
+        is_occupied: true,
+        is_continuation: (cur_slot).is_continuation,
+        is_shifted: (cur_slot).is_shifted,
+        remainder: (cur_slot).remainder,
+    };
+    (qf).slots = qf_update_slot((qf).slots, q, cur_slot);
+
+    // Linear scan for insertion slot
+    let mut probe: Int = q;
+    let mut step: Int = 0;
+    while step < n {
+        let test_idx: Int = (probe + step) % n;
+        let test_slot: QuotientSlot = list_get((qf).slots, test_idx);
+        if (test_slot).remainder == 0 && !(test_slot).is_shifted {
+            let placed: QuotientSlot = QuotientSlot {
+                is_occupied: (test_slot).is_occupied,
+                is_continuation: step > 0,
+                is_shifted: step > 0,
+                remainder: r,
+            };
+            (qf).slots = qf_update_slot((qf).slots, test_idx, placed);
+            (qf).item_count = (qf).item_count + 1;
+            return true;
+        }
+        step = step + 1;
+    }
+    return false;
+}
+
+pub fn qf_lookup(qf: &QuotientFilter, item: Int) -> Bool {
+    let qr: List[Int] = qf_split_hash(item, (qf).q_bits, (qf).r_bits);
+    let q: Int = list_get(qr, 0);
+    let r: Int = list_get(qr, 1);
+    let n: Int = (qf).num_slots;
+
+    let target_slot: QuotientSlot = list_get((qf).slots, q);
+    if !(target_slot).is_occupied {
+        return false;
+    }
+
+    let mut probe: Int = 0;
+    while probe < 16 && (q + probe) < n {
+        let s: QuotientSlot = list_get((qf).slots, (q + probe) % n);
+        if (s).remainder == r {
+            return true;
+        }
+        probe = probe + 1;
+    }
+    return false;
+}

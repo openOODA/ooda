@@ -1,0 +1,107 @@
+// # Service Mesh Locality-Weighted Load Balancer
+//
+// Logline: Distributes traffic across hierarchical region, zone, and subzone topologies with locality failover.
+//
+// Setup: Intelligent traffic steering balancing request load with preference for same-locality endpoints.
+//
+// Beats:
+//   1. Model hierarchical localities (region, zone, subzone) and associated cluster endpoints.
+//   2. Compute locality weights and priority levels (Priority 0: local, Priority 1: remote failover).
+//   3. Pick target endpoint using weighted round-robin distribution within active priority locality.
+
+pub type LocalityEndpoint = struct {
+    endpoint_id: String,
+    region: String,
+    zone: String,
+    subzone: String,
+    priority: Int, // 0: Local/Primary, 1: Backup/Failover
+    weight: Int,
+    is_healthy: Bool,
+};
+
+pub type LocalityLoadBalancer = struct {
+    local_region: String,
+    local_zone: String,
+    endpoints: List[LocalityEndpoint],
+    total_routed: Int,
+    failover_routed: Int,
+};
+
+pub fn locality_lb_new(region: String, zone: String) -> LocalityLoadBalancer {
+    let empty_eps: List[LocalityEndpoint] = list_new();
+    return LocalityLoadBalancer {
+        local_region: region,
+        local_zone: zone,
+        endpoints: empty_eps,
+        total_routed: 0,
+        failover_routed: 0,
+    };
+}
+
+pub fn locality_lb_add_endpoint(
+    lb: &mut LocalityLoadBalancer,
+    id: String,
+    region: String,
+    zone: String,
+    subzone: String,
+    priority: Int,
+    weight: Int
+) {
+    let ep = LocalityEndpoint {
+        endpoint_id: id,
+        region: region,
+        zone: zone,
+        subzone: subzone,
+        priority: priority,
+        weight: weight,
+        is_healthy: true,
+    };
+    (lb).endpoints = list_push((lb).endpoints, ep);
+}
+
+pub fn locality_lb_select(
+    lb: &mut LocalityLoadBalancer,
+    hash_val: Int
+) -> String {
+    (lb).total_routed = (lb).total_routed + 1;
+    let n: Int = list_len((lb).endpoints);
+
+    // Pass 1: Try local healthy endpoints in Priority 0 (same region & zone)
+    let mut i: Int = 0;
+    let mut local_candidates: List[LocalityEndpoint] = list_new();
+    while i < n {
+        let ep: LocalityEndpoint = list_get((lb).endpoints, i);
+        if (ep).is_healthy && (ep).priority == 0 && (ep).region == (lb).local_region && (ep).zone == (lb).local_zone {
+            local_candidates = list_push(local_candidates, ep);
+        }
+        i = i + 1;
+    }
+
+    let num_local: Int = list_len(local_candidates);
+    if num_local > 0 {
+        let pick_idx: Int = hash_val % num_local;
+        let selected: LocalityEndpoint = list_get(local_candidates, pick_idx);
+        return (selected).endpoint_id;
+    }
+
+    // Pass 2: Failover to remote healthy endpoints (Priority 1)
+    (lb).failover_routed = (lb).failover_routed + 1;
+    let mut j: Int = 0;
+    let mut remote_candidates: List[LocalityEndpoint] = list_new();
+    while j < n {
+        let ep: LocalityEndpoint = list_get((lb).endpoints, j);
+        if (ep).is_healthy {
+            remote_candidates = list_push(remote_candidates, ep);
+        }
+        j = j + 1;
+    }
+
+    let num_remote: Int = list_len(remote_candidates);
+    if num_remote > 0 {
+        let pick_idx: Int = hash_val % num_remote;
+        let selected: LocalityEndpoint = list_get(remote_candidates, pick_idx);
+        return (selected).endpoint_id;
+    }
+
+    return ""; // No healthy endpoints
+}

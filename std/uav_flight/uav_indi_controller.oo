@@ -1,0 +1,95 @@
+// # UAV Incremental Nonlinear Dynamic Inversion (INDI) Controller
+//
+// Logline: Sensor-based Incremental Nonlinear Dynamic Inversion (INDI) providing extreme robustness to aerodynamic model mismatch.
+//
+// Setup: High-bandwidth rate controller utilizing filtered angular acceleration measurements to compute incremental actuator updates.
+//
+// Beats:
+//   1. Define INDI Control Effectiveness Matrix G (mapping incremental actuator torque to angular acceleration).
+//   2. Filter gyro angular velocity to estimate measured angular acceleration domega_meas.
+//   3. Compute desired angular acceleration domega_des = kp*(omega_ref - omega_curr).
+//   4. Calculate incremental actuator control delta_u = G^-1 * (domega_des - domega_meas) + u_prev.
+
+import "./uav_coordinate_frames.oo";
+
+pub type IndiConfig = struct {
+    kp_rate_p: Float,
+    kp_rate_q: Float,
+    kp_rate_r: Float,
+    g_eff_p: Float, // G effectiveness (1 / Ixx)
+    g_eff_q: Float, // G effectiveness (1 / Iyy)
+    g_eff_r: Float, // G effectiveness (1 / Izz)
+    filter_alpha: Float,
+    max_delta_u: Float,
+};
+
+pub type IndiState = struct {
+    prev_omega: Vector3D,
+    filtered_domega: Vector3D,
+    prev_control_u: Vector3D,
+};
+
+pub fn indi_config_default() -> IndiConfig {
+    return IndiConfig {
+        kp_rate_p: 15.0,
+        kp_rate_q: 15.0,
+        kp_rate_r: 8.0,
+        g_eff_p: 66.67, // 1 / 0.015
+        g_eff_q: 66.67, // 1 / 0.015
+        g_eff_r: 40.0,  // 1 / 0.025
+        filter_alpha: 0.65, // Low-pass filter smoothing gyro differentiation noise
+        max_delta_u: 0.8,
+    };
+}
+
+pub fn indi_state_init() -> IndiState {
+    return IndiState {
+        prev_omega: vector3d_zero(),
+        filtered_domega: vector3d_zero(),
+        prev_control_u: vector3d_zero(),
+    };
+}
+
+pub fn indi_controller_step(
+    cfg: &IndiConfig,
+    state: &IndiState,
+    omega_curr: &Vector3D,
+    omega_ref: &Vector3D,
+    dt: Float
+) -> Vector3D { // returns new control torque u
+    let safe_dt: Float = if dt < 0.0005 { 0.0005 } else { dt };
+
+    // 1. Raw angular acceleration measurement = (omega_curr - prev_omega) / dt
+    let raw_d_p: Float = ((omega_curr).x - (state).prev_omega.x) / safe_dt;
+    let raw_d_q: Float = ((omega_curr).y - (state).prev_omega.y) / safe_dt;
+    let raw_d_r: Float = ((omega_curr).z - (state).prev_omega.z) / safe_dt;
+
+    // 2. Low-pass filter domega: domega_filt = (1-a)*domega_filt + a*raw_d
+    let a: Float = (cfg).filter_alpha;
+    let filt_dp: Float = ((1.0 - a) * (state).filtered_domega.x) + (a * raw_d_p);
+    let filt_dq: Float = ((1.0 - a) * (state).filtered_domega.y) + (a * raw_d_q);
+    let filt_dr: Float = ((1.0 - a) * (state).filtered_domega.z) + (a * raw_d_r);
+
+    // 3. Desired angular acceleration: domega_des = Kp * (omega_ref - omega_curr)
+    let des_dp: Float = (cfg).kp_rate_p * ((omega_ref).x - (omega_curr).x);
+    let des_dq: Float = (cfg).kp_rate_q * ((omega_ref).y - (omega_curr).y);
+    let des_dr: Float = (cfg).kp_rate_r * ((omega_ref).z - (omega_curr).z);
+
+    // 4. Incremental update: delta_u = G^-1 * (des_domega - filt_domega)
+    let du_p: Float = (des_dp - filt_dp) / (cfg).g_eff_p;
+    let du_q: Float = (des_dq - filt_dq) / (cfg).g_eff_q;
+    let du_r: Float = (des_dr - filt_dr) / (cfg).g_eff_r;
+
+    // Clamp delta_u to prevent saturation spikes
+    let max_du: Float = (cfg).max_delta_u;
+    let cl_dup: Float = if du_p > max_du { max_du } else if du_p < (0.0 - max_du) { 0.0 - max_du } else { du_p };
+    let cl_duq: Float = if du_q > max_du { max_du } else if du_q < (0.0 - max_du) { 0.0 - max_du } else { du_q };
+    let cl_dur: Float = if du_r > max_du { max_du } else if du_r < (0.0 - max_du) { 0.0 - max_du } else { du_r };
+
+    // New total torque = prev_u + delta_u
+    let new_up: Float = (state).prev_control_u.x + cl_dup;
+    let new_uq: Float = (state).prev_control_u.y + cl_duq;
+    let new_ur: Float = (state).prev_control_u.z + cl_dur;
+
+    return Vector3D { x: new_up, y: new_uq, z: new_ur };
+}

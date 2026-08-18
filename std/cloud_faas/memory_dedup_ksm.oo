@@ -1,0 +1,77 @@
+// # Kernel Samepage Merging (KSM) Deduplicator
+//
+// Logline: Implements cross-microVM memory page deduplication with cryptographic hashing and copy-on-write mapping.
+//
+// Setup: Memory density optimizer scanning guest memory pages to collapse identical pages into shared read-only frames.
+//
+// Beats:
+//   1. Compute checksum hashes across candidate guest physical pages.
+//   2. Match duplicate page contents and remap multiple virtual addresses to a single shared physical frame.
+//   3. Track memory savings and handle copy-on-write page break faults on guest writes.
+
+pub type MemoryPage = struct {
+    page_id: Int,
+    content_hash: Int,
+    shared_ref_count: Int,
+    is_shared: Bool,
+};
+
+pub type KsmDeduplicator = struct {
+    page_size_kb: Int,
+    pages: List[MemoryPage],
+    total_pages_scanned: Int,
+    pages_merged: Int,
+    bytes_saved_kb: Int,
+};
+
+pub fn ksm_deduplicator_new(page_size_kb: Int) -> KsmDeduplicator {
+    let empty_pages: List[MemoryPage] = list_new();
+    return KsmDeduplicator {
+        page_size_kb: page_size_kb,
+        pages: empty_pages,
+        total_pages_scanned: 0,
+        pages_merged: 0,
+        bytes_saved_kb: 0,
+    };
+}
+
+pub fn ksm_scan_and_merge(ksm: &mut KsmDeduplicator, page_id: Int, hash: Int) -> Bool {
+    (ksm).total_pages_scanned = (ksm).total_pages_scanned + 1;
+    let n: Int = list_len((ksm).pages);
+    let mut i: Int = 0;
+    let mut matched: Bool = false;
+    let mut updated: List[MemoryPage] = list_new();
+
+    while i < n {
+        let p: MemoryPage = list_get((ksm).pages, i);
+        if (p).content_hash == hash && !matched {
+            let shared_p = MemoryPage {
+                page_id: (p).page_id,
+                content_hash: (p).content_hash,
+                shared_ref_count: (p).shared_ref_count + 1,
+                is_shared: true,
+            };
+            updated = list_push(updated, shared_p);
+            matched = true;
+            (ksm).pages_merged = (ksm).pages_merged + 1;
+            (ksm).bytes_saved_kb = (ksm).bytes_saved_kb + (ksm).page_size_kb;
+        } else {
+            updated = list_push(updated, p);
+        }
+        i = i + 1;
+    }
+
+    if !matched {
+        let new_p = MemoryPage {
+            page_id: page_id,
+            content_hash: hash,
+            shared_ref_count: 1,
+            is_shared: false,
+        };
+        (ksm).pages = list_push(updated, new_p);
+        return false;
+    }
+
+    (ksm).pages = updated;
+    return true;
+}

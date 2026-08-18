@@ -1,0 +1,111 @@
+// # Flash Loan Execution Engine
+//
+// Logline: Implements uncollateralized single-transaction flash loans with strict balance conservation invariants and reentrancy mutexes.
+//
+// Setup: Pure DeFi liquidity protocol module with atomic transaction verification.
+//
+// Beats:
+//   1. Define FlashLoanPool, FlashBorrowReceipt, and FlashLoanVerification structures.
+//   2. Compute protocol flash loan fee premiums (e.g. 9 bps).
+//   3. Validate that post-execution pool balance satisfies Invariant Balance_Final >= Balance_Initial + Premium.
+
+pub type FlashLoanPool = struct {
+    token_address: String,
+    available_liquidity: Int,
+    flash_fee_bps: Int, // e.g. 9 for 0.09%
+    total_fees_collected: Int,
+    is_locked: Bool,
+};
+
+pub type FlashBorrowReceipt = struct {
+    borrower: String,
+    loan_amount: Int,
+    fee_due: Int,
+    total_repayment_required: Int,
+    initial_pool_balance: Int,
+};
+
+pub type FlashLoanVerification = struct {
+    is_successful: Bool,
+    net_profit_to_pool: Int,
+    new_pool_balance: Int,
+    error_message: String,
+};
+
+pub fn flash_pool_new(token: String, liquidity: Int, fee_bps: Int) -> FlashLoanPool {
+    return FlashLoanPool {
+        token_address: token,
+        available_liquidity: liquidity,
+        flash_fee_bps: fee_bps,
+        total_fees_collected: 0,
+        is_locked: false,
+    };
+}
+
+pub fn flash_loan_borrow(
+    pool: &mut FlashLoanPool,
+    borrower: String,
+    amount: Int
+) -> FlashBorrowReceipt {
+    if (pool).is_locked || amount <= 0 || amount > (pool).available_liquidity {
+        return FlashBorrowReceipt {
+            borrower: borrower,
+            loan_amount: 0,
+            fee_due: 0,
+            total_repayment_required: 0,
+            initial_pool_balance: (pool).available_liquidity,
+        };
+    }
+
+    (pool).is_locked = true;
+    let fee: Int = (amount * (pool).flash_fee_bps) / 10000;
+    let repay: Int = amount + fee;
+    let init_bal: Int = (pool).available_liquidity;
+
+    (pool).available_liquidity = (pool).available_liquidity - amount;
+
+    return FlashBorrowReceipt {
+        borrower: borrower,
+        loan_amount: amount,
+        fee_due: fee,
+        total_repayment_required: repay,
+        initial_pool_balance: init_bal,
+    };
+}
+
+pub fn flash_loan_repay_and_verify(
+    pool: &mut FlashLoanPool,
+    receipt: &FlashBorrowReceipt,
+    repaid_amount: Int
+) -> FlashLoanVerification {
+    if !(pool).is_locked {
+        return FlashLoanVerification {
+            is_successful: false,
+            net_profit_to_pool: 0,
+            new_pool_balance: (pool).available_liquidity,
+            error_message: "POOL_NOT_LOCKED",
+        };
+    }
+
+    let required: Int = (receipt).total_repayment_required;
+    if repaid_amount < required {
+        (pool).is_locked = false;
+        return FlashLoanVerification {
+            is_successful: false,
+            net_profit_to_pool: 0,
+            new_pool_balance: (pool).available_liquidity,
+            error_message: "INSUFFICIENT_FLASH_LOAN_REPAYMENT",
+        };
+    }
+
+    (pool).available_liquidity = (receipt).initial_pool_balance + (receipt).fee_due;
+    (pool).total_fees_collected = (pool).total_fees_collected + (receipt).fee_due;
+    (pool).is_locked = false;
+
+    return FlashLoanVerification {
+        is_successful: true,
+        net_profit_to_pool: (receipt).fee_due,
+        new_pool_balance: (pool).available_liquidity,
+        error_message: "SUCCESS",
+    };
+}

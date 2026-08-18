@@ -1,0 +1,107 @@
+// # Terahertz Schottky Barrier Diode Direct Detection
+//
+// Logline: Models zero-bias Schottky barrier diode (SBD) video detection, voltage responsivity, and Noise Equivalent Power (NEP).
+//
+// Setup: Pure standard library implementation of room-temperature sub-THz direct envelope and square-law detection.
+//
+// Beats:
+//   1. Model diode I-V nonlinear curvature and differential junction resistance.
+//   2. Compute frequency-dependent voltage responsivity Rv in V/W considering junction parasitics.
+//   3. Calculate thermal Johnson noise, Noise Equivalent Power (NEP in pW/sqrt(Hz)), and Minimum Detectable Signal (MDS).
+
+pub type SchottkyDetectorConfig = struct {
+    ideality_factor_eta: Float,
+    saturation_current_a: Float,
+    junction_capacitance_ff: Float,
+    series_resistance_ohm: Float,
+    video_bandwidth_hz: Float,
+    ambient_temp_k: Float,
+};
+
+pub type SbdDetectionResult = struct {
+    frequency_ghz: Float,
+    input_rf_power_uw: Float,
+    voltage_responsivity_v_w: Float,
+    output_detected_voltage_mv: Float,
+    noise_voltage_nv_per_rt_hz: Float,
+    noise_equivalent_power_pw_rt_hz: Float,
+    min_detectable_power_dbm: Float,
+};
+
+pub fn sbd_config_zero_bias_d_band() -> SchottkyDetectorConfig {
+    return SchottkyDetectorConfig {
+        ideality_factor_eta: 1.18,
+        saturation_current_a: 0.00000001, // 10 nA
+        junction_capacitance_ff: 1.2,      // 1.2 fF
+        series_resistance_ohm: 18.0,
+        video_bandwidth_hz: 1000000.0,     // 1 MHz baseband
+        ambient_temp_k: 295.0,
+    };
+}
+
+pub fn thz_sbd_junction_resistance(cfg: SchottkyDetectorConfig) -> Float {
+    let k_b: Float = 0.00000000000000000000001380649; // 1.38e-23 J/K
+    let q_e: Float = 0.0000000000000000001602176634;  // 1.602e-19 C
+    let temp_k: Float = cfg.ambient_temp_k;
+    let eta: Float = cfg.ideality_factor_eta;
+    let i_s: Float = cfg.saturation_current_a;
+    let v_t: Float = (k_b * temp_k) / q_e;
+    return (eta * v_t) / i_s;
+}
+
+pub fn thz_sbd_detection_eval(cfg: SchottkyDetectorConfig, freq_ghz: Float, rf_pwr_uw: Float) -> SbdDetectionResult {
+    let r_j: Float = thz_sbd_junction_resistance(cfg);
+    let r_s: Float = cfg.series_resistance_ohm;
+    let c_j: Float = cfg.junction_capacitance_ff;
+    let c_j_f: Float = c_j * 0.000000000000001;
+    let eta: Float = cfg.ideality_factor_eta;
+    let temp_k: Float = cfg.ambient_temp_k;
+    let b_video: Float = cfg.video_bandwidth_hz;
+
+    let pi: Float = 3.141592653589793;
+    let omega: Float = 2.0 * pi * freq_ghz * 1000000000.0;
+
+    // Ideal low-frequency voltage responsivity: Rv0 = q / (2 * eta * k_B * T) * (R_j / (1 + R_s / R_j))
+    let k_b: Float = 0.00000000000000000000001380649;
+    let q_e: Float = 0.0000000000000000001602176634;
+    let gamma_0: Float = q_e / (2.0 * eta * k_b * temp_k);
+    let rv_dc: Float = gamma_0 * r_j / (1.0 + (r_s / r_j));
+
+    // High frequency roll-off factor: 1 / (1 + omega^2 * C_j^2 * R_s * R_j)
+    let roll_off: Float = 1.0 / (1.0 + (omega * omega * c_j_f * c_j_f * r_s * r_j));
+    let rv_eff: Float = rv_dc * roll_off;
+
+    let p_w: Float = rf_pwr_uw * 0.000001;
+    let v_out_v: Float = rv_eff * p_w;
+    let v_out_mv: Float = v_out_v * 1000.0;
+
+    // Johnson thermal noise: v_n = sqrt(4 * k_B * T * (R_s + R_j))
+    let total_r: Float = r_s + r_j;
+    let v_noise_v_rt_hz: Float = sqrt(4.0 * k_b * temp_k * total_r);
+    let v_noise_nv: Float = v_noise_v_rt_hz * 1000000000.0;
+
+    // NEP = v_noise / Rv
+    let mut nep_w_rt_hz: Float = 0.001;
+    if rv_eff > 0.001 {
+        nep_w_rt_hz = v_noise_v_rt_hz / rv_eff;
+    }
+    let nep_pw: Float = nep_w_rt_hz * 1000000000000.0;
+
+    let mds_w: Float = nep_w_rt_hz * sqrt(b_video);
+    let ln10: Float = 2.302585092994046;
+    let mut safe_mds_mw: Float = 0.000000000000001;
+    if mds_w > 0.000000000000001 {
+        safe_mds_mw = mds_w * 1000.0;
+    }
+    let mds_dbm: Float = 10.0 * (ln(safe_mds_mw) / ln10);
+
+    return SbdDetectionResult {
+        frequency_ghz: freq_ghz,
+        input_rf_power_uw: rf_pwr_uw,
+        voltage_responsivity_v_w: rv_eff,
+        output_detected_voltage_mv: v_out_mv,
+        noise_voltage_nv_per_rt_hz: v_noise_nv,
+        noise_equivalent_power_pw_rt_hz: nep_pw,
+        min_detectable_power_dbm: mds_dbm,
+    };
+}

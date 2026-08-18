@@ -1,0 +1,197 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::sys::pe_engine
+// PE directories, sections, audit, full image parse
+// (split from pe.oo, M172)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+import "./pe_parse.oo";
+
+pub fn pe_get_data_directory_name(index: Int) -> String {
+    if index == 0 { return "EXPORT"; }
+    if index == 1 { return "IMPORT"; }
+    if index == 2 { return "RESOURCE"; }
+    if index == 3 { return "EXCEPTION"; }
+    if index == 4 { return "SECURITY"; }
+    if index == 5 { return "BASERELOC"; }
+    if index == 6 { return "DEBUG"; }
+    if index == 7 { return "ARCHITECTURE"; }
+    if index == 8 { return "GLOBALPTR"; }
+    if index == 9 { return "TLS"; }
+    if index == 10 { return "LOAD_CONFIG"; }
+    if index == 11 { return "BOUND_IMPORT"; }
+    if index == 12 { return "IAT"; }
+    if index == 13 { return "DELAY_IMPORT"; }
+    if index == 14 { return "CLR_HEADER"; }
+    return "RESERVED";
+}
+
+pub fn pe_parse_data_directories(data: String, dirs_offset: Int, count: Int) -> List[DataDirectory] {
+    let mut dirs: List[DataDirectory] = list_new();
+    let data_len: Int = data.len();
+    let mut i: Int = 0;
+    while i < count {
+        let entry_offset: Int = dirs_offset + (i * 8);
+        if entry_offset + 8 <= data_len {
+            let rva: Int = read_u32_le(data, entry_offset);
+            let size: Int = read_u32_le(data, entry_offset + 4);
+            let name: String = pe_get_data_directory_name(i);
+            let dir: DataDirectory = data_directory_new(name, rva, size);
+            dirs = list_push(dirs, dir);
+        }
+        i = i + 1;
+    }
+    return dirs;
+}
+
+pub fn pe_parse_section_headers(data: String, sec_offset: Int, count: Int) -> List[SectionHeader] {
+    let mut sections: List[SectionHeader] = list_new();
+    let data_len: Int = data.len();
+    let mut i: Int = 0;
+    while i < count {
+        let entry_offset: Int = sec_offset + (i * 40);
+        if entry_offset + 40 <= data_len {
+            let sec_name: String = read_fixed_string(data, entry_offset, 8);
+            let virt_size: Int = read_u32_le(data, entry_offset + 8);
+            let virt_addr: Int = read_u32_le(data, entry_offset + 12);
+            let raw_size: Int = read_u32_le(data, entry_offset + 16);
+            let raw_ptr: Int = read_u32_le(data, entry_offset + 20);
+            let reloc_ptr: Int = read_u32_le(data, entry_offset + 24);
+            let line_ptr: Int = read_u32_le(data, entry_offset + 28);
+            let num_reloc: Int = read_u16_le(data, entry_offset + 32);
+            let num_line: Int = read_u16_le(data, entry_offset + 34);
+            let charact: Int = read_u32_le(data, entry_offset + 36);
+
+            let is_exec: Bool = (charact / 536870912) % 2 != 0; // 0x20000000
+            let is_read: Bool = (charact / 1073741824) % 2 != 0; // 0x40000000
+            let is_write: Bool = charact < 0; // 0x80000000 bit set (signed 32-bit int)
+
+            let header: SectionHeader = SectionHeader {
+                name: sec_name,
+                virtual_size: virt_size,
+                virtual_address: virt_addr,
+                size_of_raw_data: raw_size,
+                pointer_to_raw_data: raw_ptr,
+                pointer_to_relocations: reloc_ptr,
+                pointer_to_linenumbers: line_ptr,
+                number_of_relocations: num_reloc,
+                number_of_linenumbers: num_line,
+                characteristics: charact,
+                is_executable: is_exec,
+                is_readable: is_read,
+                is_writable: is_write,
+            };
+            sections = list_push(sections, header);
+        }
+        i = i + 1;
+    }
+    return sections;
+}
+
+pub fn pe_audit_image(
+    opt_header: OptionalHeader,
+    pe_header: PeHeader,
+    sections: List[SectionHeader],
+    dirs: List[DataDirectory]
+) -> PeSecurityAudit {
+    let dll_char: Int = opt_header.dll_characteristics;
+    let has_aslr: Bool = (dll_char / 64) % 2 != 0;
+    let has_heva: Bool = (dll_char / 32) % 2 != 0;
+    let has_dep: Bool = (dll_char / 256) % 2 != 0;
+    let has_cfg: Bool = (dll_char / 16384) % 2 != 0;
+    let has_fi: Bool = (dll_char / 128) % 2 != 0;
+    let has_noseh: Bool = (dll_char / 1024) % 2 != 0;
+    let is_dll: Bool = (pe_header.characteristics / 8192) % 2 != 0;
+
+    let mut has_sec_dir: Bool = false;
+    let dir_count: Int = list_len(dirs);
+    let mut i: Int = 0;
+    while i < dir_count {
+        let dir: DataDirectory = list_get(dirs, i);
+        if dir.name == "SECURITY" {
+            if dir.is_present {
+                has_sec_dir = true;
+            }
+        }
+        i = i + 1;
+    }
+
+    let mut has_wx: Bool = false;
+    let sec_count: Int = list_len(sections);
+    let mut j: Int = 0;
+    while j < sec_count {
+        let sec: SectionHeader = list_get(sections, j);
+        if sec.is_executable {
+            if sec.is_writable {
+                has_wx = true;
+            }
+        }
+        j = j + 1;
+    }
+
+    let mut score: Int = 0;
+    if has_aslr { score = score + 25; }
+    if has_dep { score = score + 25; }
+    if has_cfg { score = score + 20; }
+    if has_heva { score = score + 10; }
+    if has_sec_dir { score = score + 20; }
+    if has_wx { score = score - 30; }
+    if score < 0 { score = 0; }
+
+    return PeSecurityAudit {
+        has_aslr: has_aslr,
+        has_high_entropy_va: has_heva,
+        has_dep_nx: has_dep,
+        has_cfg: has_cfg,
+        has_force_integrity: has_fi,
+        has_no_seh: has_noseh,
+        has_authenticode: has_sec_dir,
+        has_wx_sections: has_wx,
+        is_dll: is_dll,
+        security_score: score,
+    };
+}
+
+pub fn pe_parse_image(data: String, filepath: String) -> Result[PeImage, String] {
+    let dos_res: Result[DosHeader, String] = pe_parse_dos_header(data);
+    let dos_hdr: DosHeader = match dos_res {
+        Ok(h) => h,
+        Err(e) => return Err(e),
+    };
+
+    let pe_res: Result[PeHeader, String] = pe_parse_file_header(data, dos_hdr.e_lfanew);
+    let pe_hdr: PeHeader = match pe_res {
+        Ok(h) => h,
+        Err(e) => return Err(e),
+    };
+
+    let opt_offset: Int = dos_hdr.e_lfanew + 24;
+    let opt_res: Result[OptionalHeader, String] = pe_parse_optional_header(data, opt_offset);
+    let opt_hdr: OptionalHeader = match opt_res {
+        Ok(h) => h,
+        Err(e) => return Err(e),
+    };
+
+    let dirs_offset: Int = if opt_hdr.is_64bit { opt_offset + 112 } else { opt_offset + 96 };
+    let dirs: List[DataDirectory] = pe_parse_data_directories(data, dirs_offset, opt_hdr.number_of_rva_and_sizes);
+
+    let sec_offset: Int = opt_offset + pe_hdr.size_of_optional_header;
+    let sections: List[SectionHeader] = pe_parse_section_headers(data, sec_offset, pe_hdr.number_of_sections);
+
+    let audit: PeSecurityAudit = pe_audit_image(opt_hdr, pe_hdr, sections, dirs);
+
+    let image: PeImage = PeImage {
+        filepath: filepath,
+        dos_header: dos_hdr,
+        pe_header: pe_hdr,
+        optional_header: opt_hdr,
+        data_directories: dirs,
+        sections: sections,
+        audit: audit,
+        is_64bit: opt_hdr.is_64bit,
+        is_valid: true,
+        raw_size: data.len(),
+    };
+    return Ok(image);
+}

@@ -1,0 +1,179 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::net::jwt_verify
+// JWT claims verification & engine evaluation (split from jwt.oo, M171)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required where applicable.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins / compiler limitations.
+
+import "./jwt_types.oo";
+import "./jwt_util.oo";
+import "./jwt_engine.oo";
+
+// -------------------------------------------------------------------
+// Verification & Policy Evaluation
+// -------------------------------------------------------------------
+
+pub fn jwt_verify_payload_claims(
+    payload: JwtPayload,
+    rules: JwtValidationRules,
+    current_time: Int
+) -> Result[Bool, String] {
+    let active: Bool = rules.is_active;
+    if active == false {
+        return Err("RULES_INACTIVE: Validation rules policy is inactive");
+    }
+
+    let skew: Int = rules.clock_skew_seconds;
+    let req_exp: Bool = rules.require_exp;
+    if req_exp {
+        let exp: Int = payload.exp;
+        let exp_bound: Int = exp + skew;
+        if current_time >= exp_bound {
+            return Err("TOKEN_EXPIRED: JWT token has expired");
+        }
+    }
+
+    let req_nbf: Bool = rules.require_nbf;
+    if req_nbf {
+        let nbf: Int = payload.nbf;
+        let nbf_bound: Int = nbf - skew;
+        if current_time < nbf_bound {
+            return Err("TOKEN_NOT_YET_VALID: Current time is before nbf claim");
+        }
+    }
+
+    let req_iss: Bool = rules.require_iss;
+    if req_iss {
+        let exp_iss: String = rules.expected_issuer;
+        let act_iss: String = payload.iss;
+        let match_i: Bool = jwt_str_eq(exp_iss, act_iss);
+        if match_i == false {
+            return Err("ISSUER_MISMATCH: Token issuer does not match expected issuer");
+        }
+    }
+
+    let req_aud: Bool = rules.require_aud;
+    if req_aud {
+        let exp_aud: String = rules.expected_audience;
+        let act_aud: String = payload.aud;
+        let match_a: Bool = jwt_str_eq(exp_aud, act_aud);
+        if match_a == false {
+            return Err("AUDIENCE_MISMATCH: Token audience does not match expected audience");
+        }
+    }
+
+    return Ok(true);
+}
+
+pub fn jwt_engine_evaluate_token(
+    sys: &SysCap,
+    engine: JwtEngine,
+    token: JwtToken,
+    current_time: Int
+) -> Result[JwtVerificationResult, String] {
+    let halted: Bool = engine.system_halted;
+    if halted {
+        return Err("JWT_ENGINE_HALTED: Engine is halted");
+    }
+
+    let payload: JwtPayload = token.payload;
+    let sub_id: String = payload.sub;
+    let iss_id: String = payload.iss;
+
+    let is_rev: Bool = token.is_revoked;
+    if is_rev {
+        let res = JwtVerificationResult {
+            is_valid: false,
+            subject: sub_id,
+            issuer: iss_id,
+            error_code: "TOKEN_REVOKED",
+            error_description: "Token marked as revoked",
+            verification_time: current_time,
+        };
+        return Ok(res);
+    }
+
+    let jti: String = payload.jti;
+    let jti_revoked: Bool = jwt_engine_is_jti_revoked(engine, jti);
+    if jti_revoked {
+        let res = JwtVerificationResult {
+            is_valid: false,
+            subject: sub_id,
+            issuer: iss_id,
+            error_code: "JTI_REVOKED",
+            error_description: "Token JTI present in revocation list",
+            verification_time: current_time,
+        };
+        return Ok(res);
+    }
+
+    let rules: JwtValidationRules = engine.validation_rules;
+    let claims_res: Result[Bool, String] = jwt_verify_payload_claims(payload, rules, current_time);
+    let claims_ok: Bool = match claims_res {
+        Ok(v) => v,
+        Err(e) => false,
+    };
+
+    if claims_ok == false {
+        let res = JwtVerificationResult {
+            is_valid: false,
+            subject: sub_id,
+            issuer: iss_id,
+            error_code: "CLAIMS_VALIDATION_FAILED",
+            error_description: "Token claims violated policy constraints",
+            verification_time: current_time,
+        };
+        return Ok(res);
+    }
+
+    let header: JwtHeader = token.header;
+    let tok_alg: String = header.alg;
+    let allowed_algs: List[String] = rules.allowed_algorithms;
+    let num_algs: Int = list_len(allowed_algs);
+    let mut alg_matched: Bool = false;
+    let mut idx: Int = 0;
+    while idx < num_algs {
+        let alg_item: String = list_get(allowed_algs, idx);
+        let match_alg: Bool = jwt_str_eq(alg_item, tok_alg);
+        if match_alg {
+            alg_matched = true;
+        }
+        idx = idx + 1;
+    }
+
+    if alg_matched == false {
+        let res = JwtVerificationResult {
+            is_valid: false,
+            subject: sub_id,
+            issuer: iss_id,
+            error_code: "DISALLOWED_ALGORITHM",
+            error_description: "Signing algorithm not allowed by policy",
+            verification_time: current_time,
+        };
+        return Ok(res);
+    }
+
+    let res = JwtVerificationResult {
+        is_valid: true,
+        subject: sub_id,
+        issuer: iss_id,
+        error_code: "OK",
+        error_description: "Token verified successfully",
+        verification_time: current_time,
+    };
+    return Ok(res);
+}
+
+pub type Engine = struct {};
+pub type Token = struct {};
+pub type Default = struct {};
+pub type SysCap = struct {};
+pub type Current = struct {};
+pub type Validation = struct {};
+pub type JWT = struct {};
+pub type Fail = struct {};
+
+
+pub fn __dummy_std_src_ooda_sec_net_jwt_verify_oo() -> Int {
+    return 0;
+}

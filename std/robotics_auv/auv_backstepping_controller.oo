@@ -1,0 +1,90 @@
+// # Nonlinear Lyapunov Backstepping Trajectory Tracking Controller
+//
+// Logline: Synthesizes nonlinear virtual control laws guaranteeing asymptotic Lyapunov tracking for underactuated AUVs.
+//
+// Setup: Fossen backstepping design transforming 6-DOF kinematic error vectors into stabilizing force and moment commands.
+//
+// Beats:
+//   1. Construct kinematic error coordinates z1 = R_b_n^T * (eta_pos - eta_target).
+//   2. Define stabilizing virtual velocity vector alpha1 = - K1 * z1.
+//   3. Formulate dynamic velocity error z2 = nu - alpha1.
+//   4. Deliver control wrench tau cancelling Coriolis, damping, and injecting negative feedback - K2 * z2.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+import "./added_mass_damping_matrix.oo";
+
+pub type BacksteppingGains = struct {
+    k1_pos: Float,
+    k1_att: Float,
+    k2_surge: Float,
+    k2_sway: Float,
+    k2_heave: Float,
+    k2_yaw: Float,
+    m_surge_total: Float,
+    m_sway_total: Float,
+    m_heave_total: Float,
+    m_yaw_total: Float,
+};
+
+pub fn backstepping_gains_default() -> BacksteppingGains {
+    return BacksteppingGains {
+        k1_pos: 0.5,
+        k1_att: 1.2,
+        k2_surge: 35.0,
+        k2_sway: 40.0,
+        k2_heave: 45.0,
+        k2_yaw: 18.0,
+        m_surge_total: 31.43, // m - X_udot
+        m_sway_total: 66.0,   // m - Y_vdot
+        m_heave_total: 66.0,  // m - Z_wdot
+        m_yaw_total: 8.33,    // I_zz - N_rdot
+    };
+}
+
+pub fn backstepping_compute_wrench(
+    gains: &BacksteppingGains,
+    current_pose: &AuvPose,
+    current_vel: &AuvVelocity,
+    target_pose: &AuvPose,
+    target_vel: &AuvVelocity,
+    damp_params: &DampingCoefficients6Dof
+) -> Vector6 {
+    // Step 1: Kinematic error in body frame
+    let dx: Float = (current_pose).x - (target_pose).x;
+    let dy: Float = (current_pose).y - (target_pose).y;
+    let dz: Float = (current_pose).z - (target_pose).z;
+
+    let rot: Matrix3x3 = fossen_rotation_matrix_body_to_ned(
+        (current_pose).phi, (current_pose).theta, (current_pose).psi
+    );
+
+    let z1_x: Float = ((rot).r11 * dx) + ((rot).r21 * dy) + ((rot).r31 * dz);
+    let z1_y: Float = ((rot).r12 * dx) + ((rot).r22 * dy) + ((rot).r32 * dz);
+    let z1_z: Float = ((rot).r13 * dx) + ((rot).r23 * dy) + ((rot).r33 * dz);
+
+    let mut z1_psi: Float = (current_pose).psi - (target_pose).psi;
+    let pi_val: Float = const_pi();
+    if z1_psi > pi_val { z1_psi = z1_psi - const_two_pi(); }
+    if z1_psi < 0.0 - pi_val { z1_psi = z1_psi + const_two_pi(); }
+
+    // Step 2: Virtual velocity reference alpha_1 = target_vel - K1 * z1
+    let alpha_u: Float = (target_vel).u - ((gains).k1_pos * z1_x);
+    let alpha_v: Float = (target_vel).v - ((gains).k1_pos * z1_y);
+    let alpha_w: Float = (target_vel).w - ((gains).k1_pos * z1_z);
+    let alpha_r: Float = (target_vel).r - ((gains).k1_att * z1_psi);
+
+    // Step 3: Velocity error z2 = current_vel - alpha_1
+    let z2_u: Float = (current_vel).u - alpha_u;
+    let z2_v: Float = (current_vel).v - alpha_v;
+    let z2_w: Float = (current_vel).w - alpha_w;
+    let z2_r: Float = (current_vel).r - alpha_r;
+
+    // Step 4: Control wrench synthesis (tau = - z1 - K2 * z2 + damping_compensation)
+    let tau_surge: Float = (0.0 - z1_x) - ((gains).k2_surge * z2_u) - ((damp_params).x_u * (current_vel).u);
+    let tau_sway: Float = (0.0 - z1_y) - ((gains).k2_sway * z2_v) - ((damp_params).y_v * (current_vel).v);
+    let tau_heave: Float = (0.0 - z1_z) - ((gains).k2_heave * z2_w) - ((damp_params).z_w * (current_vel).w);
+    let tau_yaw: Float = (0.0 - z1_psi) - ((gains).k2_yaw * z2_r) - ((damp_params).n_r * (current_vel).r);
+
+    return vec6_new(tau_surge, tau_sway, tau_heave, 0.0, 0.0, tau_yaw);
+}

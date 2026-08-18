@@ -1,0 +1,103 @@
+// # Variance Swap Fair Strike & Log-Contract Replication Engine
+//
+// Logline: Prices continuous variance swaps and computes fair variance strikes ($K_{var}$) via numerical log-contract replication across option strips.
+//
+// Setup: Pure quantitative finance module calculating fair variance swaps from discrete out-of-the-money option strips (Demeterfi et al. formula).
+//
+// Beats:
+//   1. Define VarianceSwapContract, OptionStripQuote, and VarianceSwapResult structures.
+//   2. Integrate inverse-squared strike densities ($\frac{1}{K^2}$) over OTM call and put strips.
+//   3. Compute annualized fair strike $\sigma_0 = \sqrt{K_{var}}$, vega notional, and terminal variance payoff.
+
+pub type OptionStripQuote = struct {
+    strike: Float,
+    price: Float,
+    is_call: Bool,
+};
+
+pub type VarianceSwapContract = struct {
+    notional_vega_usd: Float, // Variance notional = Vega notional / (2 * K_var_vol)
+    agreed_strike_vol: Float, // Agreed strike in vol units, e.g. 0.60 (60%)
+    time_to_maturity_years: Float,
+    risk_free_rate: Float,
+    forward_price: Float,
+    option_strip: List[OptionStripQuote],
+};
+
+pub type VarianceSwapResult = struct {
+    fair_variance_strike_annual: Float, // K_var
+    fair_volatility_strike_pct: Float,  // sqrt(K_var)
+    variance_notional_usd: Float,
+    option_strip_integral: Float,
+    expected_payoff_usd: Float,
+};
+
+pub fn variance_swap_new(
+    vega_notional: Float,
+    agreed_vol: Float,
+    t: Float,
+    r: Float,
+    f: Float
+) -> VarianceSwapContract {
+    let strip: List[OptionStripQuote] = list_new();
+    return VarianceSwapContract {
+        notional_vega_usd: vega_notional,
+        agreed_strike_vol: agreed_vol,
+        time_to_maturity_years: t,
+        risk_free_rate: r,
+        forward_price: f,
+        option_strip: strip,
+    };
+}
+
+pub fn calc_fair_variance_strike(
+    contract: &VarianceSwapContract
+) -> VarianceSwapResult {
+    let t: Float = (contract).time_to_maturity_years;
+    let r: Float = (contract).risk_free_rate;
+    let f: Float = (contract).forward_price;
+
+    let n: Int = list_len((contract).option_strip);
+    if n < 2 || t <= 0.0 {
+        let agreed_var: Float = (contract).agreed_strike_vol * (contract).agreed_strike_vol;
+        return VarianceSwapResult {
+            fair_variance_strike_annual: agreed_var,
+            fair_volatility_strike_pct: (contract).agreed_strike_vol,
+            variance_notional_usd: (contract).notional_vega_usd / (2.0 * (contract).agreed_strike_vol + 0.0001),
+            option_strip_integral: 0.0,
+            expected_payoff_usd: 0.0,
+        };
+    }
+
+    let mut sum_integral: Float = 0.0;
+    let mut i: Int = 0;
+    while i < (n - 1) {
+        let q1: OptionStripQuote = list_get((contract).option_strip, i);
+        let q2: OptionStripQuote = list_get((contract).option_strip, i + 1);
+
+        let dk: Float = (q2).strike - (q1).strike;
+        let avg_px: Float = ((q1).price + (q2).price) / 2.0;
+        let avg_k: Float = ((q1).strike + (q2).strike) / 2.0;
+
+        let weight: Float = 1.0 / (avg_k * avg_k);
+        sum_integral = sum_integral + (weight * avg_px * dk);
+
+        i = i + 1;
+    }
+
+    let er_t: Float = exp(r * t);
+    let fair_var: Float = (2.0 * er_t / t) * sum_integral;
+    let fair_vol: Float = sqrt(fair_var);
+
+    let var_notional: Float = (contract).notional_vega_usd / (2.0 * (contract).agreed_strike_vol);
+    let agreed_var_amt: Float = (contract).agreed_strike_vol * (contract).agreed_strike_vol;
+    let exp_payoff: Float = var_notional * (fair_var - agreed_var_amt);
+
+    return VarianceSwapResult {
+        fair_variance_strike_annual: fair_var,
+        fair_volatility_strike_pct: fair_vol,
+        variance_notional_usd: var_notional,
+        option_strip_integral: sum_integral,
+        expected_payoff_usd: exp_payoff,
+    };
+}

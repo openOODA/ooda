@@ -1,0 +1,179 @@
+// # Emergency Mission Abort & Failsafe Ballast Weight Drop
+//
+// Logline: Drop-weight abort on depth, watchdog, leak, or undervoltage. Int milli destub.
+//
+// Setup: Failsafe buoyancy ascent; terminal speed from quadratic drag.
+//
+// Beats:
+//   1. Thresholds: max depth, deadman, min voltage, drop mass, hull area, Cd.
+//   2. Priority: depth, then watchdog, leak, voltage.
+//   3. Latch abort and release ballast.
+//   4. v = sqrt(2 m g / (rho Cd A)).
+
+type EmergencyThresholds = struct {
+    max_safe_depth_mm: Int,
+    deadman_timeout_ms: Int,
+    min_voltage_mv: Int,
+    drop_ballast_mass_g: Int,
+    hull_frontal_area_mm2: Int,
+    hull_drag_coeff_milli: Int
+};
+
+type FailsafeMonitorState = struct {
+    heartbeat_age_ms: Int,
+    is_abort_triggered: Bool,
+    abort_reason_code: Int,
+    is_ballast_released: Bool,
+    projected_ascent_speed_mm_s: Int
+};
+
+pub fn emergency_thresholds_default() -> EmergencyThresholds {
+    return EmergencyThresholds {
+        max_safe_depth_mm: 350000,
+        deadman_timeout_ms: 1800000,
+        min_voltage_mv: 11500,
+        drop_ballast_mass_g: 2800,
+        hull_frontal_area_mm2: 35000,
+        hull_drag_coeff_milli: 450
+    };
+}
+
+pub fn failsafe_monitor_init() -> FailsafeMonitorState {
+    return FailsafeMonitorState {
+        heartbeat_age_ms: 0,
+        is_abort_triggered: false,
+        abort_reason_code: 0,
+        is_ballast_released: false,
+        projected_ascent_speed_mm_s: 0
+    };
+}
+
+pub fn int_sqrt_seed(n: Int, g: Int) -> Int {
+    let g2: Int = g * 2;
+    if g2 <= 0 {
+        return g;
+    }
+    if (g2 * g2) > n {
+        return g;
+    }
+    if g2 <= g {
+        return g;
+    }
+    return int_sqrt_seed(n, g2);
+}
+
+pub fn int_sqrt_iter(n: Int, guess: Int, steps: Int) -> Int {
+    if steps <= 0 {
+        return guess;
+    }
+    if guess <= 0 {
+        return 0;
+    }
+    let next: Int = (guess + (n / guess)) / 2;
+    let diff: Int = next - guess;
+    if diff == 0 {
+        return next;
+    }
+    if diff < 0 {
+        if (0 - diff) <= 1 {
+            return next;
+        }
+        return int_sqrt_iter(n, next, steps - 1);
+    }
+    if diff <= 1 {
+        return guess;
+    }
+    return int_sqrt_iter(n, next, steps - 1);
+}
+
+pub fn int_sqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if n < 4 {
+        return 1;
+    }
+    let seed: Int = int_sqrt_seed(n, 1);
+    return int_sqrt_iter(n, seed, 8);
+}
+
+pub fn compute_passive_ascent_terminal_speed(thresh: EmergencyThresholds, water_density: Int) -> Int {
+    let mass_g: Int = thresh.drop_ballast_mass_g;
+    let cd_milli: Int = thresh.hull_drag_coeff_milli;
+    let area_mm2: Int = thresh.hull_frontal_area_mm2;
+    if water_density <= 0 {
+        return 500;
+    }
+    if cd_milli <= 0 {
+        return 500;
+    }
+    if area_mm2 <= 0 {
+        return 500;
+    }
+    let g_milli: Int = 9807;
+    let den: Int = water_density * cd_milli * area_mm2;
+    if den <= 0 {
+        return 500;
+    }
+    let num: Int = mass_g * g_milli * 2000000000;
+    let v2: Int = num / den;
+    return int_sqrt(v2);
+}
+
+pub fn failsafe_monitor_step(
+    thresh: EmergencyThresholds,
+    state: FailsafeMonitorState,
+    current_depth_mm: Int,
+    battery_voltage_mv: Int,
+    leak_detected: Bool,
+    heartbeat_received: Bool,
+    dt_ms: Int
+) -> FailsafeMonitorState {
+    if state.is_abort_triggered {
+        return FailsafeMonitorState {
+            heartbeat_age_ms: state.heartbeat_age_ms,
+            is_abort_triggered: true,
+            abort_reason_code: state.abort_reason_code,
+            is_ballast_released: state.is_ballast_released,
+            projected_ascent_speed_mm_s: state.projected_ascent_speed_mm_s
+        };
+    }
+    let timer: Int = if heartbeat_received {
+        0
+    } else {
+        state.heartbeat_age_ms + dt_ms
+    };
+    let abort_depth: Bool = current_depth_mm >= thresh.max_safe_depth_mm;
+    let abort_wd: Bool = timer >= thresh.deadman_timeout_ms;
+    let abort_volt: Bool = battery_voltage_mv <= thresh.min_voltage_mv;
+    let reason: Int = if abort_depth {
+        1
+    } else {
+        if abort_wd {
+            2
+        } else {
+            if leak_detected {
+                3
+            } else {
+                if abort_volt {
+                    4
+                } else {
+                    0
+                }
+            }
+        }
+    };
+    let abort: Bool = reason != 0;
+    let ascent_v: Int = if abort {
+        compute_passive_ascent_terminal_speed(thresh, 1025)
+    } else {
+        0
+    };
+    return FailsafeMonitorState {
+        heartbeat_age_ms: timer,
+        is_abort_triggered: abort,
+        abort_reason_code: reason,
+        is_ballast_released: abort,
+        projected_ascent_speed_mm_s: ascent_v
+    };
+}

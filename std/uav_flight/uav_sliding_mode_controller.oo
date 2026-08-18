@@ -1,0 +1,99 @@
+// # UAV Robust Sliding Mode Controller (SMC)
+//
+// Logline: Sliding mode tracking control with continuous boundary layer chattering reduction for position and attitude stabilization.
+//
+// Setup: Non-linear variable structure control robust against aerodynamic parameter uncertainties and wind gust disturbances.
+//
+// Beats:
+//   1. Define Sliding Surface s = de + lambda * e.
+//   2. Compute Equivalent Control effort u_eq along the invariant sliding manifold.
+//   3. Compute Discontinuous Robust Switching effort u_sw = -k * sat(s / epsilon).
+//   4. Calculate Total Control Effort u = u_eq + u_sw and evaluate sliding manifold convergence.
+
+import "./uav_coordinate_frames.oo";
+
+pub type SmcGains = struct {
+    lambda_pos: Float,
+    k_robust_pos: Float,
+    boundary_layer_eps: Float,
+    max_accel_cmd: Float,
+};
+
+pub type SmcOutput = struct {
+    accel_cmd: Vector3D,
+    surface_val: Vector3D,
+    is_sliding: Bool,
+};
+
+pub fn smc_gains_default() -> SmcGains {
+    return SmcGains {
+        lambda_pos: 2.5,
+        k_robust_pos: 3.0,
+        boundary_layer_eps: 0.15,
+        max_accel_cmd: 8.0,
+    };
+}
+
+pub fn smc_sat(val: Float, eps: Float) -> Float {
+    let safe_eps: Float = if eps < 0.001 { 0.001 } else { eps };
+    let ratio: Float = val / safe_eps;
+    if ratio > 1.0 {
+        return 1.0;
+    }
+    if ratio < (0.0 - 1.0) {
+        return 0.0 - 1.0;
+    }
+    return ratio;
+}
+
+pub fn smc_position_axis(
+    p_des: Float, v_des: Float, a_des: Float,
+    p_curr: Float, v_curr: Float,
+    gains: &SmcGains
+) -> Vector3D { // returns x: u_cmd, y: surface_s, z: is_boundary (1.0 or 0.0)
+    let e: Float = p_des - p_curr;
+    let de: Float = v_des - v_curr;
+
+    // Sliding surface s = de + lambda * e
+    let s: Float = de + ((gains).lambda_pos * e);
+
+    // Equivalent acceleration along manifold
+    let u_eq: Float = a_des + ((gains).lambda_pos * de);
+
+    // Switching control effort
+    let sat_s: Float = smc_sat(s, (gains).boundary_layer_eps);
+    let u_sw: Float = (gains).k_robust_pos * sat_s;
+
+    let u_tot: Float = u_eq + u_sw;
+    let max_a: Float = (gains).max_accel_cmd;
+    let u_clamped: Float = if u_tot > max_a {
+        max_a
+    } else if u_tot < (0.0 - max_a) {
+        0.0 - max_a
+    } else {
+        u_tot
+    };
+
+    let abs_s: Float = if s < 0.0 { 0.0 - s } else { s };
+    let in_layer: Float = if abs_s <= (gains).boundary_layer_eps { 1.0 } else { 0.0 };
+
+    return Vector3D { x: u_clamped, y: s, z: in_layer };
+}
+
+pub fn smc_position_3d(
+    p_des: &Vector3D, v_des: &Vector3D, a_des: &Vector3D,
+    p_curr: &Vector3D, v_curr: &Vector3D,
+    gains: &SmcGains
+) -> SmcOutput {
+    let res_x: Vector3D = smc_position_axis((p_des).x, (v_des).x, (a_des).x, (p_curr).x, (v_curr).x, gains);
+    let res_y: Vector3D = smc_position_axis((p_des).y, (v_des).y, (a_des).y, (p_curr).y, (v_curr).y, gains);
+    let res_z: Vector3D = smc_position_axis((p_des).z, (v_des).z, (a_des).z, (p_curr).z, (v_curr).z, gains);
+
+    let is_all_sliding: Bool = (res_x.z > 0.5) && (res_y.z > 0.5) && (res_z.z > 0.5);
+
+    return SmcOutput {
+        accel_cmd: Vector3D { x: res_x.x, y: res_y.x, z: res_z.x },
+        surface_val: Vector3D { x: res_x.y, y: res_y.y, z: res_z.y },
+        is_sliding: is_all_sliding,
+    };
+}

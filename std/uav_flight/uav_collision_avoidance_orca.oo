@@ -1,0 +1,106 @@
+// # UAV 3D Optimal Reciprocal Collision Avoidance (ORCA)
+//
+// Logline: Multi-agent reciprocal velocity obstacle (VO / ORCA) geometry ensuring collision-free cooperative 3D trajectory sharing.
+//
+// Setup: Solves reciprocal collision avoidance half-plane optimization guaranteeing smooth multi-drone deconfliction.
+//
+// Beats:
+//   1. Define ORCA Parameters (time horizon tau_orca, safety radius r_combined, max speed).
+//   2. Compute Relative Position p_rel = p_b - p_a and Relative Velocity v_rel = v_a - v_b.
+//   3. Determine minimum displacement vector u to escape the truncated velocity obstacle cone VO.
+//   4. Allocate half the avoidance effort u/2 to agent A's new preferred velocity command.
+
+import "./uav_coordinate_frames.oo";
+
+pub type OrcaConfig = struct {
+    time_horizon_sec: Float,
+    combined_radius_m: Float,
+    max_speed_m_s: Float,
+};
+
+pub type OrcaHalfPlane = struct {
+    point_on_plane: Vector3D,
+    normal_dir: Vector3D,
+};
+
+pub type OrcaAvoidanceResult = struct {
+    avoidance_vel: Vector3D,
+    is_conflict: Bool,
+    time_to_collision: Float,
+};
+
+pub fn orca_config_default() -> OrcaConfig {
+    return OrcaConfig {
+        time_horizon_sec: 4.0,
+        combined_radius_m: 2.5, // 2 * radius + safety buffer
+        max_speed_m_s: 10.0,
+    };
+}
+
+pub fn compute_orca_pairwise(
+    p_a: &Vector3D, v_a: &Vector3D,
+    p_b: &Vector3D, v_b: &Vector3D,
+    v_pref_a: &Vector3D,
+    cfg: &OrcaConfig
+) -> OrcaAvoidanceResult {
+    let tau: Float = (cfg).time_horizon_sec;
+    let r: Float = (cfg).combined_radius_m;
+
+    let p_rel: Vector3D = vector3d_sub(p_b, p_a);
+    let v_rel: Vector3D = vector3d_sub(v_a, v_b);
+
+    let dist: Float = vector3d_norm(&p_rel);
+    if dist < 0.001 {
+        // Direct overlap emergency repulsion
+        return OrcaAvoidanceResult {
+            avoidance_vel: Vector3D { x: 0.0 - (v_a).x, y: 0.0 - (v_a).y, z: 2.0 },
+            is_conflict: true,
+            time_to_collision: 0.0,
+        };
+    }
+
+    // Truncated center of velocity obstacle cone: c_vo = p_rel / tau
+    let c_vo: Vector3D = vector3d_scale(&p_rel, 1.0 / tau);
+    let radius_vo: Float = r / tau;
+
+    // Vector from VO cone center to current relative velocity: w = v_rel - c_vo
+    let w: Vector3D = vector3d_sub(&v_rel, &c_vo);
+    let w_len: Float = vector3d_norm(&w);
+
+    let in_collision_cone: Bool = w_len < radius_vo;
+
+    let mut u_escape: Vector3D = vector3d_zero();
+    let mut ttc: Float = 999.0;
+
+    if in_collision_cone {
+        // Vector pointing outward from VO sphere to surface
+        let safe_w: Float = if w_len < 0.0001 { 0.0001 } else { w_len };
+        let u_dir: Vector3D = vector3d_scale(&w, 1.0 / safe_w);
+        let u_mag: Float = radius_vo - w_len;
+        u_escape = vector3d_scale(&u_dir, u_mag);
+
+        // Approximate time to collision
+        let speed_rel: Float = vector3d_norm(&v_rel);
+        if speed_rel > 0.01 {
+            ttc = dist / speed_rel;
+        }
+    }
+
+    // Reciprocal allocation: each agent takes half the escape vector: v_new = v_pref + 0.5 * u
+    let half_u: Vector3D = vector3d_scale(&u_escape, 0.5);
+    let v_cand: Vector3D = vector3d_add(v_pref_a, &half_u);
+
+    let v_mag: Float = vector3d_norm(&v_cand);
+    let max_v: Float = (cfg).max_speed_m_s;
+    let v_final: Vector3D = if v_mag > max_v {
+        vector3d_scale(&v_cand, max_v / v_mag)
+    } else {
+        v_cand
+    };
+
+    return OrcaAvoidanceResult {
+        avoidance_vel: v_final,
+        is_conflict: in_collision_cone,
+        time_to_collision: ttc,
+    };
+}

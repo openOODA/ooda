@@ -1,0 +1,125 @@
+// # MVCC Version Chain & Tuple Visibility
+//
+// Logline: Implements multi-version tuple headers, undo pointer chains, and snapshot visibility checks across commit timestamps.
+//
+// Setup: Provides non-blocking reader concurrency where readers never block writers and writers never block readers.
+//
+// Beats:
+//   1. Define MvccTupleHeader, VersionRecord, and VersionChain structures.
+//   2. Implement version chain insertion prepending newer tuple versions with rollback pointers.
+//   3. Implement snapshot visibility evaluation using xmin, xmax, and active transaction lists.
+
+pub type MvccTupleHeader = struct {
+    xmin: Int,
+    xmax: Int,
+    cid: Int,
+    rollback_ptr: Int,
+    is_inf_xmax: Bool,
+};
+
+pub type VersionRecord = struct {
+    version_id: Int,
+    header: MvccTupleHeader,
+    payload: String,
+};
+
+pub type VersionChain = struct {
+    row_id: Int,
+    head_version_id: Int,
+    versions: List[VersionRecord],
+};
+
+pub fn mvcc_tuple_header_new(creator_tx: Int) -> MvccTupleHeader {
+    return MvccTupleHeader {
+        xmin: creator_tx,
+        xmax: 0,
+        cid: 0,
+        rollback_ptr: -1,
+        is_inf_xmax: true,
+    };
+}
+
+pub fn version_chain_new(rid: Int, initial_tx: Int, data: String) -> VersionChain {
+    let mut initial_vers: List[VersionRecord] = list_new();
+    let rec: VersionRecord = VersionRecord {
+        version_id: 1,
+        header: mvcc_tuple_header_new(initial_tx),
+        payload: data,
+    };
+    initial_vers = list_push(initial_vers, rec);
+
+    return VersionChain {
+        row_id: rid,
+        head_version_id: 1,
+        versions: initial_vers,
+    };
+}
+
+pub fn is_version_visible(
+    hdr: MvccTupleHeader,
+    reader_tx: Int,
+    snapshot_xmin: Int,
+    snapshot_xmax: Int,
+    active_txns: List[Int]
+) -> Bool {
+    let tx_creator: Int = (hdr).xmin;
+    if tx_creator >= snapshot_xmax {
+        return false;
+    }
+
+    let n: Int = list_len(active_txns);
+    let mut i: Int = 0;
+    while i < n {
+        let active_id: Int = list_get(active_txns, i);
+        if active_id == tx_creator {
+            return false;
+        }
+        i = i + 1;
+    }
+
+    if (hdr).is_inf_xmax {
+        return true;
+    }
+
+    let tx_deleter: Int = (hdr).xmax;
+    if tx_deleter < snapshot_xmin {
+        return false;
+    }
+
+    let mut j: Int = 0;
+    while j < n {
+        let active_id2: Int = list_get(active_txns, j);
+        if active_id2 == tx_deleter {
+            return true;
+        }
+        j = j + 1;
+    }
+
+    if tx_deleter < snapshot_xmax {
+        return false;
+    }
+
+    return true;
+}
+
+pub fn version_chain_find_visible(
+    chain: VersionChain,
+    reader_tx: Int,
+    snap_xmin: Int,
+    snap_xmax: Int,
+    active_txns: List[Int]
+) -> Option[String] {
+    let vers: List[VersionRecord] = (chain).versions;
+    let n: Int = list_len(vers);
+    let mut i: Int = 0;
+
+    while i < n {
+        let rec: VersionRecord = list_get(vers, i);
+        if is_version_visible((rec).header, reader_tx, snap_xmin, snap_xmax, active_txns) {
+            return Some((rec).payload);
+        }
+        i = i + 1;
+    }
+
+    return None;
+}

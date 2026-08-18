@@ -1,0 +1,88 @@
+// # UAV Dynamic Window Approach (DWA) Local Planner
+//
+// Logline: Evaluates admissible velocity space windows constrained by kinematic acceleration limits and obstacle clearance rollouts.
+//
+// Setup: Reactive local motion planner selecting optimal velocity commands maximizing speed and goal progression while avoiding collisions.
+//
+// Beats:
+//   1. Define Dynamic Window Constraints (max speed, max accel, dt_predict, sample steps).
+//   2. Calculate admissible dynamic velocity search window [v_curr - a*dt, v_curr + a*dt] bounded by [v_min, v_max].
+//   3. Roll out forward trajectory primitives over time horizon T_eval.
+//   4. Score candidates via multi-objective cost function: alpha*GoalHeading + beta*Clearance + gamma*Velocity.
+
+import "./uav_coordinate_frames.oo";
+
+pub type DwaConfig = struct {
+    max_speed_m_s: Float,
+    max_accel_m_s2: Float,
+    eval_time_sec: Float,
+    weight_goal: Float,
+    weight_clearance: Float,
+    weight_speed: Float,
+};
+
+pub type DwaCandidate = struct {
+    vel_cmd: Vector3D,
+    score: Float,
+    predicted_pos: Vector3D,
+};
+
+pub fn dwa_config_default() -> DwaConfig {
+    return DwaConfig {
+        max_speed_m_s: 8.0,
+        max_accel_m_s2: 3.5,
+        eval_time_sec: 1.5,
+        weight_goal: 0.45,
+        weight_clearance: 0.35,
+        weight_speed: 0.20,
+    };
+}
+
+pub fn evaluate_dwa_candidate(
+    curr_pos: &Vector3D,
+    curr_vel: &Vector3D,
+    cand_vel: &Vector3D,
+    goal_pos: &Vector3D,
+    obs_pos: &Vector3D,
+    obs_radius: Float,
+    cfg: &DwaConfig
+) -> DwaCandidate {
+    let t: Float = (cfg).eval_time_sec;
+
+    // Predicted position at horizon
+    let pred_p: Vector3D = Vector3D {
+        x: (curr_pos).x + ((cand_vel).x * t),
+        y: (curr_pos).y + ((cand_vel).y * t),
+        z: (curr_pos).z + ((cand_vel).z * t),
+    };
+
+    // Goal alignment score (negative distance to goal)
+    let d_goal: Vector3D = vector3d_sub(goal_pos, &pred_p);
+    let dist_to_goal: Float = vector3d_norm(&d_goal);
+    let goal_score: Float = 1.0 / (1.0 + dist_to_goal);
+
+    // Obstacle clearance score
+    let d_obs: Vector3D = vector3d_sub(&pred_p, obs_pos);
+    let dist_to_obs: Float = vector3d_norm(&d_obs) - obs_radius;
+    let mut clear_score: Float = 0.0;
+    if dist_to_obs < 0.5 {
+        clear_score = 0.0 - 999.0; // Collision penalty
+    } else {
+        clear_score = dist_to_obs / 10.0;
+    }
+
+    // Speed score
+    let speed: Float = vector3d_norm(cand_vel);
+    let speed_score: Float = speed / (cfg).max_speed_m_s;
+
+    // Total score
+    let total_score: Float = ((cfg).weight_goal * goal_score) +
+                           ((cfg).weight_clearance * clear_score) +
+                           ((cfg).weight_speed * speed_score);
+
+    return DwaCandidate {
+        vel_cmd: *cand_vel,
+        score: total_score,
+        predicted_pos: pred_p,
+    };
+}

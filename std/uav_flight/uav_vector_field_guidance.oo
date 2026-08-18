@@ -1,0 +1,114 @@
+// # UAV Vector Field Guidance for Straight Lines & Loiter Orbits
+//
+// Logline: Generates continuous, singularity-free vector fields guaranteeing global asymptotic convergence onto lines and circular orbits.
+//
+// Setup: Vector field guidance laws for robust fixed-wing and multi-rotor course control regardless of initial cross-track errors.
+//
+// Beats:
+//   1. Define Orbit Loiter Parameters (center position, radius R, clockwise/counterclockwise direction).
+//   2. Construct Orbit Vector Field combining radial convergence with tangential circulation.
+//   3. Construct Straight Line Vector Field transitioning smoothly from 90 deg intercept to parallel flight.
+//   4. Calculate commanded course heading chi_cmd and flight velocity vector.
+
+import "./uav_coordinate_frames.oo";
+
+pub type OrbitLoiterConfig = struct {
+    center: Vector3D,
+    radius_m: Float,
+    is_clockwise: Bool,
+    k_orbit_gain: Float,
+};
+
+pub type VectorFieldGuidance = struct {
+    desired_vel_dir: Vector3D,
+    course_angle_rad: Float,
+    distance_error_m: Float,
+};
+
+pub fn compute_straight_line_vector_field(
+    curr_pos: &Vector3D,
+    line_start: &Vector3D,
+    line_dir_unit: &Vector3D,
+    k_path_gain: Float,
+    max_intercept_angle_rad: Float
+) -> VectorFieldGuidance {
+    // Cross track error vector
+    let v_rel: Vector3D = vector3d_sub(curr_pos, line_start);
+    let s_proj: Float = vector3d_dot(&v_rel, line_dir_unit);
+    let p_proj: Vector3D = vector3d_add(line_start, &vector3d_scale(line_dir_unit, s_proj));
+    let e_vec: Vector3D = vector3d_sub(curr_pos, &p_proj);
+    let e_dist: Float = vector3d_norm(&e_vec);
+
+    // Convergence angle: chi_inf * (2/pi) * atan(k * e)
+    let z: Float = k_path_gain * e_dist;
+    let atan_z: Float = z / (1.0 + (0.28 * z * z));
+    let pi_val: Float = 3.141592653589793;
+    let approach_angle: Float = max_intercept_angle_rad * (2.0 / pi_val) * atan_z;
+
+    // Line nominal heading
+    let line_heading: Float = uav_atan2_approx((line_dir_unit).y, (line_dir_unit).x);
+
+    // Cross-product sign to determine left or right of line
+    let side_sign: Float = if ((v_rel.x * (line_dir_unit).y) - (v_rel.y * (line_dir_unit).x)) >= 0.0 {
+        0.0 - 1.0
+    } else {
+        1.0
+    };
+
+    let course_cmd: Float = line_heading + (side_sign * approach_angle);
+    let v_dir: Vector3D = Vector3D {
+        x: cos(course_cmd),
+        y: sin(course_cmd),
+        z: 0.0,
+    };
+
+    return VectorFieldGuidance {
+        desired_vel_dir: v_dir,
+        course_angle_rad: course_cmd,
+        distance_error_m: e_dist,
+    };
+}
+
+pub fn compute_orbit_vector_field(
+    curr_pos: &Vector3D,
+    orbit: &OrbitLoiterConfig
+) -> VectorFieldGuidance {
+    let dx: Float = (curr_pos).x - (orbit).center.x;
+    let dy: Float = (curr_pos).y - (orbit).center.y;
+    let r_curr: Float = sqrt((dx * dx) + (dy * dy));
+    let safe_r: Float = if r_curr < 0.001 { 0.001 } else { r_curr };
+
+    // Radial distance error: d = r_curr - R_des
+    let d: Float = safe_r - (orbit).radius_m;
+
+    // Tangential angle theta around center
+    let theta: Float = uav_atan2_approx(dy, dx);
+    let pi_over_2: Float = 1.5707963267948966;
+    let pi_val: Float = 3.141592653589793;
+
+    // Convergence angle: atan(k * (r^2 - R^2) / (2 * r * R))
+    let k: Float = (orbit).k_orbit_gain;
+    let num: Float = (safe_r * safe_r) - ((orbit).radius_m * (orbit).radius_m);
+    let den: Float = 2.0 * safe_r * (orbit).radius_m;
+    let z: Float = k * (num / den);
+    let psi_conv: Float = z / (1.0 + (0.28 * z * z));
+
+    let mut course_cmd: Float = 0.0;
+    if (orbit).is_clockwise {
+        course_cmd = theta + pi_over_2 + psi_conv;
+    } else {
+        course_cmd = theta - pi_over_2 - psi_conv;
+    }
+
+    let v_dir: Vector3D = Vector3D {
+        x: cos(course_cmd),
+        y: sin(course_cmd),
+        z: 0.0,
+    };
+
+    return VectorFieldGuidance {
+        desired_vel_dir: v_dir,
+        course_angle_rad: course_cmd,
+        distance_error_m: d,
+    };
+}

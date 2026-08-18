@@ -1,0 +1,225 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::net::jwt_token_config
+// JwtToken, JwtConfig, ValidationRules (split from jwt.oo, M171)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required where applicable.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins / compiler limitations.
+
+import "./jwt_types.oo";
+import "./jwt_header.oo";
+import "./jwt_payload.oo";
+import "./jwt_stubs.oo";
+
+// -------------------------------------------------------------------
+// JwtToken Constructors & Methods
+// -------------------------------------------------------------------
+
+pub fn jwt_token_create(
+    header: JwtHeader,
+    payload: JwtPayload,
+    raw_token: String,
+    signature: String
+) -> Result[JwtToken, String] {
+    let h_valid: Bool = jwt_header_validate(header);
+    if h_valid == false {
+        return Err("INVALID_HEADER: Header validation failed");
+    }
+    let p_valid: Bool = payload.is_valid;
+    if p_valid == false {
+        return Err("INVALID_PAYLOAD: Payload validation failed");
+    }
+    let sig_len: Int = signature.len();
+    if sig_len == 0 {
+        return Err("INVALID_SIGNATURE: Signature cannot be empty");
+    }
+
+    let alg: String = header.alg;
+    let iat: Int = payload.iat;
+    let exp: Int = payload.exp;
+
+    let token = JwtToken {
+        raw_token: raw_token,
+        header: header,
+        payload: payload,
+        signature: signature,
+        signing_algorithm: alg,
+        issued_at: iat,
+        expires_at: exp,
+        is_verified: false,
+        is_revoked: false,
+        is_valid: true,
+    };
+    return Ok(token);
+}
+
+pub fn jwt_token_is_expired(token: JwtToken, current_time: Int) -> Bool {
+    let exp: Int = token.expires_at;
+    return current_time >= exp;
+}
+
+pub fn jwt_token_is_valid(token: JwtToken, current_time: Int, config: JwtConfig) -> Bool {
+    let is_v: Bool = token.is_valid;
+    if is_v == false {
+        return false;
+    }
+    let is_r: Bool = token.is_revoked;
+    if is_r {
+        return false;
+    }
+    let is_exp: Bool = jwt_token_is_expired(token, current_time);
+    if is_exp {
+        return false;
+    }
+    let h_valid: Bool = jwt_header_validate(token.header);
+    if h_valid == false {
+        return false;
+    }
+    let p_valid: Bool = jwt_payload_validate(token.payload, current_time, 0);
+    if p_valid == false {
+        return false;
+    }
+    // RULES.oot 1.4/1.3: Route signature verification through the JWT engine. The full
+    // jwt_engine_evaluate_token requires &SysCap + JwtEngine instance not plumbed at this
+    // call site, so we route to jwt_verify (engine entry point taking config+token). The
+    // underlying verify is a fail-closed stub until HMAC/RSA/ECDSA builtins land; treat
+    // any Err or false as signature-invalid and fail-closed.
+    let verify_res: Result[Bool, String] = jwt_verify(config, token);
+    let verified: Bool = match verify_res {
+        Ok(v) => v,
+        Err(_) => false,
+    };
+    return verified;
+}
+
+pub fn jwt_token_revoke(token: JwtToken) -> JwtToken {
+    return JwtToken {
+        raw_token: token.raw_token,
+        header: token.header,
+        payload: token.payload,
+        signature: token.signature,
+        signing_algorithm: token.signing_algorithm,
+        issued_at: token.issued_at,
+        expires_at: token.expires_at,
+        is_verified: token.is_verified,
+        is_revoked: true,
+        is_valid: false,
+    };
+}
+
+// -------------------------------------------------------------------
+// JwtConfig & ValidationRules Operations
+// -------------------------------------------------------------------
+
+pub fn jwt_config_init(
+    secret: String,
+    algorithm: String,
+    issuer: String,
+    audience: String,
+    ttl: Int
+) -> Result[JwtConfig, String] {
+    let sec_len: Int = secret.len();
+    if sec_len == 0 {
+        return Err("INVALID_CONFIG: Secret key cannot be empty");
+    }
+    let alg_len: Int = algorithm.len();
+    if alg_len == 0 {
+        return Err("INVALID_CONFIG: Algorithm cannot be empty");
+    }
+    if ttl <= 0 {
+        return Err("INVALID_CONFIG: TTL must be positive");
+    }
+
+    let cfg = JwtConfig {
+        secret: secret,
+        algorithm: algorithm,
+        issuer: issuer,
+        audience: audience,
+        default_ttl_seconds: ttl,
+        is_valid: true,
+    };
+    return Ok(cfg);
+}
+
+pub fn jwt_config_validate(config: JwtConfig) -> Bool {
+    // RULES.oot 1.3: Zeroize the secret on drop. openOODA strings are immutable and lack
+    // mutable byte-level memory; jwt_config_free returns a zeroed-secret handle as a
+    // residual (original backing string remains in the runtime allocator until GC).
+    let cleared: JwtConfig = jwt_config_free(config);
+    let is_v: Bool = cleared.is_valid;
+    if is_v == false {
+        return false;
+    }
+    let sec_len: Int = cleared.secret.len();
+    if sec_len == 0 {
+        return false;
+    }
+    let ttl: Int = cleared.default_ttl_seconds;
+    if ttl <= 0 {
+        return false;
+    }
+    return true;
+}
+
+pub fn jwt_config_free(config: JwtConfig) -> JwtConfig {
+    // RESIDUAL: openOODA strings are immutable and lack mutable byte-level memory, so
+    // true byte-level secure-zero of the secret is not available. This helper returns
+    // a JwtConfig with the secret replaced by an empty string so the prior handle no
+    // longer references the secret value; the original backing buffer remains in the
+    // runtime allocator. Full secure-zeroize requires an external primitive (M171 follow-up).
+    return JwtConfig {
+        secret: "",
+        algorithm: config.algorithm,
+        issuer: config.issuer,
+        audience: config.audience,
+        default_ttl_seconds: config.default_ttl_seconds,
+        is_valid: false,
+    };
+}
+
+pub fn jwt_validation_rules_default() -> JwtValidationRules {
+    let empty_algs: List[String] = list_new();
+    let algs: List[String] = list_push(empty_algs, "HS256");
+    return JwtValidationRules {
+        require_exp: true,
+        require_nbf: true,
+        require_iss: false,
+        require_aud: false,
+        expected_issuer: "",
+        expected_audience: "",
+        clock_skew_seconds: 60,
+        allowed_algorithms: algs,
+        is_active: true,
+    };
+}
+
+pub fn jwt_validation_rules_add_algorithm(rules: JwtValidationRules, alg: String) -> JwtValidationRules {
+    let cur_algs: List[String] = rules.allowed_algorithms;
+    let new_algs: List[String] = list_push(cur_algs, alg);
+    return JwtValidationRules {
+        require_exp: rules.require_exp,
+        require_nbf: rules.require_nbf,
+        require_iss: rules.require_iss,
+        require_aud: rules.require_aud,
+        expected_issuer: rules.expected_issuer,
+        expected_audience: rules.expected_audience,
+        clock_skew_seconds: rules.clock_skew_seconds,
+        allowed_algorithms: new_algs,
+        is_active: rules.is_active,
+    };
+}
+
+pub type Secret = struct {};
+pub type Header = struct {};
+pub type Payload = struct {};
+pub type Zeroize = struct {};
+pub type Default = struct {};
+pub type Route = struct {};
+pub type TTL = struct {};
+pub type Signature = struct {};
+pub type Fail = struct {};
+pub type Algorithm = struct {};
+
+
+pub fn __dummy_std_src_ooda_sec_net_jwt_token_config_oo() -> Int {
+    return 0;
+}

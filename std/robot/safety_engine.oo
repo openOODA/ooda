@@ -1,0 +1,169 @@
+// # Safety Monitor Engine
+//
+// Logline: Integrated safety monitor supervisor, E-Stop latching/reset, interlock updating, and verification.
+//
+// Setup: Stateful safety supervisor requiring capability reference for administrative resets.
+//
+// Beats:
+//   1. Initialize safety monitor with sub-guards and default configurations.
+//   2. Manage E-Stop tripping and capability-gated reset cycles.
+//   3. Execute full cycle update validating watchdog, geofence, proximity, and speed limits.
+//   4. Verify safety monitor transitions, faults, and capability resets.
+
+import "./safety_types.oo";
+import "./safety_ops.oo";
+
+// -------------------------------------------------------------------
+// Safety Monitor System Interlock
+// -------------------------------------------------------------------
+
+pub fn safety_monitor_init(cap: &SysCap) -> SafetyMonitor {
+    return SafetyMonitor {
+        status: 0,
+        estop_latched: false,
+        estop_reason_code: 0,
+        manual_override: false,
+        fault_count: 0,
+        last_fault: safety_fault_none(),
+        geofence: geofence2d_disabled(),
+        speed_limit: speed_limit_config_default(),
+        proximity: obstacle_proximity_new(300, 800),
+        watchdog: watchdog_new(1000),
+        cap: cap,
+    };
+}
+
+pub fn safety_monitor_trigger_estop(mon: &mut SafetyMonitor, reason_code: Int, timestamp_ms: Int) {
+    (mon).status = 2;
+    (mon).estop_latched = true;
+    (mon).estop_reason_code = reason_code;
+    (mon).fault_count = (mon).fault_count + 1;
+    (mon).last_fault = safety_fault_new(reason_code, 3, timestamp_ms);
+}
+
+/// Capability-gated reset for latched emergency stop. Explicit &SysCap required.
+pub fn safety_monitor_reset_estop(mon: &mut SafetyMonitor, sys: &SysCap) -> Bool {
+    (mon).estop_latched = false;
+    (mon).estop_reason_code = 0;
+    (mon).status = 0;
+    return true;
+}
+
+pub fn safety_monitor_set_geofence(mon: &mut SafetyMonitor, fence: Geofence2D) {
+    (mon).geofence = fence;
+}
+
+pub fn safety_monitor_set_speed_limit(mon: &mut SafetyMonitor, config: SpeedLimitConfig) {
+    (mon).speed_limit = config;
+}
+
+pub fn safety_monitor_heartbeat(mon: &mut SafetyMonitor, timestamp_ms: Int) {
+    watchdog_heartbeat(&mut (mon).watchdog, timestamp_ms);
+}
+
+/// Primary cycle update for safety interlocks.
+/// Evaluates geofence, speed limits, proximity sensors, and watchdog timers.
+pub fn safety_monitor_update(mon: &mut SafetyMonitor, x: Int, y: Int, linear_speed: Int, angular_speed: Int, obstacle_dist_mm: Int, timestamp_ms: Int) -> Int {
+    if (mon).estop_latched {
+        (mon).status = 2;
+        return 2;
+    }
+
+    // 1. Check Watchdog
+    let wd_ok = watchdog_check(&mut (mon).watchdog, timestamp_ms);
+    if wd_ok == false {
+        safety_monitor_trigger_estop(mon, 101, timestamp_ms); // 101 = Watchdog Timeout
+        return 2;
+    }
+
+    // 2. Check Geofence
+    let inside_fence = geofence2d_contains(&(mon).geofence, x, y);
+    if inside_fence == false {
+        (mon).status = 4;
+        (mon).fault_count = (mon).fault_count + 1;
+        (mon).last_fault = safety_fault_new(401, 2, timestamp_ms); // 401 = Geofence Breach
+        return 4;
+    }
+
+    // 3. Check Obstacle Proximity
+    let prox_status = obstacle_proximity_evaluate(&mut (mon).proximity, obstacle_dist_mm);
+    if prox_status == 2 {
+        safety_monitor_trigger_estop(mon, 201, timestamp_ms); // 201 = Imminent Collision
+        return 2;
+    }
+
+    // 4. Check Speed Limits
+    let clamped_lin = safety_clamp_speed(linear_speed, (mon).speed_limit.max_linear_mm_s);
+    let clamped_ang = safety_clamp_speed(angular_speed, (mon).speed_limit.max_angular_mdeg_s);
+
+    if clamped_lin != linear_speed {
+        (mon).status = 1; // Speed Warning
+        return 1;
+    }
+    if clamped_ang != angular_speed {
+        (mon).status = 1; // Speed Warning
+        return 1;
+    }
+
+    if prox_status == 1 {
+        (mon).status = 1; // Proximity Warning
+        return 1;
+    }
+
+    (mon).status = 0; // All Systems OK
+    return 0;
+}
+
+pub fn safety_monitor_is_safe(mon: &SafetyMonitor) -> Bool {
+    if (mon).estop_latched {
+        return false;
+    }
+    if (mon).status == 2 {
+        return false;
+    }
+    if (mon).status == 3 {
+        return false;
+    }
+    if (mon).status == 4 {
+        return false;
+    }
+    return true;
+}
+
+pub fn safety_monitor_get_status(mon: &SafetyMonitor) -> Int {
+    return (mon).status;
+}
+
+pub fn safety_monitor_get_fault_count(mon: &SafetyMonitor) -> Int {
+    return (mon).fault_count;
+}
+
+pub fn safety_monitor_do_work(mon: &SafetyMonitor) -> Int {
+    if (mon).estop_latched {
+        return 0;
+    }
+    return 1;
+}
+
+// -------------------------------------------------------------------
+// Self-Verification Suite
+// -------------------------------------------------------------------
+
+verify safety_engine {
+    let cap: &SysCap = 0;
+    let mut mon = safety_monitor_init(cap);
+    assert_eq!(safety_monitor_is_safe(&mon), true);
+
+    let status1 = safety_monitor_update(&mut mon, 0, 0, 1000, 10000, 1000, 100);
+    assert_eq!(status1, 0);
+
+    // Test obstacle stop trigger
+    let status2 = safety_monitor_update(&mut mon, 0, 0, 1000, 10000, 200, 200);
+    assert_eq!(status2, 2);
+    assert_eq!(safety_monitor_is_safe(&mon), false);
+
+    // Reset E-Stop with capability reference
+    let reset_ok = safety_monitor_reset_estop(&mut mon, cap);
+    assert_eq!(reset_ok, true);
+    assert_eq!(safety_monitor_is_safe(&mon), true);
+}

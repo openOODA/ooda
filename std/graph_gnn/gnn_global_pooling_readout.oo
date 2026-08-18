@@ -1,0 +1,138 @@
+// # Global Graph Pooling & Readout Layers
+//
+// Logline: Implements permutation-invariant graph readout operators (Sum, Mean, Max, and Attention Pooling) for graph classification.
+//
+// Setup: Graph-level readout module aggregating variable-sized node sets into fixed-dimensional whole-graph embedding vectors.
+//
+// Beats:
+//   1. Compute Global Sum, Global Mean, and Global Max multiset poolings across graph nodes.
+//   2. Evaluate parameterized Global Attention pooling weighting salient graph sub-structures.
+//   3. Concatenate multi-scale readouts for graph property prediction and molecule scoring.
+
+pub type GlobalReadoutConfig = struct {
+    in_features: Int,
+    use_attention: Bool,
+};
+
+pub type GlobalAttentionReadout = struct {
+    config: GlobalReadoutConfig,
+    attn_weight: List[Float], // in_features
+};
+
+pub fn global_readout_config_new(in_f: Int, attn: Bool) -> GlobalReadoutConfig {
+    return GlobalReadoutConfig {
+        in_features: in_f,
+        use_attention: attn,
+    };
+}
+
+pub fn global_attention_readout_init(config: GlobalReadoutConfig, seed: Int) -> GlobalAttentionReadout {
+    let in_f: Int = (config).in_features;
+    let mut aw: List[Float] = list_new();
+    let mut state: Int = seed;
+    let scale: Float = sqrt(1.0 / (in_f as Float));
+
+    let mut i: Int = 0;
+    while i < in_f {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        aw = list_push(aw, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale);
+        i = i + 1;
+    }
+
+    return GlobalAttentionReadout {
+        config: config,
+        attn_weight: aw,
+    };
+}
+
+pub fn global_mean_pool(
+    node_features: List[Float], // num_nodes * in_features
+    num_nodes: Int,
+    in_features: Int
+) -> List[Float] {
+    let mut pooled: List[Float] = list_new();
+    let n_f: Float = (num_nodes as Float);
+
+    let mut d: Int = 0;
+    while d < in_features {
+        let mut sum_d: Float = 0.0;
+        let mut i: Int = 0;
+        while i < num_nodes {
+            let v: Float = list_get(node_features, (i * in_features) + d);
+            sum_d = sum_d + v;
+            i = i + 1;
+        }
+        pooled = list_push(pooled, if num_nodes > 0 { sum_d / n_f } else { 0.0 });
+        d = d + 1;
+    }
+    return pooled;
+}
+
+pub fn global_max_pool(
+    node_features: List[Float],
+    num_nodes: Int,
+    in_features: Int
+) -> List[Float] {
+    let mut pooled: List[Float] = list_new();
+    let mut d: Int = 0;
+    while d < in_features {
+        let mut max_d: Float = -1000000.0;
+        let mut i: Int = 0;
+        while i < num_nodes {
+            let v: Float = list_get(node_features, (i * in_features) + d);
+            if v > max_d {
+                max_d = v;
+            }
+            i = i + 1;
+        }
+        pooled = list_push(pooled, if num_nodes > 0 { max_d } else { 0.0 });
+        d = d + 1;
+    }
+    return pooled;
+}
+
+pub fn global_attention_pool(
+    layer: &GlobalAttentionReadout,
+    node_features: List[Float],
+    num_nodes: Int
+) -> List[Float] {
+    let in_f: Int = (*layer).config.in_features;
+
+    // Step 1: Compute attention scores for each node
+    let mut attn_exp: List[Float] = list_new();
+    let mut sum_exp: Float = 0.0;
+    let mut i: Int = 0;
+    while i < num_nodes {
+        let off: Int = i * in_f;
+        let mut dot: Float = 0.0;
+        let mut c: Int = 0;
+        while c < in_f {
+            let x: Float = list_get(node_features, off + c);
+            let w: Float = list_get((*layer).attn_weight, c);
+            dot = dot + (x * w);
+            c = c + 1;
+        }
+        let e: Float = exp(dot);
+        attn_exp = list_push(attn_exp, e);
+        sum_exp = sum_exp + e;
+        i = i + 1;
+    }
+
+    // Step 2: Weighted sum
+    let mut pooled: List[Float] = list_new();
+    let mut d: Int = 0;
+    while d < in_f {
+        let mut accum: Float = 0.0;
+        let mut j: Int = 0;
+        while j < num_nodes {
+            let alpha: Float = if sum_exp > 0.0 { list_get(attn_exp, j) / sum_exp } else { 1.0 / (num_nodes as Float) };
+            let val: Float = list_get(node_features, (j * in_f) + d);
+            accum = accum + (alpha * val);
+            j = j + 1;
+        }
+        pooled = list_push(pooled, accum);
+        d = d + 1;
+    }
+    return pooled;
+}

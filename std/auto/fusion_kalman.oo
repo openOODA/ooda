@@ -1,0 +1,229 @@
+// # Kalman Filter & Data Association Algorithms
+//
+// Logline: Executes Kalman predict and update steps with Euclidean and Mahalanobis distance gating.
+//
+// Setup: Tracking filter algorithms importing fusion_track.oo.
+//
+// Beats:
+//   1. Propagate track state and covariance forward using constant-velocity models.
+//   2. Compute Mahalanobis statistical distance for measurement association gating.
+//   3. Update state estimates with measurement innovations and Kalman gain.
+
+import "./fusion_types.oo";
+
+// -------------------------------------------------------------------
+// 6. Extended Kalman Filter (EKF) State Prediction & Update
+// -------------------------------------------------------------------
+
+/// EKF State Prediction step: propagates kinematics and covariance forward over time step dt.
+pub fn kalman_predict_step(track: TrackedObject, dt: Float, config: FusionConfig) -> TrackedObject {
+    if !(track).is_active {
+        return track;
+    }
+    let safe_dt = math_max(0.0, dt);
+
+    // Kinematic motion propagation: p_next = p + v*dt + 0.5*a*dt^2
+    let half_dt_sq = 0.5 * (safe_dt * safe_dt);
+    let p_delta = vec3_add(vec3_scale((track).velocity, safe_dt), vec3_scale((track).acceleration, half_dt_sq));
+    let next_pos = vec3_add((track).position, p_delta);
+
+    // Velocity propagation: v_next = v + a*dt
+    let v_delta = vec3_scale((track).acceleration, safe_dt);
+    let next_vel = vec3_add((track).velocity, v_delta);
+
+    // Covariance propagation with process noise Q
+    let q_pos = (config).process_noise_pos * safe_dt;
+    let q_vel = (config).process_noise_vel * safe_dt;
+
+    let next_pos_cov = Vec3 {
+        x: ((track).pos_covariance).x + q_pos,
+        y: ((track).pos_covariance).y + q_pos,
+        z: ((track).pos_covariance).z + q_pos,
+    };
+
+    let next_vel_cov = Vec3 {
+        x: ((track).vel_covariance).x + q_vel,
+        y: ((track).vel_covariance).y + q_vel,
+        z: ((track).vel_covariance).z + q_vel,
+    };
+
+    let next_age = (track).age_ticks + 1;
+
+    return TrackedObject {
+        id: (track).id,
+        track_state: (track).track_state,
+        class_label: (track).class_label,
+        position: next_pos,
+        velocity: next_vel,
+        acceleration: (track).acceleration,
+        size: (track).size,
+        heading: (track).heading,
+        yaw_rate: (track).yaw_rate,
+        pos_covariance: next_pos_cov,
+        vel_covariance: next_vel_cov,
+        confidence: (track).confidence,
+        age_ticks: next_age,
+        hits: (track).hits,
+        misses: (track).misses,
+        last_update_time_s: (track).last_update_time_s + safe_dt,
+        is_active: (track).is_active,
+    };
+}
+
+/// EKF Measurement Update step: corrects state estimate using sensor measurement.
+pub fn kalman_update_step(track: TrackedObject, meas: SensorMeasurement, config: FusionConfig) -> TrackedObject {
+    if !(meas).is_valid {
+        return track;
+    }
+
+    // 1. Position Innovation and Kalman Gain
+    let r_pos = (meas).covariance_pos;
+    let p_x = ((track).pos_covariance).x;
+    let p_y = ((track).pos_covariance).y;
+    let p_z = ((track).pos_covariance).z;
+
+    let k_x = p_x / (p_x + r_pos);
+    let k_y = p_y / (p_y + r_pos);
+    let k_z = p_z / (p_z + r_pos);
+
+    let dy_x = ((meas).position).x - ((track).position).x;
+    let dy_y = ((meas).position).y - ((track).position).y;
+    let dy_z = ((meas).position).z - ((track).position).z;
+
+    let updated_pos = Vec3 {
+        x: ((track).position).x + (k_x * dy_x),
+        y: ((track).position).y + (k_y * dy_y),
+        z: ((track).position).z + (k_z * dy_z),
+    };
+
+    let updated_pos_cov = Vec3 {
+        x: (1.0 - k_x) * p_x,
+        y: (1.0 - k_y) * p_y,
+        z: (1.0 - k_z) * p_z,
+    };
+
+    // 2. Velocity Update (if sensor provides velocity e.g. Radar)
+    let mut updated_vel = (track).velocity;
+    let mut updated_vel_cov = (track).vel_covariance;
+
+    if (meas).sensor_type == 2 {
+        let r_vel = (meas).covariance_vel;
+        let pv_x = ((track).vel_covariance).x;
+        let pv_y = ((track).vel_covariance).y;
+        let pv_z = ((track).vel_covariance).z;
+
+        let kv_x = pv_x / (pv_x + r_vel);
+        let kv_y = pv_y / (pv_y + r_vel);
+        let kv_z = pv_z / (pv_z + r_vel);
+
+        let dvy_x = ((meas).velocity).x - ((track).velocity).x;
+        let dvy_y = ((meas).velocity).y - ((track).velocity).y;
+        let dvy_z = ((meas).velocity).z - ((track).velocity).z;
+
+        updated_vel = Vec3 {
+            x: ((track).velocity).x + (kv_x * dvy_x),
+            y: ((track).velocity).y + (kv_y * dvy_y),
+            z: ((track).velocity).z + (kv_z * dvy_z),
+        };
+
+        updated_vel_cov = Vec3 {
+            x: (1.0 - kv_x) * pv_x,
+            y: (1.0 - kv_y) * pv_y,
+            z: (1.0 - kv_z) * pv_z,
+        };
+    }
+
+    // 3. Track Hit Count and Lifecycle Transition
+    let updated_hits = (track).hits + 1;
+    let mut next_state = (track).track_state;
+
+    // Promote Tentative to Confirmed if hits reach threshold
+    if next_state == 0 {
+        if updated_hits >= (config).confirmation_threshold_hits {
+            next_state = 1; // Confirmed
+        }
+    } else {
+        if next_state == 2 {
+            next_state = 1; // Re-confirm coasting track
+        }
+    }
+
+    // Update confidence score based on sensor confidence and hits
+    let updated_conf = clamp_float(((track).confidence * 0.7) + ((meas).confidence * 0.3), 0.0, 1.0);
+
+    let mut label = (track).class_label;
+    if (meas).class_label != 0 {
+        label = (meas).class_label;
+    }
+
+    return TrackedObject {
+        id: (track).id,
+        track_state: next_state,
+        class_label: label,
+        position: updated_pos,
+        velocity: updated_vel,
+        acceleration: (track).acceleration,
+        size: (track).size,
+        heading: (track).heading,
+        yaw_rate: (track).yaw_rate,
+        pos_covariance: updated_pos_cov,
+        vel_covariance: updated_vel_cov,
+        confidence: updated_conf,
+        age_ticks: (track).age_ticks,
+        hits: updated_hits,
+        misses: 0, // Reset misses on measurement hit
+        last_update_time_s: (meas).timestamp_s,
+        is_active: true,
+    };
+}
+
+// -------------------------------------------------------------------
+// 7. Distance Gating & Data Association Mechanics
+// -------------------------------------------------------------------
+
+/// Computes spatial Euclidean distance between TrackedObject and SensorMeasurement.
+pub fn compute_euclidean_distance(track: &TrackedObject, meas: &SensorMeasurement) -> Float {
+    return vec3_dist((track).position, (meas).position);
+}
+
+/// Computes diagonal Mahalanobis distance between TrackedObject state and SensorMeasurement.
+pub fn compute_mahalanobis_distance(track: &TrackedObject, meas: &SensorMeasurement) -> Float {
+    let dx = ((meas).position).x - ((track).position).x;
+    let dy = ((meas).position).y - ((track).position).y;
+    let dz = ((meas).position).z - ((track).position).z;
+
+    let var_x = ((track).pos_covariance).x + (meas).covariance_pos;
+    let var_y = ((track).pos_covariance).y + (meas).covariance_pos;
+    let var_z = ((track).pos_covariance).z + (meas).covariance_pos;
+
+    let dist_sq = ((dx * dx) / var_x) + (((dy * dy) / var_y) + ((dz * dz) / var_z));
+    if dist_sq < 0.000000001 {
+        return 0.0;
+    }
+    return sqrt(dist_sq);
+}
+
+/// Finds the closest matching track ID for a sensor measurement within the gating threshold.
+/// Returns track index in state.tracks or -1 if no track falls inside gate.
+pub fn fusion_find_matching_track_index(state: &FusionState, meas: &SensorMeasurement) -> Int {
+    let total = list_len((state).tracks);
+    let mut best_index = 0 - 1;
+    let mut min_dist = ((state).config).gating_threshold_m;
+
+    let mut i = 0;
+    while i < total {
+        let track = list_get((state).tracks, i);
+        if (track).is_active {
+            if (track).track_state != 3 {
+                let dist = compute_euclidean_distance(&track, meas);
+                if dist < min_dist {
+                    min_dist = dist;
+                    best_index = i;
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    return best_index;
+}

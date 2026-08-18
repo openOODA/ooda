@@ -1,0 +1,97 @@
+// # Service Mesh VirtualService Routing & Weighted Splitting
+//
+// Logline: Evaluates Istio VirtualService routing rules, URI matching, and weighted canary traffic splits.
+//
+// Setup: Layer-7 routing engine directing incoming HTTP requests to versioned service subsets.
+//
+// Beats:
+//   1. Match incoming HTTP URI paths (exact, prefix, regex), methods, and request headers.
+//   2. Calculate weighted destination subset routing splits (e.g. 90% v1, 10% v2).
+//   3. Return resolved destination cluster name, host, and subset identifier.
+
+pub type DestinationWeight = struct {
+    subset_name: String,
+    weight: Int,
+    target_cluster: String,
+};
+
+pub type RouteMatchRule = struct {
+    uri_prefix: String,
+    method: String,
+    destinations: List[DestinationWeight],
+    total_weight: Int,
+};
+
+pub type VirtualServiceRouter = struct {
+    service_name: String,
+    routes: List[RouteMatchRule],
+    total_routed: Int,
+};
+
+pub fn virtual_service_router_new(service: String) -> VirtualServiceRouter {
+    let empty_routes: List[RouteMatchRule] = list_new();
+    return VirtualServiceRouter {
+        service_name: service,
+        routes: empty_routes,
+        total_routed: 0,
+    };
+}
+
+pub fn virtual_service_add_route(
+    router: &mut VirtualServiceRouter,
+    prefix: String,
+    method: String,
+    dests: List[DestinationWeight],
+    tot_weight: Int
+) {
+    let r = RouteMatchRule {
+        uri_prefix: prefix,
+        method: method,
+        destinations: dests,
+        total_weight: tot_weight,
+    };
+    (router).routes = list_push((router).routes, r);
+}
+
+pub fn virtual_service_route(
+    router: &mut VirtualServiceRouter,
+    path: String,
+    method: String,
+    random_weight_seed: Int
+) -> String {
+    (router).total_routed = (router).total_routed + 1;
+    let n: Int = list_len((router).routes);
+    let mut i: Int = 0;
+
+    while i < n {
+        let r: RouteMatchRule = list_get((router).routes, i);
+        let mut match_pfx: Bool = (r).uri_prefix == "/" || (r).uri_prefix == path;
+        let mut match_m: Bool = (r).method == "*" || (r).method == method;
+
+        if match_pfx && match_m {
+            let n_dests: Int = list_len((r).destinations);
+            if n_dests == 0 {
+                return (router).service_name;
+            }
+            if (r).total_weight <= 0 {
+                let d0: DestinationWeight = list_get((r).destinations, 0);
+                return (d0).target_cluster;
+            }
+
+            let roll: Int = random_weight_seed % (r).total_weight;
+            let mut accum: Int = 0;
+            let mut j: Int = 0;
+            while j < n_dests {
+                let d: DestinationWeight = list_get((r).destinations, j);
+                accum = accum + (d).weight;
+                if roll < accum {
+                    return (d).target_cluster;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    return (router).service_name;
+}

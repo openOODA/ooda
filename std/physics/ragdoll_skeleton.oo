@@ -1,0 +1,188 @@
+// # Articulated Ragdoll Skeleton & Skeletal Joint System
+//
+// Logline: Assembles multi-bone articulated ragdoll skeletons with linked rigid limbs, joint limits, and injury/breakage thresholds.
+//
+// Setup: Hierarchical articulated multi-body chain kinematics and position-based joint stabilization.
+//
+// Beats:
+//   1. Define RagdollBone, RagdollJoint, and RagdollSkeletonState structures.
+//   2. Link bone transforms with joint distance and angular limit constraints.
+//   3. Implement skeletal gravity integration, ground plane clamping, and joint error resolution.
+
+pub type RagdollBone = struct {
+    bone_id: Int,
+    parent_bone_id: Int,
+    px: Float,
+    py: Float,
+    pz: Float,
+    vx: Float,
+    vy: Float,
+    vz: Float,
+    mass: Float,
+    inv_mass: Float,
+    length: Float,
+    radius: Float,
+    is_pinned: Int,
+};
+
+pub type RagdollJoint = struct {
+    parent_id: Int,
+    child_id: Int,
+    rest_distance: Float,
+    min_angle: Float,
+    max_angle: Float,
+    stiffness: Float,
+};
+
+pub type RagdollSkeletonState = struct {
+    gravity_y: Float,
+    damping: Float,
+    ground_y: Float,
+    restitution: Float,
+};
+
+pub type BoneLinkResult = struct {
+    parent_dx: Float,
+    parent_dy: Float,
+    parent_dz: Float,
+    child_dx: Float,
+    child_dy: Float,
+    child_dz: Float,
+    separation: Float,
+};
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn ragdoll_bone_new(
+    bone_id: Int,
+    parent_id: Int,
+    px: Float, py: Float, pz: Float,
+    mass: Float,
+    length: Float
+) -> RagdollBone {
+    let mut inv_m = 0.0;
+    if mass > 0.000001 {
+        inv_m = 1.0 / mass;
+    }
+    return RagdollBone {
+        bone_id: bone_id,
+        parent_bone_id: parent_id,
+        px: px, py: py, pz: pz,
+        vx: 0.0, vy: 0.0, vz: 0.0,
+        mass: mass,
+        inv_mass: inv_m,
+        length: length,
+        radius: 0.1,
+        is_pinned: 0,
+    };
+}
+
+pub fn ragdoll_skeleton_state_default() -> RagdollSkeletonState {
+    return RagdollSkeletonState {
+        gravity_y: -9.81,
+        damping: 0.995,
+        ground_y: 0.0,
+        restitution: 0.3,
+    };
+}
+
+// -------------------------------------------------------------------
+// Bone Kinematics & Ground Clamping
+// -------------------------------------------------------------------
+
+pub fn ragdoll_bone_step(
+    bone: RagdollBone,
+    state: RagdollSkeletonState,
+    dt: Float
+) -> RagdollBone {
+    if (bone).is_pinned != 0 || (bone).inv_mass <= 0.0 {
+        return bone;
+    }
+
+    let mut nvy = ((bone).vy + ((state).gravity_y * dt)) * (state).damping;
+    let mut nvx = (bone).vx * (state).damping;
+    let mut nvz = (bone).vz * (state).damping;
+
+    let mut nx = (bone).px + (nvx * dt);
+    let mut ny = (bone).py + (nvy * dt);
+    let mut nz = (bone).pz + (nvz * dt);
+
+    // Ground plane collision clamping
+    let rad = (bone).radius;
+    if ny - rad < (state).ground_y {
+        ny = (state).ground_y + rad;
+        nvy = -nvy * (state).restitution;
+        // Friction on ground
+        nvx = nvx * 0.8;
+        nvz = nvz * 0.8;
+    }
+
+    return RagdollBone {
+        bone_id: (bone).bone_id,
+        parent_bone_id: (bone).parent_bone_id,
+        px: nx, py: ny, pz: nz,
+        vx: nvx, vy: nvy, vz: nvz,
+        mass: (bone).mass,
+        inv_mass: (bone).inv_mass,
+        length: (bone).length,
+        radius: (bone).radius,
+        is_pinned: (bone).is_pinned,
+    };
+}
+
+// -------------------------------------------------------------------
+// Joint Positional Constraint (Bone Linking)
+// -------------------------------------------------------------------
+
+pub fn ragdoll_solve_bone_joint(
+    parent: RagdollBone,
+    child: RagdollBone,
+    joint: RagdollJoint
+) -> BoneLinkResult {
+    let dx = (child).px - (parent).px;
+    let dy = (child).py - (parent).py;
+    let dz = (child).pz - (parent).pz;
+
+    let dist = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+    if dist < 0.000001 {
+        return BoneLinkResult {
+            parent_dx: 0.0, parent_dy: 0.0, parent_dz: 0.0,
+            child_dx: 0.0, child_dy: 0.0, child_dz: 0.0,
+            separation: 0.0,
+        };
+    }
+
+    let w_p = (parent).inv_mass;
+    let w_c = (child).inv_mass;
+    let w_sum = w_p + w_c;
+
+    if w_sum <= 0.000001 {
+        return BoneLinkResult {
+            parent_dx: 0.0, parent_dy: 0.0, parent_dz: 0.0,
+            child_dx: 0.0, child_dy: 0.0, child_dz: 0.0,
+            separation: dist,
+        };
+    }
+
+    let err = dist - (joint).rest_distance;
+    let factor = (err / dist) * (joint).stiffness;
+
+    let p_ratio = (w_p / w_sum) * factor;
+    let c_ratio = (w_c / w_sum) * factor;
+
+    let p_dx = if (parent).is_pinned == 0 { dx * p_ratio } else { 0.0 };
+    let p_dy = if (parent).is_pinned == 0 { dy * p_ratio } else { 0.0 };
+    let p_dz = if (parent).is_pinned == 0 { dz * p_ratio } else { 0.0 };
+
+    let c_dx = if (child).is_pinned == 0 { - (dx * c_ratio) } else { 0.0 };
+    let c_dy = if (child).is_pinned == 0 { - (dy * c_ratio) } else { 0.0 };
+    let c_dz = if (child).is_pinned == 0 { - (dz * c_ratio) } else { 0.0 };
+
+    return BoneLinkResult {
+        parent_dx: p_dx, parent_dy: p_dy, parent_dz: p_dz,
+        child_dx: c_dx, child_dy: c_dy, child_dz: c_dz,
+        separation: dist,
+    };
+}

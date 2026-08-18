@@ -1,0 +1,124 @@
+// # Raft Log Replication & Quorum Commitment
+//
+// Logline: Manages AppendEntries RPC payload construction, follower log matching, and commit index advancement.
+//
+// Setup: Core distributed log replication tracking match_index, next_index per peer, and committed log entries.
+//
+// Beats:
+//   1. Define log entries, AppendEntries payload, and per-peer progress tracker.
+//   2. Validate consistency invariants upon AppendEntries receipts, overwriting uncommitted conflicts.
+//   3. Advance leader commit index upon quorum match confirmation and dispatch state machine applies.
+
+pub type LogEntry = struct {
+    index: Int,
+    term: Int,
+    command: String,
+};
+
+pub type AppendArgs = struct {
+    term: Int,
+    leader_id: String,
+    prev_log_index: Int,
+    prev_log_term: Int,
+    entries: List[LogEntry],
+    leader_commit: Int,
+};
+
+pub type AppendReply = struct {
+    term: Int,
+    success: Bool,
+    match_index: Int,
+};
+
+pub type PeerProgress = struct {
+    peer_id: String,
+    next_index: Int,
+    match_index: Int,
+    last_contact_ms: Int,
+};
+
+pub type RaftReplicator = struct {
+    leader_id: String,
+    current_term: Int,
+    commit_index: Int,
+    last_applied: Int,
+    entries: List[LogEntry],
+    peers: List[PeerProgress],
+};
+
+pub fn raft_replicator_new(leader_id: String, term: Int) -> RaftReplicator {
+    let mut initial_entries: List[LogEntry] = list_new();
+    // Index 0 dummy sentinel
+    let dummy: LogEntry = LogEntry { index: 0, term: 0, command: "" };
+    initial_entries = list_push(initial_entries, dummy);
+
+    let empty_peers: List[PeerProgress] = list_new();
+    return RaftReplicator {
+        leader_id: leader_id,
+        current_term: term,
+        commit_index: 0,
+        last_applied: 0,
+        entries: initial_entries,
+        peers: empty_peers,
+    };
+}
+
+pub fn raft_replicator_append_command(rep: &mut RaftReplicator, cmd: String) -> Int {
+    let last_idx: Int = list_len((rep).entries) - 1;
+    let new_idx: Int = last_idx + 1;
+    let entry: LogEntry = LogEntry {
+        index: new_idx,
+        term: (rep).current_term,
+        command: cmd,
+    };
+    (rep).entries = list_push((rep).entries, entry);
+    return new_idx;
+}
+
+pub fn raft_replicator_process_reply(
+    rep: &mut RaftReplicator,
+    peer_idx: Int,
+    reply: &AppendReply
+) -> Bool {
+    let num_peers: Int = list_len((rep).peers);
+    if peer_idx < 0 || peer_idx >= num_peers {
+        return false;
+    }
+
+    let mut prog: PeerProgress = list_get((rep).peers, peer_idx);
+    if (reply).success {
+        prog.match_index = (reply).match_index;
+        prog.next_index = (reply).match_index + 1;
+    } else {
+        if prog.next_index > 1 {
+            prog.next_index = prog.next_index - 1;
+        }
+    }
+
+    // Check if commit_index can be bumped
+    let total_nodes: Int = num_peers + 1;
+    let majority: Int = (total_nodes / 2) + 1;
+    let last_idx: Int = list_len((rep).entries) - 1;
+
+    let mut n: Int = (rep).commit_index + 1;
+    while n <= last_idx {
+        let entry: LogEntry = list_get((rep).entries, n);
+        if entry.term == (rep).current_term {
+            let mut matches: Int = 1; // leader counts as 1
+            let mut p: Int = 0;
+            while p < num_peers {
+                let peer_item: PeerProgress = list_get((rep).peers, p);
+                if peer_item.match_index >= n {
+                    matches = matches + 1;
+                }
+                p = p + 1;
+            }
+            if matches >= majority {
+                (rep).commit_index = n;
+            }
+        }
+        n = n + 1;
+    }
+
+    return true;
+}

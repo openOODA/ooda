@@ -1,0 +1,145 @@
+// # UAV Quadrotor Dynamics on SE(3)
+//
+// Logline: Full 6-DOF nonlinear equations of motion for quadrotor UAVs evolving on the Special Euclidean group SE(3).
+//
+// Setup: High-fidelity multi-rotor flight dynamics modeling thrust mixing, rigid body inertia, gravitational acceleration, and aerodynamic drag.
+//
+// Beats:
+//   1. Define Quadrotor Parameters (mass, arm length, thrust/drag coefficients, inertia matrix J).
+//   2. Define Quadrotor State (position, velocity, orientation quaternion, angular velocity omega).
+//   3. Compute rotor thrust and torque allocation for X-configuration quadrotors.
+//   4. Calculate state time derivatives: p_dot = v, v_dot = g + R*(T/m) - (D/m)*v, omega_dot = J^-1 * (tau - omega x J*omega).
+
+import "./uav_coordinate_frames.oo";
+import "./uav_quaternion_kinematics.oo";
+import "./uav_so3_rotation_matrix.oo";
+
+pub type QuadrotorParams = struct {
+    mass: Float,
+    arm_length: Float,
+    kf_thrust: Float,
+    km_torque: Float,
+    ixx: Float,
+    iyy: Float,
+    izz: Float,
+    drag_linear: Float,
+};
+
+pub type QuadrotorState = struct {
+    pos: Vector3D,
+    vel: Vector3D,
+    quat: Quaternion,
+    omega: Vector3D,
+};
+
+pub type MotorCommands = struct {
+    w1: Float,
+    w2: Float,
+    w3: Float,
+    w4: Float,
+};
+
+pub type QuadrotorForcesTorques = struct {
+    thrust_total: Float,
+    torque_body: Vector3D,
+};
+
+pub type QuadrotorDerivatives = struct {
+    pos_dot: Vector3D,
+    vel_dot: Vector3D,
+    quat_dot: Quaternion,
+    omega_dot: Vector3D,
+};
+
+pub fn quadrotor_params_default() -> QuadrotorParams {
+    return QuadrotorParams {
+        mass: 1.5,
+        arm_length: 0.225,
+        kf_thrust: 0.000029,
+        km_torque: 0.00000075,
+        ixx: 0.015,
+        iyy: 0.015,
+        izz: 0.025,
+        drag_linear: 0.1,
+    };
+}
+
+pub fn quadrotor_mixer_x(params: &QuadrotorParams, cmd: &MotorCommands) -> QuadrotorForcesTorques {
+    let kf: Float = (params).kf_thrust;
+    let km: Float = (params).km_torque;
+    let d: Float = (params).arm_length * 0.7071067811865476; // arm / sqrt(2)
+
+    let f1: Float = kf * (cmd).w1 * (cmd).w1;
+    let f2: Float = kf * (cmd).w2 * (cmd).w2;
+    let f3: Float = kf * (cmd).w3 * (cmd).w3;
+    let f4: Float = kf * (cmd).w4 * (cmd).w4;
+
+    let f_total: Float = f1 + f2 + f3 + f4;
+
+    // Standard X configuration:
+    // Motor 1: Front-Right (CCW), Motor 2: Rear-Left (CCW)
+    // Motor 3: Front-Left (CW),   Motor 4: Rear-Right (CW)
+    let tau_x: Float = d * ((f3 + f2) - (f1 + f4));
+    let tau_y: Float = d * ((f1 + f3) - (f2 + f4));
+    let tau_z: Float = km * (((cmd).w1 * (cmd).w1) + ((cmd).w2 * (cmd).w2) - ((cmd).w3 * (cmd).w3) - ((cmd).w4 * (cmd).w4));
+
+    return QuadrotorForcesTorques {
+        thrust_total: f_total,
+        torque_body: Vector3D { x: tau_x, y: tau_y, z: tau_z },
+    };
+}
+
+pub fn quadrotor_dynamics_step(
+    params: &QuadrotorParams,
+    state: &QuadrotorState,
+    ft: &QuadrotorForcesTorques
+) -> QuadrotorDerivatives {
+    let m: Float = (params).mass;
+    let gravity: Float = 9.80665;
+
+    // Linear velocity derivative: v_dot = [0, 0, -g] + (1/m)*R*[0, 0, T] - (drag/m)*v
+    let thrust_body: Vector3D = Vector3D { x: 0.0, y: 0.0, z: (ft).thrust_total };
+    let thrust_world: Vector3D = quat_rotate_vector(&(state).quat, &thrust_body);
+
+    let drag_force_x: Float = (0.0 - (params).drag_linear) * (state).vel.x;
+    let drag_force_y: Float = (0.0 - (params).drag_linear) * (state).vel.y;
+    let drag_force_z: Float = (0.0 - (params).drag_linear) * (state).vel.z;
+
+    let acc_x: Float = (thrust_world.x + drag_force_x) / m;
+    let acc_y: Float = (thrust_world.y + drag_force_y) / m;
+    let acc_z: Float = ((thrust_world.z + drag_force_z) / m) - gravity;
+
+    // Quaternion derivative: q_dot = 0.5 * q * [0, omega]
+    let omega_q: Quaternion = Quaternion {
+        w: 0.0,
+        x: 0.5 * (state).omega.x,
+        y: 0.5 * (state).omega.y,
+        z: 0.5 * (state).omega.z,
+    };
+    let q_dot: Quaternion = quat_multiply(&(state).quat, &omega_q);
+
+    // Angular acceleration: omega_dot = J^-1 * (tau - omega x J*omega)
+    let jx: Float = (params).ixx;
+    let jy: Float = (params).iyy;
+    let jz: Float = (params).izz;
+
+    let wx: Float = (state).omega.x;
+    let wy: Float = (state).omega.y;
+    let wz: Float = (state).omega.z;
+
+    // Gyroscopic / Coriolis torque = omega x (J * omega)
+    let gyro_x: Float = (jz - jy) * wy * wz;
+    let gyro_y: Float = (jx - jz) * wx * wz;
+    let gyro_z: Float = (jy - jx) * wx * wy;
+
+    let alpha_x: Float = ((ft).torque_body.x - gyro_x) / jx;
+    let alpha_y: Float = ((ft).torque_body.y - gyro_y) / jy;
+    let alpha_z: Float = ((ft).torque_body.z - gyro_z) / jz;
+
+    return QuadrotorDerivatives {
+        pos_dot: (state).vel,
+        vel_dot: Vector3D { x: acc_x, y: acc_y, z: acc_z },
+        quat_dot: q_dot,
+        omega_dot: Vector3D { x: alpha_x, y: alpha_y, z: alpha_z },
+    };
+}

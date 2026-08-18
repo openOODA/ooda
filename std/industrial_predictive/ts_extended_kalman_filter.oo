@@ -1,0 +1,121 @@
+// # Extended Kalman Filter (EKF) for Non-Linear Thermal-Speed Dynamics
+//
+// Logline: 2D non-linear Extended Kalman Filter with analytical Jacobian linearization for coupled motor speed and temperature estimation.
+//
+// Setup: Models quadratic frictional heating $\dot{T} \propto \omega^2$ and exponential cooling under noisy sensor observations.
+//
+// Beats:
+//   1. Define EkfState2D and EkfOutput structures.
+//   2. Compute non-linear physical state propagation and evaluate transition Jacobian matrix $F$.
+//   3. Update state error covariance and apply optimal Kalman innovation corrections.
+
+pub type EkfState2D = struct {
+    temperature_c: Float,
+    speed_rad_s: Float,
+    p00: Float, p01: Float,
+    p10: Float, p11: Float,
+    q_temp: Float,
+    q_speed: Float,
+    r_temp: Float,
+    r_speed: Float,
+};
+
+pub type EkfOutput = struct {
+    filtered_temp: Float,
+    filtered_speed: Float,
+    temp_uncertainty: Float,
+    speed_uncertainty: Float,
+};
+
+pub fn math_sqrt(x: Float) -> Float {
+    if x <= 0.0 { return 0.0; }
+    let mut g: Float = if x > 1.0 { x / 2.0 } else { x };
+    let mut i: Int = 0;
+    while i < 12 {
+        g = 0.5 * (g + (x / g));
+        i = i + 1;
+    }
+    return g;
+}
+
+pub fn ekf_2d_new(t0: Float, w0: Float) -> EkfState2D {
+    return EkfState2D {
+        temperature_c: t0,
+        speed_rad_s: w0,
+        p00: 1.0, p01: 0.0,
+        p10: 0.0, p11: 1.0,
+        q_temp: 0.05,
+        q_speed: 0.1,
+        r_temp: 0.5,
+        r_speed: 0.2,
+    };
+}
+
+pub fn ekf_2d_step(
+    state: &mut EkfState2D,
+    meas_temp: Float,
+    meas_speed: Float,
+    dt: Float,
+    amb_temp: Float,
+) -> EkfOutput {
+    let t_cur: Float = (state).temperature_c;
+    let w_cur: Float = (state).speed_rad_s;
+
+    // Physical model:
+    // T_next = T + dt * ( 0.0001 * w^2 - 0.02 * (T - T_amb) )
+    // w_next = w + dt * ( -0.01 * w )
+    let k_heat: Float = 0.0001;
+    let tau_cool: Float = 0.02;
+
+    let t_pred: Float = t_cur + (dt * ((k_heat * w_cur * w_cur) - (tau_cool * (t_cur - amb_temp))));
+    let w_pred: Float = w_cur - (dt * 0.01 * w_cur);
+
+    // Jacobian F = [ [1 - dt*0.02, 2*dt*0.0001*w], [0, 1 - dt*0.01] ]
+    let f00: Float = 1.0 - (dt * tau_cool);
+    let f01: Float = 2.0 * dt * k_heat * w_cur;
+    let f10: Float = 0.0;
+    let f11: Float = 1.0 - (dt * 0.01);
+
+    // P_pred = F * P * F^T + Q
+    let fp00: Float = (f00 * (state).p00) + (f01 * (state).p10);
+    let fp01: Float = (f00 * (state).p01) + (f01 * (state).p11);
+    let fp10: Float = (f10 * (state).p00) + (f11 * (state).p10);
+    let fp11: Float = (f10 * (state).p01) + (f11 * (state).p11);
+
+    let p00_p: Float = (fp00 * f00) + (fp01 * f01) + (state).q_temp;
+    let p01_p: Float = (fp00 * f10) + (fp01 * f11);
+    let p10_p: Float = (fp10 * f00) + (fp11 * f01);
+    let p11_p: Float = (fp10 * f10) + (fp11 * f11) + (state).q_speed;
+
+    // Direct measurement H = I
+    let s00: Float = p00_p + (state).r_temp;
+    let s11: Float = p11_p + (state).r_speed;
+
+    let k00: Float = if s00 > 0.0001 { p00_p / s00 } else { 0.0 };
+    let k11: Float = if s11 > 0.0001 { p11_p / s11 } else { 0.0 };
+
+    let inno_t: Float = meas_temp - t_pred;
+    let inno_w: Float = meas_speed - w_pred;
+
+    let t_upd: Float = t_pred + (k00 * inno_t);
+    let w_upd: Float = w_pred + (k11 * inno_w);
+
+    let p00_u: Float = (1.0 - k00) * p00_p;
+    let p01_u: Float = (1.0 - k00) * p01_p;
+    let p10_u: Float = (1.0 - k11) * p10_p;
+    let p11_u: Float = (1.0 - k11) * p11_p;
+
+    (state).temperature_c = t_upd;
+    (state).speed_rad_s = w_upd;
+    (state).p00 = p00_u;
+    (state).p01 = p01_u;
+    (state).p10 = p10_u;
+    (state).p11 = p11_u;
+
+    return EkfOutput {
+        filtered_temp: t_upd,
+        filtered_speed: w_upd,
+        temp_uncertainty: math_sqrt(p00_u),
+        speed_uncertainty: math_sqrt(p11_u),
+    };
+}

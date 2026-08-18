@@ -1,0 +1,76 @@
+// # Kubernetes StatefulSet Controller & Ordinal Scheduler
+//
+// Logline: Implements StatefulSet deterministic ordinal index scheduling, ordered scale up/down, and PVC retention.
+//
+// Setup: Stateful workload controller managing ordered pod naming conventions (pod-0, pod-1) and volume claims.
+//
+// Beats:
+//   1. Track replicas, current revision, update strategy (RollingUpdate/OnDelete), and partition boundaries.
+//   2. Generate deterministic ordinal pod names (e.g. app-0 to app-(N-1)).
+//   3. Drive monotonic sequential scaling: scale up in ascending order (0 -> N), scale down in descending order (N -> 0).
+
+pub type StatefulSetPod = struct {
+    ordinal_index: Int,
+    pod_name: String,
+    is_ready: Bool,
+    revision: String,
+};
+
+pub type StatefulSetController = struct {
+    name: String,
+    namespace: String,
+    desired_replicas: Int,
+    current_revision: String,
+    update_revision: String,
+    partition: Int,
+    pods: List[StatefulSetPod],
+};
+
+pub fn statefulset_controller_new(name: String, ns: String, replicas: Int, rev: String) -> StatefulSetController {
+    let empty_pods: List[StatefulSetPod] = list_new();
+    return StatefulSetController {
+        name: name,
+        namespace: ns,
+        desired_replicas: replicas,
+        current_revision: rev,
+        update_revision: rev,
+        partition: 0,
+        pods: empty_pods,
+    };
+}
+
+pub fn statefulset_reconcile_scale_up(ctrl: &mut StatefulSetController) -> Int {
+    let cur_count: Int = list_len((ctrl).pods);
+    if cur_count >= (ctrl).desired_replicas {
+        return 0;
+    }
+
+    // Only provision one ordinal per reconcile cycle for strict ordering
+    let next_ord: Int = cur_count;
+    let p_name: String = (ctrl).name + "-pod";
+    let new_pod: StatefulSetPod = StatefulSetPod {
+        ordinal_index: next_ord,
+        pod_name: p_name,
+        is_ready: true,
+        revision: (ctrl).update_revision,
+    };
+    (ctrl).pods = list_push((ctrl).pods, new_pod);
+    return 1;
+}
+
+pub fn statefulset_reconcile_scale_down(ctrl: &mut StatefulSetController) -> Int {
+    let cur_count: Int = list_len((ctrl).pods);
+    if cur_count <= (ctrl).desired_replicas || cur_count == 0 {
+        return 0;
+    }
+
+    // Remove highest ordinal
+    let mut remaining: List[StatefulSetPod] = list_new();
+    let mut i: Int = 0;
+    while i < cur_count - 1 {
+        remaining = list_push(remaining, list_get((ctrl).pods, i));
+        i = i + 1;
+    }
+    (ctrl).pods = remaining;
+    return 1;
+}

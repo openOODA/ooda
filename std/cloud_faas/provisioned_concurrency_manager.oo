@@ -1,0 +1,161 @@
+// # Provisioned Concurrency Manager
+//
+// Logline: Implements scheduled and autoscaled provisioned warm container capacity management for zero cold starts.
+//
+// Setup: Enterprise serverless capacity controller maintaining dedicated pre-initialized warm execution environments.
+//
+// Beats:
+//   1. Configure target provisioned execution slots and time-scheduled capacity policies.
+//   2. Reconcile desired provisioned instance count against active healthy allocations.
+//   3. Seamlessly route steady-state traffic to provisioned slots and burst traffic to on-demand pools.
+//
+// Int-floor destub: slot ids are Int; parallel List[Int] slots.
+// ready/leased flags are Int 0/1. last_leased_id is 0 when no ready slot remains.
+
+type ProvisionedConcurrencyManager = struct {
+    function_id: Int,
+    target_capacity: Int,
+    slot_ids: List[Int],
+    slot_vers: List[Int],
+    ready: List[Int],
+    leased: List[Int],
+    allocated_slots: Int,
+    leased_slots: Int,
+    last_leased_id: Int,
+    last_ok: Int
+};
+
+pub fn provisioned_concurrency_manager_new(fn_id: Int, target: Int) -> ProvisionedConcurrencyManager {
+    let empty_ids: List[Int] = list_new();
+    let empty_vers: List[Int] = list_new();
+    let empty_ready: List[Int] = list_new();
+    let empty_leased: List[Int] = list_new();
+    return ProvisionedConcurrencyManager {
+        function_id: fn_id,
+        target_capacity: target,
+        slot_ids: empty_ids,
+        slot_vers: empty_vers,
+        ready: empty_ready,
+        leased: empty_leased,
+        allocated_slots: 0,
+        leased_slots: 0,
+        last_leased_id: 0,
+        last_ok: 0
+    };
+}
+
+pub fn provisioned_add_slot(
+    mgr: ProvisionedConcurrencyManager,
+    slot_id: Int,
+    version: Int
+) -> ProvisionedConcurrencyManager {
+    return ProvisionedConcurrencyManager {
+        function_id: mgr.function_id,
+        target_capacity: mgr.target_capacity,
+        slot_ids: list_push(mgr.slot_ids, slot_id),
+        slot_vers: list_push(mgr.slot_vers, version),
+        ready: list_push(mgr.ready, 1),
+        leased: list_push(mgr.leased, 0),
+        allocated_slots: mgr.allocated_slots + 1,
+        leased_slots: mgr.leased_slots,
+        last_leased_id: mgr.last_leased_id,
+        last_ok: 1
+    };
+}
+
+pub fn provisioned_acquire_slot(mgr: ProvisionedConcurrencyManager) -> ProvisionedConcurrencyManager {
+    let n: Int = list_len(mgr.slot_ids);
+    let mut i: Int = 0;
+    let mut next_ids: List[Int] = list_new();
+    let mut next_vers: List[Int] = list_new();
+    let mut next_ready: List[Int] = list_new();
+    let mut next_leased: List[Int] = list_new();
+    let mut chosen: Int = 0;
+    let mut chosen_id: Int = 0;
+    let mut next_leased_slots: Int = mgr.leased_slots;
+    while i < n {
+        let sid: Int = list_get(mgr.slot_ids, i);
+        let ver: Int = list_get(mgr.slot_vers, i);
+        let is_ready: Int = list_get(mgr.ready, i);
+        let is_leased: Int = list_get(mgr.leased, i);
+        next_ids = list_push(next_ids, sid);
+        next_vers = list_push(next_vers, ver);
+        next_ready = list_push(next_ready, is_ready);
+        if is_ready == 1 {
+            if is_leased == 0 {
+                if chosen == 0 {
+                    chosen = 1;
+                    chosen_id = sid;
+                    next_leased = list_push(next_leased, 1);
+                    next_leased_slots = next_leased_slots + 1;
+                } else {
+                    next_leased = list_push(next_leased, is_leased);
+                }
+            } else {
+                next_leased = list_push(next_leased, is_leased);
+            }
+        } else {
+            next_leased = list_push(next_leased, is_leased);
+        }
+        i = i + 1;
+    }
+    return ProvisionedConcurrencyManager {
+        function_id: mgr.function_id,
+        target_capacity: mgr.target_capacity,
+        slot_ids: next_ids,
+        slot_vers: next_vers,
+        ready: next_ready,
+        leased: next_leased,
+        allocated_slots: mgr.allocated_slots,
+        leased_slots: next_leased_slots,
+        last_leased_id: chosen_id,
+        last_ok: chosen
+    };
+}
+
+pub fn provisioned_release_slot(
+    mgr: ProvisionedConcurrencyManager,
+    slot_id: Int
+) -> ProvisionedConcurrencyManager {
+    let n: Int = list_len(mgr.slot_ids);
+    let mut i: Int = 0;
+    let mut next_ids: List[Int] = list_new();
+    let mut next_vers: List[Int] = list_new();
+    let mut next_ready: List[Int] = list_new();
+    let mut next_leased: List[Int] = list_new();
+    let mut found: Int = 0;
+    let mut next_leased_slots: Int = mgr.leased_slots;
+    while i < n {
+        let sid: Int = list_get(mgr.slot_ids, i);
+        let ver: Int = list_get(mgr.slot_vers, i);
+        let is_ready: Int = list_get(mgr.ready, i);
+        let is_leased: Int = list_get(mgr.leased, i);
+        next_ids = list_push(next_ids, sid);
+        next_vers = list_push(next_vers, ver);
+        next_ready = list_push(next_ready, is_ready);
+        if sid == slot_id {
+            if is_leased == 1 {
+                next_leased = list_push(next_leased, 0);
+                found = 1;
+                next_leased_slots = next_leased_slots - 1;
+            } else {
+                next_leased = list_push(next_leased, is_leased);
+            }
+        } else {
+            next_leased = list_push(next_leased, is_leased);
+        }
+        i = i + 1;
+    }
+    return ProvisionedConcurrencyManager {
+        function_id: mgr.function_id,
+        target_capacity: mgr.target_capacity,
+        slot_ids: next_ids,
+        slot_vers: next_vers,
+        ready: next_ready,
+        leased: next_leased,
+        allocated_slots: mgr.allocated_slots,
+        leased_slots: next_leased_slots,
+        last_leased_id: mgr.last_leased_id,
+        last_ok: found
+    };
+}

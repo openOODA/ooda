@@ -1,0 +1,192 @@
+// ===================================================================
+// openOODA Standard Library — ooda::fin::yield_curve
+// Discount factors, swap rates, curve construction (split from yield.oo, M172)
+// ===================================================================
+// RULES.oot 1.4 / 1.3: default-deny privileged effects; fail-closed residual.
+
+import "./yield_ops.oo";
+
+pub fn discount_factor_create(tenor_months: Int, rate_bps: Int, compounding_type: Int) -> DiscountFactor {
+    let mut valid: Bool = true;
+    if tenor_months < 0 {
+        valid = false;
+    }
+    if rate_bps < 0 {
+        valid = false;
+    }
+
+    let days: Int = (tenor_months * 365) / 12;
+    let df_val: Int = calculate_discount_factor_bps(tenor_months, rate_bps, compounding_type);
+
+    return DiscountFactor {
+        tenor_months: tenor_months,
+        maturity_days: days,
+        factor_bps: df_val,
+        zero_rate_bps: rate_bps,
+        compounding_type: compounding_type,
+        is_valid: valid,
+    };
+}
+
+pub fn discount_factor_from_value(tenor_months: Int, factor_bps: Int) -> DiscountFactor {
+    let mut valid: Bool = true;
+    if tenor_months < 0 {
+        valid = false;
+    }
+    if factor_bps <= 0 {
+        valid = false;
+    }
+    if factor_bps > 10000 {
+        valid = false;
+    }
+
+    let days: Int = (tenor_months * 365) / 12;
+    let rate: Int = calculate_zero_rate_from_df(tenor_months, factor_bps);
+
+    return DiscountFactor {
+        tenor_months: tenor_months,
+        maturity_days: days,
+        factor_bps: factor_bps,
+        zero_rate_bps: rate,
+        compounding_type: 0, // ANNUAL default
+        is_valid: valid,
+    };
+}
+
+pub fn discount_factor_get_value(df: &DiscountFactor) -> Int {
+    return (df).factor_bps;
+}
+
+pub fn discount_factor_get_zero_rate(df: &DiscountFactor) -> Int {
+    return (df).zero_rate_bps;
+}
+
+pub fn discount_factor_is_valid(df: &DiscountFactor) -> Bool {
+    return (df).is_valid;
+}
+
+// -------------------------------------------------------------------
+// SwapRate Constructors & Methods
+// -------------------------------------------------------------------
+
+pub fn swap_rate_create(
+    swap_id: String,
+    tenor_months: Int,
+    rate_bps: Int,
+    fixed_freq: Int,
+    float_freq: Int
+) -> SwapRate {
+    let mut active: Bool = true;
+    if tenor_months <= 0 {
+        active = false;
+    }
+    if rate_bps <= 0 {
+        active = false;
+    }
+
+    return SwapRate {
+        swap_id: swap_id,
+        tenor_months: tenor_months,
+        rate_bps: rate_bps,
+        fixed_freq: fixed_freq,
+        float_freq: float_freq,
+        day_count: 0, // ACT_360
+        spread_bps: 0,
+        is_active: active,
+    };
+}
+
+pub fn swap_rate_get_rate(swap: &SwapRate) -> Int {
+    return (swap).rate_bps;
+}
+
+pub fn swap_rate_calculate_fixed_leg_pv(swap: &SwapRate, notional: Int, df: &DiscountFactor) -> Int {
+    let active: Bool = (swap).is_active;
+    if !active {
+        return 0;
+    }
+    let freq: Int = (swap).fixed_freq;
+    if freq <= 0 {
+        return 0;
+    }
+
+    let coupon_per_period_bps: Int = (swap).rate_bps / freq;
+    let factor: Int = (df).factor_bps;
+    let pv_bps: Int = (coupon_per_period_bps * factor) / 10000;
+    let pv_amount: Int = (notional * pv_bps) / 10000;
+    return pv_amount;
+}
+
+// -------------------------------------------------------------------
+// YieldCurve Constructors & Management Helpers
+// -------------------------------------------------------------------
+
+pub fn yield_curve_point_create(
+    tenor_months: Int,
+    rate_bps: Int,
+    dummy: Int
+) -> YieldCurvePoint {
+    let df: DiscountFactor = discount_factor_create(tenor_months, rate_bps, 0);
+    return YieldCurvePoint {
+        tenor_months: tenor_months,
+        rate_bps: rate_bps,
+        discount_factor: df,
+        is_calibrated: true,
+    };
+}
+
+pub fn yield_curve_create(curve_id: String, curve_type: Int, base_date: Int, interpolation_type: Int) -> YieldCurve {
+    let pts: List[YieldCurvePoint] = list_new();
+    let swaps: List[SwapRate] = list_new();
+    return YieldCurve {
+        curve_id: curve_id,
+        curve_type: curve_type,
+        base_date: base_date,
+        points: pts,
+        swap_rates: swaps,
+        interpolation_type: interpolation_type,
+        is_calibrated: false,
+    };
+}
+
+pub fn yield_curve_add_point(curve: &mut YieldCurve, point: YieldCurvePoint) -> Bool {
+    let pts: List[YieldCurvePoint] = (curve).points;
+    let updated_pts: List[YieldCurvePoint] = list_push(pts, point);
+    (curve).points = updated_pts;
+    (curve).is_calibrated = true;
+    return true;
+}
+
+pub fn yield_curve_add_swap_rate(curve: &mut YieldCurve, swap: SwapRate) -> Bool {
+    let swaps: List[SwapRate] = (curve).swap_rates;
+    let updated_swaps: List[SwapRate] = list_push(swaps, swap);
+    (curve).swap_rates = updated_swaps;
+    return true;
+}
+
+pub fn yield_curve_get_point_count(curve: &YieldCurve) -> Int {
+    let pts: List[YieldCurvePoint] = (curve).points;
+    return list_len(pts);
+}
+
+pub fn yield_curve_get_swap_count(curve: &YieldCurve) -> Int {
+    let swaps: List[SwapRate] = (curve).swap_rates;
+    return list_len(swaps);
+}
+
+pub fn yield_curve_get_point_by_tenor(curve: &YieldCurve, tenor_months: Int) -> Result[YieldCurvePoint, String] {
+    let pts: List[YieldCurvePoint] = (curve).points;
+    let count: Int = list_len(pts);
+    let mut i: Int = 0;
+
+    while i < count {
+        let p: YieldCurvePoint = list_get(pts, i);
+        let t: Int = (p).tenor_months;
+        if t == tenor_months {
+            return Ok(p);
+        }
+        i = i + 1;
+    }
+
+    return Err("POINT_NOT_FOUND: Yield curve point for tenor not found");
+}

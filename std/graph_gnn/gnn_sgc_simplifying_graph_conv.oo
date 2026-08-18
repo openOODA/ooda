@@ -1,0 +1,122 @@
+// # Simplifying Graph Convolutional Networks (SGC)
+//
+// Logline: Linearizes deep GCN models by pre-computing K-th power normalized graph smoothing operators S^K.
+//
+// Setup: High-throughput linear graph classification engine eliminating intermediate non-linear activation layers.
+//
+// Beats:
+//   1. Construct augmented self-loop normalized transition matrix S = D_tilde^{-1/2} * A_tilde * D_tilde^{-1/2}.
+//   2. Precompute collapsed multi-hop propagation X_bar = S^K * X in closed-form.
+//   3. Train single standard convex linear multinomial regression model Y = Softmax(X_bar * W).
+
+pub type SGCConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    k_hops: Int,
+    learning_rate: Float,
+};
+
+pub type SGCModel = struct {
+    config: SGCConfig,
+    weight: List[Float], // in_features * out_features
+    bias: List[Float],   // out_features
+};
+
+pub fn sgc_config_new(
+    in_f: Int,
+    out_f: Int,
+    k: Int,
+    lr: Float
+) -> SGCConfig {
+    return SGCConfig {
+        in_features: in_f,
+        out_features: out_f,
+        k_hops: k,
+        learning_rate: lr,
+    };
+}
+
+pub fn sgc_model_init(config: SGCConfig, seed: Int) -> SGCModel {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let total_w: Int = in_f * out_f;
+    let mut state: Int = seed;
+
+    let mut w_mat: List[Float] = list_new();
+    let scale: Float = sqrt(2.0 / ((in_f + out_f) as Float));
+    let mut i: Int = 0;
+    while i < total_w {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        let val: Float = ((((state % 2000) as Float) / 1000.0) - 1.0) * scale;
+        w_mat = list_push(w_mat, val);
+        i = i + 1;
+    }
+
+    let mut b_vec: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < out_f {
+        b_vec = list_push(b_vec, 0.0);
+        j = j + 1;
+    }
+
+    return SGCModel {
+        config: config,
+        weight: w_mat,
+        bias: b_vec,
+    };
+}
+
+pub fn sgc_predict_node(
+    model: &SGCModel,
+    precomputed_feat: List[Float], // Length in_features (precomputed S^K * X)
+    feat_offset: Int
+) -> List[Float] {
+    let cfg: SGCConfig = (*model).config;
+    let in_f: Int = (cfg).in_features;
+    let out_f: Int = (cfg).out_features;
+
+    let mut logits: List[Float] = list_new();
+    let mut max_l: Float = -1000000.0;
+
+    let mut o: Int = 0;
+    while o < out_f {
+        let b: Float = list_get((*model).bias, o);
+        let mut dot: Float = 0.0;
+        let mut c: Int = 0;
+        while c < in_f {
+            let x: Float = list_get(precomputed_feat, feat_offset + c);
+            let w: Float = list_get((*model).weight, (c * out_f) + o);
+            dot = dot + (x * w);
+            c = c + 1;
+        }
+        let logit: Float = dot + b;
+        if logit > max_l {
+            max_l = logit;
+        }
+        logits = list_push(logits, logit);
+        o = o + 1;
+    }
+
+    // Softmax probabilities
+    let mut exp_sum: Float = 0.0;
+    let mut exp_vals: List[Float] = list_new();
+    let mut p: Int = 0;
+    while p < out_f {
+        let l: Float = list_get(logits, p);
+        let e: Float = exp(l - max_l);
+        exp_vals = list_push(exp_vals, e);
+        exp_sum = exp_sum + e;
+        p = p + 1;
+    }
+
+    let mut probs: List[Float] = list_new();
+    let mut q: Int = 0;
+    while q < out_f {
+        let ev: Float = list_get(exp_vals, q);
+        let prob: Float = if exp_sum > 0.0 { ev / exp_sum } else { 1.0 / (out_f as Float) };
+        probs = list_push(probs, prob);
+        q = q + 1;
+    }
+    return probs;
+}

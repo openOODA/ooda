@@ -1,0 +1,88 @@
+// # UAV Optical Flow Velocity Estimator & Gyro Derotation
+//
+// Logline: Pixel flow minus gyro, times AGL, to body velocity. Int milli destub.
+//
+// Setup: GPS-denied planar velocity from downward flow and rangefinder.
+//
+// Beats:
+//   1. Focal length, min AGL, quality gate.
+//   2. omega_flow = (flow_px / f) / dt.
+//   3. trans = omega_flow - gyro; v = trans * h.
+//   4. Reject quality < 30.
+
+type OpticalFlowParams = struct {
+    focal_length_px: Int,
+    min_agl_height_mm: Int,
+    max_flow_rate_mrad_s: Int
+};
+
+type OpticalFlowRaw = struct {
+    flow_x_px: Int,
+    flow_y_px: Int,
+    dt_ms: Int,
+    surface_quality: Int
+};
+
+type OpticalFlowVelocity = struct {
+    vx_body_mm_s: Int,
+    vy_body_mm_s: Int,
+    is_valid: Bool,
+    quality_score: Int
+};
+
+pub fn optical_flow_params_default() -> OpticalFlowParams {
+    return OpticalFlowParams {
+        focal_length_px: 350,
+        min_agl_height_mm: 100,
+        max_flow_rate_mrad_s: 5000
+    };
+}
+
+pub fn estimate_flow_velocity(
+    raw: OpticalFlowRaw,
+    params: OpticalFlowParams,
+    height_agl_mm: Int,
+    gyro_rate_p_mrad_s: Int,
+    gyro_rate_q_mrad_s: Int
+) -> OpticalFlowVelocity {
+    if raw.surface_quality < 30 {
+        return OpticalFlowVelocity {
+            vx_body_mm_s: 0,
+            vy_body_mm_s: 0,
+            is_valid: false,
+            quality_score: raw.surface_quality
+        };
+    }
+    let safe_dt: Int = if raw.dt_ms < 1 { 1 } else { raw.dt_ms };
+    let f_px: Int = if params.focal_length_px < 1 { 1 } else { params.focal_length_px };
+    let omega_flow_x: Int = (raw.flow_x_px * 1000000) / (f_px * safe_dt);
+    let omega_flow_y: Int = (raw.flow_y_px * 1000000) / (f_px * safe_dt);
+    let trans_flow_x: Int = omega_flow_x - gyro_rate_p_mrad_s;
+    let trans_flow_y: Int = omega_flow_y - gyro_rate_q_mrad_s;
+    let safe_h: Int = if height_agl_mm < params.min_agl_height_mm {
+        params.min_agl_height_mm
+    } else {
+        height_agl_mm
+    };
+    let vx_metric: Int = (trans_flow_x * safe_h) / 1000;
+    let vy_metric: Int = (trans_flow_y * safe_h) / 1000;
+    let max_rate: Int = params.max_flow_rate_mrad_s;
+    let over_x: Bool = if trans_flow_x < 0 {
+        (0 - trans_flow_x) > max_rate
+    } else {
+        trans_flow_x > max_rate
+    };
+    let over_y: Bool = if trans_flow_y < 0 {
+        (0 - trans_flow_y) > max_rate
+    } else {
+        trans_flow_y > max_rate
+    };
+    let over: Bool = if over_x { true } else { over_y };
+    let valid: Bool = if over { false } else { true };
+    return OpticalFlowVelocity {
+        vx_body_mm_s: vx_metric,
+        vy_body_mm_s: vy_metric,
+        is_valid: valid,
+        quality_score: raw.surface_quality
+    };
+}

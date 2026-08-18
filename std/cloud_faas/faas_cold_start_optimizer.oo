@@ -1,0 +1,115 @@
+// # FaaS Cold Start Optimizer & Predictive Warm Pool
+//
+// Logline: Implements multi-tier warm pool sizing, predictive traffic pre-warming, and cold start minimization.
+//
+// Setup: Intelligent capacity governor maintaining just-in-time warm microVM instances to eliminate initialization lag.
+//
+// Beats:
+//   1. Maintain tiered instance pools across Cold, Warming, Warm, and Active states.
+//   2. Forecast traffic surges using historical arrival windows and pre-warm ahead of spikes.
+//   3. Transition instances smoothly between pool states and evict aged idle containers.
+
+pub type PoolInstance = struct {
+    instance_id: String,
+    state: String,
+    created_at_ms: Int,
+    last_invoked_ms: Int,
+    warm_up_duration_ms: Int,
+};
+
+pub type ColdStartOptimizer = struct {
+    function_name: String,
+    min_warm_pool: Int,
+    max_warm_pool: Int,
+    instances: List[PoolInstance],
+    cold_starts_count: Int,
+    warm_hits_count: Int,
+};
+
+pub fn cold_start_optimizer_new(fn_name: String, min_warm: Int, max_warm: Int) -> ColdStartOptimizer {
+    let empty_instances: List[PoolInstance] = list_new();
+    return ColdStartOptimizer {
+        function_name: fn_name,
+        min_warm_pool: min_warm,
+        max_warm_pool: max_warm,
+        instances: empty_instances,
+        cold_starts_count: 0,
+        warm_hits_count: 0,
+    };
+}
+
+pub fn cold_start_register_warm(
+    opt: &mut ColdStartOptimizer,
+    id: String,
+    now_ms: Int,
+    warmup_ms: Int
+) {
+    let inst = PoolInstance {
+        instance_id: id,
+        state: "WARM",
+        created_at_ms: now_ms,
+        last_invoked_ms: now_ms,
+        warm_up_duration_ms: warmup_ms,
+    };
+    (opt).instances = list_push((opt).instances, inst);
+}
+
+pub fn cold_start_dispatch(opt: &mut ColdStartOptimizer, now_ms: Int) -> String {
+    let n: Int = list_len((opt).instances);
+    let mut i: Int = 0;
+    let mut updated: List[PoolInstance] = list_new();
+    let mut target_id: String = "";
+
+    while i < n {
+        let inst: PoolInstance = list_get((opt).instances, i);
+        if (inst).state == "WARM" && target_id == "" {
+            target_id = (inst).instance_id;
+            let active_inst = PoolInstance {
+                instance_id: (inst).instance_id,
+                state: "ACTIVE",
+                created_at_ms: (inst).created_at_ms,
+                last_invoked_ms: now_ms,
+                warm_up_duration_ms: (inst).warm_up_duration_ms,
+            };
+            updated = list_push(updated, active_inst);
+            (opt).warm_hits_count = (opt).warm_hits_count + 1;
+        } else {
+            updated = list_push(updated, inst);
+        }
+        i = i + 1;
+    }
+
+    if target_id != "" {
+        (opt).instances = updated;
+        return target_id;
+    }
+
+    // Cold start triggered
+    (opt).cold_starts_count = (opt).cold_starts_count + 1;
+    return "";
+}
+
+pub fn cold_start_release_to_warm(opt: &mut ColdStartOptimizer, id: String, now_ms: Int) {
+    let n: Int = list_len((opt).instances);
+    let mut i: Int = 0;
+    let mut updated: List[PoolInstance] = list_new();
+
+    while i < n {
+        let inst: PoolInstance = list_get((opt).instances, i);
+        if (inst).instance_id == id {
+            let warm_inst = PoolInstance {
+                instance_id: (inst).instance_id,
+                state: "WARM",
+                created_at_ms: (inst).created_at_ms,
+                last_invoked_ms: now_ms,
+                warm_up_duration_ms: (inst).warm_up_duration_ms,
+            };
+            updated = list_push(updated, warm_inst);
+        } else {
+            updated = list_push(updated, inst);
+        }
+        i = i + 1;
+    }
+
+    (opt).instances = updated;
+}

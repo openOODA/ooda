@@ -1,0 +1,114 @@
+// # eBPF Traffic Control (TC) Classifier & Direct Action Scheduler
+//
+// Logline: Implements cls_bpf qdisc classifier executing direct-action packet mangling, queuing, and shaping.
+//
+// Setup: Traffic Control filter operating on ingress and egress qdiscs with full sk_buff packet context.
+//
+// Beats:
+//   1. Parse sk_buff metadata including priority, mark, ingress interface, and queue index.
+//   2. Evaluate QoS classification rules and assign DSCP / skb->priority markings.
+//   3. Return TC direct-action return codes: TC_ACT_OK (0), TC_ACT_SHOT (2), TC_ACT_UNSPEC (-1), TC_ACT_REDIRECT (7).
+
+pub type TcAction = struct {
+    ret_code: Int,     // 0: TC_ACT_OK, 2: TC_ACT_SHOT, 7: TC_ACT_REDIRECT, -1: TC_ACT_UNSPEC
+    new_priority: Int,
+    new_mark: Int,
+    redirect_ifindex: Int,
+};
+
+pub type TcClassifierRule = struct {
+    match_dscp: Int,
+    match_proto: Int,
+    assign_priority: Int,
+    assign_mark: Int,
+    action_code: Int,
+};
+
+pub type TcClassifierState = struct {
+    rules: List[TcClassifierRule],
+    total_classified: Int,
+    passed_count: Int,
+    dropped_count: Int,
+    redirect_count: Int,
+};
+
+pub fn tc_classifier_state_new() -> TcClassifierState {
+    let empty_rules: List[TcClassifierRule] = list_new();
+    return TcClassifierState {
+        rules: empty_rules,
+        total_classified: 0,
+        passed_count: 0,
+        dropped_count: 0,
+        redirect_count: 0,
+    };
+}
+
+pub fn tc_add_rule(
+    state: &mut TcClassifierState,
+    dscp: Int,
+    proto: Int,
+    prio: Int,
+    mark: Int,
+    action: Int
+) {
+    let r = TcClassifierRule {
+        match_dscp: dscp,
+        match_proto: proto,
+        assign_priority: prio,
+        assign_mark: mark,
+        action_code: action,
+    };
+    (state).rules = list_push((state).rules, r);
+}
+
+pub fn tc_classify_skb(
+    state: &mut TcClassifierState,
+    dscp: Int,
+    proto: Int,
+    cur_prio: Int,
+    cur_mark: Int
+) -> TcAction {
+    (state).total_classified = (state).total_classified + 1;
+    let n: Int = list_len((state).rules);
+    let mut i: Int = 0;
+
+    while i < n {
+        let r: TcClassifierRule = list_get((state).rules, i);
+        let mut match_d: Bool = false;
+        if (r).match_dscp == 0 || (r).match_dscp == dscp {
+            match_d = true;
+        }
+
+        let mut match_p: Bool = false;
+        if (r).match_proto == 0 || (r).match_proto == proto {
+            match_p = true;
+        }
+
+        if match_d && match_p {
+            let act: Int = (r).action_code;
+            if act == 0 {
+                (state).passed_count = (state).passed_count + 1;
+            } else if act == 2 {
+                (state).dropped_count = (state).dropped_count + 1;
+            } else if act == 7 {
+                (state).redirect_count = (state).redirect_count + 1;
+            }
+
+            return TcAction {
+                ret_code: act,
+                new_priority: (r).assign_priority,
+                new_mark: (r).assign_mark,
+                redirect_ifindex: 0,
+            };
+        }
+        i = i + 1;
+    }
+
+    (state).passed_count = (state).passed_count + 1;
+    return TcAction {
+        ret_code: 0, // TC_ACT_OK
+        new_priority: cur_prio,
+        new_mark: cur_mark,
+        redirect_ifindex: 0,
+    };
+}

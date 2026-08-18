@@ -1,0 +1,117 @@
+// # Service Mesh SPIFFE Trust Bundle & Root CA Rotator
+//
+// Logline: Manages SPIFFE root certificate trust bundles, trust domain federation, and seamless CA key rotations.
+//
+// Setup: Security authority repository distributing validated root public keys to sidecar proxies.
+//
+// Beats:
+//   1. Store trust domain authority bundles with sequence numbers and expiration epochs.
+//   2. Rotate root Certificate Authority keys with overlapping grace periods.
+//   3. Match inbound trust domains against federated partner domain bundles.
+
+pub type TrustBundleEntry = struct {
+    trust_domain: String,
+    ca_id: Int,
+    public_key_fingerprint: Int,
+    valid_until_epoch: Int,
+    is_active: Bool,
+};
+
+pub type SpiffeTrustStore = struct {
+    bundles: List[TrustBundleEntry],
+    rotations_count: Int,
+    revocations_count: Int,
+};
+
+pub fn spiffe_trust_store_new() -> SpiffeTrustStore {
+    let empty_bundles: List[TrustBundleEntry] = list_new();
+    return SpiffeTrustStore {
+        bundles: empty_bundles,
+        rotations_count: 0,
+        revocations_count: 0,
+    };
+}
+
+pub fn spiffe_add_trust_bundle(
+    store: &mut SpiffeTrustStore,
+    domain: String,
+    ca_id: Int,
+    fp: Int,
+    valid_until: Int
+) {
+    let b = TrustBundleEntry {
+        trust_domain: domain,
+        ca_id: ca_id,
+        public_key_fingerprint: fp,
+        valid_until_epoch: valid_until,
+        is_active: true,
+    };
+    (store).bundles = list_push((store).bundles, b);
+}
+
+pub fn spiffe_rotate_ca(
+    store: &mut SpiffeTrustStore,
+    domain: String,
+    old_ca_id: Int,
+    new_ca_id: Int,
+    new_fp: Int,
+    new_expiry: Int
+) -> Bool {
+    (store).rotations_count = (store).rotations_count + 1;
+    let n: Int = list_len((store).bundles);
+    let mut updated: List[TrustBundleEntry] = list_new();
+    let mut found: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let b: TrustBundleEntry = list_get((store).bundles, i);
+        if (b).trust_domain == domain && (b).ca_id == old_ca_id {
+            let mod_b = TrustBundleEntry {
+                trust_domain: (b).trust_domain,
+                ca_id: (b).ca_id,
+                public_key_fingerprint: (b).public_key_fingerprint,
+                valid_until_epoch: (b).valid_until_epoch,
+                is_active: false, // Deactivate old CA
+            };
+            updated = list_push(updated, mod_b);
+            found = true;
+        } else {
+            updated = list_push(updated, b);
+        }
+        i = i + 1;
+    }
+
+    let new_bundle = TrustBundleEntry {
+        trust_domain: domain,
+        ca_id: new_ca_id,
+        public_key_fingerprint: new_fp,
+        valid_until_epoch: new_expiry,
+        is_active: true,
+    };
+    updated = list_push(updated, new_bundle);
+
+    (store).bundles = updated;
+    return found;
+}
+
+pub fn spiffe_validate_issuer(
+    store: &SpiffeTrustStore,
+    domain: String,
+    ca_id: Int,
+    now_epoch: Int
+) -> Bool {
+    let n: Int = list_len((store).bundles);
+    let mut i: Int = 0;
+
+    while i < n {
+        let b: TrustBundleEntry = list_get((store).bundles, i);
+        if (b).trust_domain == domain && (b).ca_id == ca_id && (b).is_active {
+            if now_epoch <= (b).valid_until_epoch {
+                return true;
+            }
+        }
+        i = i + 1;
+    }
+
+    return false;
+}

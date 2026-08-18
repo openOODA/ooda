@@ -1,0 +1,122 @@
+// # TF2 Quaternion SLERP Time Buffer
+//
+// Logline: Interpolates time-indexed transform frames using Quaternion SLERP and linear translation blending.
+//
+// Setup: Geometric interpolation engine for historical and lookahead TF2 coordinate queries.
+//
+// Beats:
+//   1. Implement Spherical Linear Interpolation (SLERP) for Unit Quaternions.
+//   2. Linearly interpolate 3D translation vectors (LERP).
+//   3. Blend dual stamped transforms at an arbitrary intermediate query timestamp.
+//   4. Handle edge cases: colinear rotations, antipodal quaternions, and boundary clamping.
+
+import "./tf2_spatial_transform.oo";
+
+pub type TransformSample = struct {
+    timestamp_ns: Int,
+    transform: Transform3D,
+};
+
+pub fn transform_sample_new(time_ns: Int, t: Transform3D) -> TransformSample {
+    return TransformSample {
+        timestamp_ns: time_ns,
+        transform: t,
+    };
+}
+
+pub fn quaternion_dot(q1: &Quaternion, q2: &Quaternion) -> Float {
+    return ((q1).x * (q2).x) + ((q1).y * (q2).y) + ((q1).z * (q2).z) + ((q1).w * (q2).w);
+}
+
+pub fn quaternion_slerp(q0: &Quaternion, q1_in: &Quaternion, alpha: Float) -> Quaternion {
+    let mut dot: Float = quaternion_dot(q0, q1_in);
+    let mut q1: Quaternion = Quaternion {
+        x: (q1_in).x,
+        y: (q1_in).y,
+        z: (q1_in).z,
+        w: (q1_in).w,
+    };
+
+    // Take shortest arc on unit 4-sphere
+    if dot < 0.0 {
+        q1 = Quaternion {
+            x: 0.0 - (q1).x,
+            y: 0.0 - (q1).y,
+            z: 0.0 - (q1).z,
+            w: 0.0 - (q1).w,
+        };
+        dot = 0.0 - dot;
+    }
+
+    if dot > 0.9995 {
+        // High alignment: normalized linear interpolation (NLERP)
+        let one_minus_a: Float = 1.0 - alpha;
+        let q_lin: Quaternion = Quaternion {
+            x: (one_minus_a * (q0).x) + (alpha * (q1).x),
+            y: (one_minus_a * (q0).y) + (alpha * (q1).y),
+            z: (one_minus_a * (q0).z) + (alpha * (q1).z),
+            w: (one_minus_a * (q0).w) + (alpha * (q1).w),
+        };
+        return quaternion_normalize(&q_lin);
+    }
+
+    // High accuracy trigonometric approximation: theta = sqrt(2 * (1 - dot))
+    let mut clamped_dot: Float = dot;
+    if clamped_dot > 1.0 {
+        clamped_dot = 1.0;
+    }
+    let theta_0: Float = sqrt(2.0 * (1.0 - clamped_dot));
+    let sin_theta_0: Float = sin(theta_0);
+    if sin_theta_0 < 0.000001 {
+        return quaternion_normalize(q0);
+    }
+
+    let theta: Float = theta_0 * alpha;
+    let sin_theta: Float = sin(theta);
+    let s0: Float = cos(theta) - (clamped_dot * sin_theta / sin_theta_0);
+    let s1: Float = sin_theta / sin_theta_0;
+
+    let q_res: Quaternion = Quaternion {
+        x: (s0 * (q0).x) + (s1 * (q1).x),
+        y: (s0 * (q0).y) + (s1 * (q1).y),
+        z: (s0 * (q0).z) + (s1 * (q1).z),
+        w: (s0 * (q0).w) + (s1 * (q1).w),
+    };
+    return quaternion_normalize(&q_res);
+}
+
+pub fn vector3_lerp(v0: &Vector3, v1: &Vector3, alpha: Float) -> Vector3 {
+    let one_minus_a: Float = 1.0 - alpha;
+    return Vector3 {
+        x: (one_minus_a * (v0).x) + (alpha * (v1).x),
+        y: (one_minus_a * (v0).y) + (alpha * (v1).y),
+        z: (one_minus_a * (v0).z) + (alpha * (v1).z),
+    };
+}
+
+pub fn transform3d_interpolate(
+    s0: &TransformSample,
+    s1: &TransformSample,
+    query_time_ns: Int
+) -> Transform3D {
+    let dt: Int = (s1).timestamp_ns - (s0).timestamp_ns;
+    if dt <= 0 {
+        return (s0).transform;
+    }
+    let elapsed: Int = query_time_ns - (s0).timestamp_ns;
+    let mut alpha: Float = (elapsed as Float) / (dt as Float);
+    if alpha < 0.0 {
+        alpha = 0.0;
+    }
+    if alpha > 1.0 {
+        alpha = 1.0;
+    }
+
+    let t_interp: Vector3 = vector3_lerp(&(s0).transform.translation, &(s1).transform.translation, alpha);
+    let q_interp: Quaternion = quaternion_slerp(&(s0).transform.rotation, &(s1).transform.rotation, alpha);
+
+    return Transform3D {
+        translation: t_interp,
+        rotation: q_interp,
+    };
+}

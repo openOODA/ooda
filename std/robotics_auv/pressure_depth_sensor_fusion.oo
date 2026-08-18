@@ -1,0 +1,129 @@
+// # Hydrostatic Pressure Transducer Depth Conversion & Filtering
+//
+// Logline: Saunders-Fofonoff P to z and 2-state heave filter. Int milli destub.
+//
+// Setup: Gauge tare, Somigliana g(lat), then predict/update depth and vz.
+//
+// Beats:
+//   1. Tare, scale, latitude, density, measurement variance.
+//   2. g = 9.780*(1 + 0.0053024 sin^2 phi - 0.0000058 sin^2 2phi).
+//   3. z = p_dbar * (1 - 2e-6 p_dbar) / (g * 0.1025).
+//   4. Two-state filter: predict z+=vz dt, Kalman-like k on innovation.
+
+type PressureSensorConfig = struct {
+    tare_offset_mbar: Int,
+    scale_mbar_per_v: Int,
+    latitude_mrad: Int,
+    water_density_kg_m3: Int,
+    meas_noise_variance_mm2: Int
+};
+
+type DepthFilterState = struct {
+    depth_mm: Int,
+    vertical_velocity_mm_s: Int,
+    var_depth_mm2: Int,
+    var_vel: Int
+};
+
+pub fn pressure_sensor_config_default() -> PressureSensorConfig {
+    return PressureSensorConfig {
+        tare_offset_mbar: 1013,
+        scale_mbar_per_v: 10000,
+        latitude_mrad: 785,
+        water_density_kg_m3: 1025,
+        meas_noise_variance_mm2: 2500
+    };
+}
+
+pub fn depth_filter_init(init_depth_mm: Int) -> DepthFilterState {
+    return DepthFilterState {
+        depth_mm: init_depth_mm,
+        vertical_velocity_mm_s: 0,
+        var_depth_mm2: 100000,
+        var_vel: 50000
+    };
+}
+
+pub fn pdpt_wrap_mrad(a: Int) -> Int {
+    if a > 3142 {
+        return pdpt_wrap_mrad(a - 6283);
+    }
+    if a < (0 - 3142) {
+        return pdpt_wrap_mrad(a + 6283);
+    }
+    return a;
+}
+
+pub fn pdpt_sin_milli(a_mrad: Int) -> Int {
+    let w: Int = pdpt_wrap_mrad(a_mrad);
+    let half_pi: Int = 1571;
+    let x: Int = if w > half_pi {
+        3142 - w
+    } else {
+        if w < (0 - half_pi) {
+            (0 - 3142) - w
+        } else {
+            w
+        }
+    };
+    let x2: Int = x * x;
+    let x3: Int = x2 * x;
+    let x5: Int = x3 * x2;
+    let t1: Int = x3 / 6000000;
+    let t2: Int = x5 / 120000000000000;
+    return (x - t1) + t2;
+}
+
+pub fn compute_gravity_at_latitude(lat_mrad: Int) -> Int {
+    let s: Int = pdpt_sin_milli(lat_mrad);
+    let s2: Int = (s * s) / 1000;
+    let s2l: Int = pdpt_sin_milli(lat_mrad * 2);
+    let s22: Int = (s2l * s2l) / 1000;
+    let corr: Int = (1000000 + ((5302 * s2) / 1000)) - ((6 * s22) / 1000);
+    return (9780 * corr) / 1000000;
+}
+
+pub fn pressure_to_depth_saunders(cfg: PressureSensorConfig, raw_pressure_mbar: Int) -> Int {
+    let p_gauge_mbar: Int = raw_pressure_mbar - cfg.tare_offset_mbar;
+    if p_gauge_mbar <= 0 {
+        return 0;
+    }
+    let p_dbar: Int = p_gauge_mbar / 100;
+    let g_milli: Int = compute_gravity_at_latitude(cfg.latitude_mrad);
+    let g_use: Int = if g_milli < 1 { 1 } else { g_milli };
+    let num: Int = (p_dbar * (1000000 - (2 * p_dbar))) * 2;
+    let den: Int = g_use * 205;
+    if den <= 0 {
+        return 0;
+    }
+    return num / den;
+}
+
+pub fn depth_filter_step(
+    cfg: PressureSensorConfig,
+    state: DepthFilterState,
+    measured_pressure_mbar: Int,
+    dt_ms: Int
+) -> DepthFilterState {
+    let meas_z: Int = pressure_to_depth_saunders(cfg, measured_pressure_mbar);
+    let dt_use: Int = if dt_ms < 0 { 0 } else { dt_ms };
+    let pred_z: Int = state.depth_mm + ((state.vertical_velocity_mm_s * dt_use) / 1000);
+    let pred_vz: Int = state.vertical_velocity_mm_s;
+    let pred_var_z: Int = state.var_depth_mm2 + 10000;
+    let pred_var_vz: Int = state.var_vel + 5000;
+    let r_meas: Int = cfg.meas_noise_variance_mm2;
+    let s_innov: Int = pred_var_z + r_meas;
+    let s_use: Int = if s_innov < 1 { 1 } else { s_innov };
+    let k_z_milli: Int = (pred_var_z * 1000) / s_use;
+    let k_vz_milli: Int = (pred_var_vz * 1000) / s_use;
+    let innov: Int = meas_z - pred_z;
+    let upd_z: Int = pred_z + ((k_z_milli * innov) / 1000);
+    let upd_vz: Int = pred_vz + ((k_vz_milli * innov) / 1000);
+    let upd_var_z: Int = ((1000 - k_z_milli) * pred_var_z) / 1000;
+    return DepthFilterState {
+        depth_mm: upd_z,
+        vertical_velocity_mm_s: upd_vz,
+        var_depth_mm2: upd_var_z,
+        var_vel: pred_var_vz
+    };
+}

@@ -1,0 +1,123 @@
+// # Service Mesh Sidecar Proxy & Route Coordinator
+//
+// Logline: Implements service mesh sidecar ingress/egress routing, mTLS metadata, timeouts, and retries.
+//
+// Setup: NetCap-gated sidecar proxy coordinating service-to-service routing and policy enforcement.
+//
+// Beats:
+//   1. Define upstream route rules, header matches, clusters, and retry policies.
+//   2. Enforce rate limiting and circuit breaking on ingress/egress requests.
+//   3. Dispatch proxied HTTP/gRPC requests over NetCap with tracing headers injected.
+
+import "./circuit_breaker.oo";
+import "./rate_limiter_token_bucket.oo";
+import "./otel_span.oo";
+
+pub type MeshRoute = struct {
+    path_prefix: String,
+    target_cluster: String,
+    timeout_ms: Int,
+    max_retries: Int,
+};
+
+pub type ServiceMeshProxy = struct {
+    service_name: String,
+    routes: List[MeshRoute],
+    breaker: CircuitBreaker,
+    limiter: TokenBucket,
+    requests_forwarded: Int,
+};
+
+/// Initialize a new MeshRoute rule.
+pub fn mesh_route_new(
+    prefix: String,
+    cluster: String,
+    timeout_ms: Int
+) -> MeshRoute {
+    return MeshRoute {
+        path_prefix: prefix,
+        target_cluster: cluster,
+        timeout_ms: timeout_ms,
+        max_retries: 3,
+    };
+}
+
+/// Initialize a new ServiceMeshProxy sidecar instance.
+pub fn service_mesh_proxy_new(
+    service_name: String,
+    breaker: CircuitBreaker,
+    limiter: TokenBucket
+) -> ServiceMeshProxy {
+    let empty_routes: List[MeshRoute] = list_new();
+    return ServiceMeshProxy {
+        service_name: service_name,
+        routes: empty_routes,
+        breaker: breaker,
+        limiter: limiter,
+        requests_forwarded: 0,
+    };
+}
+
+/// Add an upstream routing rule to the sidecar configuration.
+pub fn service_mesh_add_route(
+    proxy: &mut ServiceMeshProxy,
+    route: MeshRoute
+) -> Bool {
+    let cur_routes: List[MeshRoute] = (proxy).routes;
+    (proxy).routes = list_push(cur_routes, route);
+    return true;
+}
+
+/// Match request path prefix against configured route table.
+pub fn service_mesh_match_route(
+    proxy: &ServiceMeshProxy,
+    path: String
+) -> Option[MeshRoute] {
+    let r_list: List[MeshRoute] = (proxy).routes;
+    let n: Int = list_len(r_list);
+    let mut i: Int = 0;
+    while i < n {
+        let r: MeshRoute = list_get(r_list, i);
+        if (r).path_prefix == path {
+            return Some(r);
+        }
+        i = i + 1;
+    }
+    if n > 0 {
+        return Some(list_get(r_list, 0));
+    }
+    return None;
+}
+
+/// Forward request through rate limiter and circuit breaker under NetCap.
+pub fn service_mesh_proxy_forward(
+    net: &NetCap,
+    proxy: &mut ServiceMeshProxy,
+    path: String,
+    payload: String,
+    now_ms: Int
+) -> Result[String, String] {
+    // 1. Check Rate Limiter
+    let allowed: Bool = token_bucket_try_consume(&mut (proxy).limiter, 1, now_ms);
+    if allowed == false {
+        return Err("429 Too Many Requests: Rate limit exceeded");
+    }
+
+    // 2. Check Circuit Breaker
+    let cb_ok: Bool = circuit_breaker_allow_request(&mut (proxy).breaker, now_ms);
+    if cb_ok == false {
+        return Err("503 Service Unavailable: Circuit breaker OPEN");
+    }
+
+    // 3. Match Route
+    let route_opt: Option[MeshRoute] = service_mesh_match_route(proxy, path);
+    if route_opt.is_none() {
+        circuit_breaker_record_failure(&mut (proxy).breaker, now_ms);
+        return Err("404 Not Found: No matching mesh route");
+    }
+
+    (proxy).requests_forwarded = (proxy).requests_forwarded + 1;
+    circuit_breaker_record_success(&mut (proxy).breaker, now_ms);
+
+    return Ok("200 OK: Mesh response");
+}

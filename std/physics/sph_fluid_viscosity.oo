@@ -1,0 +1,134 @@
+// # SPH Viscous Shear Diffusion & Artificial Viscosity
+//
+// Logline: Evaluates Laplacian viscosity smoothing operators, artificial viscosity, and shear stress transfers between fluid particles.
+//
+// Setup: Viscous dissipation forces for Navier-Stokes SPH momentum equations and Monaghan artificial viscosity.
+//
+// Beats:
+//   1. Evaluate Müller Laplacian viscosity smoothing kernel (45 / (pi * h^6) * (h - r)).
+//   2. Compute physical viscous shear stress force exchange between neighboring particles.
+//   3. Implement Monaghan artificial bulk viscosity for shock capturing and numerical stability.
+
+pub type ViscosityConfig = struct {
+    dynamic_viscosity_mu: Float,
+    monaghan_alpha: Float,
+    monaghan_beta: Float,
+    speed_of_sound: Float,
+    boundary_damping: Float,
+};
+
+pub type ViscosityForceResult = struct {
+    f_ax: Float,
+    f_ay: Float,
+    f_az: Float,
+    f_bx: Float,
+    f_by: Float,
+    f_bz: Float,
+};
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn viscosity_config_default() -> ViscosityConfig {
+    return ViscosityConfig {
+        dynamic_viscosity_mu: 0.05,
+        monaghan_alpha: 0.1,
+        monaghan_beta: 0.2,
+        speed_of_sound: 50.0,
+        boundary_damping: 0.5,
+    };
+}
+
+// -------------------------------------------------------------------
+// Viscosity Laplacian Smoothing Kernel
+// laplace W_visc(r, h) = 45 / (pi * h^6) * (h - r)  for 0 <= r <= h
+// -------------------------------------------------------------------
+
+pub fn sph_viscosity_laplacian_kernel(r: Float, h: Float) -> Float {
+    if r >= h || r < 0.0 {
+        return 0.0;
+    }
+
+    let h3 = h * h * h;
+    let h6 = h3 * h3;
+    let coeff = 45.0 / (3.141592653589793 * h6);
+
+    return coeff * (h - r);
+}
+
+// -------------------------------------------------------------------
+// Physical Shear Viscosity Force
+// F_visc_i = mu * sum_j m_j * (v_j - v_i) / rho_j * laplace W_visc(r_ij, h)
+// -------------------------------------------------------------------
+
+pub fn sph_compute_viscosity_force_pair(
+    p1_x: Float, p1_y: Float, p1_z: Float,
+    p2_x: Float, p2_y: Float, p2_z: Float,
+    v1_x: Float, v1_y: Float, v1_z: Float,
+    v2_x: Float, v2_y: Float, v2_z: Float,
+    mass_1: Float, mass_2: Float,
+    rho_2: Float,
+    mu: Float,
+    h: Float
+) -> ViscosityForceResult {
+    let dx = p1_x - p2_x;
+    let dy = p1_y - p2_y;
+    let dz = p1_z - p2_z;
+    let r_sq = (dx * dx) + (dy * dy) + (dz * dz);
+
+    if r_sq >= (h * h) || r_sq <= 0.00000001 || rho_2 < 0.0001 {
+        return ViscosityForceResult {
+            f_ax: 0.0, f_ay: 0.0, f_az: 0.0,
+            f_bx: 0.0, f_by: 0.0, f_bz: 0.0,
+        };
+    }
+
+    let r = sqrt(r_sq);
+    let lap = sph_viscosity_laplacian_kernel(r, h);
+
+    // Relative velocity: v2 - v1
+    let dvx = v2_x - v1_x;
+    let dvy = v2_y - v1_y;
+    let dvz = v2_z - v1_z;
+
+    let coeff = mu * mass_2 * (1.0 / rho_2) * lap;
+    let fx = dvx * coeff * mass_1;
+    let fy = dvy * coeff * mass_1;
+    let fz = dvz * coeff * mass_1;
+
+    return ViscosityForceResult {
+        f_ax: fx, f_ay: fy, f_az: fz,
+        f_bx: -fx, f_by: -fy, f_bz: -fz,
+    };
+}
+
+// -------------------------------------------------------------------
+// Monaghan Artificial Viscosity (Shock Capturing)
+// -------------------------------------------------------------------
+
+pub fn sph_monaghan_artificial_viscosity(
+    dx: Float, dy: Float, dz: Float,
+    dvx: Float, dvy: Float, dvz: Float,
+    r: Float,
+    rho_avg: Float,
+    cfg: ViscosityConfig,
+    h: Float
+) -> Float {
+    // Dot product of relative velocity and relative position: v_ij . r_ij
+    let v_dot_r = (dvx * dx) + (dvy * dy) + (dvz * dz);
+    if v_dot_r >= 0.0 || rho_avg < 0.0001 {
+        // Particles moving apart, no artificial viscosity
+        return 0.0;
+    }
+
+    let eps = 0.01 * (h * h);
+    let mu_ij = (h * v_dot_r) / ((r * r) + eps);
+
+    let alpha = (cfg).monaghan_alpha;
+    let beta = (cfg).monaghan_beta;
+    let cs = (cfg).speed_of_sound;
+
+    let pi_ij = (- (alpha * cs * mu_ij) + (beta * mu_ij * mu_ij)) / rho_avg;
+    return pi_ij;
+}

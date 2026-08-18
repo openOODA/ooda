@@ -1,0 +1,102 @@
+// # Service Mesh mTLS SPIFFE Certificate Verifier
+//
+// Logline: Validates X.509 certificates, SPIFFE IDs, and trust domains for mutual TLS mesh peer authentication.
+//
+// Setup: Cryptographic peer identity validator running at Envoy/Sidecar TLS termination layer.
+//
+// Beats:
+//   1. Parse X.509 Subject Alternative Names (SANs) for SPIFFE URI schemes (`spiffe://<domain>/ns/<ns>/sa/<sa>`).
+//   2. Verify peer trust domain against local mesh trust domain and federated partner domains.
+//   3. Check certificate validity period against current cluster timestamp (not before / not after).
+
+pub type SpiffeIdentity = struct {
+    trust_domain: String,
+    namespace: String,
+    service_account: String,
+    uri_string: String,
+    is_valid: Bool,
+};
+
+pub type X509CertInfo = struct {
+    serial_number: Int,
+    san_spiffe_uri: String,
+    not_before_epoch: Int,
+    not_after_epoch: Int,
+    issuer_ca_id: Int,
+};
+
+pub type MtlsVerifierState = struct {
+    local_trust_domain: String,
+    allowed_namespaces: List[String],
+    total_verified: Int,
+    auth_failures: Int,
+};
+
+pub fn mtls_verifier_new(trust_domain: String) -> MtlsVerifierState {
+    let empty_ns: List[String] = list_new();
+    return MtlsVerifierState {
+        local_trust_domain: trust_domain,
+        allowed_namespaces: empty_ns,
+        total_verified: 0,
+        auth_failures: 0,
+    };
+}
+
+pub fn mtls_allow_namespace(state: &mut MtlsVerifierState, ns: String) {
+    (state).allowed_namespaces = list_push((state).allowed_namespaces, ns);
+}
+
+pub fn mtls_parse_spiffe_uri(uri: String, domain: String, ns: String, sa: String) -> SpiffeIdentity {
+    let expected: String = "spiffe://" + domain + "/ns/" + ns + "/sa/" + sa;
+    let is_match: Bool = uri == expected;
+    return SpiffeIdentity {
+        trust_domain: domain,
+        namespace: ns,
+        service_account: sa,
+        uri_string: uri,
+        is_valid: is_match,
+    };
+}
+
+pub fn mtls_verify_peer_cert(
+    state: &mut MtlsVerifierState,
+    cert: &X509CertInfo,
+    now_epoch: Int,
+    peer_ns: String,
+    peer_sa: String
+) -> Bool {
+    (state).total_verified = (state).total_verified + 1;
+
+    // Check certificate time validity
+    if now_epoch < (cert).not_before_epoch || now_epoch > (cert).not_after_epoch {
+        (state).auth_failures = (state).auth_failures + 1;
+        return false;
+    }
+
+    // Verify SPIFFE identity
+    let id: SpiffeIdentity = mtls_parse_spiffe_uri((cert).san_spiffe_uri, (state).local_trust_domain, peer_ns, peer_sa);
+    if !(id).is_valid {
+        (state).auth_failures = (state).auth_failures + 1;
+        return false;
+    }
+
+    // Check namespace allowlist if configured
+    let n: Int = list_len((state).allowed_namespaces);
+    if n > 0 {
+        let mut found: Bool = false;
+        let mut i: Int = 0;
+        while i < n {
+            let allowed_ns: String = list_get((state).allowed_namespaces, i);
+            if allowed_ns == peer_ns {
+                found = true;
+            }
+            i = i + 1;
+        }
+        if !found {
+            (state).auth_failures = (state).auth_failures + 1;
+            return false;
+        }
+    }
+
+    return true;
+}

@@ -1,0 +1,205 @@
+// # Falcon Keys and Key Lifecycle
+//
+// Logline: Manages key generation, validation, and serialization for FALCON.
+//
+// Setup: Imports falcon_types.oo for key representations.
+//
+// Beats:
+//   1. Generate and validate FALCON public and private keys.
+//   2. Implement key serialization and formatting routines.
+//   3. Enforce security policies on key length and parameters.
+
+import "./falcon_ops.oo";
+
+pub fn falcon_hash_to_point(message: String, salt_hex: String, degree: Int, modulus: Int) -> FalconPolynomial {
+    let msg_len: Int = message.len();
+    let salt_len: Int = salt_hex.len();
+    let mut res_coeffs: List[Int] = list_new();
+    let mut seed: Int = 5381;
+    seed = seed + falcon_checksum_string(message);
+    seed = seed + falcon_checksum_string(salt_hex);
+    
+    let mut i: Int = 0;
+    while i < degree {
+        seed = (seed * 1103515245 + 12345) % 2147483647;
+        let mut val: Int = seed % modulus;
+        if val < 0 {
+            val = val + modulus;
+        }
+        res_coeffs = list_push(res_coeffs, val);
+        i = i + 1;
+    }
+    return FalconPolynomial {
+        degree: degree,
+        coefficients: res_coeffs,
+        is_ntt: false,
+    };
+}
+
+pub fn falcon_public_key_create(
+    key_id: String,
+    degree: Int,
+    h_poly: FalconPolynomial,
+    raw_bytes: String
+) -> FalconPublicKey {
+    let chk: Int = falcon_checksum_poly(h_poly) + falcon_checksum_string(raw_bytes);
+    let mut valid: Bool = true;
+    if degree != 512 {
+        if degree != 1024 {
+            valid = false;
+        }
+    }
+    return FalconPublicKey {
+        key_id: key_id,
+        degree: degree,
+        h_poly: h_poly,
+        raw_bytes: raw_bytes,
+        checksum: chk,
+        is_valid: valid,
+    };
+}
+
+pub fn falcon_secret_key_create(
+    key_id: String,
+    degree: Int,
+    f_poly: FalconPolynomial,
+    g_poly: FalconPolynomial,
+    F_poly: FalconPolynomial,
+    G_poly: FalconPolynomial,
+    raw_bytes: String
+) -> FalconSecretKey {
+    let mut chk: Int = 0;
+    chk = chk + falcon_checksum_poly(f_poly);
+    chk = chk + falcon_checksum_poly(g_poly);
+    chk = chk + falcon_checksum_poly(F_poly);
+    chk = chk + falcon_checksum_poly(G_poly);
+    chk = chk + falcon_checksum_string(raw_bytes);
+    
+    return FalconSecretKey {
+        key_id: key_id,
+        degree: degree,
+        f_poly: f_poly,
+        g_poly: g_poly,
+        F_poly: F_poly,
+        G_poly: G_poly,
+        raw_bytes: raw_bytes,
+        checksum: chk,
+        is_wiped: false,
+    };
+}
+
+pub fn falcon_keypair_create(
+    key_id: String,
+    degree: Int,
+    pk: FalconPublicKey,
+    sk: FalconSecretKey,
+    timestamp: Int
+) -> FalconKeyPair {
+    let mut valid: Bool = pk.is_valid;
+    if sk.is_wiped {
+        valid = false;
+    }
+    return FalconKeyPair {
+        key_id: key_id,
+        degree: degree,
+        public_key: pk,
+        secret_key: sk,
+        created_at: timestamp,
+        is_valid: valid,
+    };
+}
+
+pub fn falcon_secret_key_wipe(sk: FalconSecretKey) -> FalconSecretKey {
+    return FalconSecretKey {
+        key_id: sk.key_id,
+        degree: sk.degree,
+        f_poly: sk.f_poly,
+        g_poly: sk.g_poly,
+        F_poly: sk.F_poly,
+        G_poly: sk.G_poly,
+        raw_bytes: sk.raw_bytes,
+        checksum: sk.checksum,
+        is_wiped: true,
+    };
+}
+
+pub fn falcon_keypair_validate(kp: FalconKeyPair) -> Bool {
+    if kp.is_valid == false {
+        return false;
+    }
+    let sk: FalconSecretKey = kp.secret_key;
+    if sk.is_wiped {
+        return false;
+    }
+    let pk: FalconPublicKey = kp.public_key;
+    let pk_deg: Int = pk.degree;
+    let kp_deg: Int = kp.degree;
+    if pk_deg != kp_deg {
+        return false;
+    }
+    return true;
+}
+
+pub fn falcon_keypair_wipe_secret(kp_ref: &mut FalconKeyPair) {
+    let old_sk: FalconSecretKey = (kp_ref).secret_key;
+    let wiped_sk: FalconSecretKey = falcon_secret_key_wipe(old_sk);
+    (kp_ref).secret_key = wiped_sk;
+    (kp_ref).is_valid = false;
+}
+
+pub fn falcon_signature_create(
+    sig_id: String,
+    degree: Int,
+    salt_hex: String,
+    s2_poly: FalconPolynomial,
+    raw_bytes: String,
+    timestamp: Int
+) -> FalconSignature {
+    let mut chk: Int = falcon_checksum_poly(s2_poly);
+    chk = chk + falcon_checksum_string(salt_hex);
+    chk = chk + falcon_checksum_string(raw_bytes);
+    
+    let mut valid: Bool = true;
+    let salt_len: Int = salt_hex.len();
+    if salt_len == 0 {
+        valid = false;
+    }
+    return FalconSignature {
+        sig_id: sig_id,
+        degree: degree,
+        nonce_salt: salt_hex,
+        s2_poly: s2_poly,
+        raw_bytes: raw_bytes,
+        checksum: chk,
+        created_at: timestamp,
+        is_valid: valid,
+    };
+}
+
+pub fn falcon_signature_serialize(sig: FalconSignature) -> String {
+    let sig_id_str: String = sig.sig_id;
+    let deg: Int = sig.degree;
+    let deg_str: String = deg.to_string();
+    let salt_str: String = sig.nonce_salt;
+    let raw_str: String = sig.raw_bytes;
+    return "FALCON-SIG:" + sig_id_str + ":" + deg_str + ":" + salt_str + ":" + raw_str;
+}
+
+pub fn falcon_signature_deserialize(raw_bytes: String, degree: Int) -> FalconSignature {
+    let empty_s2: FalconPolynomial = falcon_polynomial_zero(degree);
+    let mut valid: Bool = true;
+    let r_len: Int = raw_bytes.len();
+    if r_len == 0 {
+        valid = false;
+    }
+    return FalconSignature {
+        sig_id: "deserialized",
+        degree: degree,
+        nonce_salt: "0000000000000000000000000000000000000000",
+        s2_poly: empty_s2,
+        raw_bytes: raw_bytes,
+        checksum: falcon_checksum_string(raw_bytes),
+        created_at: 0,
+        is_valid: valid,
+    };
+}

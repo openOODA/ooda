@@ -1,0 +1,132 @@
+// # Options Diagonal Spread Strategy Engine
+//
+// Logline: Evaluates diagonal spread structures across simultaneous strike differentials and expiration mismatches (e.g., Poor Man's Covered Call).
+//
+// Setup: Pure quantitative finance module analyzing hybrid time-decay and directional leverage profiles.
+//
+// Beats:
+//   1. Define DiagonalSpreadPosition and DiagonalSpreadMetrics structures.
+//   2. Model simultaneous Strike and Tenor Greek asymmetries (Delta, Gamma, Theta, Vega).
+//   3. Compute capital efficiency, synthetic covered call leverage, and breakeven boundaries.
+
+pub type DiagonalSpreadPosition = struct {
+    long_strike: Float,
+    short_strike: Float,
+    long_expiry_years: Float,
+    short_expiry_years: Float,
+    long_vol: Float,
+    short_vol: Float,
+    spot_price: Float,
+    risk_free_rate: Float,
+    is_call: Bool,
+};
+
+pub type DiagonalSpreadMetrics = struct {
+    long_option_price: Float,
+    short_option_price: Float,
+    net_debit_paid: Float,
+    net_delta: Float,
+    net_gamma: Float,
+    net_theta_daily: Float,
+    net_vega: Float,
+    capital_efficiency_ratio: Float,
+};
+
+pub fn diag_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn diag_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (diag_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn diag_bs_eval(s: Float, k: Float, t: Float, r: Float, vol: Float, is_call: Bool) -> Float {
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    let df: Float = exp((0.0 - r) * t);
+
+    if is_call {
+        return (s * diag_norm_cdf(d1)) - (k * df * diag_norm_cdf(d2));
+    }
+    return (k * df * diag_norm_cdf(0.0 - d2)) - (s * diag_norm_cdf(0.0 - d1));
+}
+
+pub fn diagonal_spread_new(
+    k_long: Float,
+    k_short: Float,
+    t_long: Float,
+    t_short: Float,
+    vol_l: Float,
+    vol_s: Float,
+    spot: Float,
+    r: Float,
+    is_call: Bool
+) -> DiagonalSpreadPosition {
+    return DiagonalSpreadPosition {
+        long_strike: k_long,
+        short_strike: k_short,
+        long_expiry_years: t_long,
+        short_expiry_years: t_short,
+        long_vol: vol_l,
+        short_vol: vol_s,
+        spot_price: spot,
+        risk_free_rate: r,
+        is_call: is_call,
+    };
+}
+
+pub fn evaluate_diagonal_spread(p: &DiagonalSpreadPosition) -> DiagonalSpreadMetrics {
+    let s: Float = (p).spot_price;
+    let r: Float = (p).risk_free_rate;
+
+    let p_long: Float = diag_bs_eval(s, (p).long_strike, (p).long_expiry_years, r, (p).long_vol, (p).is_call);
+    let p_short: Float = diag_bs_eval(s, (p).short_strike, (p).short_expiry_years, r, (p).short_vol, (p).is_call);
+
+    let net_debit: Float = p_long - p_short;
+
+    let sqrt_tl: Float = sqrt((p).long_expiry_years);
+    let sqrt_ts: Float = sqrt((p).short_expiry_years);
+
+    let d1_l: Float = (ln(s / (p).long_strike) + ((r + (0.5 * (p).long_vol * (p).long_vol)) * (p).long_expiry_years)) / ((p).long_vol * sqrt_tl);
+    let d1_s: Float = (ln(s / (p).short_strike) + ((r + (0.5 * (p).short_vol * (p).short_vol)) * (p).short_expiry_years)) / ((p).short_vol * sqrt_ts);
+
+    let delta_l: Float = diag_norm_cdf(d1_l);
+    let delta_s: Float = diag_norm_cdf(d1_s);
+    let net_delta: Float = delta_l - delta_s;
+
+    let gamma_l: Float = diag_norm_pdf(d1_l) / (s * (p).long_vol * sqrt_tl);
+    let gamma_s: Float = diag_norm_pdf(d1_s) / (s * (p).short_vol * sqrt_ts);
+    let net_gamma: Float = gamma_l - gamma_s;
+
+    let theta_l: Float = ((0.0 - (s * diag_norm_pdf(d1_l) * (p).long_vol)) / (2.0 * sqrt_tl) - (r * p_long)) / 365.0;
+    let theta_s: Float = ((0.0 - (s * diag_norm_pdf(d1_s) * (p).short_vol)) / (2.0 * sqrt_ts) - (r * p_short)) / 365.0;
+    let net_theta: Float = theta_l - theta_s;
+
+    let vega_l: Float = s * sqrt_tl * diag_norm_pdf(d1_l) * 0.01;
+    let vega_s: Float = s * sqrt_ts * diag_norm_pdf(d1_s) * 0.01;
+    let net_vega: Float = vega_l - vega_s;
+
+    let mut cap_eff: Float = 1.0;
+    if net_debit > 0.0 {
+        cap_eff = s / net_debit; // Leverage multiplier relative to owning 100% underlying
+    }
+
+    return DiagonalSpreadMetrics {
+        long_option_price: p_long,
+        short_option_price: p_short,
+        net_debit_paid: net_debit,
+        net_delta: net_delta,
+        net_gamma: net_gamma,
+        net_theta_daily: net_theta,
+        net_vega: net_vega,
+        capital_efficiency_ratio: cap_eff,
+    };
+}

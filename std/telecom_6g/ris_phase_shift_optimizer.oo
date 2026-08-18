@@ -1,0 +1,138 @@
+// # Reconfigurable Intelligent Surface Phase Shift Optimizer
+//
+// Logline: Optimizes continuous and quantized discrete phase-shift matrix configurations for passive and active metasurfaces.
+//
+// Setup: Pure standard library implementation of RIS reflection beamforming algorithms maximizing received SNR.
+//
+// Beats:
+//   1. Define RIS array geometry, element count (M x N), and phase quantization resolution (1-bit, 2-bit, 3-bit).
+//   2. Calculate ideal continuous phase shift matching cascaded transmitter-to-surface-to-receiver channel phases.
+//   3. Quantize continuous phase angles to nearest discrete PIN diode states and compute quantization loss.
+
+pub type RisArrayConfig = struct {
+    num_elements_x: Int,
+    num_elements_y: Int,
+    element_spacing_m: Float,
+    quantization_bits: Int, // 0: continuous, 1: {0, pi}, 2: {0, pi/2, pi, 3pi/2}, 3: 8 states
+    insertion_loss_db: Float,
+};
+
+pub type RisPhaseElement = struct {
+    x_idx: Int,
+    y_idx: Int,
+    ideal_phase_rad: Float,
+    quantized_phase_rad: Float,
+    quantization_error_rad: Float,
+};
+
+pub fn ris_array_config_default_64x64() -> RisArrayConfig {
+    return RisArrayConfig {
+        num_elements_x: 64,
+        num_elements_y: 64,
+        element_spacing_m: 0.001, // 1 mm (half-wavelength at 150 GHz)
+        quantization_bits: 2,     // 2-bit (4 phase states)
+        insertion_loss_db: 1.2,
+    };
+}
+
+pub fn ris_ideal_phase_shift(bs_phase_rad: Float, ue_phase_rad: Float) -> Float {
+    let mut phi: Float = 0.0 - (bs_phase_rad + ue_phase_rad);
+    let pi: Float = 3.141592653589793;
+    let two_pi: Float = 2.0 * pi;
+
+    while phi < 0.0 {
+        phi = phi + two_pi;
+    }
+    while phi >= two_pi {
+        phi = phi - two_pi;
+    }
+    return phi;
+}
+
+pub fn ris_quantize_phase(ideal_phase_rad: Float, bits: Int) -> Float {
+    let pi: Float = 3.141592653589793;
+    let two_pi: Float = 2.0 * pi;
+
+    if bits <= 0 {
+        return ideal_phase_rad;
+    }
+    if bits == 1 {
+        // 1-bit: 0 or pi
+        if ideal_phase_rad >= (0.5 * pi) && ideal_phase_rad < (1.5 * pi) {
+            return pi;
+        }
+        return 0.0;
+    }
+    if bits == 2 {
+        // 2-bit: 0, pi/2, pi, 3pi/2
+        let step: Float = 0.5 * pi;
+        let half_step: Float = 0.25 * pi;
+        if ideal_phase_rad < half_step || ideal_phase_rad >= (1.75 * pi) {
+            return 0.0;
+        }
+        if ideal_phase_rad < (0.75 * pi) {
+            return 0.5 * pi;
+        }
+        if ideal_phase_rad < (1.25 * pi) {
+            return pi;
+        }
+        return 1.5 * pi;
+    }
+    // 3-bit: 8 states (step = pi/4)
+    let step3: Float = 0.25 * pi;
+    let mut state: Int = 0;
+    let mut min_err: Float = 100.0;
+    let mut best_phase: Float = 0.0;
+
+    let mut i: Int = 0;
+    while i < 8 {
+        let test_p: Float = (ris_opt_int_to_float(i)) * step3;
+        let mut diff: Float = ideal_phase_rad - test_p;
+        if diff < 0.0 { diff = 0.0 - diff; }
+        if diff > pi { diff = two_pi - diff; }
+        if diff < min_err {
+            min_err = diff;
+            best_phase = test_p;
+        }
+        i = i + 1;
+    }
+    return best_phase;
+}
+
+pub fn ris_optimize_element(x: Int, y: Int, bs_p: Float, ue_p: Float, bits: Int) -> RisPhaseElement {
+    let ideal: Float = ris_ideal_phase_shift(bs_p, ue_p);
+    let quant: Float = ris_quantize_phase(ideal, bits);
+    let mut err: Float = ideal - quant;
+    if err < 0.0 { err = 0.0 - err; }
+    let pi: Float = 3.141592653589793;
+    if err > pi { err = (2.0 * pi) - err; }
+
+    return RisPhaseElement {
+        x_idx: x,
+        y_idx: y,
+        ideal_phase_rad: ideal,
+        quantized_phase_rad: quant,
+        quantization_error_rad: err,
+    };
+}
+
+pub fn ris_quantization_loss_factor(bits: Int) -> Float {
+    if bits <= 0 { return 1.0; }
+    if bits == 1 { return 0.6366; } // sinc(pi/2)^2 = (2/pi)^2 approx 0.405 power, 0.6366 amp
+    if bits == 2 { return 0.8105; } // sinc(pi/4)^2 approx 0.8105
+    if bits == 3 { return 0.9496; } // sinc(pi/8)^2 approx 0.9496
+    return 0.98;
+}
+
+pub fn ris_opt_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}

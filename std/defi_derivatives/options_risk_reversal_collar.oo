@@ -1,0 +1,101 @@
+// # 25-Delta Risk Reversal, Skew & Collar Hedging Engine
+//
+// Logline: Measures volatility surface skew via 25-delta Risk Reversals and Butterflies, and prices zero-cost protective Collar hedge structures.
+//
+// Setup: Pure quantitative finance module analyzing implied volatility skewness and portfolio downside collar protection.
+//
+// Beats:
+//   1. Define RiskReversalPosition, CollarHedgePosition, and SkewAnalysisResult structures.
+//   2. Compute 25-delta call/put implied volatility spread and smile curvature (Fly).
+//   3. Solve for zero-cost collar strikes balancing downside insurance against upside cap.
+
+pub type RiskReversalPosition = struct {
+    expiry_years: Float,
+    atm_vol: Float,
+    delta_25_call_vol: Float,
+    delta_25_put_vol: Float,
+    spot_price: Float,
+};
+
+pub type CollarHedgePosition = struct {
+    underlying_spot: Float,
+    put_strike_floor: Float,
+    call_strike_cap: Float,
+    expiry_years: Float,
+    put_vol: Float,
+    call_vol: Float,
+    risk_free_rate: Float,
+    spot_quantity: Float,
+};
+
+pub type SkewAnalysisResult = struct {
+    risk_reversal_25d: Float, // Call Vol - Put Vol (skew metric)
+    butterfly_25d: Float,     // (Call Vol + Put Vol)/2 - ATM Vol (curvature)
+    skew_ratio: Float,
+    put_premium_floor_cost: Float,
+    call_premium_cap_credit: Float,
+    net_collar_debit: Float,
+    is_zero_cost_or_better: Bool,
+};
+
+pub fn rrc_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn rrc_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (rrc_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn rrc_bs_call(s: Float, k: Float, t: Float, r: Float, vol: Float) -> Float {
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    let df: Float = exp((0.0 - r) * t);
+    return (s * rrc_norm_cdf(d1)) - (k * df * rrc_norm_cdf(d2));
+}
+
+pub fn analyze_skew_and_collar(
+    rr: &RiskReversalPosition,
+    collar: &CollarHedgePosition
+) -> SkewAnalysisResult {
+    let rr_25: Float = (rr).delta_25_call_vol - (rr).delta_25_put_vol;
+    let fly_25: Float = (((rr).delta_25_call_vol + (rr).delta_25_put_vol) / 2.0) - (rr).atm_vol;
+    let mut ratio: Float = 0.0;
+    if (rr).atm_vol > 0.0 {
+        ratio = rr_25 / (rr).atm_vol;
+    }
+
+    let s: Float = (collar).underlying_spot;
+    let t: Float = (collar).expiry_years;
+    let r: Float = (collar).risk_free_rate;
+    let df: Float = exp((0.0 - r) * t);
+
+    // Long Put Floor
+    let c_floor: Float = rrc_bs_call(s, (collar).put_strike_floor, t, r, (collar).put_vol);
+    let p_floor: Float = c_floor - s + ((collar).put_strike_floor * df);
+    let floor_cost: Float = p_floor * (collar).spot_quantity;
+
+    // Short Call Cap
+    let c_cap: Float = rrc_bs_call(s, (collar).call_strike_cap, t, r, (collar).call_vol);
+    let cap_credit: Float = c_cap * (collar).spot_quantity;
+
+    let net_debit: Float = floor_cost - cap_credit;
+    let is_zero_cost: Bool = net_debit <= 0.0001;
+
+    return SkewAnalysisResult {
+        risk_reversal_25d: rr_25,
+        butterfly_25d: fly_25,
+        skew_ratio: ratio,
+        put_premium_floor_cost: floor_cost,
+        call_premium_cap_credit: cap_credit,
+        net_collar_debit: net_debit,
+        is_zero_cost_or_better: is_zero_cost,
+    };
+}

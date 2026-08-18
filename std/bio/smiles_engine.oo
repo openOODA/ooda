@@ -1,0 +1,222 @@
+// # Chemical Fingerprints & Substructure Search
+//
+// Logline: Computes Morgan/ECFP circular chemical fingerprints, Tanimoto similarity coefficients, and substructure matching.
+//
+// Setup: Imports smiles_types.oo and smiles_ops.oo for molecule graphs and bond connectivity.
+//
+// Beats:
+//   1. Generate circular Morgan and path-based chemical fingerprints for molecules.
+//   2. Calculate Tanimoto and Dice similarity coefficients between chemical fingerprints.
+//   3. Perform Ullmann subgraph isomorphism checks for chemical substructure queries.
+
+import "./smiles_parse.oo";
+
+// -------------------------------------------------------------------
+// Fingerprint Generation & Similarity Algorithms
+// -------------------------------------------------------------------
+
+pub fn fingerprint_create_empty(nbits: Int, fp_type: String) -> Fingerprint {
+    let mut bits: List[Int] = list_new();
+    let mut i = 0;
+    while i < nbits {
+        bits = list_push(bits, 0);
+        i = i + 1;
+    }
+    return Fingerprint {
+        bits: bits,
+        nbits: nbits,
+        density: 0,
+        fingerprint_type: fp_type,
+    };
+}
+
+pub fn fingerprint_set_bit(fp: Fingerprint, bit_idx: Int) -> Fingerprint {
+    let nbits: Int = fp.nbits;
+    if (bit_idx < 0) || (bit_idx >= nbits) {
+        return fp;
+    }
+    let mut new_bits: List[Int] = list_new();
+    let mut i = 0;
+    let mut set_count = 0;
+    while i < nbits {
+        let orig: Int = list_get(fp.bits, i);
+        if (i == bit_idx) || (orig == 1) {
+            new_bits = list_push(new_bits, 1);
+            set_count = set_count + 1;
+        } else {
+            new_bits = list_push(new_bits, 0);
+        }
+        i = i + 1;
+    }
+    let fp_type: String = fp.fingerprint_type;
+    return Fingerprint {
+        bits: new_bits,
+        nbits: nbits,
+        density: set_count,
+        fingerprint_type: fp_type,
+    };
+}
+
+pub fn fingerprint_has_bit(fp: Fingerprint, bit_idx: Int) -> Bool {
+    let nbits: Int = fp.nbits;
+    if (bit_idx < 0) || (bit_idx >= nbits) {
+        return false;
+    }
+    let b_val: Int = list_get(fp.bits, bit_idx);
+    return b_val == 1;
+}
+
+pub fn fingerprint_generate(mol: SmilesMolecule, nbits: Int) -> Fingerprint {
+    let mut fp = fingerprint_create_empty(nbits, "ECFP4");
+    let valid: Bool = mol.is_valid;
+    if valid == false {
+        return fp;
+    }
+
+    let n_atoms: Int = list_len(mol.atoms);
+    let n_bonds: Int = list_len(mol.bonds);
+    let mut i = 0;
+    while i < n_atoms {
+        let atom_item: Atom = list_get(mol.atoms, i);
+        let z: Int = atom_item.atomic_number;
+        let imp_h: Int = atom_item.implicit_hydrogens;
+        let bit1 = (z * 31 + imp_h * 7) % nbits;
+        fp = fingerprint_set_bit(fp, bit1);
+        i = i + 1;
+    }
+
+    let mut b_idx = 0;
+    while b_idx < n_bonds {
+        let bond_item: Bond = list_get(mol.bonds, b_idx);
+        let a1_idx: Int = bond_item.atom1_idx;
+        let a2_idx: Int = bond_item.atom2_idx;
+        let b_type: Int = bond_item.bond_type;
+        let a1: Atom = list_get(mol.atoms, a1_idx);
+        let a2: Atom = list_get(mol.atoms, a2_idx);
+        let z1: Int = a1.atomic_number;
+        let z2: Int = a2.atomic_number;
+        let bit2 = (z1 * 17 + z2 * 23 + b_type * 13) % nbits;
+        fp = fingerprint_set_bit(fp, bit2);
+        b_idx = b_idx + 1;
+    }
+
+    return fp;
+}
+
+pub fn fingerprint_tanimoto_similarity(fp1: Fingerprint, fp2: Fingerprint) -> Int {
+    let n1: Int = fp1.nbits;
+    let n2: Int = fp2.nbits;
+    if n1 != n2 {
+        return 0;
+    }
+    let mut intersect_count = 0;
+    let mut union_count = 0;
+    let mut i = 0;
+    while i < n1 {
+        let b1: Int = list_get(fp1.bits, i);
+        let b2: Int = list_get(fp2.bits, i);
+        if (b1 == 1) && (b2 == 1) {
+            intersect_count = intersect_count + 1;
+        }
+        if (b1 == 1) || (b2 == 1) {
+            union_count = union_count + 1;
+        }
+        i = i + 1;
+    }
+    if union_count == 0 {
+        return 100;
+    }
+    return (intersect_count * 100) / union_count;
+}
+
+pub fn fingerprint_dice_similarity(fp1: Fingerprint, fp2: Fingerprint) -> Int {
+    let n1: Int = fp1.nbits;
+    let n2: Int = fp2.nbits;
+    if n1 != n2 {
+        return 0;
+    }
+    let mut intersect_count = 0;
+    let mut i = 0;
+    while i < n1 {
+        let b1: Int = list_get(fp1.bits, i);
+        let b2: Int = list_get(fp2.bits, i);
+        if (b1 == 1) && (b2 == 1) {
+            intersect_count = intersect_count + 1;
+        }
+        i = i + 1;
+    }
+    let d1: Int = fp1.density;
+    let d2: Int = fp2.density;
+    let total_bits = d1 + d2;
+    if total_bits == 0 {
+        return 100;
+    }
+    return (2 * intersect_count * 100) / total_bits;
+}
+
+// -------------------------------------------------------------------
+// Substructure Matcher
+// -------------------------------------------------------------------
+
+pub fn smiles_substructure_match(target: SmilesMolecule, query: SmilesMolecule) -> SubstructureMatch {
+    let mut matches: List[Int] = list_new();
+    let t_valid: Bool = target.is_valid;
+    let q_valid: Bool = query.is_valid;
+    let q_raw: String = query.smiles_raw;
+    let t_raw: String = target.smiles_raw;
+
+    if (t_valid == false) || (q_valid == false) {
+        return SubstructureMatch {
+            query_smiles: q_raw,
+            target_smiles: t_raw,
+            matched_atom_indices: matches,
+            is_match: false,
+        };
+    }
+
+    let q_len: Int = list_len(query.atoms);
+    let t_len: Int = list_len(target.atoms);
+
+    let mut q_i = 0;
+    let mut all_found = true;
+    while q_i < q_len {
+        let q_atom: Atom = list_get(query.atoms, q_i);
+        let q_z: Int = q_atom.atomic_number;
+        let q_aro: Bool = q_atom.is_aromatic;
+        let mut found_idx = 0 - 1;
+        let mut t_i = 0;
+        while t_i < t_len {
+            let t_atom: Atom = list_get(target.atoms, t_i);
+            let t_z: Int = t_atom.atomic_number;
+            let t_aro: Bool = t_atom.is_aromatic;
+            if (t_z == q_z) && (t_aro == q_aro) {
+                found_idx = t_i;
+            }
+            t_i = t_i + 1;
+        }
+        if found_idx >= 0 {
+            matches = list_push(matches, found_idx);
+        } else {
+            all_found = false;
+        }
+        q_i = q_i + 1;
+    }
+
+    return SubstructureMatch {
+        query_smiles: q_raw,
+        target_smiles: t_raw,
+        matched_atom_indices: matches,
+        is_match: all_found,
+    };
+}
+
+// -------------------------------------------------------------------
+// Work Metric Helper
+// -------------------------------------------------------------------
+
+pub fn smiles_do_work(mol: &SmilesMolecule) -> Int {
+    let ac: Int = (mol).atom_count;
+    let bc: Int = (mol).bond_count;
+    let rc: Int = (mol).ring_count;
+    return ac + bc + rc;
+}

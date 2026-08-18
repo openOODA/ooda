@@ -1,0 +1,134 @@
+// # ARMA Auto-Regressive Moving Average Graph Convolution
+//
+// Logline: Implements ARMA graph convolutional layers modeling rational filter frequency responses with localized recursions.
+//
+// Setup: Rational graph filter providing sharp spectral cutoffs and flexible frequency responses via recursive autoregressive iteration.
+//
+// Beats:
+//   1. Implement recursive autoregressive time-stepping X^{(t+1)} = sigma(L_tilde * X^{(t)} * W + X^{(0)} * V).
+//   2. Run K parallel ARMA filter stacks to capture multi-scale localized frequency behaviors.
+//   3. Average or concatenate multi-stack filtered responses for downstream node prediction.
+
+pub type ARMAConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    num_stacks: Int,
+    num_iterations: Int, // Number of autoregressive recursion steps (e.g. T=3)
+    dropout: Float,
+};
+
+pub type ARMALayer = struct {
+    config: ARMAConfig,
+    w_weights: List[Float], // num_stacks * (out_features * out_features)
+    v_weights: List[Float], // num_stacks * (in_features * out_features)
+};
+
+pub fn arma_config_new(
+    in_f: Int,
+    out_f: Int,
+    stacks: Int,
+    iters: Int,
+    drop: Float
+) -> ARMAConfig {
+    return ARMAConfig {
+        in_features: in_f,
+        out_features: out_f,
+        num_stacks: stacks,
+        num_iterations: iters,
+        dropout: drop,
+    };
+}
+
+pub fn arma_layer_init(config: ARMAConfig, seed: Int) -> ARMALayer {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let stacks: Int = (config).num_stacks;
+    let mut state: Int = seed;
+
+    let total_w: Int = stacks * out_f * out_f;
+    let mut w_mat: List[Float] = list_new();
+    let scale_w: Float = sqrt(2.0 / ((2 * out_f) as Float));
+    let mut i: Int = 0;
+    while i < total_w {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        let val_w: Float = ((((state % 2000) as Float) / 1000.0) - 1.0) * scale_w;
+        w_mat = list_push(w_mat, val_w);
+        i = i + 1;
+    }
+
+    let total_v: Int = stacks * in_f * out_f;
+    let mut v_mat: List[Float] = list_new();
+    let scale_v: Float = sqrt(2.0 / ((in_f + out_f) as Float));
+    let mut j: Int = 0;
+    while j < total_v {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        let val_v: Float = ((((state % 2000) as Float) / 1000.0) - 1.0) * scale_v;
+        v_mat = list_push(v_mat, val_v);
+        j = j + 1;
+    }
+
+    return ARMALayer {
+        config: config,
+        w_weights: w_mat,
+        v_weights: v_mat,
+    };
+}
+
+pub fn arma_stack_step(
+    layer: &ARMALayer,
+    stack_idx: Int,
+    node_id: Int,
+    neighbor_ids: List[Int],
+    x_prev_all: List[Float], // num_nodes * out_features
+    x_init_all: List[Float]  // num_nodes * in_features
+) -> List[Float] {
+    let cfg: ARMAConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let out_f: Int = (cfg).out_features;
+    let num_neighbors: Int = list_len(neighbor_ids);
+
+    let w_off: Int = stack_idx * out_f * out_f;
+    let v_off: Int = stack_idx * in_f * out_f;
+    let init_off: Int = node_id * in_f;
+
+    let mut out_h: List[Float] = list_new();
+    let mut o: Int = 0;
+    while o < out_f {
+        // First term: L_tilde * X_prev * W (averaged over neighbors)
+        let mut neigh_accum: Float = 0.0;
+        let mut n_idx: Int = 0;
+        while n_idx < num_neighbors {
+            let n_id: Int = list_get(neighbor_ids, n_idx);
+            let prev_off: Int = n_id * out_f;
+            let mut dot_w: Float = 0.0;
+            let mut c: Int = 0;
+            while c < out_f {
+                let xp: Float = list_get(x_prev_all, prev_off + c);
+                let w: Float = list_get((*layer).w_weights, w_off + (c * out_f) + o);
+                dot_w = dot_w + (xp * w);
+                c = c + 1;
+            }
+            neigh_accum = neigh_accum + dot_w;
+            n_idx = n_idx + 1;
+        }
+        let term1: Float = if num_neighbors > 0 { neigh_accum / (num_neighbors as Float) } else { 0.0 };
+
+        // Second term: X_init * V (skip connection from initial feature)
+        let mut term2: Float = 0.0;
+        let mut c2: Int = 0;
+        while c2 < in_f {
+            let x0: Float = list_get(x_init_all, init_off + c2);
+            let v: Float = list_get((*layer).v_weights, v_off + (c2 * out_f) + o);
+            term2 = term2 + (x0 * v);
+            c2 = c2 + 1;
+        }
+
+        let raw: Float = term1 + term2;
+        let act: Float = if raw > 0.0 { raw } else { 0.0 };
+        out_h = list_push(out_h, act);
+        o = o + 1;
+    }
+    return out_h;
+}

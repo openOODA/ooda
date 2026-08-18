@@ -1,0 +1,120 @@
+// # Sliding-Window Token Budget Allocator and Context Truncation
+//
+// Logline: Manages context window token quotas, prioritizes critical system prompts, and applies sliding-window truncation.
+//
+// Setup: Pure context optimization algorithm for LLM token budget management.
+//
+// Beats:
+//   1. Define TokenBudgetConfig, ContextMessage, and TokenBudgetManager structures.
+//   2. Calculate current token utilization and verify headroom before ingestion.
+//   3. Truncate oldest ephemeral messages while preserving critical pinned system messages.
+
+type ContextMessage = struct {
+    msg_id: Int,
+    role: String,         // "system", "user", "assistant", "tool"
+    content: String,
+    estimated_tokens: Int,
+    is_pinned: Bool,
+};
+
+type TokenBudgetConfig = struct {
+    max_context_tokens: Int,
+    reserved_completion_tokens: Int,
+    target_budget: Int,
+};
+
+type TokenBudgetManager = struct {
+    config: TokenBudgetConfig,
+    messages: List[ContextMessage],
+    total_tokens_used: Int,
+    evicted_count: Int,
+};
+
+pub fn token_budget_config_new(max_ctx: Int, completion_reserve: Int) -> TokenBudgetConfig {
+    let budget: Int = if max_ctx > completion_reserve { max_ctx - completion_reserve } else { max_ctx };
+    return TokenBudgetConfig {
+        max_context_tokens: max_ctx,
+        reserved_completion_tokens: completion_reserve,
+        target_budget: budget,
+    };
+}
+
+pub fn context_message_new(id: Int, role: String, content: String, est_tok: Int, pinned: Bool) -> ContextMessage {
+    return ContextMessage {
+        msg_id: id,
+        role: role,
+        content: content,
+        estimated_tokens: est_tok,
+        is_pinned: pinned,
+    };
+}
+
+pub fn token_budget_manager_new(cfg: TokenBudgetConfig) -> TokenBudgetManager {
+    let empty_msgs: List[ContextMessage] = list_new();
+    return TokenBudgetManager {
+        config: cfg,
+        messages: empty_msgs,
+        total_tokens_used: 0,
+        evicted_count: 0,
+    };
+}
+
+pub fn token_budget_available(mgr: &TokenBudgetManager) -> Int {
+    let budget: Int = (mgr).config.target_budget;
+    let used: Int = (mgr).total_tokens_used;
+    if used >= budget {
+        return 0;
+    }
+    return budget - used;
+}
+
+pub fn token_budget_add_message(
+    mgr: &mut TokenBudgetManager,
+    msg: ContextMessage
+) -> Bool {
+    let tok: Int = msg.estimated_tokens;
+    mgr.messages = list_push(mgr.messages, msg);
+    mgr.total_tokens_used = mgr.total_tokens_used + tok;
+
+    // Check if over budget; if so, evict oldest non-pinned messages
+    while mgr.total_tokens_used > mgr.config.target_budget {
+        let n: Int = list_len(mgr.messages);
+        if n <= 1 {
+            return false;
+        }
+
+        let mut found_idx: Int = -1;
+        let mut i: Int = 0;
+        while i < n {
+            let m: ContextMessage = list_get(mgr.messages, i);
+            if !((m).is_pinned) {
+                found_idx = i;
+                i = n; // break
+            }
+            i = i + 1;
+        }
+
+        if found_idx == -1 {
+            return false; // all pinned, cannot evict
+        }
+
+        let mut new_list: List[ContextMessage] = list_new();
+        let mut j: Int = 0;
+        let mut evicted_tok: Int = 0;
+        while j < n {
+            let cur: ContextMessage = list_get(mgr.messages, j);
+            if j == found_idx {
+                evicted_tok = (cur).estimated_tokens;
+            } else {
+                new_list = list_push(new_list, cur);
+            }
+            j = j + 1;
+        }
+
+        mgr.messages = new_list;
+        mgr.total_tokens_used = mgr.total_tokens_used - evicted_tok;
+        mgr.evicted_count = mgr.evicted_count + 1;
+    }
+
+    return true;
+}

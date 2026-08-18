@@ -1,0 +1,146 @@
+// # Fossen 6-DOF Marine Hydrodynamics Kinematics & Dynamics
+//
+// Logline: Implements nonlinear 6-DOF equations of motion, Euler angle transformations, and body-to-NED kinematics for marine craft.
+//
+// Setup: Fossen (2011/2021) standard formulation for autonomous underwater vehicle pose propagation and acceleration solving.
+//
+// Beats:
+//   1. Define 6-DOF pose eta = [x_north, y_east, z_down, phi_roll, theta_pitch, psi_yaw].
+//   2. Define 6-DOF body velocity nu = [u_surge, v_sway, w_heave, p_roll, q_pitch, r_yaw].
+//   3. Compute Euler angle rotation matrix R_b_n and attitude transformation matrix T_b_n.
+//   4. Integrate kinematic equations of motion eta_dot = J(eta) * nu.
+
+import "./auv_hydrodynamics_constants.oo";
+
+pub type AuvPose = struct {
+    x: Float,
+    y: Float,
+    z: Float,
+    phi: Float,
+    theta: Float,
+    psi: Float,
+};
+
+pub type AuvVelocity = struct {
+    u: Float,
+    v: Float,
+    w: Float,
+    p: Float,
+    q: Float,
+    r: Float,
+};
+
+pub type Auv6DofState = struct {
+    pose: AuvPose,
+    vel: AuvVelocity,
+};
+
+pub type Matrix3x3 = struct {
+    r11: Float,
+    r12: Float,
+    r13: Float,
+    r21: Float,
+    r22: Float,
+    r23: Float,
+    r31: Float,
+    r32: Float,
+    r33: Float,
+};
+
+pub fn auv_pose_zero() -> AuvPose {
+    return AuvPose {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        phi: 0.0,
+        theta: 0.0,
+        psi: 0.0,
+    };
+}
+
+pub fn auv_vel_zero() -> AuvVelocity {
+    return AuvVelocity {
+        u: 0.0,
+        v: 0.0,
+        w: 0.0,
+        p: 0.0,
+        q: 0.0,
+        r: 0.0,
+    };
+}
+
+pub fn auv_state_new(pose: AuvPose, vel: AuvVelocity) -> Auv6DofState {
+    return Auv6DofState {
+        pose: pose,
+        vel: vel,
+    };
+}
+
+pub fn fossen_rotation_matrix_body_to_ned(phi: Float, theta: Float, psi: Float) -> Matrix3x3 {
+    let cphi: Float = cos(phi);
+    let sphi: Float = sin(phi);
+    let cth: Float = cos(theta);
+    let sth: Float = sin(theta);
+    let cpsi: Float = cos(psi);
+    let spsi: Float = sin(psi);
+
+    return Matrix3x3 {
+        r11: (cpsi * cth),
+        r12: (cpsi * sth * sphi) - (spsi * cphi),
+        r13: (cpsi * sth * cphi) + (spsi * sphi),
+        r21: (spsi * cth),
+        r22: (spsi * sth * sphi) + (cpsi * cphi),
+        r23: (spsi * sth * cphi) - (cpsi * sphi),
+        r31: 0.0 - sth,
+        r32: cth * sphi,
+        r33: cth * cphi,
+    };
+}
+
+pub fn fossen_body_to_ned_linear_vel(phi: Float, theta: Float, psi: Float, u: Float, v: Float, w: Float) -> Vector3 {
+    let rot: Matrix3x3 = fossen_rotation_matrix_body_to_ned(phi, theta, psi);
+    let x_dot: Float = ((rot).r11 * u) + ((rot).r12 * v) + ((rot).r13 * w);
+    let y_dot: Float = ((rot).r21 * u) + ((rot).r22 * v) + ((rot).r23 * w);
+    let z_dot: Float = ((rot).r31 * u) + ((rot).r32 * v) + ((rot).r33 * w);
+    return vec3_new(x_dot, y_dot, z_dot);
+}
+
+pub fn fossen_body_to_ned_angular_rates(phi: Float, theta: Float, p: Float, q: Float, r: Float) -> Vector3 {
+    let cth: Float = cos(theta);
+    let sth: Float = sin(theta);
+    let sphi: Float = sin(phi);
+    let cphi: Float = cos(phi);
+
+    let mut safe_cth: Float = cth;
+    if math_abs(safe_cth) < 0.001 {
+        safe_cth = 0.001;
+    }
+    let sec_th: Float = 1.0 / safe_cth;
+    let tan_th: Float = sth * sec_th;
+
+    let phi_dot: Float = p + ((q * sphi + r * cphi) * tan_th);
+    let theta_dot: Float = (q * cphi) - (r * sphi);
+    let psi_dot: Float = (q * sphi + r * cphi) * sec_th;
+
+    return vec3_new(phi_dot, theta_dot, psi_dot);
+}
+
+pub fn fossen_kinematics_step(pose: &AuvPose, vel: &AuvVelocity, dt: Float) -> AuvPose {
+    let p_dot: Vector3 = fossen_body_to_ned_linear_vel(
+        (pose).phi, (pose).theta, (pose).psi,
+        (vel).u, (vel).v, (vel).w
+    );
+    let a_dot: Vector3 = fossen_body_to_ned_angular_rates(
+        (pose).phi, (pose).theta,
+        (vel).p, (vel).q, (vel).r
+    );
+
+    return AuvPose {
+        x: (pose).x + ((p_dot).x * dt),
+        y: (pose).y + ((p_dot).y * dt),
+        z: (pose).z + ((p_dot).z * dt),
+        phi: (pose).phi + ((a_dot).x * dt),
+        theta: (pose).theta + ((a_dot).y * dt),
+        psi: (pose).psi + ((a_dot).z * dt),
+    };
+}

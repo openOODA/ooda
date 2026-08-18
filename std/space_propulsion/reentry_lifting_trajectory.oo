@@ -1,0 +1,93 @@
+// # Lifting Re-entry Flight Dynamics & Bank Angle Roll Control
+//
+// Logline: Solves lifting entry flight dynamics, L/D roll angle modulation, cross-range / down-range footprint reachability, and skip re-entry trajectory.
+//
+// Setup: Formulates 3-DOF entry equations of motion with bank angle roll guidance for Starship/Shuttle/Apollo atmospheric entry.
+//
+// Beats:
+//   1. Define entry vehicle mass, reference wing/body area, hypersonic Lift and Drag polar coefficients, and bank angle (sigma).
+//   2. Compute aerodynamic lift and drag forces, vertical lift component (L*cos(sigma)), and lateral side-force (L*sin(sigma)).
+//   3. Calculate altitude descent rate (h_dot), velocity deceleration rate (v_dot), and accessible cross-range footprint.
+
+import "./space_propulsion_constants.oo";
+
+pub type LiftingEntryVehicle = struct {
+    mass_kg: Float, // e.g. 100000 kg (Starship scale)
+    reference_area_m2: Float, // e.g. 120 m2
+    cl_hypersonic: Float, // e.g. 0.45
+    cd_hypersonic: Float, // e.g. 0.90 (L/D = 0.50)
+    bank_angle_deg: Float, // roll bank angle sigma
+};
+
+pub type LiftingEntryDerivatives = struct {
+    altitude_rate_m_s: Float,
+    velocity_rate_m_s2: Float,
+    flight_path_angle_rate_deg_s: Float,
+    heading_angle_rate_deg_s: Float,
+    lift_force_kn: Float,
+    drag_force_kn: Float,
+    load_factor_g: Float,
+};
+
+pub fn lifting_entry_vehicle_default() -> LiftingEntryVehicle {
+    return LiftingEntryVehicle {
+        mass_kg: 105000.0,
+        reference_area_m2: 130.0,
+        cl_hypersonic: 0.48,
+        cd_hypersonic: 0.96, // L/D = 0.50
+        bank_angle_deg: 45.0,
+    };
+}
+
+pub fn entry_compute_derivatives(
+    veh: LiftingEntryVehicle,
+    alt_m: Float,
+    vel_m_s: Float,
+    gamma_deg: Float,
+    psi_deg: Float
+) -> LiftingEntryDerivatives {
+    let m: Float = (veh).mass_kg;
+    let s_ref: Float = (veh).reference_area_m2;
+    let cl: Float = (veh).cl_hypersonic;
+    let cd: Float = (veh).cd_hypersonic;
+    let sigma_rad: Float = (veh).bank_angle_deg * const_deg_to_rad();
+    let gamma_rad: Float = gamma_deg * const_deg_to_rad();
+
+    let re: Float = const_radius_earth();
+    let r_curr: Float = re + alt_m;
+    let g_loc: Float = const_g0() * ((re / r_curr) * (re / r_curr));
+
+    // Density at altitude: rho(h) = rho0 * exp(-h / 7200)
+    let rho: Float = 1.225 * math_exp(0.0 - (alt_m / 7200.0));
+    let q_dyn: Float = 0.5 * rho * (vel_m_s * vel_m_s);
+
+    let lift_n: Float = q_dyn * s_ref * cl;
+    let drag_n: Float = q_dyn * s_ref * cd;
+
+    // Equations of motion for 3-DOF spherical rotating planet:
+    // h_dot = v * sin(gamma)
+    let h_dot: Float = vel_m_s * sin(gamma_rad);
+
+    // v_dot = -D/m - g * sin(gamma)
+    let v_dot: Float = (0.0 - (drag_n / m)) - (g_loc * sin(gamma_rad));
+
+    // gamma_dot = (L * cos(sigma) / (m * v)) - (g / v - v / r) * cos(gamma)
+    let term_centrif: Float = (g_loc / (vel_m_s + 0.1)) - (vel_m_s / r_curr);
+    let lift_vert: Float = (lift_n * cos(sigma_rad)) / (m * (vel_m_s + 0.1));
+    let gamma_dot_rad: Float = lift_vert - (term_centrif * cos(gamma_rad));
+
+    // psi_dot (heading angle rate) = (L * sin(sigma)) / (m * v * cos(gamma))
+    let lift_lat: Float = (lift_n * sin(sigma_rad)) / (m * (vel_m_s + 0.1) * (cos(gamma_rad) + 0.001));
+
+    let g_load: Float = sqrt((lift_n * lift_n) + (drag_n * drag_n)) / (m * const_g0());
+
+    return LiftingEntryDerivatives {
+        altitude_rate_m_s: h_dot,
+        velocity_rate_m_s2: v_dot,
+        flight_path_angle_rate_deg_s: gamma_dot_rad * const_rad_to_deg(),
+        heading_angle_rate_deg_s: lift_lat * const_rad_to_deg(),
+        lift_force_kn: lift_n / 1000.0,
+        drag_force_kn: drag_n / 1000.0,
+        load_factor_g: g_load,
+    };
+}

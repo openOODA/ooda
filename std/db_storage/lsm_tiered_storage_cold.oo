@@ -1,0 +1,98 @@
+// # LSM Tiered Storage & Cold Data Migration
+//
+// Logline: Manages multi-tier storage offload, identifying cold SSTable files and migrating immutable blocks to object storage.
+//
+// Setup: Hierarchical storage tiering balancing NVMe fast local writes with cost-effective cold object storage archives.
+//
+// Beats:
+//   1. Define StorageTier, TierMigrationPolicy, and ColdSSTablePointer structures.
+//   2. Implement access heat scoring and cold candidate SSTable detection.
+//   3. Implement migration execution and remote object pointer resolution.
+
+pub type ColdSSTablePointer = struct {
+    file_id: Int,
+    tier_id: Int,
+    remote_uri: String,
+    size_bytes: Int,
+    created_timestamp: Int,
+    last_access_timestamp: Int,
+};
+
+pub type TierMigrationPolicy = struct {
+    hot_tier_max_bytes: Int,
+    cold_age_threshold_seconds: Int,
+    enable_zstd_compression: Bool,
+};
+
+pub type TierStorageManager = struct {
+    policy: TierMigrationPolicy,
+    local_files: List[ColdSSTablePointer],
+    cold_files: List[ColdSSTablePointer],
+    total_migrated_bytes: Int,
+};
+
+pub fn tier_migration_policy_default() -> TierMigrationPolicy {
+    return TierMigrationPolicy {
+        hot_tier_max_bytes: 107374182400,
+        cold_age_threshold_seconds: 604800,
+        enable_zstd_compression: true,
+    };
+}
+
+pub fn tier_storage_manager_new(pol: TierMigrationPolicy) -> TierStorageManager {
+    let empty_local: List[ColdSSTablePointer] = list_new();
+    let empty_cold: List[ColdSSTablePointer] = list_new();
+    return TierStorageManager {
+        policy: pol,
+        local_files: empty_local,
+        cold_files: empty_cold,
+        total_migrated_bytes: 0,
+    };
+}
+
+pub fn is_file_cold(file: ColdSSTablePointer, now_ts: Int, age_thresh: Int) -> Bool {
+    let age: Int = now_ts - (file).last_access_timestamp;
+    return age >= age_thresh;
+}
+
+pub fn evaluate_and_migrate_cold_files(
+    mgr: TierStorageManager,
+    now_ts: Int,
+    remote_prefix: String
+) -> TierStorageManager {
+    let locals: List[ColdSSTablePointer] = (mgr).local_files;
+    let colds: List[ColdSSTablePointer] = (mgr).cold_files;
+    let thresh: Int = (mgr).policy.cold_age_threshold_seconds;
+
+    let mut remaining_local: List[ColdSSTablePointer] = list_new();
+    let mut updated_cold: List[ColdSSTablePointer] = colds;
+    let mut migrated_bytes: Int = (mgr).total_migrated_bytes;
+
+    let n: Int = list_len(locals);
+    let mut i: Int = 0;
+    while i < n {
+        let f: ColdSSTablePointer = list_get(locals, i);
+        if is_file_cold(f, now_ts, thresh) {
+            let migrated: ColdSSTablePointer = ColdSSTablePointer {
+                file_id: (f).file_id,
+                tier_id: 2,
+                remote_uri: remote_prefix + "/cold_sst_" + ((f).file_id).to_string() + ".sst",
+                size_bytes: (f).size_bytes,
+                created_timestamp: (f).created_timestamp,
+                last_access_timestamp: (f).last_access_timestamp,
+            };
+            updated_cold = list_push(updated_cold, migrated);
+            migrated_bytes = migrated_bytes + (f).size_bytes;
+        } else {
+            remaining_local = list_push(remaining_local, f);
+        }
+        i = i + 1;
+    }
+
+    return TierStorageManager {
+        policy: (mgr).policy,
+        local_files: remaining_local,
+        cold_files: updated_cold,
+        total_migrated_bytes: migrated_bytes,
+    };
+}

@@ -1,0 +1,105 @@
+// # Data Execution Prevention & W^X Memory Page Policy Enforcer
+//
+// Logline: Enforces Write-XOR-Execute (W^X) invariants, audits memory page permissions, and blocks RWX code injection.
+//
+// Setup: Validates memory page permission maps (PROT_READ, PROT_WRITE, PROT_EXEC).
+//
+// Beats:
+//   1. Define PageProtection (R, W, X flags), MemoryRegion, and DepPolicy descriptors.
+//   2. Audit memory page mappings for hazardous RWX (Read-Write-Execute) permissions.
+//   3. Enforce JIT-compliant W^X state transitions (mprotect flip between write and exec).
+
+pub type PageProtection = struct {
+    read: Bool,
+    write: Bool,
+    execute: Bool,
+};
+
+pub type MemoryRegion = struct {
+    start_address: Int,
+    size_bytes: Int,
+    prot: PageProtection,
+    region_name: String,
+};
+
+pub type DepPolicyEnforcer = struct {
+    strict_wx_only: Bool,
+    allow_jit_flipping: Bool,
+    regions: List[MemoryRegion],
+    region_count: Int,
+    rwx_violations: Int,
+};
+
+pub fn page_prot_rx() -> PageProtection {
+    return PageProtection { read: true, write: false, execute: true };
+}
+
+pub fn page_prot_rw() -> PageProtection {
+    return PageProtection { read: true, write: true, execute: false };
+}
+
+pub fn page_prot_rwx() -> PageProtection {
+    return PageProtection { read: true, write: true, execute: true };
+}
+
+pub fn dep_policy_enforcer_new(strict: Bool) -> DepPolicyEnforcer {
+    let empty_regions: List[MemoryRegion] = list_new();
+    return DepPolicyEnforcer {
+        strict_wx_only: strict,
+        allow_jit_flipping: true,
+        regions: empty_regions,
+        region_count: 0,
+        rwx_violations: 0,
+    };
+}
+
+pub fn dep_policy_register_region(
+    enf: &mut DepPolicyEnforcer,
+    start: Int,
+    sz: Int,
+    prot: PageProtection,
+    name: String
+) -> Bool {
+    // Check W^X invariant: cannot be both W and X
+    if prot.write && prot.execute {
+        (enf).rwx_violations = (enf).rwx_violations + 1;
+        if (enf).strict_wx_only {
+            return false; // Reject RWX allocation
+        }
+    }
+    let region = MemoryRegion {
+        start_address: start,
+        size_bytes: sz,
+        prot: prot,
+        region_name: name,
+    };
+    (enf).regions = list_push((enf).regions, region);
+    (enf).region_count = (enf).region_count + 1;
+    return true;
+}
+
+pub fn dep_policy_flip_jit_page(
+    enf: &mut DepPolicyEnforcer,
+    addr: Int,
+    to_executable: Bool
+) -> Bool {
+    let count: Int = (enf).region_count;
+    let mut i: Int = 0;
+    while i < count {
+        let mut reg: MemoryRegion = list_get((enf).regions, i);
+        if reg.start_address == addr {
+            if to_executable {
+                // Switch RW -> RX
+                reg.prot.write = false;
+                reg.prot.execute = true;
+            } else {
+                // Switch RX -> RW
+                reg.prot.write = true;
+                reg.prot.execute = false;
+            }
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}

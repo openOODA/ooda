@@ -1,0 +1,115 @@
+// # eBPF Ring Buffer & Perf Event Ring
+//
+// Logline: Implements multi-producer single-consumer circular ring buffer with reserve/commit/discard semantics.
+//
+// Setup: High-throughput lockless telemetry channel streaming kernel events to userspace daemons.
+//
+// Beats:
+//   1. Manage circular memory buffer with atomic producer and consumer head/tail offsets.
+//   2. Support atomic record reservation with size headers and status flags (committed, discarded).
+//   3. Handle buffer overflow conditions, drop counter increments, and wrapping page boundaries.
+
+pub type RingBufferRecord = struct {
+    record_id: Int,
+    payload_len: Int,
+    data_hash: Int,
+    is_committed: Bool,
+};
+
+pub type EbpfRingBuffer = struct {
+    records: List[RingBufferRecord],
+    capacity: Int,
+    head: Int,
+    tail: Int,
+    dropped_records: Int,
+    total_bytes_written: Int,
+};
+
+pub fn ebpf_ring_buffer_new(capacity: Int) -> EbpfRingBuffer {
+    let empty_records: List[RingBufferRecord] = list_new();
+    return EbpfRingBuffer {
+        records: empty_records,
+        capacity: capacity,
+        head: 0,
+        tail: 0,
+        dropped_records: 0,
+        total_bytes_written: 0,
+    };
+}
+
+pub fn ebpf_ring_buffer_reserve(
+    rb: &mut EbpfRingBuffer,
+    rec_id: Int,
+    payload_len: Int,
+    hash: Int
+) -> Bool {
+    let current_used: Int = list_len((rb).records);
+    if current_used >= (rb).capacity {
+        (rb).dropped_records = (rb).dropped_records + 1;
+        return false;
+    }
+
+    let rec = RingBufferRecord {
+        record_id: rec_id,
+        payload_len: payload_len,
+        data_hash: hash,
+        is_committed: false,
+    };
+
+    (rb).records = list_push((rb).records, rec);
+    (rb).head = ((rb).head + 1) % (rb).capacity;
+    return true;
+}
+
+pub fn ebpf_ring_buffer_commit(rb: &mut EbpfRingBuffer, rec_id: Int) -> Bool {
+    let n: Int = list_len((rb).records);
+    let mut i: Int = 0;
+    let mut updated: List[RingBufferRecord] = list_new();
+    let mut found: Bool = false;
+
+    while i < n {
+        let r: RingBufferRecord = list_get((rb).records, i);
+        if (r).record_id == rec_id && !(r).is_committed {
+            let committed_r = RingBufferRecord {
+                record_id: (r).record_id,
+                payload_len: (r).payload_len,
+                data_hash: (r).data_hash,
+                is_committed: true,
+            };
+            (rb).total_bytes_written = (rb).total_bytes_written + (r).payload_len;
+            updated = list_push(updated, committed_r);
+            found = true;
+        } else {
+            updated = list_push(updated, r);
+        }
+        i = i + 1;
+    }
+
+    (rb).records = updated;
+    return found;
+}
+
+pub fn ebpf_ring_buffer_consume(rb: &mut EbpfRingBuffer) -> Int {
+    let n: Int = list_len((rb).records);
+    if n == 0 {
+        return 0;
+    }
+
+    let mut remaining: List[RingBufferRecord] = list_new();
+    let mut consumed_count: Int = 0;
+    let mut i: Int = 0;
+
+    while i < n {
+        let r: RingBufferRecord = list_get((rb).records, i);
+        if i == 0 && (r).is_committed {
+            consumed_count = 1;
+            (rb).tail = ((rb).tail + 1) % (rb).capacity;
+        } else {
+            remaining = list_push(remaining, r);
+        }
+        i = i + 1;
+    }
+
+    (rb).records = remaining;
+    return consumed_count;
+}

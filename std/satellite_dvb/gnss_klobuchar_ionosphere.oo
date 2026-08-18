@@ -1,0 +1,79 @@
+// # GPS Klobuchar Broadcast Ionospheric Model
+//
+// Logline: Implements IS-GPS-200 Klobuchar ionospheric delay algorithm using broadcast alpha and beta coefficients.
+//
+// Setup: Pure single-frequency GNSS receiver ionospheric error correction module.
+//
+// Beats:
+//   1. Calculate Ionospheric Pierce Point (IPP) sub-ionospheric coordinates and geomagnetic latitude.
+//   2. Compute local solar time at IPP and cosine diurnal amplitude curve.
+//   3. Apply obliquity slant factor F_obliq to scale vertical delay to line-of-sight path delay (seconds/meters).
+
+pub type KlobucharCoeffs = struct {
+    alpha0: Float, alpha1: Float, alpha2: Float, alpha3: Float,
+    beta0: Float,  beta1: Float,  beta2: Float,  beta3: Float,
+};
+
+pub fn klobuchar_coeffs_default() -> KlobucharCoeffs {
+    return KlobucharCoeffs {
+        alpha0: 0.00000001118,
+        alpha1: 0.000000007451,
+        alpha2: -0.00000005960,
+        alpha3: -0.0000001192,
+        beta0: 90110.0,
+        beta1: 65540.0,
+        beta2: -131100.0,
+        beta3: -393200.0,
+    };
+}
+
+pub fn klobuchar_calc_slant_delay_m(
+    coeffs: &KlobucharCoeffs,
+    user_lat_deg: Float,
+    user_lon_deg: Float,
+    sat_elevation_deg: Float,
+    sat_azimuth_deg: Float,
+    gps_time_of_week_s: Float
+) -> Float {
+    let pi_val: Float = 3.141592653589793;
+    let user_lat_semicircles: Float = user_lat_deg / 180.0;
+    let user_lon_semicircles: Float = user_lon_deg / 180.0;
+    let elev_semicircles: Float = sat_elevation_deg / 180.0;
+    let az_rad: Float = (sat_azimuth_deg * pi_val) / 180.0;
+
+    // Earth angle psi = 0.0137 / (elev + 0.11) - 0.022
+    let psi: Float = (0.0137 / (elev_semicircles + 0.11)) - 0.022;
+
+    // Sub-ionospheric latitude
+    let mut phi_i: Float = user_lat_semicircles + (psi * cos(az_rad));
+    if phi_i > 0.416 { phi_i = 0.416; }
+    if phi_i < -0.416 { phi_i = -0.416; }
+
+    // Geomagnetic latitude
+    let phi_m: Float = phi_i + (0.064 * cos((phi_i - 0.291) * pi_val));
+
+    // Obliquity factor F
+    let f_obliq: Float = 1.0 + (16.0 * (0.53 - elev_semicircles) * (0.53 - elev_semicircles) * (0.53 - elev_semicircles));
+
+    // Local time at IPP
+    let t_local: Float = (43200.0 * user_lon_semicircles) + gps_time_of_week_s;
+    let mut t_mod: Float = t_local;
+    while t_mod >= 86400.0 { t_mod = t_mod - 86400.0; }
+    while t_mod < 0.0 { t_mod = t_mod + 86400.0; }
+
+    // Amplitude A and Period P
+    let mut a: Float = (coeffs).alpha0 + ((coeffs).alpha1 * phi_m) + ((coeffs).alpha2 * phi_m * phi_m) + ((coeffs).alpha3 * phi_m * phi_m * phi_m);
+    if a < 0.0 { a = 0.0; }
+    let mut p: Float = (coeffs).beta0 + ((coeffs).beta1 * phi_m) + ((coeffs).beta2 * phi_m * phi_m) + ((coeffs).beta3 * phi_m * phi_m * phi_m);
+    if p < 72000.0 { p = 72000.0; }
+
+    let x: Float = (2.0 * pi_val * (t_mod - 50400.0)) / p;
+    let mut t_iono_s: Float = 0.000000005 * f_obliq; // 5 ns night-time constant
+    if (x >= -1.57) && (x <= 1.57) {
+        let cos_x: Float = cos(x);
+        t_iono_s = (0.000000005 + (a * cos_x)) * f_obliq;
+    }
+
+    let c: Float = 299792458.0;
+    return t_iono_s * c;
+}

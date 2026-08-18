@@ -1,0 +1,126 @@
+// # Gravitational Wave Inspiral-Merger-Ringdown (IMR) Chirp Waveform
+//
+// Logline: Synthesizes complete Inspiral-Merger-Ringdown (IMR) gravitational wave strain waveforms for compact binary coalescences (BBH/BNS).
+//
+// Setup: Implements PhenomA/PhenomB post-Newtonian frequency evolution, chirp mass M_c, and Lorentzian ringdown damping.
+//
+// Beats:
+//   1. Compute binary chirp mass M_c = (m1 * m2)^(3/5) / (m1 + m2)^(1/5) and symmetric mass ratio eta = m1*m2 / (m1 + m2)^2.
+//   2. Compute instantaneous orbital frequency f_gw(t) and post-Newtonian inspiral phase up to merger time t_merge.
+//   3. Compute merger amplitude peak and exponentially damped quasi-normal mode ringdown waveform.
+
+import "./astro_rel_constants.oo";
+
+pub type GravitationalWaveChirpPoint = struct {
+    time_to_merger_s: Float, // t - t_merger (negative for inspiral, positive for ringdown)
+    gw_frequency_hz: Float,
+    strain_amplitude: Float,
+    phase_rad: Float,
+    regime_id: Int, // 1: Inspiral, 2: Merger, 3: Ringdown
+};
+
+pub fn gw_chirp_mass_kg(m1_kg: Float, m2_kg: Float) -> Float {
+    if m1_kg <= 0.0 || m2_kg <= 0.0 {
+        return 0.0;
+    }
+    let m_total: Float = m1_kg + m2_kg;
+    let num: Float = pow(m1_kg * m2_kg, 0.6);
+    let den: Float = pow(m_total, 0.2);
+    return num / den;
+}
+
+pub fn gw_symmetric_mass_ratio(m1_kg: Float, m2_kg: Float) -> Float {
+    let m_tot: Float = m1_kg + m2_kg;
+    if m_tot <= 0.0 {
+        return 0.0;
+    }
+    return (m1_kg * m2_kg) / (m_tot * m_tot);
+}
+
+pub fn gw_inspiral_frequency_hz(chirp_mass_kg: Float, tau_to_merger_s: Float) -> Float {
+    if tau_to_merger_s <= 0.0001 || chirp_mass_kg <= 0.0 {
+        return 0.0;
+    }
+    // 0PN chirp frequency: f_gw(tau) = (1 / pi) * (5 / 256 * tau)^(-3/8) * (G*M_c / c^3)^(-5/8)
+    let g_val: Float = const_g();
+    let c_val: Float = const_c();
+    let c3: Float = c_val * (c_val * c_val);
+
+    let t_geom: Float = (g_val * chirp_mass_kg) / c3; // M_c in time units
+    let pi_val: Float = const_pi();
+
+    let factor1: Float = pow((5.0 / 256.0) / tau_to_merger_s, 0.375); // tau^(-3/8)
+    let factor2: Float = pow(t_geom, 0.0 - 0.625); // t_geom^(-5/8)
+
+    return (1.0 / (8.0 * pi_val)) * factor1 * factor2;
+}
+
+pub fn gw_imr_waveform_sample(
+    m1_kg: Float,
+    m2_kg: Float,
+    distance_m: Float,
+    time_offset_s: Float
+) -> GravitationalWaveChirpPoint {
+    let m_c: Float = gw_chirp_mass_kg(m1_kg, m2_kg);
+    let m_tot: Float = m1_kg + m2_kg;
+
+    let g_val: Float = const_g();
+    let c_val: Float = const_c();
+    let c2: Float = c_val * c_val;
+    let c4: Float = c2 * c2;
+
+    // Merger / ISCO frequency f_isco = c^3 / (6^(3/2) * pi * G * M_tot)
+    let f_isco: Float = (c_val * c2) / (pow(6.0, 1.5) * const_pi() * g_val * m_tot);
+
+    // Ringdown quasi-normal mode frequency f_qnm ~ 1.5 * f_isco, damping time tau_qnm ~ 10 * G*M_tot/c^3
+    let f_qnm: Float = 1.5 * f_isco;
+    let tau_ringdown: Float = (10.0 * g_val * m_tot) / (c_val * c2);
+
+    if time_offset_s < 0.0 {
+        // Inspiral Regime (time_offset_s is -tau)
+        let tau: Float = math_abs(time_offset_s);
+        let f_gw: Float = math_min(gw_inspiral_frequency_hz(m_c, tau), f_isco);
+
+        // Strain amplitude: h(t) = 4 / d * (G*M_c / c^2)^(5/4) * (pi*f_gw / c)^(2/3)
+        let term1: Float = pow((g_val * m_c) / c2, 1.25);
+        let term2: Float = pow((const_pi() * f_gw) / c_val, 0.6666666666666666);
+        let amp: Float = (4.0 / distance_m) * term1 * term2;
+
+        // Inspiral phase: phi(tau) = -2 * (5 * G * M_c / c^3)^(-5/8) * tau^(5/8)
+        let t_geom: Float = (g_val * m_c) / (c_val * c2);
+        let phase: Float = (0.0 - 2.0) * pow(tau / (5.0 * t_geom), 0.625);
+
+        return GravitationalWaveChirpPoint {
+            time_to_merger_s: time_offset_s,
+            gw_frequency_hz: f_gw,
+            strain_amplitude: amp,
+            phase_rad: phase,
+            regime_id: 1,
+        };
+    } else if time_offset_s <= 0.001 {
+        // Merger peak
+        let amp_peak: Float = (g_val * m_tot) / (distance_m * c2);
+        return GravitationalWaveChirpPoint {
+            time_to_merger_s: time_offset_s,
+            gw_frequency_hz: f_isco,
+            strain_amplitude: amp_peak,
+            phase_rad: 0.0,
+            regime_id: 2,
+        };
+    } else {
+        // Ringdown Regime (damped sinusoid)
+        let amp_peak: Float = (g_val * m_tot) / (distance_m * c2);
+        let decay_arg: Float = (0.0 - time_offset_s) / math_max(tau_ringdown, 0.0001);
+        let decay: Float = exp(decay_arg);
+        let amp_ring: Float = amp_peak * decay;
+        let phase_ring: Float = (const_two_pi() * f_qnm) * time_offset_s;
+
+        return GravitationalWaveChirpPoint {
+            time_to_merger_s: time_offset_s,
+            gw_frequency_hz: f_qnm,
+            strain_amplitude: amp_ring,
+            phase_rad: phase_ring,
+            regime_id: 3,
+        };
+    }
+}

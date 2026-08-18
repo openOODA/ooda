@@ -1,0 +1,125 @@
+// # Battery Dispatch Schedule & Smart Grid Control
+//
+// Logline: Generates and validates energy storage dispatch commands for peak shaving and grid balancing.
+//
+// Setup: Grid battery coordination algorithms importing the by-value bank module.
+//
+// Beats:
+//   1. Construct DispatchSchedule structures and validate target power limits.
+//   2. Calculate optimal dispatch power commands for peak shaving and arbitrage.
+//   3. Step battery facility state under active dispatch schedules.
+
+import "./battery_bank.oo";
+
+type DispatchSchedule = struct {
+    target_power_kw: Float,
+    duration_hours: Float,
+    time_window_start: Int,
+    time_window_end: Int,
+    mode: Int,
+    priority: Int,
+    is_active: Bool
+};
+
+pub fn dispatch_schedule_new(target_kw: Float, duration_hours: Float, mode: Int, priority: Int) -> DispatchSchedule {
+    return DispatchSchedule {
+        target_power_kw: target_kw,
+        duration_hours: duration_hours,
+        time_window_start: 0,
+        time_window_end: 24,
+        mode: mode,
+        priority: priority,
+        is_active: true
+    };
+}
+
+pub fn dispatch_schedule_peak_shaving(peak_demand_kw: Float, target_threshold_kw: Float, duration_hours: Float) -> DispatchSchedule {
+    let mut discharge_kw: Float = peak_demand_kw - target_threshold_kw;
+    if discharge_kw < 0.0 {
+        discharge_kw = 0.0;
+    }
+    return DispatchSchedule {
+        target_power_kw: discharge_kw,
+        duration_hours: duration_hours,
+        time_window_start: 14,
+        time_window_end: 19,
+        mode: 0,
+        priority: 8,
+        is_active: true
+    };
+}
+
+pub fn dispatch_schedule_arbitrage(target_kw: Float, duration_hours: Float, buy_hour: Int, sell_hour: Int) -> DispatchSchedule {
+    return DispatchSchedule {
+        target_power_kw: target_kw,
+        duration_hours: duration_hours,
+        time_window_start: buy_hour,
+        time_window_end: sell_hour,
+        mode: 3,
+        priority: 5,
+        is_active: true
+    };
+}
+
+pub fn dispatch_schedule_validate(schedule: DispatchSchedule, bank: BatteryBank) -> Bool {
+    if schedule.is_active == false {
+        return false;
+    }
+    if battery_bank_is_safe(bank, 60.0) == false {
+        return false;
+    }
+    let pwr: Float = schedule.target_power_kw;
+    let dur: Float = schedule.duration_hours;
+    let soc: StateOfCharge = battery_bank_get_soc(bank);
+    if pwr > 0.0 {
+        if pwr > bank.max_discharge_rate_kw {
+            return false;
+        }
+        let avail: Float = soc_available_discharge_kwh(soc);
+        if (pwr * dur) > avail {
+            return false;
+        }
+    } else {
+        let mut chg_pwr: Float = 0.0 - pwr;
+        if chg_pwr > bank.max_charge_rate_kw {
+            return false;
+        }
+        let avail_c: Float = soc_available_charge_kwh(soc);
+        if (chg_pwr * dur) > avail_c {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn dispatch_schedule_estimate_energy_kwh(schedule: DispatchSchedule) -> Float {
+    let mut pwr: Float = schedule.target_power_kw;
+    if pwr < 0.0 {
+        pwr = 0.0 - pwr;
+    }
+    return pwr * schedule.duration_hours;
+}
+
+pub fn dispatch_schedule_estimate_financial_yield(schedule: DispatchSchedule, buy_price_per_kwh: Float, sell_price_per_kwh: Float) -> Float {
+    let energy_kwh: Float = dispatch_schedule_estimate_energy_kwh(schedule);
+    let cost: Float = energy_kwh * buy_price_per_kwh;
+    let revenue: Float = energy_kwh * sell_price_per_kwh;
+    return revenue - cost;
+}
+
+/// Execute a dispatch step. Positive target_kw discharges; negative charges.
+pub fn battery_bank_apply_dispatch(bank: BatteryBank, schedule: DispatchSchedule, actual_duration_hours: Float) -> BatteryBank {
+    if dispatch_schedule_validate(schedule, bank) == false {
+        return bank;
+    }
+    let pwr: Float = schedule.target_power_kw;
+    if pwr > 0.0 {
+        let after: BatteryBank = battery_bank_discharge(bank, pwr, actual_duration_hours);
+        let moved: Float = bank.current_energy_kwh - after.current_energy_kwh;
+        return battery_bank_update_health(after, moved);
+    }
+    let chg_pwr: Float = 0.0 - pwr;
+    let after_c: BatteryBank = battery_bank_charge(bank, chg_pwr, actual_duration_hours);
+    let moved_c: Float = after_c.current_energy_kwh - bank.current_energy_kwh;
+    return battery_bank_update_health(after_c, moved_c);
+}

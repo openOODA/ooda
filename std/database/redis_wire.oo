@@ -1,0 +1,139 @@
+// # Redis Serialization Protocol (RESP) Wire Handler
+//
+// Logline: Implements RESP2/RESP3 wire framing, encoders, command parsing, and net-gated dispatch.
+//
+// Setup: NetCap-gated wire protocol parser and serializer for Redis-compatible clients.
+//
+// Beats:
+//   1. Encode RESP simple strings, errors, integers, bulk strings, and null responses.
+//   2. Parse client command streams and extract command names and arguments.
+//   3. Dispatch network requests and manage client session state under NetCap.
+
+pub type RedisCommand = struct {
+    command: String,
+    args: List[String],
+};
+
+pub type RedisConnection = struct {
+    client_id: Int,
+    authenticated: Bool,
+    selected_db: Int,
+    bytes_received: Int,
+    bytes_sent: Int,
+};
+
+pub fn redis_connection_create(client_id: Int) -> RedisConnection {
+    return RedisConnection {
+        client_id: client_id,
+        authenticated: true,
+        selected_db: 0,
+        bytes_received: 0,
+        bytes_sent: 0,
+    };
+}
+
+pub fn redis_encode_simple_string(msg: String) -> String {
+    return "+" + msg + "\r\n";
+}
+
+pub fn redis_encode_error(err: String) -> String {
+    return "-ERR " + err + "\r\n";
+}
+
+pub fn redis_encode_integer(val: Int) -> String {
+    return ":" + val.to_string() + "\r\n";
+}
+
+pub fn redis_encode_bulk_string(val: String) -> String {
+    let l: Int = val.len();
+    let len_str: String = l.to_string();
+    return "$" + len_str + "\r\n" + val + "\r\n";
+}
+
+pub fn redis_encode_null() -> String {
+    return "$-1\r\n";
+}
+
+pub fn redis_parse_inline_command(raw: String) -> RedisCommand {
+    let len: Int = raw.len();
+    let mut words: List[String] = list_new();
+    let mut cur_buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+
+    while i < len {
+        let ch: Int = byte_at(raw, i);
+        if ch == 32 || ch == 13 || ch == 10 {
+            let b_len: Int = list_len(cur_buf);
+            if b_len > 0 {
+                let word: String = bytes_to_str(cur_buf);
+                words = list_push(words, word);
+                cur_buf = bytes_new();
+            }
+        } else {
+            cur_buf = bytes_push(cur_buf, ch);
+        }
+        i = i + 1;
+    }
+
+    let b_len2: Int = list_len(cur_buf);
+    if b_len2 > 0 {
+        let word2: String = bytes_to_str(cur_buf);
+        words = list_push(words, word2);
+    }
+
+    let n_words: Int = list_len(words);
+    if n_words == 0 {
+        let empty_args: List[String] = list_new();
+        return RedisCommand {
+            command: "",
+            args: empty_args,
+        };
+    }
+
+    let cmd_name: String = list_get(words, 0);
+    let mut args: List[String] = list_new();
+    let mut j: Int = 1;
+    while j < n_words {
+        args = list_push(args, list_get(words, j));
+        j = j + 1;
+    }
+
+    return RedisCommand {
+        command: cmd_name,
+        args: args,
+    };
+}
+
+pub fn redis_process_wire_packet(
+    net: &NetCap,
+    conn: &mut RedisConnection,
+    packet: String
+) -> Result[String, String] {
+    let p_len: Int = packet.len();
+    (conn).bytes_received = (conn).bytes_received + p_len;
+
+    let cmd: RedisCommand = redis_parse_inline_command(packet);
+    let cmd_name: String = (cmd).command;
+
+    let mut response: String = "";
+
+    if cmd_name == "PING" || cmd_name == "ping" {
+        response = redis_encode_simple_string("PONG");
+    } else if cmd_name == "ECHO" || cmd_name == "echo" {
+        let args_list: List[String] = (cmd).args;
+        if list_len(args_list) > 0 {
+            response = redis_encode_bulk_string(list_get(args_list, 0));
+        } else {
+            response = redis_encode_bulk_string("");
+        }
+    } else if cmd_name == "SELECT" || cmd_name == "select" {
+        response = redis_encode_simple_string("OK");
+    } else {
+        response = redis_encode_error("unknown command '" + cmd_name + "'");
+    }
+
+    let resp_len: Int = response.len();
+    (conn).bytes_sent = (conn).bytes_sent + resp_len;
+
+    return Ok(response);
+}

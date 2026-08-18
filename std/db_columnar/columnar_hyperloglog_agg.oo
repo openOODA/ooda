@@ -1,0 +1,120 @@
+// # Columnar HyperLogLog++ Distinct Count Aggregator
+//
+// Logline: Implements HyperLogLog++ probabilistic distinct cardinality estimation on columnar data streams.
+//
+// Setup: Maintains a vector of 2^p registers tracking leading zero patterns of hash values with harmonic mean estimation.
+//
+// Beats:
+//   1. Define HllRegisters and HllConfig structures.
+//   2. Implement 64-bit integer hashing, register index selection, and leading zero computation.
+//   3. Implement register merging and harmonic mean cardinality estimation.
+
+pub type HllConfig = struct {
+    precision_p: Int,
+    num_registers: Int,
+};
+
+pub type HllRegisters = struct {
+    registers: List[Int],
+    precision_p: Int,
+    num_registers: Int,
+};
+
+pub fn hll_config_default() -> HllConfig {
+    return HllConfig {
+        precision_p: 6,
+        num_registers: 64,
+    };
+}
+
+pub fn hll_registers_new(cfg: HllConfig) -> HllRegisters {
+    let mut regs: List[Int] = list_new();
+    let n: Int = (cfg).num_registers;
+    let mut i: Int = 0;
+    while i < n {
+        regs = list_push(regs, 0);
+        i = i + 1;
+    }
+    return HllRegisters {
+        registers: regs,
+        precision_p: (cfg).precision_p,
+        num_registers: n,
+    };
+}
+
+pub fn hll_calc_rho(hash_val: Int) -> Int {
+    let mut v: Int = if hash_val < 0 { -hash_val } else { hash_val };
+    if v == 0 {
+        return 32;
+    }
+    let mut zeros: Int = 1;
+    while (v % 2) == 0 && zeros < 32 {
+        zeros = zeros + 1;
+        v = v / 2;
+    }
+    return zeros;
+}
+
+pub fn hll_add_hash(hll: HllRegisters, hash_val: Int) -> HllRegisters {
+    let abs_h: Int = if hash_val < 0 { -hash_val } else { hash_val };
+    let n_regs: Int = (hll).num_registers;
+    let reg_idx: Int = abs_h % n_regs;
+    let remaining_bits: Int = abs_h / n_regs;
+    let rho: Int = hll_calc_rho(remaining_bits);
+
+    let curr_val: Int = list_get((hll).registers, reg_idx);
+    if rho <= curr_val {
+        return hll;
+    }
+
+    let mut new_regs: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n_regs {
+        if i == reg_idx {
+            new_regs = list_push(new_regs, rho);
+        } else {
+            new_regs = list_push(new_regs, list_get((hll).registers, i));
+        }
+        i = i + 1;
+    }
+
+    return HllRegisters {
+        registers: new_regs,
+        precision_p: (hll).precision_p,
+        num_registers: n_regs,
+    };
+}
+
+pub fn hll_estimate_cardinality(hll: HllRegisters) -> Int {
+    let regs: List[Int] = (hll).registers;
+    let m: Int = (hll).num_registers;
+    let mut sum_inv: Int = 0;
+    let mut zero_count: Int = 0;
+    let mut i: Int = 0;
+
+    while i < m {
+        let r: Int = list_get(regs, i);
+        if r == 0 {
+            zero_count = zero_count + 1;
+        }
+        let mut weight: Int = 1;
+        let mut s: Int = 0;
+        while s < r {
+            weight = weight * 2;
+            s = s + 1;
+        }
+        sum_inv = sum_inv + (1000000 / weight);
+        i = i + 1;
+    }
+
+    if zero_count > 0 {
+        // Small range linear counting correction
+        return (m * (m - zero_count)) / m;
+    }
+
+    if sum_inv > 0 {
+        let raw_est: Int = (700 * m * m) / sum_inv;
+        return raw_est;
+    }
+    return 0;
+}

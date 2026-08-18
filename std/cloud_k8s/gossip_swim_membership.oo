@@ -1,0 +1,120 @@
+// # SWIM Gossip Cluster Membership Protocol
+//
+// Logline: Implements SWIM failure detection with ping-req indirect probing, suspicion mechanism, and piggybacked gossip.
+//
+// Setup: Scalable, weakly-consistent distributed group membership protocol with bounded message overhead.
+//
+// Beats:
+//   1. Track member health states (Alive, Suspect, Dead) with incarnation numbers.
+//   2. Drive periodic ping and indirect ping-req probing cycles to detect unresponsive peers.
+//   3. Disseminate state updates through piggybacked gossip messages with anti-entropy decay.
+
+pub type SwimMemberState = Int; // 0=Alive, 1=Suspect, 2=Dead
+
+pub type SwimMember = struct {
+    node_id: String,
+    address: String,
+    port: Int,
+    state: Int,
+    incarnation: Int,
+    last_status_change_ms: Int,
+};
+
+pub type SwimPingReq = struct {
+    origin_id: String,
+    target_id: String,
+    sequence_number: Int,
+};
+
+pub type SwimGossipMessage = struct {
+    source_id: String,
+    member_id: String,
+    state: Int,
+    incarnation: Int,
+};
+
+pub type SwimCluster = struct {
+    local_node_id: String,
+    local_incarnation: Int,
+    members: List[SwimMember],
+    probe_interval_ms: Int,
+    suspect_timeout_ms: Int,
+    last_probe_ms: Int,
+};
+
+pub fn swim_cluster_new(local_id: String, probe_interval_ms: Int, suspect_timeout_ms: Int) -> SwimCluster {
+    let empty_members: List[SwimMember] = list_new();
+    return SwimCluster {
+        local_node_id: local_id,
+        local_incarnation: 0,
+        members: empty_members,
+        probe_interval_ms: probe_interval_ms,
+        suspect_timeout_ms: suspect_timeout_ms,
+        last_probe_ms: 0,
+    };
+}
+
+pub fn swim_add_member(
+    cluster: &mut SwimCluster,
+    node_id: String,
+    addr: String,
+    port: Int,
+    now_ms: Int
+) {
+    let m: SwimMember = SwimMember {
+        node_id: node_id,
+        address: addr,
+        port: port,
+        state: 0, // Alive
+        incarnation: 0,
+        last_status_change_ms: now_ms,
+    };
+    (cluster).members = list_push((cluster).members, m);
+}
+
+pub fn swim_process_gossip(
+    cluster: &mut SwimCluster,
+    msg: &SwimGossipMessage,
+    now_ms: Int
+) -> Bool {
+    let n: Int = list_len((cluster).members);
+    let mut i: Int = 0;
+    while i < n {
+        let mut m: SwimMember = list_get((cluster).members, i);
+        if (m).node_id == (msg).member_id {
+            if (msg).incarnation > (m).incarnation {
+                (m).incarnation = (msg).incarnation;
+                (m).state = (msg).state;
+                (m).last_status_change_ms = now_ms;
+                return true;
+            }
+            if (msg).incarnation == (m).incarnation && (msg).state > (m).state {
+                (m).state = (msg).state;
+                (m).last_status_change_ms = now_ms;
+                return true;
+            }
+            return false;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn swim_check_suspect_timeouts(cluster: &mut SwimCluster, now_ms: Int) -> Int {
+    let n: Int = list_len((cluster).members);
+    let mut dead_count: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let mut m: SwimMember = list_get((cluster).members, i);
+        if (m).state == 1 { // Suspect
+            let elapsed: Int = now_ms - (m).last_status_change_ms;
+            if elapsed >= (cluster).suspect_timeout_ms {
+                (m).state = 2; // Dead
+                (m).last_status_change_ms = now_ms;
+                dead_count = dead_count + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return dead_count;
+}

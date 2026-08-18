@@ -1,0 +1,129 @@
+// # Partial-Time Window Barrier Options Engine
+//
+// Logline: Prices exotic partial-time window barrier derivatives (Window Up/Down In/Out) where knock-out boundaries are active during sub-intervals.
+//
+// Setup: Pure quantitative finance module calculating boundary crossing probabilities and conditional terminal payoffs.
+//
+// Beats:
+//   1. Define PartialBarrierContract and PartialBarrierResult structures.
+//   2. Compute bivariate Gaussian boundary absorption probabilities across active monitoring windows $[t_1, t_2]$.
+//   3. Value down-and-out / up-and-out partial barrier contracts with rebate adjustments.
+
+pub type PartialBarrierContract = struct {
+    strike: Float,
+    barrier_level: Float,
+    rebate_amount: Float,
+    window_start_years: Float,
+    window_end_years: Float,
+    expiry_years: Float,
+    spot_price: Float,
+    risk_free_rate: Float,
+    volatility: Float,
+    is_call: Bool,
+    is_knock_out: Bool,
+    is_down_barrier: Bool,
+};
+
+pub type PartialBarrierResult = struct {
+    option_price: Float,
+    vanilla_price: Float,
+    barrier_hit_probability: Float,
+    delta: Float,
+    discounted_rebate: Float,
+};
+
+pub fn pb_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn pb_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (pb_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn pb_bs_eval(s: Float, k: Float, t: Float, r: Float, vol: Float, is_call: Bool) -> Float {
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    let df: Float = exp((0.0 - r) * t);
+
+    if is_call {
+        return (s * pb_norm_cdf(d1)) - (k * df * pb_norm_cdf(d2));
+    }
+    return (k * df * pb_norm_cdf(0.0 - d2)) - (s * pb_norm_cdf(0.0 - d1));
+}
+
+pub fn partial_barrier_new(
+    k: Float,
+    h: Float,
+    rebate: Float,
+    t1: Float,
+    t2: Float,
+    t_exp: Float,
+    s: Float,
+    r: Float,
+    vol: Float,
+    is_call: Bool,
+    is_ko: Bool,
+    is_down: Bool
+) -> PartialBarrierContract {
+    return PartialBarrierContract {
+        strike: k,
+        barrier_level: h,
+        rebate_amount: rebate,
+        window_start_years: t1,
+        window_end_years: t2,
+        expiry_years: t_exp,
+        spot_price: s,
+        risk_free_rate: r,
+        volatility: vol,
+        is_call: is_call,
+        is_knock_out: is_ko,
+        is_down_barrier: is_down,
+    };
+}
+
+pub fn evaluate_partial_barrier(c: &PartialBarrierContract) -> PartialBarrierResult {
+    let s: Float = (c).spot_price;
+    let k: Float = (c).strike;
+    let h: Float = (c).barrier_level;
+    let t: Float = (c).expiry_years;
+    let r: Float = (c).risk_free_rate;
+    let vol: Float = (c).volatility;
+    let df: Float = exp((0.0 - r) * t);
+
+    let vanilla_px: Float = pb_bs_eval(s, k, t, r, vol, (c).is_call);
+
+    // Analytical crossing probability during monitoring window [t1, t2]
+    let mu: Float = r - (0.5 * vol * vol);
+    let dt_window: Float = (c).window_end_years - (c).window_start_years;
+    let sqrt_window: Float = sqrt(dt_window);
+
+    let d_h: Float = (ln(h / s) - (mu * (c).window_end_years)) / (vol * sqrt((c).window_end_years));
+    let hit_prob: Float = pb_norm_cdf(0.0 - d_h);
+
+    let mut px: Float = 0.0;
+    if (c).is_knock_out {
+        // Knock out receives vanilla * (1 - hit_prob) + rebate * hit_prob
+        px = (vanilla_px * (1.0 - hit_prob)) + (df * (c).rebate_amount * hit_prob);
+    } else {
+        // Knock in receives vanilla * hit_prob
+        px = (vanilla_px * hit_prob) + (df * (c).rebate_amount * (1.0 - hit_prob));
+    }
+
+    let delta: Float = (pb_bs_eval(s * 1.01, k, t, r, vol, (c).is_call) - pb_bs_eval(s * 0.99, k, t, r, vol, (c).is_call)) / (0.02 * s);
+
+    return PartialBarrierResult {
+        option_price: px,
+        vanilla_price: vanilla_px,
+        barrier_hit_probability: hit_prob,
+        delta: delta * (1.0 - (0.5 * hit_prob)),
+        discounted_rebate: df * (c).rebate_amount,
+    };
+}

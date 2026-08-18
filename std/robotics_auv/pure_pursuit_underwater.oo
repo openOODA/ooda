@@ -1,0 +1,100 @@
+// # 3D Underwater Pure Pursuit Guidance & Path Interception
+//
+// Logline: Intercepts 3D waypoints with speed-dependent dynamic lookahead distance and curvature steering rate commands.
+//
+// Setup: Geometric pure pursuit guidance algorithm computing steering arc curvature and vertical pitch commands for underwater cruising.
+//
+// Beats:
+//   1. Scale lookahead horizon distance dynamically based on surge speed: L_d = max(L_min, k_vel * u).
+//   2. Determine target interception lookahead point on 3D path trajectory.
+//   3. Compute horizontal arc curvature kappa = 2 * sin(alpha_bearing) / L_d.
+//   4. Deliver yaw rate command r_cmd = u * kappa and vertical pitch angle command.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type PurePursuitConfig = struct {
+    min_lookahead_m: Float,
+    max_lookahead_m: Float,
+    speed_scale_k: Float,
+    max_yaw_rate_rad_s: Float,
+    waypoint_reach_radius_m: Float,
+};
+
+pub type PurePursuitOutput = struct {
+    yaw_rate_cmd_rad_s: Float,
+    pitch_angle_cmd_rad: Float,
+    lookahead_distance_m: Float,
+    distance_to_target_m: Float,
+    is_waypoint_reached: Bool,
+};
+
+pub fn pure_pursuit_config_default() -> PurePursuitConfig {
+    return PurePursuitConfig {
+        min_lookahead_m: 5.0,
+        max_lookahead_m: 25.0,
+        speed_scale_k: 8.0,
+        max_yaw_rate_rad_s: 0.35, // ~20 deg/s
+        waypoint_reach_radius_m: 3.0,
+    };
+}
+
+pub fn pure_pursuit_step(
+    cfg: &PurePursuitConfig,
+    current_pos: &Vector3,
+    current_psi: Float,
+    surge_speed: Float,
+    target_pos: &Vector3
+) -> PurePursuitOutput {
+    let dx: Float = (target_pos).x - (current_pos).x;
+    let dy: Float = (target_pos).y - (current_pos).y;
+    let dz: Float = (target_pos).z - (current_pos).z;
+
+    let dist_horiz: Float = sqrt((dx * dx) + (dy * dy));
+    let dist_3d: Float = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+
+    let reached: Bool = dist_3d <= (cfg).waypoint_reach_radius_m;
+
+    // Dynamic lookahead distance
+    let l_d_raw: Float = (cfg).speed_scale_k * surge_speed;
+    let l_d: Float = math_clamp(l_d_raw, (cfg).min_lookahead_m, (cfg).max_lookahead_m);
+
+    // Target bearing relative to vehicle heading
+    let target_bearing: Float = math_atan2(dy, dx);
+    let mut alpha: Float = target_bearing - current_psi;
+
+    // Wrap to [-pi, pi]
+    let pi_val: Float = const_pi();
+    if alpha > pi_val {
+        alpha = alpha - const_two_pi();
+    }
+    if alpha < 0.0 - pi_val {
+        alpha = alpha + const_two_pi();
+    }
+
+    // Arc curvature: kappa = 2 * sin(alpha) / L_d
+    let mut safe_ld: Float = l_d;
+    if safe_ld < 0.1 {
+        safe_ld = 0.1;
+    }
+    let kappa: Float = (2.0 * sin(alpha)) / safe_ld;
+
+    let r_cmd_raw: Float = surge_speed * kappa;
+    let max_r: Float = (cfg).max_yaw_rate_rad_s;
+    let r_cmd: Float = math_clamp(r_cmd_raw, 0.0 - max_r, max_r);
+
+    // Pitch angle to target
+    let mut safe_dh: Float = dist_horiz;
+    if safe_dh < 0.1 {
+        safe_dh = 0.1;
+    }
+    let pitch_cmd: Float = 0.0 - math_atan2(dz, safe_dh);
+
+    return PurePursuitOutput {
+        yaw_rate_cmd_rad_s: r_cmd,
+        pitch_angle_cmd_rad: pitch_cmd,
+        lookahead_distance_m: safe_ld,
+        distance_to_target_m: dist_3d,
+        is_waypoint_reached: reached,
+    };
+}

@@ -1,0 +1,136 @@
+// # Autoregressive AR(p) Model & Levinson-Durbin
+//
+// Logline: Fits pure AR(p) models using sample autocovariance sequences and Levinson-Durbin recursive lattice solving.
+//
+// Setup: Estimates autoregressive parameters and white-noise variance for industrial sensor dynamics.
+//
+// Beats:
+//   1. Calculate sample autocovariance and autocorrelation coefficients up to lag p.
+//   2. Solve Yule-Walker equations via Levinson-Durbin $O(p^2)$ recursion.
+//   3. Forecast forward steps and evaluate Akaike Information Criterion (AIC).
+
+pub type ArFitResult = struct {
+    order_p: Int,
+    coeffs: List[Float],
+    variance: Float,
+    aic_score: Float,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn math_ln(x: Float) -> Float {
+    if x <= 0.0 { return (0.0 - 99.0); }
+    let mut y: Float = x;
+    let mut count_e: Float = 0.0;
+    let e: Float = 2.718281828459045;
+    while y > e {
+        y = y / e;
+        count_e = count_e + 1.0;
+    }
+    while y < (1.0 / e) {
+        y = y * e;
+        count_e = count_e - 1.0;
+    }
+    let z: Float = (y - 1.0) / (y + 1.0);
+    let z2: Float = z * z;
+    let series: Float = 2.0 * z * (1.0 + (z2 / 3.0) + ((z2 * z2) / 5.0) + ((z2 * z2 * z2) / 7.0));
+    return count_e + series;
+}
+
+pub fn ar_autocovariance(series: &List[Float], max_lag: Int) -> List[Float] {
+    let n: Int = list_len(*series);
+    let mut acov: List[Float] = list_new();
+    if n == 0 || max_lag < 0 {
+        return acov;
+    }
+
+    let n_f: Float = int_to_float(n);
+    let mut sum: Float = 0.0;
+    let mut i: Int = 0;
+    while i < n {
+        sum = sum + list_get(*series, i);
+        i = i + 1;
+    }
+    let mean: Float = sum / n_f;
+
+    let mut lag: Int = 0;
+    while lag <= max_lag {
+        let mut lag_sum: Float = 0.0;
+        i = 0;
+        while i < (n - lag) {
+            let v0: Float = list_get(*series, i) - mean;
+            let v1: Float = list_get(*series, i + lag) - mean;
+            lag_sum = lag_sum + (v0 * v1);
+            i = i + 1;
+        }
+        acov = list_push(acov, lag_sum / n_f);
+        lag = lag + 1;
+    }
+    return acov;
+}
+
+pub fn ar_fit_levinson_durbin(series: &List[Float], order_p: Int) -> ArFitResult {
+    let mut coeffs: List[Float] = list_new();
+    let n: Int = list_len(*series);
+    if n <= order_p || order_p <= 0 {
+        return ArFitResult { order_p: 0, coeffs: coeffs, variance: 0.0, aic_score: 0.0 };
+    }
+
+    let r: List[Float] = ar_autocovariance(series, order_p);
+    let r0: Float = list_get(r, 0);
+    if r0 <= 0.00000001 {
+        return ArFitResult { order_p: order_p, coeffs: coeffs, variance: 0.0, aic_score: 0.0 };
+    }
+
+    let mut v: Float = r0;
+    let mut a: List[Float] = list_new();
+    let mut k: Int = 1;
+
+    while k <= order_p {
+        let mut lambda_sum: Float = 0.0;
+        let mut j: Int = 1;
+        while j < k {
+            let a_j: Float = list_get(a, j - 1);
+            let r_kj: Float = list_get(r, k - j);
+            lambda_sum = lambda_sum + (a_j * r_kj);
+            j = j + 1;
+        }
+        let r_k: Float = list_get(r, k);
+        let k_factor: Float = (r_k - lambda_sum) / (if v != 0.0 { v } else { 1.0 });
+
+        let mut a_next: List[Float] = list_new();
+        j = 1;
+        while j < k {
+            let a_j: Float = list_get(a, j - 1);
+            let a_rev: Float = list_get(a, k - j - 1);
+            a_next = list_push(a_next, a_j - (k_factor * a_rev));
+            j = j + 1;
+        }
+        a_next = list_push(a_next, k_factor);
+        a = a_next;
+        v = v * (1.0 - (k_factor * k_factor));
+        k = k + 1;
+    }
+
+    let n_f: Float = int_to_float(n);
+    let p_f: Float = int_to_float(order_p);
+    let aic: Float = (n_f * math_ln(if v > 0.0 { v } else { 0.00001 })) + (2.0 * p_f);
+
+    return ArFitResult {
+        order_p: order_p,
+        coeffs: a,
+        variance: v,
+        aic_score: aic,
+    };
+}

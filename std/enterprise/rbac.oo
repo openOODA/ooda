@@ -1,0 +1,522 @@
+// ===================================================================
+// openOODA Standard Library — ooda::enterprise::rbac
+// Role-Based Access Control (RBAC) System
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+pub type Permission = struct {
+    resource: String,
+    action: String,
+    allowed: Bool,
+};
+
+pub type Role = struct {
+    name: String,
+    parent_role: String,
+    permissions: List[Permission],
+    is_active: Bool,
+};
+
+pub type UserAssignment = struct {
+    user_id: String,
+    roles: List[String],
+    is_active: Bool,
+};
+
+pub type RbacEngine = struct {
+    roles: List[Role],
+    users: List[UserAssignment],
+    strict_mode: Bool,
+    wildcards_enabled: Bool,
+    eval_count: Int,
+    allowed_count: Int,
+    denied_count: Int,
+};
+
+// -------------------------------------------------------------------
+// Constructors & Permission Helpers
+// -------------------------------------------------------------------
+
+pub fn permission_create(resource: String, action: String, allowed: Bool) -> Permission {
+    return Permission {
+        resource: resource,
+        action: action,
+        allowed: allowed,
+    };
+}
+
+pub fn permission_matches(perm: Permission, target_resource: String, target_action: String, enable_wildcards: Bool) -> Bool {
+    if perm.allowed == false {
+        return false;
+    }
+
+    let mut res_ok = false;
+    if perm.resource == target_resource {
+        res_ok = true;
+    }
+    if enable_wildcards {
+        if perm.resource == "*" {
+            res_ok = true;
+        }
+    }
+    if res_ok == false {
+        return false;
+    }
+
+    let mut act_ok = false;
+    if perm.action == target_action {
+        act_ok = true;
+    }
+    if enable_wildcards {
+        if perm.action == "*" {
+            act_ok = true;
+        }
+    }
+    if act_ok == false {
+        return false;
+    }
+
+    return true;
+}
+
+// -------------------------------------------------------------------
+// Role Management
+// -------------------------------------------------------------------
+
+pub fn role_create(name: String, parent_role: String) -> Role {
+    let perms: List[Permission] = list_new();
+    return Role {
+        name: name,
+        parent_role: parent_role,
+        permissions: perms,
+        is_active: true,
+    };
+}
+
+pub fn role_add_permission(role: Role, perm: Permission) -> Role {
+    let mut updated_perms: List[Permission] = list_new();
+    let mut old_perms = role.permissions;
+    let n = list_len(old_perms);
+    let mut i = 0;
+    while i < n {
+        updated_perms = list_push(updated_perms, list_get(old_perms, i));
+        i = i + 1;
+    }
+    updated_perms = list_push(updated_perms, perm);
+    return Role {
+        name: role.name,
+        parent_role: role.parent_role,
+        permissions: updated_perms,
+        is_active: role.is_active,
+    };
+}
+
+pub fn role_set_active(role: Role, active: Bool) -> Role {
+    return Role {
+        name: role.name,
+        parent_role: role.parent_role,
+        permissions: role.permissions,
+        is_active: active,
+    };
+}
+
+// -------------------------------------------------------------------
+// User Assignment Helpers
+// -------------------------------------------------------------------
+
+pub fn user_assignment_create(user_id: String) -> UserAssignment {
+    let mut initial_roles: List[String] = list_new();
+    return UserAssignment {
+        user_id: user_id,
+        roles: initial_roles,
+        is_active: true,
+    };
+}
+
+pub fn user_assignment_add_role(user: UserAssignment, role_name: String) -> UserAssignment {
+    let mut updated_roles: List[String] = list_new();
+    let mut existing_roles = user.roles;
+    let n = list_len(existing_roles);
+    let mut i = 0;
+    let mut exists = false;
+    while i < n {
+        let r = list_get(existing_roles, i);
+        if r == role_name {
+            exists = true;
+        }
+        updated_roles = list_push(updated_roles, r);
+        i = i + 1;
+    }
+    if exists == false {
+        updated_roles = list_push(updated_roles, role_name);
+    }
+    return UserAssignment {
+        user_id: user.user_id,
+        roles: updated_roles,
+        is_active: user.is_active,
+    };
+}
+
+pub fn user_assignment_remove_role(user: UserAssignment, role_name: String) -> UserAssignment {
+    let mut updated_roles: List[String] = list_new();
+    let mut existing_roles = user.roles;
+    let n = list_len(existing_roles);
+    let mut i = 0;
+    while i < n {
+        let r = list_get(existing_roles, i);
+        if r == role_name {
+            // skip role
+        } else {
+            updated_roles = list_push(updated_roles, r);
+        }
+        i = i + 1;
+    }
+    return UserAssignment {
+        user_id: user.user_id,
+        roles: updated_roles,
+        is_active: user.is_active,
+    };
+}
+
+pub fn user_assignment_set_active(user: UserAssignment, active: Bool) -> UserAssignment {
+    return UserAssignment {
+        user_id: user.user_id,
+        roles: user.roles,
+        is_active: active,
+    };
+}
+
+// -------------------------------------------------------------------
+// RBAC Engine Implementation
+// -------------------------------------------------------------------
+
+pub fn rbac_engine_init() -> RbacEngine {
+    let mut initial_roles: List[Role] = list_new();
+    let mut initial_users: List[UserAssignment] = list_new();
+    return RbacEngine {
+        roles: initial_roles,
+        users: initial_users,
+        strict_mode: true,
+        wildcards_enabled: true,
+        eval_count: 0,
+        allowed_count: 0,
+        denied_count: 0,
+    };
+}
+
+pub fn rbac_set_strict_mode(engine: &mut RbacEngine, strict: Bool) {
+    (engine).strict_mode = strict;
+}
+
+pub fn rbac_set_wildcards_enabled(engine: &mut RbacEngine, allow: Bool) {
+    (engine).wildcards_enabled = allow;
+}
+
+pub fn rbac_add_role(engine: &mut RbacEngine, role: Role) {
+    let mut role_list: List[Role] = list_new();
+    let mut current_roles = (engine).roles;
+    let n = list_len(current_roles);
+    let mut i = 0;
+    let mut replaced = false;
+    while i < n {
+        let r = list_get(current_roles, i);
+        if r.name == role.name {
+            role_list = list_push(role_list, role);
+            replaced = true;
+        } else {
+            role_list = list_push(role_list, r);
+        }
+        i = i + 1;
+    }
+    if replaced == false {
+        role_list = list_push(role_list, role);
+    }
+    (engine).roles = role_list;
+}
+
+pub fn rbac_has_role(engine: &RbacEngine, role_name: String) -> Bool {
+    let mut current_roles = (engine).roles;
+    let n = list_len(current_roles);
+    let mut i = 0;
+    while i < n {
+        let r = list_get(current_roles, i);
+        if r.name == role_name {
+            return r.is_active;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn rbac_role_inherits(engine: &RbacEngine, role_name: String, target_role: String) -> Bool {
+    let mut current_role = role_name;
+    let mut depth = 0;
+    let max_depth = 10;
+
+    while depth < max_depth {
+        if current_role == "" {
+            return false;
+        }
+        if current_role == target_role {
+            return true;
+        }
+
+        let mut found_parent = "";
+        let mut all_roles = (engine).roles;
+        let n = list_len(all_roles);
+        let mut i = 0;
+
+        while i < n {
+            let r = list_get(all_roles, i);
+            if r.name == current_role {
+                if r.is_active {
+                    found_parent = r.parent_role;
+                }
+            }
+            i = i + 1;
+        }
+
+        if found_parent == "" {
+            return false;
+        }
+        if found_parent == current_role {
+            return false;
+        }
+
+        current_role = found_parent;
+        depth = depth + 1;
+    }
+
+    return false;
+}
+
+pub fn rbac_check_role_permission(engine: &RbacEngine, role_name: String, resource: String, action: String) -> Bool {
+    let mut current_role = role_name;
+    let mut depth = 0;
+    let max_depth = 10;
+    let use_wildcards = (engine).wildcards_enabled;
+
+    while depth < max_depth {
+        if current_role == "" {
+            return false;
+        }
+
+        let mut found_role = false;
+        let mut parent_name = "";
+        let mut all_roles = (engine).roles;
+        let n = list_len(all_roles);
+        let mut i = 0;
+
+        while i < n {
+            let r = list_get(all_roles, i);
+            if r.name == current_role {
+                if r.is_active == false {
+                    return false;
+                }
+                found_role = true;
+                parent_name = r.parent_role;
+
+                let mut role_perms = r.permissions;
+                let num_perms = list_len(role_perms);
+                let mut j = 0;
+                while j < num_perms {
+                    let p = list_get(role_perms, j);
+                    if permission_matches(p, resource, action, use_wildcards) {
+                        return true;
+                    }
+                    j = j + 1;
+                }
+            }
+            i = i + 1;
+        }
+
+        if found_role == false {
+            return false;
+        }
+
+        if parent_name == current_role {
+            return false;
+        }
+
+        current_role = parent_name;
+        depth = depth + 1;
+    }
+
+    return false;
+}
+
+pub fn rbac_assign_role(engine: &mut RbacEngine, user_id: String, role_name: String) {
+    let mut user_list: List[UserAssignment] = list_new();
+    let mut current_users = (engine).users;
+    let n = list_len(current_users);
+    let mut i = 0;
+    let mut user_found = false;
+
+    while i < n {
+        let u = list_get(current_users, i);
+        if u.user_id == user_id {
+            user_found = true;
+            let updated_u = user_assignment_add_role(u, role_name);
+            user_list = list_push(user_list, updated_u);
+        } else {
+            user_list = list_push(user_list, u);
+        }
+        i = i + 1;
+    }
+
+    if user_found == false {
+        let new_u = user_assignment_create(user_id);
+        let updated_u = user_assignment_add_role(new_u, role_name);
+        user_list = list_push(user_list, updated_u);
+    }
+
+    (engine).users = user_list;
+}
+
+pub fn rbac_revoke_role(engine: &mut RbacEngine, user_id: String, role_name: String) {
+    let mut user_list: List[UserAssignment] = list_new();
+    let mut current_users = (engine).users;
+    let n = list_len(current_users);
+    let mut i = 0;
+
+    while i < n {
+        let u = list_get(current_users, i);
+        if u.user_id == user_id {
+            let updated_u = user_assignment_remove_role(u, role_name);
+            user_list = list_push(user_list, updated_u);
+        } else {
+            user_list = list_push(user_list, u);
+        }
+        i = i + 1;
+    }
+
+    (engine).users = user_list;
+}
+
+pub fn rbac_set_user_active(engine: &mut RbacEngine, user_id: String, active: Bool) {
+    let mut user_list: List[UserAssignment] = list_new();
+    let mut current_users = (engine).users;
+    let n = list_len(current_users);
+    let mut i = 0;
+
+    while i < n {
+        let u = list_get(current_users, i);
+        if u.user_id == user_id {
+            let updated_u = user_assignment_set_active(u, active);
+            user_list = list_push(user_list, updated_u);
+        } else {
+            user_list = list_push(user_list, u);
+        }
+        i = i + 1;
+    }
+
+    (engine).users = user_list;
+}
+
+pub fn rbac_user_has_role(engine: &RbacEngine, user_id: String, role_name: String) -> Bool {
+    let mut current_users = (engine).users;
+    let n = list_len(current_users);
+    let mut i = 0;
+
+    while i < n {
+        let u = list_get(current_users, i);
+        if u.user_id == user_id {
+            if u.is_active == false {
+                return false;
+            }
+            let mut assigned_roles = u.roles;
+            let num_roles = list_len(assigned_roles);
+            let mut j = 0;
+            while j < num_roles {
+                let r_name = list_get(assigned_roles, j);
+                if r_name == role_name {
+                    return true;
+                }
+                if rbac_role_inherits(engine, r_name, role_name) {
+                    return true;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    return false;
+}
+
+pub fn rbac_authorize(engine: &mut RbacEngine, user_id: String, resource: String, action: String) -> Bool {
+    let mut ev_c = (engine).eval_count;
+    ev_c = ev_c + 1;
+    (engine).eval_count = ev_c;
+
+    let mut current_users = (engine).users;
+    let n = list_len(current_users);
+    let mut i = 0;
+
+    while i < n {
+        let u = list_get(current_users, i);
+        if u.user_id == user_id {
+            if u.is_active == false {
+                let mut den_c = (engine).denied_count;
+                den_c = den_c + 1;
+                (engine).denied_count = den_c;
+                return false;
+            }
+
+            let mut assigned_roles = u.roles;
+            let num_roles = list_len(assigned_roles);
+            let mut j = 0;
+            while j < num_roles {
+                let r_name = list_get(assigned_roles, j);
+                if rbac_check_role_permission(engine, r_name, resource, action) {
+                    let mut al_c = (engine).allowed_count;
+                    al_c = al_c + 1;
+                    (engine).allowed_count = al_c;
+                    return true;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+
+    // Default-deny (RULES 1.4)
+    let mut den_c2 = (engine).denied_count;
+    den_c2 = den_c2 + 1;
+    (engine).denied_count = den_c2;
+    return false;
+}
+
+pub fn rbac_authorize_with_capability(sys: &SysCap, engine: &mut RbacEngine, user_id: String, resource: String, action: String) -> Result[Bool, String] {
+    let allowed = rbac_authorize(engine, user_id, resource, action);
+    if allowed {
+        return Ok(true);
+    } else {
+        return Err("ACCESS_DENIED: User lacks permission");
+    }
+}
+
+pub fn rbac_eval_dynamic_expression(engine: &RbacEngine, expr_ptr: Int) -> Bool {
+    // Hard compiler limitation: openOODA lacks dynamic code reflection, raw pointers, and runtime FFI to execute arbitrary dynamic expression trees.
+    process_exit(1);
+    return false;
+}
+
+pub fn rbac_get_eval_count(engine: &RbacEngine) -> Int {
+    return (engine).eval_count;
+}
+
+pub fn rbac_get_allowed_count(engine: &RbacEngine) -> Int {
+    return (engine).allowed_count;
+}
+
+pub fn rbac_get_denied_count(engine: &RbacEngine) -> Int {
+    return (engine).denied_count;
+}
+
+pub fn rbac_do_work(engine: &RbacEngine) -> Int {
+    let r_count = list_len((engine).roles);
+    let u_count = list_len((engine).users);
+    return (engine).eval_count + r_count + u_count;
+}

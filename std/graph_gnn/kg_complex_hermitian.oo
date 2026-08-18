@@ -1,0 +1,152 @@
+// # ComplEx Complex Hermitian Embeddings
+//
+// Logline: Models asymmetric and antisymmetric knowledge graph relations using complex Hermitian dot products.
+//
+// Setup: Complex vector space embedding representing entity and relation vectors as pairs of real and imaginary coordinates.
+//
+// Beats:
+//   1. Decompose entities and relations into complex real (Re) and imaginary (Im) vector components.
+//   2. Compute Hermitian score Re(<h, r, conjugate(t)>) = sum (h_r*r_r*t_r + h_r*r_i*t_i + h_i*r_r*t_i - h_i*r_i*t_r).
+//   3. Handle asymmetric relations naturally via sign reversal on conjugate inversion.
+
+pub type ComplExConfig = struct {
+    num_entities: Int,
+    num_relations: Int,
+    dim: Int, // Complex vector dimension
+    regularizer_weight: Float,
+};
+
+pub type ComplExModel = struct {
+    config: ComplExConfig,
+    entity_re: List[Float],
+    entity_im: List[Float],
+    relation_re: List[Float],
+    relation_im: List[Float],
+};
+
+pub fn complex_config_new(
+    num_entities: Int,
+    num_relations: Int,
+    dim: Int,
+    reg_weight: Float
+) -> ComplExConfig {
+    return ComplExConfig {
+        num_entities: num_entities,
+        num_relations: num_relations,
+        dim: dim,
+        regularizer_weight: reg_weight,
+    };
+}
+
+pub fn complex_model_init(config: ComplExConfig, seed: Int) -> ComplExModel {
+    let dim: Int = (config).dim;
+    let total_e: Int = (config).num_entities * dim;
+    let mut e_re: List[Float] = list_new();
+    let mut e_im: List[Float] = list_new();
+    let mut state: Int = seed;
+
+    let mut i: Int = 0;
+    while i < total_e {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        e_re = list_push(e_re, (((state % 1000) as Float) / 500.0) - 1.0);
+
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        e_im = list_push(e_im, (((state % 1000) as Float) / 500.0) - 1.0);
+        i = i + 1;
+    }
+
+    let total_r: Int = (config).num_relations * dim;
+    let mut r_re: List[Float] = list_new();
+    let mut r_im: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < total_r {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        r_re = list_push(r_re, (((state % 1000) as Float) / 500.0) - 1.0);
+
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        r_im = list_push(r_im, (((state % 1000) as Float) / 500.0) - 1.0);
+        j = j + 1;
+    }
+
+    return ComplExModel {
+        config: config,
+        entity_re: e_re,
+        entity_im: e_im,
+        relation_re: r_re,
+        relation_im: r_im,
+    };
+}
+
+pub fn complex_score(
+    model: &ComplExModel,
+    head: Int,
+    relation: Int,
+    tail: Int
+) -> Float {
+    let cfg: ComplExConfig = (*model).config;
+    let dim: Int = (cfg).dim;
+    let h_off: Int = head * dim;
+    let r_off: Int = relation * dim;
+    let t_off: Int = tail * dim;
+
+    let mut score: Float = 0.0;
+    let mut d: Int = 0;
+    while d < dim {
+        let hr: Float = list_get((*model).entity_re, h_off + d);
+        let hi: Float = list_get((*model).entity_im, h_off + d);
+        let rr: Float = list_get((*model).relation_re, r_off + d);
+        let ri: Float = list_get((*model).relation_im, r_off + d);
+        let tr: Float = list_get((*model).entity_re, t_off + d);
+        let ti: Float = list_get((*model).entity_im, t_off + d);
+
+        // Real part of <h, r, conjugate(t)>:
+        // (hr + i*hi) * (rr + i*ri) * (tr - i*ti)
+        // = (hr*rr - hi*ri + i*(hr*ri + hi*rr)) * (tr - i*ti)
+        // Real part = (hr*rr - hi*ri)*tr - (hr*ri + hi*rr)*(-ti)
+        //           = hr*rr*tr - hi*ri*tr + hr*ri*ti + hi*rr*ti
+        let term1: Float = hr * rr * tr;
+        let term2: Float = 0.0 - (hi * ri * tr);
+        let term3: Float = hr * ri * ti;
+        let term4: Float = hi * rr * ti;
+
+        score = score + term1 + term2 + term3 + term4;
+        d = d + 1;
+    }
+    return score;
+}
+
+pub fn complex_n3_regularizer(
+    model: &ComplExModel,
+    head: Int,
+    relation: Int,
+    tail: Int
+) -> Float {
+    let cfg: ComplExConfig = (*model).config;
+    let dim: Int = (cfg).dim;
+    let h_off: Int = head * dim;
+    let r_off: Int = relation * dim;
+    let t_off: Int = tail * dim;
+
+    let mut reg: Float = 0.0;
+    let mut d: Int = 0;
+    while d < dim {
+        let hr: Float = list_get((*model).entity_re, h_off + d);
+        let hi: Float = list_get((*model).entity_im, h_off + d);
+        let rr: Float = list_get((*model).relation_re, r_off + d);
+        let ri: Float = list_get((*model).relation_im, r_off + d);
+        let tr: Float = list_get((*model).entity_re, t_off + d);
+        let ti: Float = list_get((*model).entity_im, t_off + d);
+
+        let h_mag: Float = sqrt((hr * hr) + (hi * hi));
+        let r_mag: Float = sqrt((rr * rr) + (ri * ri));
+        let t_mag: Float = sqrt((tr * tr) + (ti * ti));
+
+        reg = reg + (h_mag * h_mag * h_mag) + (r_mag * r_mag * r_mag) + (t_mag * t_mag * t_mag);
+        d = d + 1;
+    }
+    return (cfg).regularizer_weight * reg;
+}

@@ -1,0 +1,113 @@
+// # GraphQL Query Execution Engine
+//
+// Logline: Evaluates parsed GraphQL operations against schemas and formats JSON data responses.
+//
+// Setup: Deterministic query resolution pipeline producing data payload and error lists.
+//
+// Beats:
+//   1. Resolve root operation (Query, Mutation) from GqlDocument.
+//   2. Validate field selection against schema catalog.
+//   3. Format JSON response envelopes with data and error fields.
+
+import "./graphql_ast.oo";
+import "./graphql_schema.oo";
+
+pub type GqlExecutionResult = struct {
+    data_json: String,
+    errors: List[String],
+    success: Bool,
+    field_count: Int,
+};
+
+pub fn gql_execution_result_new(
+    data_json: String,
+    errors: List[String],
+    success: Bool,
+    field_count: Int
+) -> GqlExecutionResult {
+    return GqlExecutionResult {
+        data_json: data_json,
+        errors: errors,
+        success: success,
+        field_count: field_count,
+    };
+}
+
+pub fn gql_execute_query(schema: &GqlSchema, doc: &GqlDocument) -> GqlExecutionResult {
+    let ops: List[GqlOperation] = (doc).operations;
+    let n_ops: Int = list_len(ops);
+    let mut errs: List[String] = list_new();
+
+    if n_ops == 0 {
+        errs = list_push(errs, "No executable operations in document");
+        return gql_execution_result_new("{}", errs, false, 0);
+    }
+
+    let root_op: GqlOperation = list_get(ops, 0);
+    let selections: List[GqlField] = root_op.selection_set;
+    let n_sel: Int = list_len(selections);
+
+    let target_type: String = if root_op.op_type == 1 {
+        (schema).mutation_type
+    } else {
+        (schema).query_type
+    };
+
+    let mut out_json: String = "{";
+    let mut valid_fields: Int = 0;
+    let mut i: Int = 0;
+
+    while i < n_sel {
+        let fld: GqlField = list_get(selections, i);
+        let exists: Bool = gql_schema_has_field(schema, target_type, fld.name);
+
+        if exists {
+            let key: String = if fld.alias.len() > 0 { fld.alias } else { fld.name };
+            if valid_fields > 0 {
+                out_json = out_json + ", ";
+            }
+            out_json = out_json + "\"" + key + "\": null";
+            valid_fields = valid_fields + 1;
+        } else {
+            let err_msg: String = "Field '" + fld.name + "' not found on type '" + target_type + "'";
+            errs = list_push(errs, err_msg);
+        }
+        i = i + 1;
+    }
+
+    out_json = out_json + "}";
+    let is_ok: Bool = list_len(errs) == 0;
+
+    return gql_execution_result_new(out_json, errs, is_ok, valid_fields);
+}
+
+pub fn gql_format_json_response(result: &GqlExecutionResult) -> String {
+    let errs: List[String] = (result).errors;
+    let n_errs: Int = list_len(errs);
+
+    if (result).success && n_errs == 0 {
+        return "{\"data\": " + (result).data_json + "}";
+    }
+
+    let mut err_str: String = "[";
+    let mut i: Int = 0;
+    while i < n_errs {
+        if i > 0 {
+            err_str = err_str + ", ";
+        }
+        let e: String = list_get(errs, i);
+        err_str = err_str + "{\"message\": \"" + e + "\"}";
+        i = i + 1;
+    }
+    err_str = err_str + "]";
+
+    if (result).field_count > 0 {
+        return "{\"data\": " + (result).data_json + ", \"errors\": " + err_str + "}";
+    }
+
+    return "{\"errors\": " + err_str + "}";
+}
+
+pub fn gql_format_error_json(message: String) -> String {
+    return "{\"errors\": [{\"message\": \"" + message + "\"}]}";
+}

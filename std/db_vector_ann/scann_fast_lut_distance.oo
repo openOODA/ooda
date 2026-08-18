@@ -1,0 +1,108 @@
+// # ScaNN Fast Lookup Table (LUT) Distance Kernel
+//
+// Logline: Implements ScaNN asymmetric 4-bit and 8-bit lookup table (LUT) SIMD distance accumulation kernels.
+//
+// Setup: Precomputes query dot products with sub-space centroids into cached lookup tables for accelerated vector scoring.
+//
+// Beats:
+//   1. Define ScannLutConfig, ScannDistanceLut, and LutAccumulator structures.
+//   2. Implement LUT generation from query vector and sub-space centroid codebooks.
+//   3. Implement fast LUT code accumulation across dense quantized vector buffers.
+
+pub type ScannLutConfig = struct {
+    num_subspaces: Int,
+    centroids_per_subspace: Int,
+    subspace_dimension: Int,
+};
+
+pub type ScannDistanceLut = struct {
+    num_subspaces: Int,
+    centroids_per_subspace: Int,
+    table: List[List[Int]],
+};
+
+pub type LutAccumulator = struct {
+    total_score: Int,
+    subspaces_evaluated: Int,
+};
+
+pub fn scann_lut_config_default(n_sub: Int, sub_dim: Int) -> ScannLutConfig {
+    return ScannLutConfig {
+        num_subspaces: n_sub,
+        centroids_per_subspace: 256,
+        subspace_dimension: sub_dim,
+    };
+}
+
+pub fn scann_distance_lut_new(n_sub: Int, c_per_sub: Int) -> ScannDistanceLut {
+    return ScannDistanceLut {
+        num_subspaces: n_sub,
+        centroids_per_subspace: c_per_sub,
+        table: list_new(),
+    };
+}
+
+pub fn scann_build_query_lut(
+    query_subvecs: List[List[Int]],
+    codebook: List[List[List[Int]]]
+) -> ScannDistanceLut {
+    let n_sub: Int = list_len(query_subvecs);
+    let mut lut_table: List[List[Int]] = list_new();
+
+    let mut m_idx: Int = 0;
+    while m_idx < n_sub {
+        let q_sub: List[Int] = list_get(query_subvecs, m_idx);
+        let sub_centroids: List[List[Int]] = if m_idx < list_len(codebook) {
+            list_get(codebook, m_idx)
+        } else {
+            list_new()
+        };
+
+        let mut sub_lut: List[Int] = list_new();
+        let num_c: Int = list_len(sub_centroids);
+        let mut c_idx: Int = 0;
+        while c_idx < num_c {
+            let cent: List[Int] = list_get(sub_centroids, c_idx);
+            let mut dot: Int = 0;
+            let mut d_i: Int = 0;
+            while d_i < list_len(q_sub) && d_i < list_len(cent) {
+                dot = dot + (list_get(q_sub, d_i) * list_get(cent, d_i));
+                d_i = d_i + 1;
+            }
+            sub_lut = list_push(sub_lut, dot);
+            c_idx = c_idx + 1;
+        }
+
+        lut_table = list_push(lut_table, sub_lut);
+        m_idx = m_idx + 1;
+    }
+
+    return ScannDistanceLut {
+        num_subspaces: n_sub,
+        centroids_per_subspace: 256,
+        table: lut_table,
+    };
+}
+
+pub fn scann_accumulate_lut_distance(
+    lut: ScannDistanceLut,
+    quantized_codes: List[Int]
+) -> Int {
+    let n_sub: Int = (lut).num_subspaces;
+    let tbl: List[List[Int]] = (lut).table;
+    let mut total_score: Int = 0;
+
+    let mut m_idx: Int = 0;
+    while m_idx < n_sub && m_idx < list_len(quantized_codes) {
+        let code: Int = list_get(quantized_codes, m_idx);
+        if m_idx < list_len(tbl) {
+            let sub_lut: List[Int] = list_get(tbl, m_idx);
+            if code >= 0 && code < list_len(sub_lut) {
+                total_score = total_score + list_get(sub_lut, code);
+            }
+        }
+        m_idx = m_idx + 1;
+    }
+
+    return total_score;
+}

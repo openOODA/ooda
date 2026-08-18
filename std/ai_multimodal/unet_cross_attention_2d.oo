@@ -1,0 +1,124 @@
+// # UNet 2D Spatial Cross-Attention Layer
+//
+// Logline: Fuses conditioning context vectors with spatial feature maps via multi-head scaled dot-product cross-attention.
+//
+// Setup: Projects queries from flattened spatial latent grids and keys/values from text prompt embeddings.
+//
+// Beats:
+//   1. Define UNetCrossAttentionConfig and AttentionOutput structs.
+//   2. Compute spatial query projections and multi-head cross-attention dot products.
+//   3. Apply softmax scaling with temperature normalization and output value projection.
+
+pub type UNetCrossAttentionConfig = struct {
+    query_dim: Int,
+    context_dim: Int,
+    num_heads: Int,
+    head_dim: Int,
+    scale: Float,
+};
+
+pub type AttentionOutput = struct {
+    out_tokens: List[Float],
+    num_queries: Int,
+    out_dim: Int,
+};
+
+pub fn unet_cross_attention_config_new(
+    q_dim: Int,
+    ctx_dim: Int,
+    heads: Int,
+    h_dim: Int
+) -> UNetCrossAttentionConfig {
+    let mut h_dim_f: Float = 0.0;
+    let mut count: Int = h_dim;
+    while count >= 1000 { h_dim_f = h_dim_f + 1000.0; count = count - 1000; }
+    while count >= 100 { h_dim_f = h_dim_f + 100.0; count = count - 100; }
+    while count >= 10 { h_dim_f = h_dim_f + 10.0; count = count - 10; }
+    while count >= 1 { h_dim_f = h_dim_f + 1.0; count = count - 1; }
+
+    let scale_val: Float = if h_dim_f > 0.0 { 1.0 / sqrt(h_dim_f) } else { 1.0 };
+
+    return UNetCrossAttentionConfig {
+        query_dim: q_dim,
+        context_dim: ctx_dim,
+        num_heads: heads,
+        head_dim: h_dim,
+        scale: scale_val,
+    };
+}
+
+pub fn unet_cross_attention_forward(
+    cfg: &UNetCrossAttentionConfig,
+    queries: List[Float],
+    keys: List[Float],
+    values: List[Float],
+    num_q: Int,
+    num_kv: Int
+) -> AttentionOutput {
+    let d_model: Int = (cfg).query_dim;
+    let scale: Float = (cfg).scale;
+
+    let mut out_tokens: List[Float] = list_new();
+
+    let mut q_idx: Int = 0;
+    while q_idx < num_q {
+        // 1. Compute dot-product logits with each key
+        let mut weights: List[Float] = list_new();
+        let mut max_logit: Float = 0.0 - 100000.0;
+
+        let mut k_idx: Int = 0;
+        while k_idx < num_kv {
+            let mut dot: Float = 0.0;
+            let mut d: Int = 0;
+            while d < d_model {
+                let q_val: Float = list_get(queries, (q_idx * d_model) + d);
+                let k_val: Float = list_get(keys, (k_idx * d_model) + d);
+                dot = dot + (q_val * k_val);
+                d = d + 1;
+            }
+            let scaled_dot: Float = dot * scale;
+            if scaled_dot > max_logit { max_logit = scaled_dot; }
+            weights = list_push(weights, scaled_dot);
+            k_idx = k_idx + 1;
+        }
+
+        // 2. Softmax normalization
+        let mut sum_exp: Float = 0.0;
+        let mut exp_weights: List[Float] = list_new();
+        let mut w_i: Int = 0;
+        while w_i < num_kv {
+            let w: Float = list_get(weights, w_i);
+            let e: Float = exp(w - max_logit);
+            exp_weights = list_push(exp_weights, e);
+            sum_exp = sum_exp + e;
+            w_i = w_i + 1;
+        }
+
+        // 3. Weighted sum of values
+        let mut d_out: Int = 0;
+        while d_out < d_model {
+            let mut acc: Float = 0.0;
+            let mut v_i: Int = 0;
+            while v_i < num_kv {
+                let p: Float = list_get(exp_weights, v_i) / (if sum_exp > 0.00001 { sum_exp } else { 1.0 });
+                let v_val: Float = list_get(values, (v_i * d_model) + d_out);
+                acc = acc + (p * v_val);
+                v_i = v_i + 1;
+            }
+            out_tokens = list_push(out_tokens, acc);
+            d_out = d_out + 1;
+        }
+
+        q_idx = q_idx + 1;
+    }
+
+    return AttentionOutput {
+        out_tokens: out_tokens,
+        num_queries: num_q,
+        out_dim: d_model,
+    };
+}
+
+pub fn unet_cross_attention_marker() -> Int {
+    return 1;
+}

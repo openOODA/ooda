@@ -1,0 +1,95 @@
+// # Graceful Shutdown & Drain Coordinator
+//
+// Logline: Implements SIGTERM lifecycle hook dispatch, active invocation draining, and shutdown grace periods.
+//
+// Setup: Process lifecycle governor ensuring in-flight requests and background telemetry flush before container termination.
+//
+// Beats:
+//   1. Receive container termination signal and enter DRAINING state.
+//   2. Stop accepting new invocations and wait for active requests to complete.
+//   3. Trigger runtime pre-stop hooks and enforce max shutdown grace timeout.
+
+pub type ActiveDrainTask = struct {
+    task_id: String,
+    started_at_ms: Int,
+    is_completed: Bool,
+};
+
+pub type GracefulShutdownDrainer = struct {
+    instance_id: String,
+    grace_period_ms: Int,
+    is_draining: Bool,
+    drain_started_ms: Int,
+    active_tasks: List[ActiveDrainTask],
+    completed_drains: Int,
+};
+
+pub fn graceful_shutdown_drainer_new(id: String, grace_ms: Int) -> GracefulShutdownDrainer {
+    let empty_tasks: List[ActiveDrainTask] = list_new();
+    return GracefulShutdownDrainer {
+        instance_id: id,
+        grace_period_ms: grace_ms,
+        is_draining: false,
+        drain_started_ms: 0,
+        active_tasks: empty_tasks,
+        completed_drains: 0,
+    };
+}
+
+pub fn drainer_start_drain(drainer: &mut GracefulShutdownDrainer, now_ms: Int) {
+    (drainer).is_draining = true;
+    (drainer).drain_started_ms = now_ms;
+}
+
+pub fn drainer_add_task(drainer: &mut GracefulShutdownDrainer, task_id: String, now_ms: Int) -> Bool {
+    if (drainer).is_draining {
+        return false;
+    }
+
+    let task = ActiveDrainTask {
+        task_id: task_id,
+        started_at_ms: now_ms,
+        is_completed: false,
+    };
+
+    (drainer).active_tasks = list_push((drainer).active_tasks, task);
+    return true;
+}
+
+pub fn drainer_complete_task(drainer: &mut GracefulShutdownDrainer, task_id: String) {
+    let n: Int = list_len((drainer).active_tasks);
+    let mut i: Int = 0;
+    let mut updated: List[ActiveDrainTask] = list_new();
+
+    while i < n {
+        let t: ActiveDrainTask = list_get((drainer).active_tasks, i);
+        if (t).task_id == task_id {
+            let done_t = ActiveDrainTask {
+                task_id: (t).task_id,
+                started_at_ms: (t).started_at_ms,
+                is_completed: true,
+            };
+            updated = list_push(updated, done_t);
+        } else {
+            updated = list_push(updated, t);
+        }
+        i = i + 1;
+    }
+
+    (drainer).active_tasks = updated;
+}
+
+pub fn drainer_is_all_drained(drainer: &GracefulShutdownDrainer) -> Bool {
+    let n: Int = list_len((drainer).active_tasks);
+    let mut i: Int = 0;
+
+    while i < n {
+        let t: ActiveDrainTask = list_get((drainer).active_tasks, i);
+        if !(t).is_completed {
+            return false;
+        }
+        i = i + 1;
+    }
+
+    return true;
+}

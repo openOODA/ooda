@@ -1,0 +1,94 @@
+// # Asset State Synchronizer & Telemetry Assimilation
+//
+// Logline: Telemetry timestamp alignment, Kalman state assimilation, and continuous digital twin state synchronization.
+//
+// Setup: Bridges physical edge telemetry streams with digital twin state vectors using innovation filtering and nudging gains.
+//
+// Beats:
+//   1. Define TelemetrySample, AssetSyncState, and AssimilationConfig structures.
+//   2. Align asynchronous out-of-order telemetry packets and compute measurement innovations.
+//   3. Blend simulated physics state with physical measurements via dynamic assimilation gains.
+
+pub type TelemetrySample = struct {
+    sensor_id: Int,
+    timestamp_sec: Float,
+    measurement_value: Float,
+    quality_flag: Int, // 0=Good, 1=Degraded, 2=Bad
+};
+
+pub type AssetSyncState = struct {
+    asset_id: Int,
+    current_time_sec: Float,
+    synchronized_states: List[Float],
+    sync_confidence: Float, // 0.0 to 1.0
+    drift_rate: Float,
+};
+
+pub type AssimilationConfig = struct {
+    nudging_gain: Float, // alpha blend factor in [0, 1]
+    max_time_skew_sec: Float,
+    confidence_decay: Float,
+};
+
+pub fn asset_sync_new(asset_id: Int, init_states: &List[Float]) -> AssetSyncState {
+    return AssetSyncState {
+        asset_id: asset_id,
+        current_time_sec: 0.0,
+        synchronized_states: *init_states,
+        sync_confidence: 1.0,
+        drift_rate: 0.0,
+    };
+}
+
+pub fn asset_assimilate_telemetry(
+    state: &AssetSyncState,
+    sample: &TelemetrySample,
+    state_idx: Int,
+    cfg: &AssimilationConfig
+) -> AssetSyncState {
+    let n_s: Int = list_len((state).synchronized_states);
+    if state_idx < 0 || state_idx >= n_s || (sample).quality_flag == 2 {
+        return *state;
+    }
+
+    // Check timestamp skew: |t_sample - t_curr|
+    let mut skew: Float = (sample).timestamp_sec - (state).current_time_sec;
+    if skew < 0.0 { skew = 0.0 - skew; }
+    if skew > (cfg).max_time_skew_sec {
+        return *state; // drop stale or out-of-order packet
+    }
+
+    let curr_val: Float = list_get((state).synchronized_states, state_idx);
+    let meas_val: Float = (sample).measurement_value;
+    let innov: Float = meas_val - curr_val;
+
+    // Nudging update: x_new = x_curr + gain * innov
+    let gain: Float = (cfg).nudging_gain;
+    let new_val: Float = curr_val + (gain * innov);
+
+    let mut updated_states: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < n_s {
+        if i == state_idx {
+            updated_states = list_push(updated_states, new_val);
+        } else {
+            updated_states = list_push(updated_states, list_get((state).synchronized_states, i));
+        }
+        i = i + 1;
+    }
+
+    let mut innov_abs: Float = innov;
+    if innov_abs < 0.0 { innov_abs = 0.0 - innov_abs; }
+    let conf_delta: Float = if innov_abs < 1.0 { 0.05 } else { 0.0 - 0.1 };
+    let mut new_conf: Float = (state).sync_confidence + conf_delta;
+    if new_conf > 1.0 { new_conf = 1.0; }
+    if new_conf < 0.0 { new_conf = 0.0; }
+
+    return AssetSyncState {
+        asset_id: (state).asset_id,
+        current_time_sec: (sample).timestamp_sec,
+        synchronized_states: updated_states,
+        sync_confidence: new_conf,
+        drift_rate: innov_abs,
+    };
+}

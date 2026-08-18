@@ -1,0 +1,161 @@
+// # Whisper Speech Log-Mel Convolution & Positional Audio Encoder
+//
+// Logline: Processes 80-channel Log-Mel spectrogram frames with 1D downsampling convolutions and sinusoidal audio position embeddings.
+//
+// Setup: Audio front-end processor with 1D convolutions and sinusoidal position encoding.
+//
+// Beats:
+//   1. Define WhisperAudioConfig and WhisperConv1D structures.
+//   2. Downsample audio spectrogram frames via 1D strided convolution stages.
+//   3. Add sinusoidal positional encodings across time frames.
+
+pub type WhisperAudioConfig = struct {
+    num_mel_bins: Int,
+    hidden_dim: Int,
+    max_audio_len: Int,
+    downsample_factor: Int,
+};
+
+pub type WhisperConv1D = struct {
+    in_channels: Int,
+    out_channels: Int,
+    kernel_size: Int,
+    stride: Int,
+    weights: List[Float],
+    bias: List[Float],
+};
+
+pub fn whisper_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn whisper_config_new(
+    mel_bins: Int,
+    hidden_dim: Int,
+    max_len: Int
+) -> WhisperAudioConfig {
+    return WhisperAudioConfig {
+        num_mel_bins: mel_bins,
+        hidden_dim: hidden_dim,
+        max_audio_len: max_len,
+        downsample_factor: 2,
+    };
+}
+
+pub fn whisper_conv1d_new(
+    in_c: Int,
+    out_c: Int,
+    k: Int,
+    stride: Int
+) -> WhisperConv1D {
+    let total_w: Int = in_c * out_c * k;
+    let mut w: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < total_w {
+        w = list_push(w, 0.01);
+        i = i + 1;
+    }
+
+    let mut b: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < out_c {
+        b = list_push(b, 0.0);
+        j = j + 1;
+    }
+
+    return WhisperConv1D {
+        in_channels: in_c,
+        out_channels: out_c,
+        kernel_size: k,
+        stride: stride,
+        weights: w,
+        bias: b,
+    };
+}
+
+pub fn whisper_conv1d_forward(
+    conv: &WhisperConv1D,
+    input_frames: List[Float],
+    num_frames: Int
+) -> List[Float] {
+    let in_c: Int = (conv).in_channels;
+    let out_c: Int = (conv).out_channels;
+    let k: Int = (conv).kernel_size;
+    let stride: Int = (conv).stride;
+
+    let out_frames: Int = (num_frames - k) / stride + 1;
+    if out_frames <= 0 {
+        return list_new();
+    }
+
+    let mut out: List[Float] = list_new();
+    let mut t_out: Int = 0;
+    while t_out < out_frames {
+        let t_in: Int = t_out * stride;
+        let mut oc: Int = 0;
+        while oc < out_c {
+            let mut acc: Float = list_get((conv).bias, oc);
+            let mut ki: Int = 0;
+            while ki < k {
+                let frame_idx: Int = t_in + ki;
+                let mut ic: Int = 0;
+                while ic < in_c {
+                    let in_val: Float = list_get(input_frames, (frame_idx * in_c) + ic);
+                    let w_idx: Int = (((ic * out_c) + oc) * k) + ki;
+                    let w_val: Float = list_get((conv).weights, w_idx);
+                    acc = acc + (in_val * w_val);
+                    ic = ic + 1;
+                }
+                ki = ki + 1;
+            }
+            out = list_push(out, acc);
+            oc = oc + 1;
+        }
+        t_out = t_out + 1;
+    }
+
+    return out;
+}
+
+pub fn whisper_add_sinusoidal_pos(
+    audio_features: List[Float],
+    num_frames: Int,
+    hidden_dim: Int
+) -> List[Float] {
+    let half_d: Int = hidden_dim / 2;
+    let mut out: List[Float] = list_new();
+
+    let mut t: Int = 0;
+    while t < num_frames {
+        let t_f: Float = whisper_int_to_float(t);
+        let mut d: Int = 0;
+        while d < hidden_dim {
+            let feat_val: Float = list_get(audio_features, (t * hidden_dim) + d);
+            let pos_emb: Float = if d < half_d {
+                let freq: Float = 1.0 / pow(10000.0, (2.0 * whisper_int_to_float(d)) / whisper_int_to_float(hidden_dim));
+                sin(t_f * freq)
+            } else {
+                let freq2: Float = 1.0 / pow(10000.0, (2.0 * whisper_int_to_float(d - half_d)) / whisper_int_to_float(hidden_dim));
+                cos(t_f * freq2)
+            };
+            out = list_push(out, feat_val + pos_emb);
+            d = d + 1;
+        }
+        t = t + 1;
+    }
+
+    return out;
+}
+
+pub fn whisper_audio_encoder_marker() -> Int {
+    return 1;
+}

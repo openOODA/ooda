@@ -1,0 +1,93 @@
+// # Battery Electrochemical Equivalent Circuit Model (2-RC Thevenin)
+//
+// Logline: Dual-polarization Thevenin ECM for Li-ion battery cells with OCV-SOC mapping, RC diffusion, and Joule heating.
+//
+// Setup: Solves dynamic terminal voltage V_term, state of charge (SOC), polarization voltages, and cell temperature.
+//
+// Beats:
+//   1. Define BatteryCellParams, BatteryDynamicState, and OcvLookupCurve structures.
+//   2. Step forward Coulomb counting SOC integration and dual RC polarization branch voltages.
+//   3. Compute instantaneous cell terminal voltage V_term = OCV(SOC) - I*R0 - V_rc1 - V_rc2 and thermal losses.
+
+pub type BatteryCellParams = struct {
+    nominal_capacity_ah: Float,
+    r0_ohmic_ohms: Float,
+    r1_polarization_ohms: Float,
+    c1_polarization_farads: Float,
+    r2_diffusion_ohms: Float,
+    c2_diffusion_farads: Float,
+    thermal_capacity_j_k: Float,
+    thermal_resistance_k_w: Float,
+};
+
+pub type BatteryDynamicState = struct {
+    soc_fraction: Float, // 0.0 to 1.0
+    v_rc1: Float,
+    v_rc2: Float,
+    terminal_voltage_v: Float,
+    cell_temperature_c: Float,
+    heat_loss_watts: Float,
+};
+
+pub fn battery_eval_ocv(soc: Float) -> Float {
+    // Polynomial OCV-SOC curve for NMC chemistry (3.0V to 4.2V)
+    let mut s: Float = soc;
+    if s < 0.0 { s = 0.0; }
+    if s > 1.0 { s = 1.0; }
+    let ocv: Float = 3.4 + (0.8 * s) - (0.2 * s * s);
+    return ocv;
+}
+
+pub fn battery_step_state(
+    params: &BatteryCellParams,
+    state: &BatteryDynamicState,
+    current_a: Float, // positive for discharge, negative for charge
+    ambient_temp_c: Float,
+    dt: Float
+) -> BatteryDynamicState {
+    let q_coulombs: Float = (params).nominal_capacity_ah * 3600.0;
+    
+    // 1. Coulomb counting SOC update
+    let d_soc: Float = if q_coulombs > 0.0 { (0.0 - current_a * dt) / q_coulombs } else { 0.0 };
+    let mut next_soc: Float = (state).soc_fraction + d_soc;
+    if next_soc < 0.0 { next_soc = 0.0; }
+    if next_soc > 1.0 { next_soc = 1.0; }
+
+    // 2. RC branch 1 update: dV1/dt = -V1/(R1*C1) + I/C1
+    let tau1: Float = (params).r1_polarization_ohms * (params).c1_polarization_farads;
+    let dv1: Float = if tau1 > 0.0 {
+        ((0.0 - (state).v_rc1) / tau1) + (current_a / (params).c1_polarization_farads)
+    } else { 0.0 };
+    let next_v1: Float = (state).v_rc1 + (dv1 * dt);
+
+    // 3. RC branch 2 update: dV2/dt = -V2/(R2*C2) + I/C2
+    let tau2: Float = (params).r2_diffusion_ohms * (params).c2_diffusion_farads;
+    let dv2: Float = if tau2 > 0.0 {
+        ((0.0 - (state).v_rc2) / tau2) + (current_a / (params).c2_diffusion_farads)
+    } else { 0.0 };
+    let next_v2: Float = (state).v_rc2 + (dv2 * dt);
+
+    // 4. Terminal voltage V = OCV - I*R0 - V1 - V2
+    let ocv: Float = battery_eval_ocv(next_soc);
+    let v_term: Float = ocv - (current_a * (params).r0_ohmic_ohms) - next_v1 - next_v2;
+
+    // 5. Thermal dissipation: P = I^2*R0 + I*V1 + I*V2
+    let p_joule: Float = (current_a * current_a * (params).r0_ohmic_ohms) + (current_a * next_v1) + (current_a * next_v2);
+    let mut p_loss: Float = p_joule;
+    if p_loss < 0.0 { p_loss = 0.0; }
+
+    let c_th: Float = (params).thermal_capacity_j_k;
+    let r_th: Float = (params).thermal_resistance_k_w;
+    let q_cool: Float = if r_th > 0.0 { ((state).cell_temperature_c - ambient_temp_c) / r_th } else { 0.0 };
+    let d_temp: Float = if c_th > 0.0 { ((p_loss - q_cool) / c_th) * dt } else { 0.0 };
+    let next_temp: Float = (state).cell_temperature_c + d_temp;
+
+    return BatteryDynamicState {
+        soc_fraction: next_soc,
+        v_rc1: next_v1,
+        v_rc2: next_v2,
+        terminal_voltage_v: v_term,
+        cell_temperature_c: next_temp,
+        heat_loss_watts: p_loss,
+    };
+}

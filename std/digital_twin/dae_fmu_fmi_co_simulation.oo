@@ -1,0 +1,121 @@
+// # FMI / FMU Co-Simulation Master Algorithm
+//
+// Logline: Functional Mock-up Interface (FMI 2.0/3.0) co-simulation master coordinator for multi-physics slave FMUs.
+//
+// Setup: Coordinates fixed/adaptive communication step sizes, input-output signal routing, and rollbacks across heterogeneous FMUs.
+//
+// Beats:
+//   1. Define FmuSlaveInstance, SignalConnection, and FmiMasterCoordinator structures.
+//   2. Route continuous real/integer/boolean variable exchanges across slave boundaries.
+//   3. Execute master time synchronization step (fmi2DoStep) with rollback and communication logging.
+
+pub type FmuSlave = struct {
+    fmu_id: Int,
+    current_time: Float,
+    is_initialized: Bool,
+    input_values: List[Float],
+    output_values: List[Float],
+};
+
+pub type FmuConnection = struct {
+    from_fmu_id: Int,
+    from_output_idx: Int,
+    to_fmu_id: Int,
+    to_input_idx: Int,
+    gain: Float,
+};
+
+pub type MasterStepResult = struct {
+    communication_step_size: Float,
+    next_master_time: Float,
+    all_slaves_converged: Bool,
+};
+
+pub fn fmu_slave_new(id: Int, num_inputs: Int, num_outputs: Int) -> FmuSlave {
+    let mut inps: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < num_inputs {
+        inps = list_push(inps, 0.0);
+        i = i + 1;
+    }
+    let mut outs: List[Float] = list_new();
+    i = 0;
+    while i < num_outputs {
+        outs = list_push(outs, 0.0);
+        i = i + 1;
+    }
+    return FmuSlave {
+        fmu_id: id,
+        current_time: 0.0,
+        is_initialized: true,
+        input_values: inps,
+        output_values: outs,
+    };
+}
+
+pub fn fmi_exchange_signals(slaves: &List[FmuSlave], connections: &List[FmuConnection]) -> List[FmuSlave] {
+    // Exchange outputs to connected inputs
+    let n_slaves: Int = list_len(*slaves);
+    let n_conn: Int = list_len(*connections);
+    let mut updated_slaves: List[FmuSlave] = list_new();
+
+    let mut s_idx: Int = 0;
+    while s_idx < n_slaves {
+        let slave: FmuSlave = list_get(*slaves, s_idx);
+        let n_inps: Int = list_len(slave.input_values);
+        let mut new_inps: List[Float] = list_new();
+
+        let mut in_idx: Int = 0;
+        while in_idx < n_inps {
+            let mut val: Float = list_get(slave.input_values, in_idx);
+            // Search incoming connection
+            let mut c_idx: Int = 0;
+            while c_idx < n_conn {
+                let conn: FmuConnection = list_get(*connections, c_idx);
+                if conn.to_fmu_id == slave.fmu_id && conn.to_input_idx == in_idx {
+                    if conn.from_fmu_id >= 0 && conn.from_fmu_id < n_slaves {
+                        let src_slave: FmuSlave = list_get(*slaves, conn.from_fmu_id);
+                        if conn.from_output_idx >= 0 && conn.from_output_idx < list_len(src_slave.output_values) {
+                            val = list_get(src_slave.output_values, conn.from_output_idx) * conn.gain;
+                        }
+                    }
+                }
+                c_idx = c_idx + 1;
+            }
+            new_inps = list_push(new_inps, val);
+            in_idx = in_idx + 1;
+        }
+
+        let updated = FmuSlave {
+            fmu_id: slave.fmu_id,
+            current_time: slave.current_time,
+            is_initialized: slave.is_initialized,
+            input_values: new_inps,
+            output_values: slave.output_values,
+        };
+        updated_slaves = list_push(updated_slaves, updated);
+        s_idx = s_idx + 1;
+    }
+    return updated_slaves;
+}
+
+pub fn fmi_step_slaves(slaves: &List[FmuSlave], h_comm: Float) -> List[FmuSlave] {
+    let n_slaves: Int = list_len(*slaves);
+    let mut stepped: List[FmuSlave] = list_new();
+    let mut i: Int = 0;
+    while i < n_slaves {
+        let s: FmuSlave = list_get(*slaves, i);
+        // Advance internal slave mock state
+        let next_t: Float = s.current_time + h_comm;
+        let s_new = FmuSlave {
+            fmu_id: s.fmu_id,
+            current_time: next_t,
+            is_initialized: s.is_initialized,
+            input_values: s.input_values,
+            output_values: s.output_values,
+        };
+        stepped = list_push(stepped, s_new);
+        i = i + 1;
+    }
+    return stepped;
+}

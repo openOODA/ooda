@@ -1,0 +1,149 @@
+// # Digital & Binary Options Valuation Engine
+//
+// Logline: Prices Cash-or-Nothing and Asset-or-Nothing binary options, computing replication tight-spread bounds and discontinuous jump Greeks.
+//
+// Setup: Pure quantitative finance module implementing closed-form digital derivative pricing and synthetic call-spread replication.
+//
+// Beats:
+//   1. Define DigitalOptionContract and DigitalOptionResult structures.
+//   2. Compute risk-neutral exercise probabilities $N(d_2)$ and discounted fixed cash payouts.
+//   3. Value asset-or-nothing contracts and compute smoothed call spread replication approximations.
+
+pub type DigitalOptionContract = struct {
+    strike: Float,
+    expiry_years: Float,
+    cash_payout_amount: Float,
+    spot_price: Float,
+    risk_free_rate: Float,
+    volatility: Float,
+    is_call: Bool,
+    is_cash_or_nothing: Bool,
+};
+
+pub type DigitalOptionResult = struct {
+    option_price: Float,
+    exercise_probability: Float,
+    discounted_payout: Float,
+    delta: Float,
+    gamma: Float,
+    vega: Float,
+    theta_daily: Float,
+    replicated_spread_width: Float,
+};
+
+pub fn dig_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn dig_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (dig_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn digital_contract_new(
+    k: Float,
+    t: Float,
+    payout: Float,
+    spot: Float,
+    r: Float,
+    vol: Float,
+    is_call: Bool,
+    is_cash_or_nothing: Bool
+) -> DigitalOptionContract {
+    return DigitalOptionContract {
+        strike: k,
+        expiry_years: t,
+        cash_payout_amount: payout,
+        spot_price: spot,
+        risk_free_rate: r,
+        volatility: vol,
+        is_call: is_call,
+        is_cash_or_nothing: is_cash_or_nothing,
+    };
+}
+
+pub fn evaluate_digital_option(c: &DigitalOptionContract) -> DigitalOptionResult {
+    let s: Float = (c).spot_price;
+    let k: Float = (c).strike;
+    let t: Float = (c).expiry_years;
+    let r: Float = (c).risk_free_rate;
+    let vol: Float = (c).volatility;
+    let q: Float = (c).cash_payout_amount;
+
+    if t <= 0.0 || vol <= 0.0 {
+        let mut px: Float = 0.0;
+        let mut prob: Float = 0.0;
+        if (c).is_call {
+            if s >= k { px = q; prob = 1.0; }
+        } else {
+            if s <= k { px = q; prob = 1.0; }
+        }
+        return DigitalOptionResult {
+            option_price: px,
+            exercise_probability: prob,
+            discounted_payout: q,
+            delta: 0.0,
+            gamma: 0.0,
+            vega: 0.0,
+            theta_daily: 0.0,
+            replicated_spread_width: 0.0,
+        };
+    }
+
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    let df: Float = exp((0.0 - r) * t);
+
+    let pdf_d2: Float = dig_norm_pdf(d2);
+    let mut prob_exercise: Float = 0.0;
+    let mut price: Float = 0.0;
+    let mut delta: Float = 0.0;
+
+    if (c).is_cash_or_nothing {
+        if (c).is_call {
+            prob_exercise = dig_norm_cdf(d2);
+            price = df * q * prob_exercise;
+            delta = (df * q * pdf_d2) / (s * vol * sqrt_t);
+        } else {
+            prob_exercise = dig_norm_cdf(0.0 - d2);
+            price = df * q * prob_exercise;
+            delta = (0.0 - (df * q * pdf_d2)) / (s * vol * sqrt_t);
+        }
+    } else {
+        // Asset or nothing
+        if (c).is_call {
+            prob_exercise = dig_norm_cdf(d1);
+            price = s * prob_exercise;
+            delta = dig_norm_cdf(d1) + (dig_norm_pdf(d1) / (vol * sqrt_t));
+        } else {
+            prob_exercise = dig_norm_cdf(0.0 - d1);
+            price = s * prob_exercise;
+            delta = dig_norm_cdf(0.0 - d1) - (dig_norm_pdf(d1) / (vol * sqrt_t));
+        }
+    }
+
+    let gamma: Float = (0.0 - (df * q * pdf_d2 * d1)) / (s * s * vol * vol * t);
+    let vega: Float = (0.0 - (df * q * pdf_d2 * d1)) / vol;
+    let theta_annual: Float = (r * price) - ((df * q * pdf_d2 * ((d1 / (2.0 * t)) - (r / (vol * sqrt_t)))));
+    let theta_daily: Float = theta_annual / 365.0;
+
+    let spread_w: Float = k * 0.01; // 1% spread replication width
+
+    return DigitalOptionResult {
+        option_price: price,
+        exercise_probability: prob_exercise,
+        discounted_payout: df * q,
+        delta: delta,
+        gamma: gamma,
+        vega: vega,
+        theta_daily: theta_daily,
+        replicated_spread_width: spread_w,
+    };
+}

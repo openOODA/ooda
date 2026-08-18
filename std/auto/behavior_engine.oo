@@ -1,0 +1,252 @@
+// # Tactical Behavior & Collision Assessment Engine
+//
+// Logline: Evaluates time-to-collision (TTC), emergency braking thresholds, and updates vehicle kinematics.
+//
+// Setup: Tactical behavior planning engine importing behavior_ops.oo.
+//
+// Beats:
+//   1. Calculate inter-vehicle spatial distances and closing velocities.
+//   2. Evaluate Time-To-Collision (TTC) and trigger emergency braking thresholds.
+//   3. Update longitudinal and lateral vehicle kinematics during execution steps.
+
+import "./behavior_types.oo";
+import "./behavior_ops.oo";
+
+// -------------------------------------------------------------------
+// Kinematics, Safety & Decision Evaluation Mechanics
+// -------------------------------------------------------------------
+
+pub fn vehicle_state_distance(a: VehicleState, b: VehicleState) -> Float {
+    let dx: Float = (a).x - (b).x;
+    let dy: Float = (a).y - (b).y;
+    let dz: Float = (a).z - (b).z;
+    let sq: Float = ((dx * dx) + (dy * dy)) + (dz * dz);
+    if sq < 0.000000001 {
+        return 0.0;
+    }
+    return sqrt(sq);
+}
+
+pub fn vehicle_state_distance_to_obstacle(ego: VehicleState, obs: ObstacleState) -> Float {
+    let dx: Float = (ego).x - (obs).x;
+    let dy: Float = (ego).y - (obs).y;
+    let dz: Float = (ego).z - (obs).z;
+    let sq: Float = ((dx * dx) + (dy * dy)) + (dz * dz);
+    if sq < 0.000000001 {
+        return 0.0;
+    }
+    let center_dist: Float = sqrt(sq);
+    let edge_dist: Float = center_dist - (obs).bounding_radius;
+    if edge_dist < 0.0 {
+        return 0.0;
+    }
+    return edge_dist;
+}
+
+pub fn vehicle_state_time_to_collision(lead: VehicleState, follower: VehicleState) -> Float {
+    let dist: Float = vehicle_state_distance(lead, follower);
+    let rel_speed: Float = (follower).speed - (lead).speed;
+    if rel_speed <= 0.0001 {
+        return 999.0;
+    }
+    return dist / rel_speed;
+}
+
+pub fn vehicle_state_ttc_to_obstacle(ego: VehicleState, obs: ObstacleState) -> Float {
+    let dist: Float = vehicle_state_distance_to_obstacle(ego, obs);
+    let rel_speed: Float = (ego).speed - (obs).speed;
+    if rel_speed <= 0.0001 {
+        return 999.0;
+    }
+    return dist / rel_speed;
+}
+
+pub fn vehicle_state_is_emergency(
+    ego: VehicleState,
+    min_ttc: Float,
+    min_dist: Float,
+    lead: VehicleState
+) -> Bool {
+    if (ego).emergency_stop {
+        return true;
+    }
+    let dist: Float = vehicle_state_distance(ego, lead);
+    if dist < min_dist {
+        return true;
+    }
+    let ttc: Float = vehicle_state_time_to_collision(lead, ego);
+    if ttc < min_ttc {
+        return true;
+    }
+    return false;
+}
+
+pub fn vehicle_state_update_kinematics(state: VehicleState, dt: Float) -> VehicleState {
+    if (state).emergency_stop {
+        return state;
+    }
+
+    let new_speed: Float = (state).speed + ((state).acceleration * dt);
+    let mut safe_speed: Float = new_speed;
+    if safe_speed < 0.0 {
+        safe_speed = 0.0;
+    }
+
+    let new_yaw: Float = (state).yaw + ((state).yaw_rate * dt);
+    let new_vx: Float = safe_speed * cos(new_yaw);
+    let new_vy: Float = safe_speed * sin(new_yaw);
+
+    let new_x: Float = (state).x + (new_vx * dt);
+    let new_y: Float = (state).y + (new_vy * dt);
+
+    return VehicleState {
+        id: (state).id,
+        x: new_x,
+        y: new_y,
+        z: (state).z,
+        vx: new_vx,
+        vy: new_vy,
+        vz: (state).vz,
+        speed: safe_speed,
+        yaw: new_yaw,
+        yaw_rate: (state).yaw_rate,
+        steering_angle: (state).steering_angle,
+        acceleration: (state).acceleration,
+        target_speed: (state).target_speed,
+        current_lane_id: (state).current_lane_id,
+        target_lane_id: (state).target_lane_id,
+        fuel_or_battery_pct: (state).fuel_or_battery_pct,
+        is_autonomous: (state).is_autonomous,
+        emergency_stop: (state).emergency_stop,
+    };
+}
+
+pub fn decision_node_set_status(node: DecisionNode, status: Int) -> DecisionNode {
+    return DecisionNode {
+        id: (node).id,
+        node_type: (node).node_type,
+        status: status,
+        name: (node).name,
+        parent_id: (node).parent_id,
+        child_count: (node).child_count,
+        action_id: (node).action_id,
+        threshold: (node).threshold,
+        is_enabled: (node).is_enabled,
+    };
+}
+
+pub fn decision_node_evaluate_condition(node: DecisionNode, current_val: Float) -> DecisionNode {
+    let mut new_status: Int = status_failure();
+    if current_val >= (node).threshold {
+        new_status = status_success();
+    }
+    return decision_node_set_status(node, new_status);
+}
+
+pub fn tactical_plan_generate_stop(ego: VehicleState, reason_emergency: Bool) -> TacticalPlan {
+    let mut b_mode: Int = behavior_stop();
+    let mut accel: Float = -3.0;
+    if reason_emergency {
+        b_mode = behavior_emergency_brake();
+        accel = -8.0;
+    }
+
+    return TacticalPlan {
+        plan_id: 1,
+        target_behavior: b_mode,
+        target_speed: 0.0,
+        target_lane_id: (ego).current_lane_id,
+        time_to_collision: 0.0,
+        safe_distance: 5.0,
+        recommended_acceleration: accel,
+        recommended_steering: 0.0,
+        lane_change_allowed: false,
+        is_emergency: reason_emergency,
+    };
+}
+
+pub fn tactical_plan_generate_lane_keep(ego: VehicleState, target_speed: Float) -> TacticalPlan {
+    let mut accel: Float = 0.0;
+    let diff: Float = target_speed - (ego).speed;
+    if diff > 0.5 {
+        accel = 1.5;
+    } else {
+        if diff < -0.5 {
+            accel = -1.5;
+        }
+    }
+
+    return TacticalPlan {
+        plan_id: 2,
+        target_behavior: behavior_lane_keep(),
+        target_speed: target_speed,
+        target_lane_id: (ego).current_lane_id,
+        time_to_collision: 999.0,
+        safe_distance: 15.0,
+        recommended_acceleration: accel,
+        recommended_steering: 0.0,
+        lane_change_allowed: true,
+        is_emergency: false,
+    };
+}
+
+pub fn tactical_plan_generate_follow_lead(
+    ego: VehicleState,
+    lead: VehicleState,
+    desired_gap: Float
+) -> TacticalPlan {
+    let dist: Float = vehicle_state_distance(lead, ego);
+    let ttc: Float = vehicle_state_time_to_collision(lead, ego);
+
+    let mut accel: Float = 0.0;
+    let gap_diff: Float = dist - desired_gap;
+    if gap_diff < -2.0 {
+        accel = -2.5;
+    } else {
+        if gap_diff > 5.0 {
+            accel = 1.0;
+        } else {
+            accel = 0.0;
+        }
+    }
+
+    return TacticalPlan {
+        plan_id: 3,
+        target_behavior: behavior_follow_lead(),
+        target_speed: (lead).speed,
+        target_lane_id: (ego).current_lane_id,
+        time_to_collision: ttc,
+        safe_distance: desired_gap,
+        recommended_acceleration: accel,
+        recommended_steering: 0.0,
+        lane_change_allowed: true,
+        is_emergency: false,
+    };
+}
+
+pub fn tactical_plan_generate_lane_change(
+    ego: VehicleState,
+    target_lane: Int,
+    is_left: Bool,
+    target_speed: Float
+) -> TacticalPlan {
+    let mut b_mode: Int = behavior_lane_change_right();
+    let mut steer: Float = -0.15;
+    if is_left {
+        b_mode = behavior_lane_change_left();
+        steer = 0.15;
+    }
+
+    return TacticalPlan {
+        plan_id: 4,
+        target_behavior: b_mode,
+        target_speed: target_speed,
+        target_lane_id: target_lane,
+        time_to_collision: 999.0,
+        safe_distance: 20.0,
+        recommended_acceleration: 0.5,
+        recommended_steering: steer,
+        lane_change_allowed: true,
+        is_emergency: false,
+    };
+}

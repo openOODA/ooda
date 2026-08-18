@@ -1,0 +1,114 @@
+// # Dynamic Gamma Scalping & Delta Rebalancing Engine
+//
+// Logline: Simulates automated delta-neutral gamma scalping, evaluating realized volatility capture against execution slippage and fee drag.
+//
+// Setup: Pure quantitative finance module optimizing discrete rebalancing thresholds for long-gamma option portfolios.
+//
+// Beats:
+//   1. Define GammaScalpConfig, GammaScalpPosition, and GammaScalpExecution structures.
+//   2. Monitor portfolio delta drift $\Delta_{net}$ and trigger rebalancing when threshold is breached.
+//   3. Accumulate realized gamma trading profits ($\frac{1}{2}\Gamma (\Delta S)^2$) and subtract transaction costs.
+
+pub type GammaScalpConfig = struct {
+    delta_rebalance_threshold: Float, // e.g. 0.05 (rebalance when |delta| > 0.05)
+    taker_fee_pct: Float,             // e.g. 0.0005 (0.05%)
+    expected_slippage_pct: Float,
+    underlying_symbol: String,
+};
+
+pub type GammaScalpPosition = struct {
+    long_gamma_contracts: Float,
+    unit_gamma: Float,
+    current_net_delta: Float,
+    last_hedge_spot_price: Float,
+    accumulated_scalp_profit_usd: Float,
+    total_rebalances_count: Int,
+};
+
+pub type GammaScalpExecution = struct {
+    rebalance_triggered: Bool,
+    shares_traded: Float,
+    fill_price: Float,
+    realized_gamma_pnl_usd: Float,
+    fee_paid_usd: Float,
+    net_step_pnl_usd: Float,
+};
+
+pub fn gamma_scalp_config_default() -> GammaScalpConfig {
+    return GammaScalpConfig {
+        delta_rebalance_threshold: 0.05,
+        taker_fee_pct: 0.0005,
+        expected_slippage_pct: 0.0002,
+        underlying_symbol: "ETH-PERP",
+    };
+}
+
+pub fn gamma_scalp_position_new(
+    contracts: Float,
+    unit_gamma: Float,
+    spot_px: Float
+) -> GammaScalpPosition {
+    return GammaScalpPosition {
+        long_gamma_contracts: contracts,
+        unit_gamma: unit_gamma,
+        current_net_delta: 0.0,
+        last_hedge_spot_price: spot_px,
+        accumulated_scalp_profit_usd: 0.0,
+        total_rebalances_count: 0,
+    };
+}
+
+pub fn update_gamma_scalp_tick(
+    pos: &mut GammaScalpPosition,
+    new_spot_px: Float,
+    cfg: &GammaScalpConfig
+) -> GammaScalpExecution {
+    let ds: Float = new_spot_px - (pos).last_hedge_spot_price;
+    let total_gamma: Float = (pos).long_gamma_contracts * (pos).unit_gamma;
+    let delta_drift: Float = total_gamma * ds;
+
+    let mut abs_delta: Float = delta_drift;
+    if abs_delta < 0.0 {
+        abs_delta = 0.0 - abs_delta;
+    }
+
+    if abs_delta < (cfg).delta_rebalance_threshold {
+        (pos).current_net_delta = delta_drift;
+        return GammaScalpExecution {
+            rebalance_triggered: false,
+            shares_traded: 0.0,
+            fill_price: new_spot_px,
+            realized_gamma_pnl_usd: 0.0,
+            fee_paid_usd: 0.0,
+            net_step_pnl_usd: 0.0,
+        };
+    }
+
+    // Trigger rebalance: trade opposite of delta drift
+    let trade_size: Float = 0.0 - delta_drift;
+    let mut abs_trade: Float = trade_size;
+    if abs_trade < 0.0 {
+        abs_trade = 0.0 - abs_trade;
+    }
+
+    let trade_notional: Float = abs_trade * new_spot_px;
+    let fee: Float = trade_notional * ((cfg).taker_fee_pct + (cfg).expected_slippage_pct);
+
+    // Realized gamma PnL = 0.5 * Gamma * (dS)^2
+    let gamma_pnl: Float = 0.5 * total_gamma * ds * ds;
+    let net_pnl: Float = gamma_pnl - fee;
+
+    (pos).accumulated_scalp_profit_usd = (pos).accumulated_scalp_profit_usd + net_pnl;
+    (pos).total_rebalances_count = (pos).total_rebalances_count + 1;
+    (pos).last_hedge_spot_price = new_spot_px;
+    (pos).current_net_delta = 0.0;
+
+    return GammaScalpExecution {
+        rebalance_triggered: true,
+        shares_traded: trade_size,
+        fill_price: new_spot_px,
+        realized_gamma_pnl_usd: gamma_pnl,
+        fee_paid_usd: fee,
+        net_step_pnl_usd: net_pnl,
+    };
+}

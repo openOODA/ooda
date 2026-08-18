@@ -1,0 +1,172 @@
+// # Separating Axis Theorem (SAT) 2D Narrowphase
+//
+// Logline: Implements 2D Separating Axis Theorem for Oriented Bounding Boxes (OBB) and convex polygons with MTV generation.
+//
+// Setup: Geometric projection intervals and contact manifold generation for 2D rigid bodies.
+//
+// Beats:
+//   1. Project convex vertices and oriented bounds onto arbitrary separating axes.
+//   2. Detect axis intervals overlap and compute minimum translation vectors (MTV).
+//   3. Solve OBB-to-OBB and OBB-to-Triangle contact normals and penetration depths.
+
+// -------------------------------------------------------------------
+// SAT Data Types & Projections
+// -------------------------------------------------------------------
+
+pub type SATProjection = struct {
+    min_val: Float,
+    max_val: Float,
+};
+
+pub type SATContact = struct {
+    has_collision: Int,
+    penetration: Float,
+    normal_x: Float,
+    normal_y: Float,
+};
+
+pub type OBB2D = struct {
+    center_x: Float,
+    center_y: Float,
+    half_w: Float,
+    half_h: Float,
+    angle_rad: Float,
+};
+
+pub type Triangle2D = struct {
+    ax: Float,
+    ay: Float,
+    bx: Float,
+    by: Float,
+    cx: Float,
+    cy: Float,
+};
+
+// -------------------------------------------------------------------
+// Projection Operations
+// -------------------------------------------------------------------
+
+pub fn sat_projection_overlaps(a: &SATProjection, b: &SATProjection) -> Int {
+    if (a).max_val < (b).min_val { return 0; }
+    if (b).max_val < (a).min_val { return 0; }
+    return 1;
+}
+
+pub fn sat_projection_overlap_depth(a: &SATProjection, b: &SATProjection) -> Float {
+    let d1: Float = (a).max_val - (b).min_val;
+    let d2: Float = (b).max_val - (a).min_val;
+    if d1 < d2 { return d1; }
+    return d2;
+}
+
+pub fn obb2d_new(cx: Float, cy: Float, hw: Float, hh: Float, angle: Float) -> OBB2D {
+    return OBB2D {
+        center_x: cx,
+        center_y: cy,
+        half_w: hw,
+        half_h: hh,
+        angle_rad: angle,
+    };
+}
+
+// -------------------------------------------------------------------
+// OBB & Polygon Axis Projections
+// -------------------------------------------------------------------
+
+pub fn obb2d_project_axis(b: &OBB2D, axis_x: Float, axis_y: Float) -> SATProjection {
+    let c: Float = cos((b).angle_rad);
+    let s: Float = sin((b).angle_rad);
+
+    let u1_x: Float = c;
+    let u1_y: Float = s;
+    let u2_x: Float = 0.0 - s;
+    let u2_y: Float = c;
+
+    let dot_c: Float = ((b).center_x * axis_x) + ((b).center_y * axis_y);
+    let dot_u1: Float = (u1_x * axis_x) + (u1_y * axis_y);
+    let dot_u2: Float = (u2_x * axis_x) + (u2_y * axis_y);
+
+    let abs_u1: Float = if dot_u1 < 0.0 { 0.0 - dot_u1 } else { dot_u1 };
+    let abs_u2: Float = if dot_u2 < 0.0 { 0.0 - dot_u2 } else { dot_u2 };
+
+    let radius: Float = ((b).half_w * abs_u1) + ((b).half_h * abs_u2);
+
+    return SATProjection {
+        min_val: dot_c - radius,
+        max_val: dot_c + radius,
+    };
+}
+
+pub fn triangle2d_project_axis(tri: &Triangle2D, axis_x: Float, axis_y: Float) -> SATProjection {
+    let p1: Float = ((tri).ax * axis_x) + ((tri).ay * axis_y);
+    let p2: Float = ((tri).bx * axis_x) + ((tri).by * axis_y);
+    let p3: Float = ((tri).cx * axis_x) + ((tri).cy * axis_y);
+
+    let min_v: Float = if p1 < p2 { p1 } else { p2 };
+    let final_min: Float = if min_v < p3 { min_v } else { p3 };
+
+    let max_v: Float = if p1 > p2 { p1 } else { p2 };
+    let final_max: Float = if max_v > p3 { max_v } else { p3 };
+
+    return SATProjection {
+        min_val: final_min,
+        max_val: final_max,
+    };
+}
+
+// -------------------------------------------------------------------
+// OBB-to-OBB SAT Narrowphase
+// -------------------------------------------------------------------
+
+pub fn obb2d_test_obb2d(a: &OBB2D, b: &OBB2D) -> SATContact {
+    let c1: Float = cos((a).angle_rad);
+    let s1: Float = sin((a).angle_rad);
+    let c2: Float = cos((b).angle_rad);
+    let s2: Float = sin((b).angle_rad);
+
+    let mut min_depth: Float = 1000000.0;
+    let mut best_nx: Float = 0.0;
+    let mut best_ny: Float = 0.0;
+
+    // Test 4 separating axes (2 from box A, 2 from box B)
+    let axes_x: [Float] = [c1, 0.0 - s1, c2, 0.0 - s2];
+    let axes_y: [Float] = [s1, c1, s2, c2];
+
+    let mut i: Int = 0;
+    while i < 4 {
+        let ax: Float = axes_x[i];
+        let ay: Float = axes_y[i];
+
+        let p1: SATProjection = obb2d_project_axis(a, ax, ay);
+        let p2: SATProjection = obb2d_project_axis(b, ax, ay);
+
+        if sat_projection_overlaps(&p1, &p2) == 0 {
+            return SATContact { has_collision: 0, penetration: 0.0, normal_x: 0.0, normal_y: 0.0 };
+        }
+
+        let depth: Float = sat_projection_overlap_depth(&p1, &p2);
+        if depth < min_depth {
+            min_depth = depth;
+            best_nx = ax;
+            best_ny = ay;
+        }
+
+        i = i + 1;
+    }
+
+    // Ensure normal points from A to B
+    let dx: Float = (b).center_x - (a).center_x;
+    let dy: Float = (b).center_y - (a).center_y;
+    let dot_dir: Float = (dx * best_nx) + (dy * best_ny);
+    if dot_dir < 0.0 {
+        best_nx = 0.0 - best_nx;
+        best_ny = 0.0 - best_ny;
+    }
+
+    return SATContact {
+        has_collision: 1,
+        penetration: min_depth,
+        normal_x: best_nx,
+        normal_y: best_ny,
+    };
+}

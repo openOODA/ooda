@@ -1,0 +1,157 @@
+// # Hybrid Wireless Mesh Protocol (HWMP / IEEE 802.11s)
+//
+// Logline: Implements IEEE 802.11s HWMP combining proactive tree-based routing with on-demand peer discovery.
+//
+// Setup: Layer-2 MAC mesh routing engine evaluating Airtime Link Metrics (ALM) across hybrid tree and on-demand paths.
+//
+// Beats:
+//   1. Maintain proactive Root Announcement (RANN) tree paths to root mesh portals.
+//   2. Initiate on-demand Path Request (PREQ) and Path Reply (PREP) discovery frames.
+//   3. Minimize cumulative Airtime Link Cost metrics across multi-radio IEEE 802.11s wireless topologies.
+
+pub type HwmpPreqFrame = struct {
+    orig_mac: Int,
+    target_mac: Int,
+    orig_sn: Int,
+    target_sn: Int,
+    metric_airtime: Int,
+    hop_count: Int,
+};
+
+pub type HwmpPrepFrame = struct {
+    orig_mac: Int,
+    target_mac: Int,
+    target_sn: Int,
+    metric_airtime: Int,
+    hop_count: Int,
+    lifetime_ms: Int,
+};
+
+pub type HwmpRouteEntry = struct {
+    dest_mac: Int,
+    next_hop_mac: Int,
+    metric_airtime: Int,
+    dest_sn: Int,
+    hop_count: Int,
+    is_tree_route: Bool,
+};
+
+pub type HwmpMeshRouter = struct {
+    local_mac: Int,
+    sequence_num: Int,
+    root_mac: Int,
+    routes: List[HwmpRouteEntry],
+};
+
+pub fn hwmp_router_create(local_mac: Int, root_mac: Int) -> HwmpMeshRouter {
+    let empty: List[HwmpRouteEntry] = list_new();
+    return HwmpMeshRouter {
+        local_mac: local_mac,
+        sequence_num: 1,
+        root_mac: root_mac,
+        routes: empty,
+    };
+}
+
+pub fn hwmp_find_route(router: &HwmpMeshRouter, dest_mac: Int) -> Int {
+    let n: Int = list_len((router).routes);
+    let mut i: Int = 0;
+    while i < n {
+        let r: HwmpRouteEntry = list_get((router).routes, i);
+        if (r).dest_mac == dest_mac {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+pub fn hwmp_update_route(
+    router: &mut HwmpMeshRouter,
+    dest_mac: Int,
+    next_hop: Int,
+    metric: Int,
+    sn: Int,
+    hops: Int,
+    is_tree: Bool
+) -> Bool {
+    let idx: Int = hwmp_find_route(router, dest_mac);
+    let new_entry: HwmpRouteEntry = HwmpRouteEntry {
+        dest_mac: dest_mac,
+        next_hop_mac: next_hop,
+        metric_airtime: metric,
+        dest_sn: sn,
+        hop_count: hops,
+        is_tree_route: is_tree,
+    };
+
+    if idx < 0 {
+        (router).routes = list_push((router).routes, new_entry);
+        return true;
+    }
+
+    let cur: HwmpRouteEntry = list_get((router).routes, idx);
+    // Update if newer SN, or equal SN with lower airtime metric
+    if (sn > (cur).dest_sn) || (sn == (cur).dest_sn && metric < (cur).metric_airtime) {
+        let mut next_list: List[HwmpRouteEntry] = list_new();
+        let n: Int = list_len((router).routes);
+        let mut i: Int = 0;
+        while i < n {
+            if i == idx {
+                next_list = list_push(next_list, new_entry);
+            } else {
+                next_list = list_push(next_list, list_get((router).routes, i));
+            }
+            i = i + 1;
+        }
+        (router).routes = next_list;
+        return true;
+    }
+
+    return false;
+}
+
+pub fn hwmp_process_preq(
+    router: &mut HwmpMeshRouter,
+    preq: &HwmpPreqFrame,
+    from_neighbor_mac: Int,
+    link_airtime_cost: Int
+) -> Bool {
+    let total_airtime: Int = (preq).metric_airtime + link_airtime_cost;
+
+    // Update reverse path to originator
+    hwmp_update_route(
+        router,
+        (preq).orig_mac,
+        from_neighbor_mac,
+        total_airtime,
+        (preq).orig_sn,
+        (preq).hop_count + 1,
+        false
+    );
+
+    // Check if local node is target
+    if (router).local_mac == (preq).target_mac {
+        (router).sequence_num = (router).sequence_num + 1;
+        return true; // Node should respond with PREP
+    }
+
+    return false; // Propagate PREQ
+}
+
+pub fn hwmp_get_next_hop(router: &HwmpMeshRouter, dest_mac: Int) -> Int {
+    let idx: Int = hwmp_find_route(router, dest_mac);
+    if idx >= 0 {
+        let r: HwmpRouteEntry = list_get((router).routes, idx);
+        return (r).next_hop_mac;
+    }
+
+    // Default to root portal next hop if known
+    let root_idx: Int = hwmp_find_route(router, (router).root_mac);
+    if root_idx >= 0 {
+        let r_root: HwmpRouteEntry = list_get((router).routes, root_idx);
+        return (r_root).next_hop_mac;
+    }
+
+    return -1;
+}

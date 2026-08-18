@@ -1,0 +1,132 @@
+// # Cascaded Depth-Pitch Dual-Loop PID Controller
+//
+// Logline: Regulates AUV submerged depth via outer-loop depth error to inner-loop pitch attitude cascaded elevator and thruster control.
+//
+// Setup: Two-stage cascaded autopilot stabilizing vehicle pitch attitude while commanding vertical diving rate and stern planes.
+//
+// Beats:
+//   1. Define cascaded PID gains (outer depth loop Kp/Ki/Kd, inner pitch loop Kp/Ki/Kd).
+//   2. Compute outer-loop desired pitch attitude theta_cmd = - PID_depth(z_err).
+//   3. Compute inner-loop elevator fin deflection delta_e = PID_pitch(theta_err) and vertical thruster effort.
+//   4. Apply anti-windup clamping to prevent integrator saturation during large depth transitions.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type DepthPitchGains = struct {
+    kp_depth: Float,
+    ki_depth: Float,
+    kd_depth: Float,
+    max_pitch_rad: Float,
+    kp_pitch: Float,
+    ki_pitch: Float,
+    kd_pitch: Float,
+    max_elevator_rad: Float,
+};
+
+pub type DepthPitchControllerState = struct {
+    integral_depth_err: Float,
+    integral_pitch_err: Float,
+    last_depth_err: Float,
+    last_pitch_err: Float,
+};
+
+pub type DepthPitchControlOutput = struct {
+    desired_pitch_rad: Float,
+    elevator_deflection_rad: Float,
+    vertical_heave_thrust_n: Float,
+};
+
+pub type DepthPitchStepResult = struct {
+    new_state: DepthPitchControllerState,
+    output: DepthPitchControlOutput,
+};
+
+pub fn depth_pitch_gains_default() -> DepthPitchGains {
+    return DepthPitchGains {
+        kp_depth: 0.08,
+        ki_depth: 0.005,
+        kd_depth: 0.15,
+        max_pitch_rad: 0.35, // 20 deg
+        kp_pitch: 1.8,
+        ki_pitch: 0.05,
+        kd_pitch: 0.6,
+        max_elevator_rad: 0.4363, // 25 deg
+    };
+}
+
+pub fn depth_pitch_controller_state_init() -> DepthPitchControllerState {
+    return DepthPitchControllerState {
+        integral_depth_err: 0.0,
+        integral_pitch_err: 0.0,
+        last_depth_err: 0.0,
+        last_pitch_err: 0.0,
+    };
+}
+
+pub fn depth_pitch_cascaded_step(
+    gains: &DepthPitchGains,
+    state: &DepthPitchControllerState,
+    target_depth_m: Float,
+    current_depth_m: Float,
+    current_pitch_rad: Float,
+    current_q_rate: Float,
+    surge_speed: Float,
+    dt: Float
+) -> DepthPitchStepResult {
+    // Outer loop: Depth error
+    let depth_err: Float = target_depth_m - current_depth_m;
+    let new_int_depth: Float = math_clamp(
+        (state).integral_depth_err + (depth_err * dt),
+        0.0 - 50.0, 50.0
+    );
+    let mut safe_dt: Float = dt;
+    if safe_dt < 0.0001 {
+        safe_dt = 0.0001;
+    }
+    let d_depth: Float = (depth_err - (state).last_depth_err) / safe_dt;
+
+    // Desired pitch angle (diving requires negative pitch down)
+    let theta_cmd_raw: Float = 0.0 - (
+        ((gains).kp_depth * depth_err) +
+        ((gains).ki_depth * new_int_depth) +
+        ((gains).kd_depth * d_depth)
+    );
+    let max_th: Float = (gains).max_pitch_rad;
+    let desired_th: Float = math_clamp(theta_cmd_raw, 0.0 - max_th, max_th);
+
+    // Inner loop: Pitch error
+    let pitch_err: Float = desired_th - current_pitch_rad;
+    let new_int_pitch: Float = math_clamp(
+        (state).integral_pitch_err + (pitch_err * dt),
+        0.0 - 5.0, 5.0
+    );
+
+    let elevator_raw: Float = (
+        ((gains).kp_pitch * pitch_err) +
+        ((gains).ki_pitch * new_int_pitch) -
+        ((gains).kd_pitch * current_q_rate)
+    );
+    let max_elev: Float = (gains).max_elevator_rad;
+    let elevator_cmd: Float = math_clamp(elevator_raw, 0.0 - max_elev, max_elev);
+
+    // Heave thruster assistance when forward speed is low
+    let mut heave_thrust: Float = 0.0;
+    if surge_speed < 0.5 {
+        heave_thrust = math_clamp(depth_err * 25.0, 0.0 - 50.0, 50.0);
+    }
+
+    return DepthPitchStepResult {
+        new_state: DepthPitchControllerState {
+            integral_depth_err: new_int_depth,
+            integral_pitch_err: new_int_pitch,
+            last_depth_err: depth_err,
+            last_pitch_err: pitch_err,
+        },
+        output: DepthPitchControlOutput {
+            desired_pitch_rad: desired_th,
+            elevator_deflection_rad: elevator_cmd,
+            vertical_heave_thrust_n: heave_thrust,
+        },
+    };
+}

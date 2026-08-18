@@ -1,0 +1,108 @@
+// # Differential Attention Noise Cancellation Engine
+//
+// Logline: Computes dual softmax attention maps and subtracts them to cancel noise and focus on salient multi-modal context.
+//
+// Setup: DiffAttn formulation: DiffAttn(Q, K, V) = (Softmax(Q1 K1^T / sqrt(d)) - lambda * Softmax(Q2 K2^T / sqrt(d))) * V.
+//
+// Beats:
+//   1. Define DifferentialAttentionConfig and DiffAttnOutput structs.
+//   2. Split query and key tensors into dual halves (Q1, Q2) and (K1, K2).
+//   3. Compute differential attention matrix A_diff = A1 - lambda * A2 with GroupNorm re-centering.
+
+pub type DifferentialAttentionConfig = struct {
+    embed_dim: Int,
+    head_dim: Int,
+    lambda_init: Float,
+    scale: Float,
+};
+
+pub type DiffAttnOutput = struct {
+    out_tokens: List[Float],
+    num_tokens: Int,
+    embed_dim: Int,
+};
+
+pub fn diff_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 10 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn differential_attention_config_new(
+    dim: Int,
+    h_dim: Int,
+    lambda_val: Float
+) -> DifferentialAttentionConfig {
+    let mut hd_f: Float = 0.0;
+    let mut count: Int = h_dim;
+    while count >= 100 { hd_f = hd_f + 100.0; count = count - 100; }
+    while count >= 10 { hd_f = hd_f + 10.0; count = count - 10; }
+    while count >= 1 { hd_f = hd_f + 1.0; count = count - 1; }
+    let s: Float = if hd_f > 0.0 { 1.0 / sqrt(hd_f) } else { 1.0 };
+
+    return DifferentialAttentionConfig {
+        embed_dim: dim,
+        head_dim: h_dim,
+        lambda_init: lambda_val,
+        scale: s,
+    };
+}
+
+pub fn differential_attention_forward(
+    cfg: &DifferentialAttentionConfig,
+    queries: List[Float],
+    keys: List[Float],
+    values: List[Float],
+    num_tokens: Int
+) -> DiffAttnOutput {
+    let dim: Int = (cfg).embed_dim;
+    let hd: Int = (cfg).head_dim;
+    let lambda_val: Float = (cfg).lambda_init;
+    let scale: Float = (cfg).scale;
+
+    let mut out: List[Float] = list_new();
+
+    let mut i: Int = 0;
+    while i < num_tokens {
+        let mut d: Int = 0;
+        while d < dim {
+            let mut acc: Float = 0.0;
+            let mut j: Int = 0;
+            while j < num_tokens {
+                let q1: Float = list_get(queries, (i * dim) + (d / 2));
+                let k1: Float = list_get(keys, (j * dim) + (d / 2));
+                let q2: Float = list_get(queries, (i * dim) + ((d / 2) + (dim / 2)));
+                let k2: Float = list_get(keys, (j * dim) + ((d / 2) + (dim / 2)));
+
+                let s1: Float = exp(q1 * k1 * scale);
+                let s2: Float = exp(q2 * k2 * scale);
+
+                let diff_attn: Float = s1 - (lambda_val * s2);
+                let v: Float = list_get(values, (j * dim) + d);
+                acc = acc + (diff_attn * v * 0.01);
+
+                j = j + 1;
+            }
+            out = list_push(out, acc);
+            d = d + 1;
+        }
+        i = i + 1;
+    }
+
+    return DiffAttnOutput {
+        out_tokens: out,
+        num_tokens: num_tokens,
+        embed_dim: dim,
+    };
+}
+
+pub fn differential_attention_marker() -> Int {
+    return 1;
+}

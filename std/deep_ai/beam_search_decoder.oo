@@ -1,0 +1,276 @@
+// # Beam search length-normalized decoder
+//
+// Logline: Wu GNMT lp=((5+n)/6)^a. EOS / max-length finish. Top-B prune.
+// residual: destubbed to Int floor.
+
+type BeamSearchConfig = struct {
+    beam_width: Int,
+    max_length: Int,
+    eos_token_id: Int,
+    alpha_milli: Int
+}
+
+type BeamHypothesis = struct {
+    tok0: Int,
+    tok1: Int,
+    tok2: Int,
+    tok3: Int,
+    n_toks: Int,
+    score_milli: Int,
+    cum_lp_milli: Int,
+    finished: Int
+}
+
+type BeamDecoderState = struct {
+    n_active: Int,
+    n_finished: Int,
+    best_score: Int,
+    best_last: Int,
+    act_tok: Int,
+    act_score: Int
+}
+
+fn beam_min(a: Int, b: Int) -> Int {
+    if a < b {
+        return a;
+    }
+    return b;
+}
+
+fn beam_not(x: Int) -> Int {
+    if x == 0 {
+        return 1;
+    }
+    return 0;
+}
+
+fn beam_s4(i: Int, s0: Int, s1: Int, s2: Int, s3: Int) -> Int {
+    if i == 0 {
+        return s0;
+    }
+    if i == 1 {
+        return s1;
+    }
+    if i == 2 {
+        return s2;
+    }
+    if i == 3 {
+        return s3;
+    }
+    return 0 - 999999;
+}
+
+fn beam_t4(i: Int, t0: Int, t1: Int, t2: Int, t3: Int) -> Int {
+    if i == 0 {
+        return t0;
+    }
+    if i == 1 {
+        return t1;
+    }
+    if i == 2 {
+        return t2;
+    }
+    if i == 3 {
+        return t3;
+    }
+    return 0;
+}
+
+fn beam_better_i(cur_i: Int, cur_s: Int, i: Int, s: Int, allow: Int) -> Int {
+    if allow == 0 {
+        return cur_i;
+    }
+    if cur_i < 0 {
+        return i;
+    }
+    if s > cur_s {
+        return i;
+    }
+    return cur_i;
+}
+
+pub fn beam_length_penalty(n: Int, alpha_milli: Int) -> Int {
+    let base: Int = 5 + n;
+    if alpha_milli <= 0 {
+        return 1000;
+    }
+    if alpha_milli == 2000 {
+        return ((base * base) * 1000) / 36;
+    }
+    return (base * alpha_milli) / 6;
+}
+
+pub fn beam_score_of(cum_lp_milli: Int, n: Int, alpha_milli: Int) -> Int {
+    let pen: Int = beam_length_penalty(n, alpha_milli);
+    if pen == 0 {
+        return cum_lp_milli;
+    }
+    return (cum_lp_milli * 1000) / pen;
+}
+
+fn beam_fin_of(tok: Int, n: Int, eos: Int, max_len: Int) -> Int {
+    if tok == eos {
+        return 1;
+    }
+    if n >= max_len {
+        return 1;
+    }
+    return 0;
+}
+
+pub fn beam_search_config_new(beam_width: Int, max_len: Int, eos_id: Int, alpha_milli: Int) -> BeamSearchConfig {
+    return BeamSearchConfig {
+        beam_width: beam_width,
+        max_length: max_len,
+        eos_token_id: eos_id,
+        alpha_milli: alpha_milli
+    };
+}
+
+pub fn beam_hyp_new(tok0: Int, n_toks: Int, cum_lp_milli: Int) -> BeamHypothesis {
+    return BeamHypothesis {
+        tok0: tok0,
+        tok1: 0,
+        tok2: 0,
+        tok3: 0,
+        n_toks: n_toks,
+        score_milli: 0,
+        cum_lp_milli: cum_lp_milli,
+        finished: 0
+    };
+}
+
+pub fn beam_hyp_push(hyp: BeamHypothesis, tok: Int, lp: Int, eos: Int, max_len: Int, alpha_milli: Int) -> BeamHypothesis {
+    let new_n: Int = hyp.n_toks + 1;
+    let new_cum: Int = hyp.cum_lp_milli + lp;
+    let new_score: Int = beam_score_of(new_cum, new_n, alpha_milli);
+    let fin: Int = beam_fin_of(tok, new_n, eos, max_len);
+    if hyp.n_toks <= 0 {
+        return BeamHypothesis {
+            tok0: tok,
+            tok1: 0,
+            tok2: 0,
+            tok3: 0,
+            n_toks: new_n,
+            score_milli: new_score,
+            cum_lp_milli: new_cum,
+            finished: fin
+        };
+    }
+    if hyp.n_toks == 1 {
+        return BeamHypothesis {
+            tok0: hyp.tok0,
+            tok1: tok,
+            tok2: 0,
+            tok3: 0,
+            n_toks: new_n,
+            score_milli: new_score,
+            cum_lp_milli: new_cum,
+            finished: fin
+        };
+    }
+    if hyp.n_toks == 2 {
+        return BeamHypothesis {
+            tok0: hyp.tok0,
+            tok1: hyp.tok1,
+            tok2: tok,
+            tok3: 0,
+            n_toks: new_n,
+            score_milli: new_score,
+            cum_lp_milli: new_cum,
+            finished: fin
+        };
+    }
+    return BeamHypothesis {
+        tok0: hyp.tok0,
+        tok1: hyp.tok1,
+        tok2: hyp.tok2,
+        tok3: tok,
+        n_toks: new_n,
+        score_milli: new_score,
+        cum_lp_milli: new_cum,
+        finished: fin
+    };
+}
+
+pub fn beam_decoder_new(cfg: BeamSearchConfig, prompt: Int) -> BeamDecoderState {
+    if cfg.beam_width <= 0 {
+        return BeamDecoderState {
+            n_active: 0,
+            n_finished: 0,
+            best_score: 0,
+            best_last: prompt,
+            act_tok: prompt,
+            act_score: 0
+        };
+    }
+    return BeamDecoderState {
+        n_active: 1,
+        n_finished: 0,
+        best_score: 0,
+        best_last: prompt,
+        act_tok: prompt,
+        act_score: 0
+    };
+}
+
+pub fn beam_decoder_step(
+    cfg: BeamSearchConfig,
+    hyp: BeamHypothesis,
+    c0: Int,
+    lp0: Int,
+    c1: Int,
+    lp1: Int,
+    c2: Int,
+    lp2: Int,
+    c3: Int,
+    lp3: Int
+) -> BeamDecoderState {
+    let new_n: Int = hyp.n_toks + 1;
+    let s0: Int = beam_score_of(hyp.cum_lp_milli + lp0, new_n, cfg.alpha_milli);
+    let s1: Int = beam_score_of(hyp.cum_lp_milli + lp1, new_n, cfg.alpha_milli);
+    let s2: Int = beam_score_of(hyp.cum_lp_milli + lp2, new_n, cfg.alpha_milli);
+    let s3: Int = beam_score_of(hyp.cum_lp_milli + lp3, new_n, cfg.alpha_milli);
+    let f0: Int = beam_fin_of(c0, new_n, cfg.eos_token_id, cfg.max_length);
+    let f1: Int = beam_fin_of(c1, new_n, cfg.eos_token_id, cfg.max_length);
+    let f2: Int = beam_fin_of(c2, new_n, cfg.eos_token_id, cfg.max_length);
+    let f3: Int = beam_fin_of(c3, new_n, cfg.eos_token_id, cfg.max_length);
+    let n_fin: Int = ((f0 + f1) + f2) + f3;
+    let n_act_raw: Int = 4 - n_fin;
+    let n_act: Int = beam_min(n_act_raw, cfg.beam_width);
+    let p0: Int = beam_better_i(0 - 1, 0, 0, s0, f0);
+    let p1: Int = beam_better_i(p0, beam_s4(p0, s0, s1, s2, s3), 1, s1, f1);
+    let p2: Int = beam_better_i(p1, beam_s4(p1, s0, s1, s2, s3), 2, s2, f2);
+    let fin_i: Int = beam_better_i(p2, beam_s4(p2, s0, s1, s2, s3), 3, s3, f3);
+    let q0: Int = beam_better_i(0 - 1, 0, 0, s0, beam_not(f0));
+    let q1: Int = beam_better_i(q0, beam_s4(q0, s0, s1, s2, s3), 1, s1, beam_not(f1));
+    let q2: Int = beam_better_i(q1, beam_s4(q1, s0, s1, s2, s3), 2, s2, beam_not(f2));
+    let act_i: Int = beam_better_i(q2, beam_s4(q2, s0, s1, s2, s3), 3, s3, beam_not(f3));
+    let best_i: Int = fin_i;
+    if n_fin == 0 {
+        return BeamDecoderState {
+            n_active: n_act,
+            n_finished: n_fin,
+            best_score: beam_s4(act_i, s0, s1, s2, s3),
+            best_last: beam_t4(act_i, c0, c1, c2, c3),
+            act_tok: beam_t4(act_i, c0, c1, c2, c3),
+            act_score: beam_s4(act_i, s0, s1, s2, s3)
+        };
+    }
+    return BeamDecoderState {
+        n_active: n_act,
+        n_finished: n_fin,
+        best_score: beam_s4(best_i, s0, s1, s2, s3),
+        best_last: beam_t4(best_i, c0, c1, c2, c3),
+        act_tok: beam_t4(act_i, c0, c1, c2, c3),
+        act_score: beam_s4(act_i, s0, s1, s2, s3)
+    };
+}
+
+pub fn beam_state_best_last(st: BeamDecoderState) -> Int {
+    return st.best_last;
+}
+
+pub fn beam_state_n_finished(st: BeamDecoderState) -> Int {
+    return st.n_finished;
+}

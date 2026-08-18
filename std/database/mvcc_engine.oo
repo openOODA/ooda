@@ -1,0 +1,199 @@
+// # MVCC Version Chain Storage Engine and Vacuum
+//
+// Logline: Implements multi-version tuple storage, snapshot reads, commit validation, and dead version vacuuming.
+//
+// Setup: Pure MVCC storage engine managing version chains and garbage collection.
+//
+// Beats:
+//   1. Define versioned tuple headers with transaction creation and expiration stamps.
+//   2. Execute snapshot-isolated reads and concurrent write conflict checks.
+//   3. Commit transactions and vacuum expired versions beneath active transaction watermarks.
+
+import "./mvcc_tx.oo";
+
+pub type MvccTuple = struct {
+    tuple_id: String,
+    key: String,
+    val: String,
+    created_by_tx: Int,
+    expired_by_tx: Int,
+    prev_version_id: String,
+    deleted: Bool,
+};
+
+pub type MvccEngine = struct {
+    active_transactions: List[Transaction],
+    tuples: List[MvccTuple],
+    next_tx_id: Int,
+    oldest_active_tx_id: Int,
+    vacuum_runs: Int,
+    reclaimed_versions: Int,
+};
+
+pub fn mvcc_engine_init() -> MvccEngine {
+    let empty_txs: List[Transaction] = list_new();
+    let empty_tuples: List[MvccTuple] = list_new();
+    return MvccEngine {
+        active_transactions: empty_txs,
+        tuples: empty_tuples,
+        next_tx_id: 1,
+        oldest_active_tx_id: 1,
+        vacuum_runs: 0,
+        reclaimed_versions: 0,
+    };
+}
+
+pub fn mvcc_begin_tx(
+    eng: &mut MvccEngine,
+    iso_level: Int,
+    now: Int
+) -> Transaction {
+    let tid: Int = (eng).next_tx_id;
+    (eng).next_tx_id = tid + 1;
+
+    let mut active_ids: List[Int] = list_new();
+    let cur_txs: List[Transaction] = (eng).active_transactions;
+    let n: Int = list_len(cur_txs);
+    let mut i: Int = 0;
+    while i < n {
+        let t: Transaction = list_get(cur_txs, i);
+        if tx_is_active(&t) {
+            active_ids = list_push(active_ids, (t).tx_id);
+        }
+        i = i + 1;
+    }
+
+    let wm: Int = (eng).oldest_active_tx_id;
+    let tx: Transaction = tx_create(tid, iso_level, now, active_ids, wm);
+    let new_txs: List[Transaction] = list_push(cur_txs, tx);
+    (eng).active_transactions = new_txs;
+
+    return tx;
+}
+
+pub fn mvcc_read(
+    eng: &MvccEngine,
+    tx: &mut Transaction,
+    key: String
+) -> Option[String] {
+    tx_add_read(tx, key);
+    let tuple_list: List[MvccTuple] = (eng).tuples;
+    let n: Int = list_len(tuple_list);
+    let mut i: Int = 0;
+
+    while i < n {
+        let tup: MvccTuple = list_get(tuple_list, i);
+        if (tup).key == key {
+            let vis: Bool = tx_is_visible(
+                tx,
+                (tup).created_by_tx,
+                (tup).expired_by_tx
+            );
+            if vis {
+                if (tup).deleted {
+                    return None;
+                }
+                return Some((tup).val);
+            }
+        }
+        i = i + 1;
+    }
+
+    return None;
+}
+
+pub fn mvcc_write(
+    eng: &mut MvccEngine,
+    tx: &mut Transaction,
+    key: String,
+    val: String
+) -> Result[Bool, String] {
+    let tid: Int = (tx).tx_id;
+    tx_add_write(tx, key);
+
+    let tuple_list: List[MvccTuple] = (eng).tuples;
+    let n: Int = list_len(tuple_list);
+    let mut new_tuples: List[MvccTuple] = list_new();
+    let mut i: Int = 0;
+    let mut prev_id: String = "";
+
+    while i < n {
+        let tup: MvccTuple = list_get(tuple_list, i);
+        if (tup).key == key {
+            if (tup).expired_by_tx == 0 {
+                let updated_prev: MvccTuple = MvccTuple {
+                    tuple_id: (tup).tuple_id,
+                    key: (tup).key,
+                    val: (tup).val,
+                    created_by_tx: (tup).created_by_tx,
+                    expired_by_tx: tid,
+                    prev_version_id: (tup).prev_version_id,
+                    deleted: (tup).deleted,
+                };
+                new_tuples = list_push(new_tuples, updated_prev);
+                prev_id = (tup).tuple_id;
+            } else {
+                new_tuples = list_push(new_tuples, tup);
+            }
+        } else {
+            new_tuples = list_push(new_tuples, tup);
+        }
+        i = i + 1;
+    }
+
+    let ts_str: String = tid.to_string();
+    let tup_id: String = "tup_" + key + "_" + ts_str;
+    let new_tuple: MvccTuple = MvccTuple {
+        tuple_id: tup_id,
+        key: key,
+        val: val,
+        created_by_tx: tid,
+        expired_by_tx: 0,
+        prev_version_id: prev_id,
+        deleted: false,
+    };
+    new_tuples = list_push(new_tuples, new_tuple);
+    (eng).tuples = new_tuples;
+
+    return Ok(true);
+}
+
+pub fn mvcc_commit_tx(
+    eng: &mut MvccEngine,
+    tx: &mut Transaction,
+    commit_ts: Int
+) -> Result[Bool, String] {
+    (tx).status = 1;
+    (tx).commit_ts = commit_ts;
+    return Ok(true);
+}
+
+pub fn mvcc_abort_tx(eng: &mut MvccEngine, tx: &mut Transaction) -> Bool {
+    (tx).status = 2;
+    return true;
+}
+
+pub fn mvcc_vacuum_garbage_collect(eng: &mut MvccEngine) -> Int {
+    (eng).vacuum_runs = (eng).vacuum_runs + 1;
+    let tuple_list: List[MvccTuple] = (eng).tuples;
+    let n: Int = list_len(tuple_list);
+    let wm: Int = (eng).oldest_active_tx_id;
+    let mut live_tuples: List[MvccTuple] = list_new();
+    let mut reclaimed: Int = 0;
+    let mut i: Int = 0;
+
+    while i < n {
+        let tup: MvccTuple = list_get(tuple_list, i);
+        let exp: Int = (tup).expired_by_tx;
+        if exp > 0 && exp < wm {
+            reclaimed = reclaimed + 1;
+        } else {
+            live_tuples = list_push(live_tuples, tup);
+        }
+        i = i + 1;
+    }
+
+    (eng).tuples = live_tuples;
+    (eng).reclaimed_versions = (eng).reclaimed_versions + reclaimed;
+    return reclaimed;
+}

@@ -1,0 +1,252 @@
+// # Keys Engine and Policy Management
+//
+// Logline: Manages execution engine lifecycle, security policies, and performance accounting for KEYS.
+//
+// Setup: Imports companion modules for validated KEYS operations.
+//
+// Beats:
+//   1. Import KEYS operations and types.
+//   2. Initialize security policies and execution engine contexts.
+//   3. Compute engine workload telemetry and operation metrics.
+
+import "./keys_ops.oo";
+
+// -------------------------------------------------------------------
+// PEM Format Encoding & Decoding
+// -------------------------------------------------------------------
+
+pub fn key_export_pem(header_tag: String, raw_bytes: String) -> String {
+    let hex_val: String = key_bytes_to_hex(raw_bytes);
+    let mut pem: String = "-----BEGIN " + header_tag;
+    pem = pem + "-----\n";
+    let len: Int = hex_val.len();
+    let mut i: Int = 0;
+    while i < len {
+        let mut chunk_len: Int = 64;
+        let i_plus_chunk: Int = i + chunk_len;
+        if i_plus_chunk > len {
+            chunk_len = len - i;
+        }
+        let mut j: Int = 0;
+        let mut line: String = "";
+        while j < chunk_len {
+            let idx: Int = i + j;
+            let ch: Int = byte_at(hex_val, idx);
+            let mut b: List[Int] = bytes_new();
+            b = bytes_push(b, ch);
+            line = line + bytes_to_str(b);
+            j = j + 1;
+        }
+        pem = pem + line;
+        pem = pem + "\n";
+        i = i + chunk_len;
+    }
+    pem = pem + "-----END ";
+    pem = pem + header_tag;
+    pem = pem + "-----\n";
+    return pem;
+}
+
+pub fn key_import_pem(pem_str: String, header_tag: String) -> Result[String, String] {
+    let begin_marker: String = "-----BEGIN " + header_tag + "-----";
+    let end_marker: String = "-----END " + header_tag + "-----";
+    let len: Int = pem_str.len();
+    let b_len: Int = begin_marker.len();
+    let e_len: Int = end_marker.len();
+    let min_len: Int = b_len + e_len;
+
+    if len < min_len {
+        return Err("PEM_INVALID: Content too short for markers");
+    }
+
+    let mut idx_pem: Int = 0;
+    let mut b_found: Bool = false;
+    let mut body_start: Int = 0;
+    let max_b_idx: Int = len - b_len;
+
+    while idx_pem <= max_b_idx {
+        let mut match_b: Bool = true;
+        let mut j: Int = 0;
+        while j < b_len {
+            let p_idx: Int = idx_pem + j;
+            let ch_p: Int = byte_at(pem_str, p_idx);
+            let ch_m: Int = byte_at(begin_marker, j);
+            if ch_p != ch_m {
+                match_b = false;
+                j = b_len;
+            } else {
+                j = j + 1;
+            }
+        }
+        if match_b {
+            b_found = true;
+            body_start = idx_pem + b_len;
+            idx_pem = len;
+        } else {
+            idx_pem = idx_pem + 1;
+        }
+    }
+
+    if b_found == false {
+        return Err("PEM_INVALID: Missing BEGIN marker");
+    }
+
+    let mut k_pem: Int = body_start;
+    let mut e_found: Bool = false;
+    let mut body_end: Int = 0;
+    let max_e_idx: Int = len - e_len;
+
+    while k_pem <= max_e_idx {
+        let mut match_e: Bool = true;
+        let mut m: Int = 0;
+        while m < e_len {
+            let p_idx: Int = k_pem + m;
+            let ch_p: Int = byte_at(pem_str, p_idx);
+            let ch_m: Int = byte_at(end_marker, m);
+            if ch_p != ch_m {
+                match_e = false;
+                m = e_len;
+            } else {
+                m = m + 1;
+            }
+        }
+        if match_e {
+            e_found = true;
+            body_end = k_pem;
+            k_pem = len;
+        } else {
+            k_pem = k_pem + 1;
+        }
+    }
+
+    if e_found == false {
+        return Err("PEM_INVALID: Missing END marker");
+    }
+
+    let mut hex_buf: String = "";
+    let mut p: Int = body_start;
+    while p < body_end {
+        let ch: Int = byte_at(pem_str, p);
+        if ch != 10 {
+            if ch != 13 {
+                if ch != 32 {
+                    let mut tmp: List[Int] = bytes_new();
+                    tmp = bytes_push(tmp, ch);
+                    let ch_s: String = bytes_to_str(tmp);
+                    hex_buf = hex_buf + ch_s;
+                }
+            }
+        }
+        p = p + 1;
+    }
+
+    return hex_to_key_bytes(hex_buf);
+}
+
+// -------------------------------------------------------------------
+// Symmetric Key Generation
+// -------------------------------------------------------------------
+
+pub fn generate_symmetric_key(
+    rand: &RandCap,
+    key_id: String,
+    algorithm: String,
+    bit_length: Int,
+    created_at: Int,
+    expires_at: Int
+) -> Result[SecretKey, String] {
+    if bit_length <= 0 {
+        return Err("INVALID_BIT_LENGTH: Bit length must be positive");
+    }
+    let bit_rem: Int = bit_length % 8;
+    if bit_rem != 0 {
+        return Err("INVALID_BIT_LENGTH: Bit length must be byte-aligned");
+    }
+
+    let num_bytes: Int = bit_length / 8;
+    let mut buf: List[Int] = bytes_new();
+    let mut i: Int = 0;
+    let mask: Int = 255;
+
+    while i < num_bytes {
+        let r: Int = random(rand);
+        let b: Int = r & mask;
+        let mut pos_b: Int = b;
+        if pos_b < 0 {
+            pos_b = 0 - pos_b;
+        }
+        pos_b = pos_b % 256;
+        buf = bytes_push(buf, pos_b);
+        i = i + 1;
+    }
+
+    let raw_str: String = bytes_to_str(buf);
+    let flags: Int = 1 | 2;
+    let meta: KeyMetadata = key_metadata_create(key_id, algorithm, 0, bit_length, flags, created_at, expires_at);
+    let sk: SecretKey = secret_key_create(meta, raw_str);
+    return Ok(sk);
+}
+
+// -------------------------------------------------------------------
+// KeyStore Management Engine
+// -------------------------------------------------------------------
+
+pub fn keystore_policy_init(
+    require_sys_cap: Bool,
+    max_keys: Int,
+    allow_export: Bool,
+    fail_closed: Bool
+) -> KeyStorePolicy {
+    return KeyStorePolicy {
+        require_sys_cap: require_sys_cap,
+        max_keys: max_keys,
+        allow_export: allow_export,
+        fail_closed: fail_closed,
+    };
+}
+
+pub fn keystore_init(store_id: String, policy: KeyStorePolicy, master_password: String) -> KeyStore {
+    let s_keys: List[SecretKey] = list_new();
+    let p_keys: List[PublicKey] = list_new();
+    let k_pairs: List[KeyPair] = list_new();
+    let pwd_hash: Int = key_calculate_checksum(master_password);
+
+    return KeyStore {
+        store_id: store_id,
+        policy: policy,
+        secret_keys: s_keys,
+        public_keys: p_keys,
+        key_pairs: k_pairs,
+        is_locked: false,
+        master_key_hash: pwd_hash,
+    };
+}
+
+pub fn keystore_is_locked(store: &KeyStore) -> Bool {
+    return (store).is_locked;
+}
+
+pub fn keystore_lock(store: &mut KeyStore) {
+    store.is_locked = true;
+}
+
+pub fn keystore_unlock(store: &mut KeyStore, password: String) -> Bool {
+    let pwd_hash: Int = key_calculate_checksum(password);
+    let master_hash: Int = store.master_key_hash;
+    if pwd_hash == master_hash {
+        store.is_locked = false;
+        return true;
+    }
+    return false;
+}
+
+pub type Bit = struct {};
+pub type Missing = struct {};
+pub type Default = struct {};
+pub type Content = struct {};
+pub type Fail = struct {};
+
+
+pub fn __dummy_std_src_ooda_crypto_keys_engine_oo() -> Int {
+    return 0;
+}

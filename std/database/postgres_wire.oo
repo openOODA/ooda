@@ -1,0 +1,138 @@
+// # PostgreSQL Wire Protocol (V3.0) Message Handler
+//
+// Logline: Implements frontend packet decoding, backend message framing, and net-gated query processing.
+//
+// Setup: NetCap-gated wire protocol handler implementing PostgreSQL 3.0 server semantics.
+//
+// Beats:
+//   1. Define PostgreSQL backend packet descriptors, message types, and session state.
+//   2. Encode RowDescription, DataRow, CommandComplete, and ReadyForQuery wire messages.
+//   3. Handle incoming client queries and dispatch protocol responses under NetCap.
+
+pub type PgPacket = struct {
+    msg_type: Int,
+    length: Int,
+    payload: String,
+    tag: String,
+};
+
+pub type PgSession = struct {
+    session_id: Int,
+    user: String,
+    database_name: String,
+    in_transaction: Bool,
+    backend_pid: Int,
+    bytes_transferred: Int,
+};
+
+pub fn pg_session_create(session_id: Int) -> PgSession {
+    return PgSession {
+        session_id: session_id,
+        user: "ooda_user",
+        database_name: "ooda_db",
+        in_transaction: false,
+        backend_pid: 1000 + session_id,
+        bytes_transferred: 0,
+    };
+}
+
+pub fn pg_encode_row_description(col_names: List[String]) -> PgPacket {
+    let n: Int = list_len(col_names);
+    let mut payload: String = "cols:" + n.to_string();
+    let mut i: Int = 0;
+    while i < n {
+        payload = payload + "," + list_get(col_names, i);
+        i = i + 1;
+    }
+    let p_len: Int = payload.len();
+    return PgPacket {
+        msg_type: 84, // 'T' RowDescription
+        length: p_len + 4,
+        payload: payload,
+        tag: "RowDescription",
+    };
+}
+
+pub fn pg_encode_data_row(values: List[String]) -> PgPacket {
+    let n: Int = list_len(values);
+    let mut payload: String = "vals:" + n.to_string();
+    let mut i: Int = 0;
+    while i < n {
+        payload = payload + "," + list_get(values, i);
+        i = i + 1;
+    }
+    let p_len: Int = payload.len();
+    return PgPacket {
+        msg_type: 68, // 'D' DataRow
+        length: p_len + 4,
+        payload: payload,
+        tag: "DataRow",
+    };
+}
+
+pub fn pg_encode_command_complete(tag: String) -> PgPacket {
+    let p_len: Int = tag.len();
+    return PgPacket {
+        msg_type: 67, // 'C' CommandComplete
+        length: p_len + 5,
+        payload: tag,
+        tag: tag,
+    };
+}
+
+pub fn pg_encode_ready_for_query(in_tx: Bool) -> PgPacket {
+    let mut status: String = "I";
+    if in_tx {
+        status = "T";
+    }
+    return PgPacket {
+        msg_type: 90, // 'Z' ReadyForQuery
+        length: 5,
+        payload: status,
+        tag: "ReadyForQuery",
+    };
+}
+
+pub fn pg_encode_error_response(severity: String, msg: String) -> PgPacket {
+    let payload: String = severity + ":" + msg;
+    let p_len: Int = payload.len();
+    return PgPacket {
+        msg_type: 69, // 'E' ErrorResponse
+        length: p_len + 4,
+        payload: payload,
+        tag: "ErrorResponse",
+    };
+}
+
+pub fn pg_session_handle_query(
+    net: &NetCap,
+    sess: &mut PgSession,
+    query: String
+) -> Result[List[PgPacket], String] {
+    let q_len: Int = query.len();
+    (sess).bytes_transferred = (sess).bytes_transferred + q_len;
+
+    let mut responses: List[PgPacket] = list_new();
+
+    if query == "BEGIN" || query == "begin" {
+        (sess).in_transaction = true;
+        let c_pkt: PgPacket = pg_encode_command_complete("BEGIN");
+        responses = list_push(responses, c_pkt);
+    } else if query == "COMMIT" || query == "commit" {
+        (sess).in_transaction = false;
+        let c_pkt2: PgPacket = pg_encode_command_complete("COMMIT");
+        responses = list_push(responses, c_pkt2);
+    } else if query == "ROLLBACK" || query == "rollback" {
+        (sess).in_transaction = false;
+        let c_pkt3: PgPacket = pg_encode_command_complete("ROLLBACK");
+        responses = list_push(responses, c_pkt3);
+    } else {
+        let c_pkt4: PgPacket = pg_encode_command_complete("SELECT 0");
+        responses = list_push(responses, c_pkt4);
+    }
+
+    let ready_pkt: PgPacket = pg_encode_ready_for_query((sess).in_transaction);
+    responses = list_push(responses, ready_pkt);
+
+    return Ok(responses);
+}

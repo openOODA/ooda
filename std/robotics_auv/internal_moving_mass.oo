@@ -1,0 +1,95 @@
+// # Internal Moving Mass & Battery Pack Shifting Trim
+//
+// Logline: Simulates internal moving mass actuator translation and rotation for attitude trim without external control surfaces.
+//
+// Setup: Shifting battery pack mechanism for underwater gliders (e.g., Slocum, Seaglider) controlling pitch and roll trim.
+//
+// Beats:
+//   1. Define internal movable battery pack mass, stroke limits, and lead-screw speed.
+//   2. Integrate linear pitch slider position x_m and roll rotation angle phi_m over dt.
+//   3. Compute composite vehicle center-of-gravity displacement delta_r_cg.
+//   4. Calculate resulting pitch and roll hydrostatic trimming moments.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type MovingMassParams = struct {
+    slider_mass_kg: Float,
+    total_vehicle_mass_kg: Float,
+    max_stroke_x_m: Float,
+    max_linear_speed_m_s: Float,
+    roll_eccentricity_radius_m: Float,
+    max_roll_rate_rad_s: Float,
+};
+
+pub type MovingMassState = struct {
+    slider_position_x_m: Float,
+    roll_angle_rad: Float,
+    effective_cg_shift_x_m: Float,
+    effective_cg_shift_y_m: Float,
+};
+
+pub fn moving_mass_params_default_glider() -> MovingMassParams {
+    return MovingMassParams {
+        slider_mass_kg: 10.0,
+        total_vehicle_mass_kg: 52.0,
+        max_stroke_x_m: 0.12, // +/- 12 cm travel
+        max_linear_speed_m_s: 0.015, // 15 mm/s
+        roll_eccentricity_radius_m: 0.04, // 4 cm radius
+        max_roll_rate_rad_s: 0.2,
+    };
+}
+
+pub fn moving_mass_state_zero() -> MovingMassState {
+    return MovingMassState {
+        slider_position_x_m: 0.0,
+        roll_angle_rad: 0.0,
+        effective_cg_shift_x_m: 0.0,
+        effective_cg_shift_y_m: 0.0,
+    };
+}
+
+pub fn moving_mass_step(
+    params: &MovingMassParams,
+    state: &MovingMassState,
+    target_pos_x: Float,
+    target_roll_rad: Float,
+    pitch_angle_rad: Float,
+    dt: Float
+) -> MovingMassState {
+    // Linear slider position integration
+    let max_x: Float = (params).max_stroke_x_m;
+    let clamped_tx: Float = math_clamp(target_pos_x, 0.0 - max_x, max_x);
+    let diff_x: Float = clamped_tx - (state).slider_position_x_m;
+    let max_step_x: Float = (params).max_linear_speed_m_s * dt;
+    let step_x: Float = math_clamp(diff_x, 0.0 - max_step_x, max_step_x);
+    let new_pos_x: Float = (state).slider_position_x_m + step_x;
+
+    // Roll angle integration
+    let diff_phi: Float = target_roll_rad - (state).roll_angle_rad;
+    let max_step_phi: Float = (params).max_roll_rate_rad_s * dt;
+    let step_phi: Float = math_clamp(diff_phi, 0.0 - max_step_phi, max_step_phi);
+    let new_phi: Float = (state).roll_angle_rad + step_phi;
+
+    // Composite CG shift: delta_r_cg = (m_slider / m_total) * r_slider
+    let mass_ratio: Float = (params).slider_mass_kg / (params).total_vehicle_mass_kg;
+    let cg_shift_x: Float = mass_ratio * new_pos_x;
+    let cg_shift_y: Float = mass_ratio * (params).roll_eccentricity_radius_m * sin(new_phi);
+
+    return MovingMassState {
+        slider_position_x_m: new_pos_x,
+        roll_angle_rad: new_phi,
+        effective_cg_shift_x_m: cg_shift_x,
+        effective_cg_shift_y_m: cg_shift_y,
+    };
+}
+
+pub fn compute_trim_pitch_moment(
+    params: &MovingMassParams,
+    state: &MovingMassState,
+    pitch_angle_rad: Float
+) -> Float {
+    let w: Float = (params).total_vehicle_mass_kg * const_g();
+    // Pitch restoring moment contribution: - W * delta_x_cg * cos(theta)
+    return 0.0 - (w * (state).effective_cg_shift_x_m * cos(pitch_angle_rad));
+}

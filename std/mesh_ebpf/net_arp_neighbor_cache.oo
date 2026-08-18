@@ -1,0 +1,102 @@
+// # Kernel Networking ARP & Neighbor Discovery Cache
+//
+// Logline: Implements IPv4 ARP and IPv6 Neighbor Discovery (ND) state machine and hardware address cache.
+//
+// Setup: Layer-2/Layer-3 address resolution table mapping IP endpoints to Ethernet MAC addresses.
+//
+// Beats:
+//   1. Maintain neighbor cache states: INCOMPLETE (1), REACHABLE (2), STALE (3), DELAY (4), PROBE (5).
+//   2. Resolve IP destination to hardware MAC address with expiration timestamp tracking.
+//   3. Handle gratuitous ARP updates and neighbor solicitation probing timeouts.
+
+pub type NeighborEntry = struct {
+    ip_addr: Int,
+    mac_hi: Int, // Upper 16 bits of MAC
+    mac_lo: Int, // Lower 32 bits of MAC
+    state: Int,  // 1: INCOMPLETE, 2: REACHABLE, 3: STALE, 4: DELAY, 5: PROBE
+    expires_at_ms: Int,
+};
+
+pub type NeighborCache = struct {
+    entries: List[NeighborEntry],
+    reachable_timeout_ms: Int,
+    total_lookups: Int,
+    miss_count: Int,
+};
+
+pub fn neighbor_cache_new(reach_timeout_ms: Int) -> NeighborCache {
+    let empty_entries: List[NeighborEntry] = list_new();
+    return NeighborCache {
+        entries: empty_entries,
+        reachable_timeout_ms: reach_timeout_ms,
+        total_lookups: 0,
+        miss_count: 0,
+    };
+}
+
+pub fn neighbor_update(
+    cache: &mut NeighborCache,
+    ip: Int,
+    mac_hi: Int,
+    mac_lo: Int,
+    now_ms: Int
+) {
+    let n: Int = list_len((cache).entries);
+    let mut updated: List[NeighborEntry] = list_new();
+    let mut found: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let e: NeighborEntry = list_get((cache).entries, i);
+        if (e).ip_addr == ip {
+            let mod_e = NeighborEntry {
+                ip_addr: ip,
+                mac_hi: mac_hi,
+                mac_lo: mac_lo,
+                state: 2, // REACHABLE
+                expires_at_ms: now_ms + (cache).reachable_timeout_ms,
+            };
+            updated = list_push(updated, mod_e);
+            found = true;
+        } else {
+            updated = list_push(updated, e);
+        }
+        i = i + 1;
+    }
+
+    if !found {
+        let new_e = NeighborEntry {
+            ip_addr: ip,
+            mac_hi: mac_hi,
+            mac_lo: mac_lo,
+            state: 2,
+            expires_at_ms: now_ms + (cache).reachable_timeout_ms,
+        };
+        updated = list_push(updated, new_e);
+    }
+
+    (cache).entries = updated;
+}
+
+pub fn neighbor_lookup(
+    cache: &mut NeighborCache,
+    ip: Int,
+    now_ms: Int
+) -> Int {
+    (cache).total_lookups = (cache).total_lookups + 1;
+    let n: Int = list_len((cache).entries);
+    let mut i: Int = 0;
+
+    while i < n {
+        let e: NeighborEntry = list_get((cache).entries, i);
+        if (e).ip_addr == ip {
+            if now_ms <= (e).expires_at_ms && (e).state == 2 {
+                return (e).mac_lo;
+            }
+        }
+        i = i + 1;
+    }
+
+    (cache).miss_count = (cache).miss_count + 1;
+    return 0; // Not resolved
+}

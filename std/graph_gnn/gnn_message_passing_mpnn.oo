@@ -1,0 +1,138 @@
+// # Message Passing Neural Networks (MPNN) Framework
+//
+// Logline: Implements generalized Message Passing Neural Networks with configurable message, aggregation, and node update phases.
+//
+// Setup: Unifying graph neural network formalism decoupling edge message functions M, permutation-invariant aggregation, and GRU/MLP update functions U.
+//
+// Beats:
+//   1. Compute directed edge message m_{vw} = M(h_v, h_w, e_{vw}) combining node and edge feature vectors.
+//   2. Aggregate incoming messages m_v = sum_{w in N(v)} m_{vw} with invariant summation or mean pooling.
+//   3. Update node hidden states h_v^{(t+1)} = U(h_v^{(t)}, m_v) using linear gated recurrence transformations.
+
+pub type MPNNConfig = struct {
+    node_dim: Int,
+    edge_dim: Int,
+    msg_dim: Int,
+};
+
+pub type MPNNLayer = struct {
+    config: MPNNConfig,
+    message_weight: List[Float], // (2 * node_dim + edge_dim) * msg_dim
+    update_weight: List[Float],  // (node_dim + msg_dim) * node_dim
+};
+
+pub fn mpnn_config_new(node_d: Int, edge_d: Int, msg_d: Int) -> MPNNConfig {
+    return MPNNConfig {
+        node_dim: node_d,
+        edge_dim: edge_d,
+        msg_dim: msg_d,
+    };
+}
+
+pub fn mpnn_layer_init(config: MPNNConfig, seed: Int) -> MPNNLayer {
+    let n_d: Int = (config).node_dim;
+    let e_d: Int = (config).edge_dim;
+    let m_d: Int = (config).msg_dim;
+    let mut state: Int = seed;
+
+    let total_m: Int = (2 * n_d + e_d) * m_d;
+    let mut m_w: List[Float] = list_new();
+    let scale_m: Float = sqrt(2.0 / ((2 * n_d + e_d + m_d) as Float));
+    let mut i: Int = 0;
+    while i < total_m {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        m_w = list_push(m_w, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale_m);
+        i = i + 1;
+    }
+
+    let total_u: Int = (n_d + m_d) * n_d;
+    let mut u_w: List[Float] = list_new();
+    let scale_u: Float = sqrt(2.0 / ((n_d + m_d + n_d) as Float));
+    let mut j: Int = 0;
+    while j < total_u {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        u_w = list_push(u_w, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale_u);
+        j = j + 1;
+    }
+
+    return MPNNLayer {
+        config: config,
+        message_weight: m_w,
+        update_weight: u_w,
+    };
+}
+
+pub fn mpnn_compute_edge_message(
+    layer: &MPNNLayer,
+    h_src: List[Float],
+    src_off: Int,
+    h_dst: List[Float],
+    dst_off: Int,
+    e_feat: List[Float],
+    edge_off: Int
+) -> List[Float] {
+    let cfg: MPNNConfig = (*layer).config;
+    let n_d: Int = (cfg).node_dim;
+    let e_d: Int = (cfg).edge_dim;
+    let m_d: Int = (cfg).msg_dim;
+    let total_in: Int = 2 * n_d + e_d;
+
+    let mut msg: List[Float] = list_new();
+    let mut o: Int = 0;
+    while o < m_d {
+        let mut dot: Float = 0.0;
+        let mut idx: Int = 0;
+        while idx < total_in {
+            let input_val: Float = if idx < n_d {
+                list_get(h_src, src_off + idx)
+            } else if idx < 2 * n_d {
+                list_get(h_dst, dst_off + (idx - n_d))
+            } else {
+                list_get(e_feat, edge_off + (idx - 2 * n_d))
+            };
+            let w: Float = list_get((*layer).message_weight, (idx * m_d) + o);
+            dot = dot + (input_val * w);
+            idx = idx + 1;
+        }
+        // ReLU activation on message
+        let act: Float = if dot > 0.0 { dot } else { 0.0 };
+        msg = list_push(msg, act);
+        o = o + 1;
+    }
+    return msg;
+}
+
+pub fn mpnn_update_node(
+    layer: &MPNNLayer,
+    h_cur: List[Float],
+    cur_off: Int,
+    m_agg: List[Float]
+) -> List[Float] {
+    let cfg: MPNNConfig = (*layer).config;
+    let n_d: Int = (cfg).node_dim;
+    let m_d: Int = (cfg).msg_dim;
+    let total_in: Int = n_d + m_d;
+
+    let mut h_next: List[Float] = list_new();
+    let mut o: Int = 0;
+    while o < n_d {
+        let mut dot: Float = 0.0;
+        let mut idx: Int = 0;
+        while idx < total_in {
+            let in_val: Float = if idx < n_d {
+                list_get(h_cur, cur_off + idx)
+            } else {
+                list_get(m_agg, idx - n_d)
+            };
+            let w: Float = list_get((*layer).update_weight, (idx * n_d) + o);
+            dot = dot + (in_val * w);
+            idx = idx + 1;
+        }
+        let act: Float = if dot > 0.0 { dot } else { 0.0 };
+        h_next = list_push(h_next, act);
+        o = o + 1;
+    }
+    return h_next;
+}

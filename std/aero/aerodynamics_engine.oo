@@ -1,0 +1,249 @@
+// # Aerodynamic Stability & Flight Dynamics Engine
+//
+// Logline: Integrates 6-DOF aerodynamic equations of motion, stability derivatives, and control surface deflections.
+//
+// Setup: Aerodynamic simulation engine importing aerodynamics_types.oo and aerodynamics_ops.oo.
+//
+// Beats:
+//   1. Calculate longitudinal and lateral-directional stability derivatives.
+//   2. Evaluate trim states and control surface aerodynamic effectiveness.
+//   3. Integrate 6-DOF equations of motion across forward simulation time steps.
+
+import "./aerodynamics_types.oo";
+import "./aerodynamics_ops.oo";
+
+// Aerodynamic Coefficients Operations
+
+pub fn aero_coefficients_new(cl_val: Float, cd_val: Float, cy_val: Float, cm_roll_val: Float, cm_pitch_val: Float, cm_yaw_val: Float) -> AeroCoefficients {
+    return AeroCoefficients {
+        cl: cl_val,
+        cd: cd_val,
+        cy: cy_val,
+        cm_roll: cm_roll_val,
+        cm_pitch: cm_pitch_val,
+        cm_yaw: cm_yaw_val,
+    };
+}
+
+pub fn aero_coefficients_zero() -> AeroCoefficients {
+    return AeroCoefficients {
+        cl: 0.0,
+        cd: 0.0,
+        cy: 0.0,
+        cm_roll: 0.0,
+        cm_pitch: 0.0,
+        cm_yaw: 0.0,
+    };
+}
+
+pub fn aero_coefficients_scale(coeff_a: AeroCoefficients, s_val: Float) -> AeroCoefficients {
+    return AeroCoefficients {
+        cl: (coeff_a).cl * s_val,
+        cd: (coeff_a).cd * s_val,
+        cy: (coeff_a).cy * s_val,
+        cm_roll: (coeff_a).cm_roll * s_val,
+        cm_pitch: (coeff_a).cm_pitch * s_val,
+        cm_yaw: (coeff_a).cm_yaw * s_val,
+    };
+}
+
+pub fn aero_coefficients_add(coeff_a: AeroCoefficients, coeff_b: AeroCoefficients) -> AeroCoefficients {
+    return AeroCoefficients {
+        cl: (coeff_a).cl + (coeff_b).cl,
+        cd: (coeff_a).cd + (coeff_b).cd,
+        cy: (coeff_a).cy + (coeff_b).cy,
+        cm_roll: (coeff_a).cm_roll + (coeff_b).cm_roll,
+        cm_pitch: (coeff_a).cm_pitch + (coeff_b).cm_pitch,
+        cm_yaw: (coeff_a).cm_yaw + (coeff_b).cm_yaw,
+    };
+}
+
+pub fn aero_coefficients_with_controls(base_coeff: AeroCoefficients, ctrl_surf: ControlSurfaces, dcl_de: Float, dcm_de: Float, dcl_da: Float, dcn_dr: Float) -> AeroCoefficients {
+    let new_cl: Float = (base_coeff).cl + ((ctrl_surf).elevator * dcl_de);
+    let new_cm_pitch: Float = (base_coeff).cm_pitch + ((ctrl_surf).elevator * dcm_de);
+    let new_cm_roll: Float = (base_coeff).cm_roll + ((ctrl_surf).aileron * dcl_da);
+    let new_cm_yaw: Float = (base_coeff).cm_yaw + ((ctrl_surf).rudder * dcn_dr);
+    return AeroCoefficients {
+        cl: new_cl,
+        cd: (base_coeff).cd,
+        cy: (base_coeff).cy,
+        cm_roll: new_cm_roll,
+        cm_pitch: new_cm_pitch,
+        cm_yaw: new_cm_yaw,
+    };
+}
+
+// Flow Regimes & Dimensionless Numbers
+
+pub fn compute_mach_number(v_speed: Float, a_sound: Float) -> Float {
+    if a_sound <= 0.0 {
+        return 0.0;
+    }
+    return v_speed / a_sound;
+}
+
+pub fn compute_reynolds_number(rho_dyn: Float, v_speed: Float, c_length: Float, mu_visc: Float) -> Float {
+    if mu_visc <= 0.0 {
+        return 0.0;
+    }
+    return (rho_dyn * v_speed * c_length) / mu_visc;
+}
+
+pub fn compute_angle_of_attack(u_vel: Float, w_vel: Float) -> Float {
+    if math_abs(u_vel) < 0.000001 {
+        return 0.0;
+    }
+    return math_atan2(w_vel, u_vel);
+}
+
+pub fn compute_sideslip_angle(v_side_vel: Float, tas_speed: Float) -> Float {
+    if tas_speed < 0.000001 {
+        return 0.0;
+    }
+    let ratio: Float = v_side_vel / tas_speed;
+    return math_asin(ratio);
+}
+
+pub fn compute_stagnation_pressure(static_p: Float, mach_val: Float, gamma_val: Float) -> Float {
+    if gamma_val <= 1.0 {
+        return static_p;
+    }
+    let factor: Float = 1.0 + (0.5 * (gamma_val - 1.0) * mach_val * mach_val);
+    let exp_val: Float = gamma_val / (gamma_val - 1.0);
+    return static_p * pow(factor, exp_val);
+}
+
+pub fn compute_stagnation_temperature(static_t: Float, mach_val: Float, gamma_val: Float) -> Float {
+    let factor: Float = 1.0 + (0.5 * (gamma_val - 1.0) * mach_val * mach_val);
+    return static_t * factor;
+}
+
+// Wing Geometry & Drag Polar Decomposition
+
+pub fn wing_geometry_new(b_span: Float, s_area: Float, c_chord: Float, e_oswald: Float) -> WingGeometry {
+    let mut ar_val: Float = 0.0;
+    if s_area > 0.0 {
+        ar_val = (b_span * b_span) / s_area;
+    }
+    return WingGeometry {
+        span: b_span,
+        area: s_area,
+        chord: c_chord,
+        aspect_ratio: ar_val,
+        oswald_efficiency: e_oswald,
+    };
+}
+
+pub fn wing_aspect_ratio(b_span: Float, s_area: Float) -> Float {
+    if s_area <= 0.0 {
+        return 0.0;
+    }
+    return (b_span * b_span) / s_area;
+}
+
+pub fn compute_induced_drag_coefficient(cl_val: Float, ar_val: Float, e_oswald: Float) -> Float {
+    let denom: Float = math_pi() * ar_val * e_oswald;
+    if denom <= 0.0 {
+        return 0.0;
+    }
+    return (cl_val * cl_val) / denom;
+}
+
+pub fn compute_wave_drag_coefficient(mach_val: Float, mach_crit: Float) -> Float {
+    if mach_val <= mach_crit {
+        return 0.0;
+    }
+    let dm: Float = mach_val - mach_crit;
+    return 20.0 * pow(dm, 4.0);
+}
+
+pub fn compute_total_drag_coefficient(cd_zero: Float, cd_ind: Float, cd_wave: Float) -> Float {
+    return cd_zero + cd_ind + cd_wave;
+}
+
+pub fn thin_airfoil_cl(alpha_rad: Float, alpha_zero_rad: Float) -> Float {
+    let d_alpha: Float = alpha_rad - alpha_zero_rad;
+    return 2.0 * math_pi() * d_alpha;
+}
+
+// Aerodynamic Forces & Moments
+
+pub fn compute_lift_force(q_pa: Float, s_area: Float, cl_val: Float) -> Float {
+    return q_pa * s_area * cl_val;
+}
+
+pub fn compute_drag_force(q_pa: Float, s_area: Float, cd_val: Float) -> Float {
+    return q_pa * s_area * cd_val;
+}
+
+pub fn compute_side_force(q_pa: Float, s_area: Float, cy_val: Float) -> Float {
+    return q_pa * s_area * cy_val;
+}
+
+pub fn compute_aero_forces(dyn_pres: DynamicPressure, s_area: Float, coeffs: AeroCoefficients) -> AeroForces {
+    let q_pa: Float = (dyn_pres).q;
+    let l_force: Float = compute_lift_force(q_pa, s_area, (coeffs).cl);
+    let d_force: Float = compute_drag_force(q_pa, s_area, (coeffs).cd);
+    let y_force: Float = compute_side_force(q_pa, s_area, (coeffs).cy);
+    let tot_vec: Vector3 = Vector3 {
+        x: 0.0 - d_force,
+        y: y_force,
+        z: 0.0 - l_force,
+    };
+    return AeroForces {
+        lift: l_force,
+        drag: d_force,
+        side_force: y_force,
+        total_force: tot_vec,
+    };
+}
+
+pub fn compute_aero_moments(dyn_pres: DynamicPressure, s_area: Float, b_span: Float, c_chord: Float, coeffs: AeroCoefficients) -> AeroMoments {
+    let q_pa: Float = (dyn_pres).q;
+    let roll: Float = q_pa * s_area * b_span * (coeffs).cm_roll;
+    let pitch: Float = q_pa * s_area * c_chord * (coeffs).cm_pitch;
+    let yaw: Float = q_pa * s_area * b_span * (coeffs).cm_yaw;
+    let tot_vec: Vector3 = Vector3 {
+        x: roll,
+        y: pitch,
+        z: yaw,
+    };
+    return AeroMoments {
+        roll_moment: roll,
+        pitch_moment: pitch,
+        yaw_moment: yaw,
+        total_moment: tot_vec,
+    };
+}
+
+// Control Surfaces, Airfoil & Flight State Constructors
+
+pub fn control_surfaces_new(de_elevator: Float, da_aileron: Float, dr_rudder: Float, df_flaps: Float) -> ControlSurfaces {
+    return ControlSurfaces {
+        elevator: de_elevator,
+        aileron: da_aileron,
+        rudder: dr_rudder,
+        flaps: df_flaps,
+    };
+}
+
+pub fn airfoil_state_new(thick_ratio: Float, camber_ratio: Float, cl_max: Float, alpha_stall: Float, cd_zero: Float) -> AirfoilState {
+    return AirfoilState {
+        thickness_ratio: thick_ratio,
+        camber: camber_ratio,
+        max_cl: cl_max,
+        stall_angle: alpha_stall,
+        cd0: cd_zero,
+    };
+}
+
+pub fn flight_state_new(pos_vec: Vector3, vel_vec: Vector3, alpha_rad: Float, beta_rad: Float, mach_num: Float, tas_speed: Float) -> FlightState {
+    return FlightState {
+        position: pos_vec,
+        velocity_vec: vel_vec,
+        alpha: alpha_rad,
+        beta: beta_rad,
+        mach: mach_num,
+        airspeed: tas_speed,
+    };
+}

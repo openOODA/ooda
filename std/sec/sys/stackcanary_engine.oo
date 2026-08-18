@@ -1,0 +1,153 @@
+// # Stack Canary Guard Engine
+//
+// Logline: Manages runtime CanaryGuard state, pushes/pops guarded frames, and checks stack integrity.
+//
+// Setup: Imports stackcanary_types.oo, stackcanary_const.oo, and stackcanary_ops.oo for stateful stack guard simulation.
+//
+// Beats:
+//   1. Initialize CanaryGuard with global secret and protection level.
+//   2. Push and pop active stack frames with canary verification.
+//   3. Run whole-stack integrity checks and compute protection statistics.
+
+import "./stackcanary_types.oo";
+import "./stackcanary_const.oo";
+import "./stackcanary_ops.oo";
+
+pub fn canary_guard_new(guard_id: String, secret: Int, protection_level: Int) -> CanaryGuard {
+    let empty_frames: List[StackFrame] = list_new();
+    let mut actual_secret: Int = secret;
+    if actual_secret == 0 {
+        actual_secret = canary_default_magic_cookie();
+    }
+    return CanaryGuard {
+        guard_id: guard_id,
+        global_canary_secret: actual_secret,
+        null_byte_terminator: true,
+        active_frames: empty_frames,
+        protection_level: protection_level,
+        stats_frames_guarded: 0,
+        stats_violations_detected: 0,
+        stats_remediations: 0,
+        is_active: true,
+        is_compromised: false,
+    };
+}
+
+pub fn canary_guard_push_frame(guard: &mut CanaryGuard, frame: StackFrame) {
+    if (guard).is_active == false {
+        return;
+    }
+    let old_frames: List[StackFrame] = (guard).active_frames;
+    let new_frames: List[StackFrame] = list_push(old_frames, frame);
+    (guard).active_frames = new_frames;
+    (guard).stats_frames_guarded = (guard).stats_frames_guarded + 1;
+}
+
+pub fn canary_guard_pop_frame(
+    guard: &mut CanaryGuard,
+    func_name: String
+) -> Result[StackFrame, String] {
+    if (guard).is_active == false {
+        return Err("CanaryGuard Error: Guard is inactive");
+    }
+    let frames: List[StackFrame] = (guard).active_frames;
+    let n: Int = list_len(frames);
+    if n == 0 {
+        (guard).stats_violations_detected = (guard).stats_violations_detected + 1;
+        (guard).is_compromised = true;
+        return Err("Stack Underflow: No active stack frames registered");
+    }
+    let last_idx: Int = n - 1;
+    let top_frame: StackFrame = list_get(frames, last_idx);
+
+    let mut new_frames: List[StackFrame] = list_new();
+    let mut i: Int = 0;
+    while i < last_idx {
+        let f: StackFrame = list_get(frames, i);
+        new_frames = list_push(new_frames, f);
+        i = i + 1;
+    }
+    (guard).active_frames = new_frames;
+
+    if top_frame.function_name != func_name {
+        (guard).stats_violations_detected = (guard).stats_violations_detected + 1;
+        (guard).is_compromised = true;
+        return Err("Stack Corruption: Frame function name mismatch on pop");
+    }
+
+    let is_valid_canary: Bool = stack_frame_verify(&top_frame, (guard).global_canary_secret);
+    if is_valid_canary == false {
+        (guard).stats_violations_detected = (guard).stats_violations_detected + 1;
+        (guard).is_compromised = true;
+        return Err("Stack Canary Violation: Canary value corrupted on stack frame pop");
+    }
+
+    return Ok(top_frame);
+}
+
+pub fn canary_guard_verify_stack(guard: &mut CanaryGuard) -> StackIntegrity {
+    let frames: List[StackFrame] = (guard).active_frames;
+    let total: Int = list_len(frames);
+    let mut passed: Int = 0;
+    let mut corrupted: Int = 0;
+    let mut canary_errs: Int = 0;
+    let mut ret_errs: Int = 0;
+    let secret: Int = (guard).global_canary_secret;
+
+    let mut i: Int = 0;
+    while i < total {
+        let f: StackFrame = list_get(frames, i);
+        let ok_canary: Bool = stack_frame_verify(&f, secret);
+        if ok_canary {
+            passed = passed + 1;
+        } else {
+            corrupted = corrupted + 1;
+            canary_errs = canary_errs + 1;
+        }
+        i = i + 1;
+    }
+
+    let healthy: Bool = corrupted == 0;
+    if healthy == false {
+        (guard).is_compromised = true;
+    }
+
+    let gid: String = (guard).guard_id;
+    let diag: String = "Stack check completed for guard " + gid;
+
+    return StackIntegrity {
+        integrity_id: "int_" + gid,
+        total_frames_checked: total,
+        passed_frames: passed,
+        corrupted_frames: corrupted,
+        canary_mismatches: canary_errs,
+        return_address_mismatches: ret_errs,
+        is_stack_healthy: healthy,
+        timestamp: 0,
+        diagnostic_message: diag,
+    };
+}
+
+pub fn canary_guard_set_active(guard: &mut CanaryGuard, active: Bool) {
+    (guard).is_active = active;
+}
+
+pub fn canary_guard_reset_stats(guard: &mut CanaryGuard) {
+    (guard).stats_frames_guarded = 0;
+    (guard).stats_violations_detected = 0;
+    (guard).stats_remediations = 0;
+    (guard).is_compromised = false;
+}
+
+pub fn canary_guard_do_work(guard: &CanaryGuard) -> Int {
+    let frames: List[StackFrame] = (guard).active_frames;
+    let n_frames: Int = list_len(frames);
+    let g_cnt: Int = (guard).stats_frames_guarded;
+    let v_cnt: Int = (guard).stats_violations_detected;
+    let level: Int = (guard).protection_level;
+    return n_frames + g_cnt * 2 + v_cnt * 5 + level;
+}
+
+pub fn __dummy_std_src_ooda_sec_sys_stackcanary_engine_oo() -> Int {
+    return 0;
+}

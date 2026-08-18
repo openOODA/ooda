@@ -1,0 +1,152 @@
+// # Fixed-for-Floating Interest Rate Swap (IRS) Pricer
+//
+// Logline: Prices interest rate swaps, evaluates Net Present Value (NPV), par swap rates, and DV01 risk.
+//
+// Setup: Imports yield_curve.oo for discount factor lookup and forward rate projection.
+//
+// Beats:
+//   1. Model fixed leg coupon streams and floating leg index projections (SOFR/EURIBOR).
+//   2. Calculate present values of both legs and derive the net swap valuation (NPV).
+//   3. Compute the breakeven par swap rate and interest rate sensitivity DV01.
+
+import "./yield_curve.oo";
+
+pub type IrsContract = struct {
+    swap_id: String,
+    notional: Float,
+    fixed_rate_bps: Int,
+    float_spread_bps: Int,
+    tenor_years: Float,
+    fixed_freq: Int,
+    float_freq: Int,
+    is_payer: Bool, // true = Pay Fixed, Receive Float; false = Receive Fixed, Pay Float
+};
+
+pub type IrsValuation = struct {
+    fixed_leg_pv: Float,
+    float_leg_pv: Float,
+    npv: Float,
+    par_swap_rate_bps: Int,
+    dv01: Float,
+};
+
+pub fn irs_contract_new(
+    swap_id: String,
+    notional: Float,
+    fixed_rate_bps: Int,
+    tenor_years: Float,
+    is_payer: Bool
+) -> IrsContract {
+    return IrsContract {
+        swap_id: swap_id,
+        notional: notional,
+        fixed_rate_bps: fixed_rate_bps,
+        float_spread_bps: 0,
+        tenor_years: tenor_years,
+        fixed_freq: 2, // Semi-annual fixed payments
+        float_freq: 4, // Quarterly floating reset
+        is_payer: is_payer,
+    };
+}
+
+pub fn irs_calculate_fixed_leg_pv(irs: &IrsContract, curve: &ZeroCurve) -> Float {
+    let freq_f: Float = int_to_float((irs).fixed_freq);
+    if freq_f <= 0.0 { return 0.0; }
+    
+    let rate_dec: Float = int_to_float((irs).fixed_rate_bps) / 10000.0;
+    let coupon_pmt: Float = ((irs).notional * rate_dec) / freq_f;
+    let months_step: Int = 12 / (irs).fixed_freq;
+    
+    let total_periods_f: Float = (irs).tenor_years * freq_f;
+    let mut pv: Float = 0.0;
+    let mut p: Float = 1.0;
+    let mut tenor_m: Int = months_step;
+    
+    while p <= total_periods_f {
+        let df: Float = zero_curve_discount_factor(curve, tenor_m);
+        pv = pv + (coupon_pmt * df);
+        tenor_m = tenor_m + months_step;
+        p = p + 1.0;
+    }
+    
+    return pv;
+}
+
+pub fn irs_calculate_float_leg_pv(irs: &IrsContract, curve: &ZeroCurve) -> Float {
+    let freq_f: Float = int_to_float((irs).float_freq);
+    if freq_f <= 0.0 { return 0.0; }
+    
+    let months_step: Int = 12 / (irs).float_freq;
+    let total_periods_f: Float = (irs).tenor_years * freq_f;
+    
+    let mut pv: Float = 0.0;
+    let mut p: Float = 1.0;
+    let mut t_start: Int = 0;
+    let mut t_end: Int = months_step;
+    
+    while p <= total_periods_f {
+        let fwd_rate: Float = zero_curve_forward_rate(curve, t_start, t_end);
+        let spread_dec: Float = int_to_float((irs).float_spread_bps) / 10000.0;
+        let total_rate: Float = fwd_rate + spread_dec;
+        let dt_years: Float = int_to_float(months_step) / 12.0;
+        let pmt: Float = (irs).notional * total_rate * dt_years;
+        
+        let df: Float = zero_curve_discount_factor(curve, t_end);
+        pv = pv + (pmt * df);
+        
+        t_start = t_end;
+        t_end = t_end + months_step;
+        p = p + 1.0;
+    }
+    
+    return pv;
+}
+
+pub fn irs_price(irs: &IrsContract, curve: &ZeroCurve) -> IrsValuation {
+    let fixed_pv: Float = irs_calculate_fixed_leg_pv(irs, curve);
+    let float_pv: Float = irs_calculate_float_leg_pv(irs, curve);
+    
+    let npv: Float = if (irs).is_payer {
+        float_pv - fixed_pv
+    } else {
+        fixed_pv - float_pv
+    };
+    
+    let freq_f: Float = int_to_float((irs).fixed_freq);
+    let months_step: Int = 12 / (irs).fixed_freq;
+    let total_periods_f: Float = (irs).tenor_years * freq_f;
+    
+    // Annuity = sum of discount factors * year_fraction
+    let mut annuity: Float = 0.0;
+    let mut p: Float = 1.0;
+    let mut tenor_m: Int = months_step;
+    let dt: Float = 1.0 / freq_f;
+    
+    while p <= total_periods_f {
+        let df: Float = zero_curve_discount_factor(curve, tenor_m);
+        annuity = annuity + (df * dt);
+        tenor_m = tenor_m + months_step;
+        p = p + 1.0;
+    }
+    
+    let mut par_rate_bps: Int = 0;
+    if (annuity > 0.0) && ((irs).notional > 0.0) {
+        let par_dec: Float = float_pv / ((irs).notional * annuity);
+        let par_bps_f: Float = par_dec * 10000.0;
+        let mut count: Float = par_bps_f;
+        while count >= 1.0 {
+            par_rate_bps = par_rate_bps + 1;
+            count = count - 1.0;
+        }
+    }
+    
+    let dv01: Float = (irs).notional * annuity * 0.0001;
+    
+    return IrsValuation {
+        fixed_leg_pv: fixed_pv,
+        float_leg_pv: float_pv,
+        npv: npv,
+        par_swap_rate_bps: par_rate_bps,
+        dv01: dv01,
+    };
+}

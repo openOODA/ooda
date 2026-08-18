@@ -1,0 +1,109 @@
+// # WAL Group Commit Coordinator
+//
+// Logline: Implements epoch-based group commit batching concurrent transaction sync requests into single fsync disk writes.
+//
+// Setup: Minimizes disk fsync overhead by coalescing multiple committing transactions into grouped disk sync batches.
+//
+// Beats:
+//   1. Define GroupCommitEpoch, CommittingTx, and GroupCommitCoordinator structures.
+//   2. Implement commit request registration into current active epoch queue.
+//   3. Implement epoch sync trigger evaluation and batch transaction notification upon fsync completion.
+
+pub type CommittingTx = struct {
+    tx_id: Int,
+    commit_lsn: Int,
+    registered_timestamp: Int,
+};
+
+pub type GroupCommitEpoch = struct {
+    epoch_id: Int,
+    transactions: List[CommittingTx],
+    max_commit_lsn: Int,
+    is_synced: Bool,
+};
+
+pub type GroupCommitCoordinator = struct {
+    current_epoch_id: Int,
+    max_batch_size: Int,
+    max_delay_micros: Int,
+    active_epoch: GroupCommitEpoch,
+    total_group_syncs: Int,
+    total_tx_synced: Int,
+};
+
+pub fn group_commit_epoch_new(eid: Int) -> GroupCommitEpoch {
+    let empty_txs: List[CommittingTx] = list_new();
+    return GroupCommitEpoch {
+        epoch_id: eid,
+        transactions: empty_txs,
+        max_commit_lsn: 0,
+        is_synced: false,
+    };
+}
+
+pub fn group_commit_coordinator_new(batch_sz: Int, delay_us: Int) -> GroupCommitCoordinator {
+    return GroupCommitCoordinator {
+        current_epoch_id: 1,
+        max_batch_size: batch_sz,
+        max_delay_micros: delay_us,
+        active_epoch: group_commit_epoch_new(1),
+        total_group_syncs: 0,
+        total_tx_synced: 0,
+    };
+}
+
+pub fn group_commit_register(
+    coord: GroupCommitCoordinator,
+    tx: Int,
+    lsn: Int,
+    now_ts: Int
+) -> GroupCommitCoordinator {
+    let cur_epoch: GroupCommitEpoch = (coord).active_epoch;
+    let tx_item: CommittingTx = CommittingTx {
+        tx_id: tx,
+        commit_lsn: lsn,
+        registered_timestamp: now_ts,
+    };
+
+    let updated_txs: List[CommittingTx] = list_push((cur_epoch).transactions, tx_item);
+    let mut max_lsn: Int = (cur_epoch).max_commit_lsn;
+    if lsn > max_lsn {
+        max_lsn = lsn;
+    }
+
+    let updated_epoch: GroupCommitEpoch = GroupCommitEpoch {
+        epoch_id: (cur_epoch).epoch_id,
+        transactions: updated_txs,
+        max_commit_lsn: max_lsn,
+        is_synced: false,
+    };
+
+    return GroupCommitCoordinator {
+        current_epoch_id: (coord).current_epoch_id,
+        max_batch_size: (coord).max_batch_size,
+        max_delay_micros: (coord).max_delay_micros,
+        active_epoch: updated_epoch,
+        total_group_syncs: (coord).total_group_syncs,
+        total_tx_synced: (coord).total_tx_synced,
+    };
+}
+
+pub fn group_commit_should_flush(coord: GroupCommitCoordinator) -> Bool {
+    let count: Int = list_len((coord).active_epoch.transactions);
+    return count >= (coord).max_batch_size;
+}
+
+pub fn group_commit_complete_sync(coord: GroupCommitCoordinator) -> GroupCommitCoordinator {
+    let cur_epoch: GroupCommitEpoch = (coord).active_epoch;
+    let synced_count: Int = list_len((cur_epoch).transactions);
+    let next_eid: Int = (coord).current_epoch_id + 1;
+
+    return GroupCommitCoordinator {
+        current_epoch_id: next_eid,
+        max_batch_size: (coord).max_batch_size,
+        max_delay_micros: (coord).max_delay_micros,
+        active_epoch: group_commit_epoch_new(next_eid),
+        total_group_syncs: (coord).total_group_syncs + 1,
+        total_tx_synced: (coord).total_tx_synced + synced_count,
+    };
+}

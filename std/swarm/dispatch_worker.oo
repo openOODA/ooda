@@ -1,0 +1,323 @@
+// # Swarm Worker and Task Lifecycle
+//
+// Logline: Worker capacity, assignment, heartbeat, and task state machine.
+// residual: &mut destubbed to by-value.
+
+type DispatcherConfig = struct {
+    strategy: Int,
+    max_queue_depth: Int,
+    max_worker_capacity: Int,
+    default_timeout_ms: Int,
+    max_retries: Int
+};
+
+type SwarmDispatcher = struct {
+    config: DispatcherConfig,
+    total_submitted: Int,
+    total_completed: Int,
+    total_failed: Int,
+    total_cancelled: Int,
+    rr_cursor: Int,
+    next_task_id: Int,
+    active_worker_count: Int
+};
+
+type WorkerNode = struct {
+    worker_id: Int,
+    status: Int,
+    active_tasks: Int,
+    capacity: Int,
+    completed_count: Int,
+    failed_count: Int,
+    last_heartbeat_ms: Int,
+    last_ok: Int
+};
+
+type SwarmTask = struct {
+    task_id: Int,
+    priority: Int,
+    status: Int,
+    assigned_worker_id: Int,
+    retry_count: Int,
+    max_retries: Int,
+    created_at_ms: Int,
+    completed_at_ms: Int,
+    payload_val: Int,
+    last_ok: Int
+};
+
+pub fn dispatcher_config_init(strategy: Int, max_queue: Int, max_capacity: Int, timeout_ms: Int, retries: Int) -> DispatcherConfig {
+    let mut strat: Int = strategy;
+    if strat < 0 {
+        strat = 0;
+    }
+    if strat > 3 {
+        strat = 0;
+    }
+    let mut q_depth: Int = max_queue;
+    if q_depth <= 0 {
+        q_depth = 64;
+    }
+    let mut cap: Int = max_capacity;
+    if cap <= 0 {
+        cap = 8;
+    }
+    let mut timeout: Int = timeout_ms;
+    if timeout <= 0 {
+        timeout = 5000;
+    }
+    let mut r: Int = retries;
+    if r < 0 {
+        r = 3;
+    }
+    return DispatcherConfig {
+        strategy: strat,
+        max_queue_depth: q_depth,
+        max_worker_capacity: cap,
+        default_timeout_ms: timeout,
+        max_retries: r
+    };
+}
+
+pub fn dispatcher_init(config: DispatcherConfig) -> SwarmDispatcher {
+    return SwarmDispatcher {
+        config: config,
+        total_submitted: 0,
+        total_completed: 0,
+        total_failed: 0,
+        total_cancelled: 0,
+        rr_cursor: 0,
+        next_task_id: 1,
+        active_worker_count: 0
+    };
+}
+
+pub fn worker_node_init(worker_id: Int, capacity: Int) -> WorkerNode {
+    let mut cap: Int = capacity;
+    if cap <= 0 {
+        cap = 1;
+    }
+    return WorkerNode {
+        worker_id: worker_id,
+        status: 1,
+        active_tasks: 0,
+        capacity: cap,
+        completed_count: 0,
+        failed_count: 0,
+        last_heartbeat_ms: 0,
+        last_ok: 1
+    };
+}
+
+pub fn swarm_task_create(task_id: Int, priority: Int, payload: Int, max_retries: Int, created_ms: Int) -> SwarmTask {
+    return SwarmTask {
+        task_id: task_id,
+        priority: priority,
+        status: 0,
+        assigned_worker_id: 0 - 1,
+        retry_count: 0,
+        max_retries: max_retries,
+        created_at_ms: created_ms,
+        completed_at_ms: 0,
+        payload_val: payload,
+        last_ok: 1
+    };
+}
+
+pub fn worker_node_can_accept(worker: WorkerNode) -> Bool {
+    if worker.status == 0 {
+        return false;
+    }
+    if worker.status == 3 {
+        return false;
+    }
+    if worker.active_tasks >= worker.capacity {
+        return false;
+    }
+    return true;
+}
+
+pub fn worker_node_assign(worker: WorkerNode) -> WorkerNode {
+    if worker_node_can_accept(worker) == false {
+        return WorkerNode {
+            worker_id: worker.worker_id,
+            status: worker.status,
+            active_tasks: worker.active_tasks,
+            capacity: worker.capacity,
+            completed_count: worker.completed_count,
+            failed_count: worker.failed_count,
+            last_heartbeat_ms: worker.last_heartbeat_ms,
+            last_ok: 0
+        };
+    }
+    let current_active: Int = worker.active_tasks + 1;
+    let mut st: Int = worker.status;
+    if current_active >= worker.capacity {
+        st = 2;
+    }
+    return WorkerNode {
+        worker_id: worker.worker_id,
+        status: st,
+        active_tasks: current_active,
+        capacity: worker.capacity,
+        completed_count: worker.completed_count,
+        failed_count: worker.failed_count,
+        last_heartbeat_ms: worker.last_heartbeat_ms,
+        last_ok: 1
+    };
+}
+
+pub fn worker_node_release(worker: WorkerNode, success: Bool) -> WorkerNode {
+    let mut current_active: Int = worker.active_tasks;
+    if current_active > 0 {
+        current_active = current_active - 1;
+    }
+    let mut completed: Int = worker.completed_count;
+    let mut failed: Int = worker.failed_count;
+    if success {
+        completed = completed + 1;
+    } else {
+        failed = failed + 1;
+    }
+    let mut st: Int = worker.status;
+    if st == 2 {
+        if current_active < worker.capacity {
+            st = 1;
+        }
+    }
+    return WorkerNode {
+        worker_id: worker.worker_id,
+        status: st,
+        active_tasks: current_active,
+        capacity: worker.capacity,
+        completed_count: completed,
+        failed_count: failed,
+        last_heartbeat_ms: worker.last_heartbeat_ms,
+        last_ok: 1
+    };
+}
+
+pub fn worker_node_update_status(worker: WorkerNode, new_status: Int) -> WorkerNode {
+    return WorkerNode {
+        worker_id: worker.worker_id,
+        status: new_status,
+        active_tasks: worker.active_tasks,
+        capacity: worker.capacity,
+        completed_count: worker.completed_count,
+        failed_count: worker.failed_count,
+        last_heartbeat_ms: worker.last_heartbeat_ms,
+        last_ok: 1
+    };
+}
+
+pub fn worker_node_heartbeat(worker: WorkerNode, timestamp_ms: Int) -> WorkerNode {
+    let mut st: Int = worker.status;
+    if st == 0 {
+        st = 1;
+    }
+    return WorkerNode {
+        worker_id: worker.worker_id,
+        status: st,
+        active_tasks: worker.active_tasks,
+        capacity: worker.capacity,
+        completed_count: worker.completed_count,
+        failed_count: worker.failed_count,
+        last_heartbeat_ms: timestamp_ms,
+        last_ok: 1
+    };
+}
+
+pub fn task_is_terminal(task: SwarmTask) -> Bool {
+    if task.status == 3 {
+        return true;
+    }
+    if task.status == 4 {
+        return true;
+    }
+    if task.status == 5 {
+        return true;
+    }
+    return false;
+}
+
+pub fn task_can_retry(task: SwarmTask) -> Bool {
+    if task.retry_count < task.max_retries {
+        return true;
+    }
+    return false;
+}
+
+pub fn task_mark_dispatched(task: SwarmTask, worker_id: Int) -> SwarmTask {
+    return SwarmTask {
+        task_id: task.task_id,
+        priority: task.priority,
+        status: 1,
+        assigned_worker_id: worker_id,
+        retry_count: task.retry_count,
+        max_retries: task.max_retries,
+        created_at_ms: task.created_at_ms,
+        completed_at_ms: task.completed_at_ms,
+        payload_val: task.payload_val,
+        last_ok: 1
+    };
+}
+
+pub fn task_mark_completed(task: SwarmTask, timestamp_ms: Int) -> SwarmTask {
+    return SwarmTask {
+        task_id: task.task_id,
+        priority: task.priority,
+        status: 3,
+        assigned_worker_id: task.assigned_worker_id,
+        retry_count: task.retry_count,
+        max_retries: task.max_retries,
+        created_at_ms: task.created_at_ms,
+        completed_at_ms: timestamp_ms,
+        payload_val: task.payload_val,
+        last_ok: 1
+    };
+}
+
+pub fn task_mark_failed(task: SwarmTask, timestamp_ms: Int) -> SwarmTask {
+    let retries: Int = task.retry_count + 1;
+    if retries <= task.max_retries {
+        return SwarmTask {
+            task_id: task.task_id,
+            priority: task.priority,
+            status: 0,
+            assigned_worker_id: 0 - 1,
+            retry_count: retries,
+            max_retries: task.max_retries,
+            created_at_ms: task.created_at_ms,
+            completed_at_ms: task.completed_at_ms,
+            payload_val: task.payload_val,
+            last_ok: 1
+        };
+    }
+    return SwarmTask {
+        task_id: task.task_id,
+        priority: task.priority,
+        status: 4,
+        assigned_worker_id: task.assigned_worker_id,
+        retry_count: retries,
+        max_retries: task.max_retries,
+        created_at_ms: task.created_at_ms,
+        completed_at_ms: timestamp_ms,
+        payload_val: task.payload_val,
+        last_ok: 0
+    };
+}
+
+pub fn task_mark_cancelled(task: SwarmTask) -> SwarmTask {
+    return SwarmTask {
+        task_id: task.task_id,
+        priority: task.priority,
+        status: 5,
+        assigned_worker_id: task.assigned_worker_id,
+        retry_count: task.retry_count,
+        max_retries: task.max_retries,
+        created_at_ms: task.created_at_ms,
+        completed_at_ms: task.completed_at_ms,
+        payload_val: task.payload_val,
+        last_ok: 1
+    };
+}

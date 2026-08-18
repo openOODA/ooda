@@ -1,0 +1,77 @@
+// # Service Mesh Asynchronous Traffic Shadowing & Mirroring
+//
+// Logline: Implements asynchronous traffic mirroring to shadow clusters with percentage-based sampling.
+//
+// Setup: Non-blocking traffic replication filter copying live production requests to canary/dark clusters.
+//
+// Beats:
+//   1. Configure mirror targets with target cluster names, percentage sampling (0-100%), and shadow headers.
+//   2. Sample incoming requests using deterministic hashing or pseudo-random percentage thresholds.
+//   3. Dispatch asynchronous fire-and-forget clone requests without delaying primary response path.
+
+pub type MirrorTarget = struct {
+    cluster_name: String,
+    sample_numerator: Int,
+    sample_denominator: Int,
+    shadow_header_key: String,
+    shadow_header_val: String,
+    is_active: Bool,
+};
+
+pub type TrafficMirrorState = struct {
+    targets: List[MirrorTarget],
+    primary_requests: Int,
+    mirrored_requests: Int,
+    skipped_requests: Int,
+};
+
+pub fn traffic_mirror_new() -> TrafficMirrorState {
+    let empty_targets: List[MirrorTarget] = list_new();
+    return TrafficMirrorState {
+        targets: empty_targets,
+        primary_requests: 0,
+        mirrored_requests: 0,
+        skipped_requests: 0,
+    };
+}
+
+pub fn traffic_mirror_add_target(
+    state: &mut TrafficMirrorState,
+    cluster: String,
+    pct_num: Int,
+    pct_den: Int
+) {
+    let t = MirrorTarget {
+        cluster_name: cluster,
+        sample_numerator: pct_num,
+        sample_denominator: pct_den,
+        shadow_header_key: "x-shadow-request",
+        shadow_header_val: "true",
+        is_active: true,
+    };
+    (state).targets = list_push((state).targets, t);
+}
+
+pub fn traffic_mirror_evaluate(
+    state: &mut TrafficMirrorState,
+    req_hash: Int
+) -> String {
+    (state).primary_requests = (state).primary_requests + 1;
+    let n: Int = list_len((state).targets);
+    let mut i: Int = 0;
+
+    while i < n {
+        let t: MirrorTarget = list_get((state).targets, i);
+        if (t).is_active {
+            let sample_mod: Int = req_hash % (t).sample_denominator;
+            if sample_mod < (t).sample_numerator {
+                (state).mirrored_requests = (state).mirrored_requests + 1;
+                return (t).cluster_name;
+            }
+        }
+        i = i + 1;
+    }
+
+    (state).skipped_requests = (state).skipped_requests + 1;
+    return ""; // No mirror
+}

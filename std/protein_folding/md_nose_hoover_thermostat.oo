@@ -1,0 +1,93 @@
+// # Molecular Dynamics Nosé-Hoover Thermostat
+//
+// Logline: Implements the deterministic Nosé-Hoover extended Hamiltonian thermostat for canonical NVT ensemble sampling.
+//
+// Setup: Extended phase space formulation coupling physical degrees of freedom to a thermal heat bath friction coordinate.
+//
+// Beats:
+//   1. Define NoseHooverParams and NoseHooverState data structures.
+//   2. Calculate thermodynamic friction variable acceleration from instantaneous kinetic energy.
+//   3. Rescale particle velocities to rigorously preserve canonical Gibbs-Boltzmann distribution.
+
+pub type NoseHooverParams = struct {
+    target_temp_k: Float,
+    relaxation_time_ps: Float,
+    bath_mass_q: Float,
+    degrees_of_freedom: Int,
+    boltzmann_k: Float,
+};
+
+pub type NoseHooverState = struct {
+    xi: Float,       // Friction coordinate
+    v_xi: Float,     // Velocity of friction coordinate
+    bath_energy: Float,
+};
+
+pub type ThermostatResult = struct {
+    updated_state: NoseHooverState,
+    rescale_factor: Float,
+    instantaneous_temp_k: Float,
+};
+
+pub fn nose_hoover_params_new(target_temp: Float, tau_ps: Float, dof: Int) -> NoseHooverParams {
+    let k_b: Float = 0.001987204; // kcal / (mol * K)
+    let dof_f = if dof > 0 { dof as Float } else { 1.0 };
+    // Bath inertia mass Q = N_df * k_B * T * tau^2
+    let q = dof_f * k_b * target_temp * (tau_ps * tau_ps);
+
+    return NoseHooverParams {
+        target_temp_k: target_temp,
+        relaxation_time_ps: tau_ps,
+        bath_mass_q: q,
+        degrees_of_freedom: dof,
+        boltzmann_k: k_b,
+    };
+}
+
+pub fn nose_hoover_friction_accel(params: &NoseHooverParams, kinetic_energy_kcal: Float) -> Float {
+    // d(v_xi)/dt = (2 * E_k - N_df * k_B * T) / Q
+    let dof_f = (params).degrees_of_freedom as Float;
+    let target_ke = 0.5 * dof_f * (params).boltzmann_k * (params).target_temp_k;
+    let delta = (2.0 * kinetic_energy_kcal) - (2.0 * target_ke);
+
+    if (params).bath_mass_q > 0.00001 {
+        return delta / (params).bath_mass_q;
+    }
+    return 0.0;
+}
+
+pub fn nose_hoover_propagate_step(
+    params: &NoseHooverParams,
+    curr_state: &NoseHooverState,
+    kinetic_energy_kcal: Float,
+    dt_ps: Float,
+) -> ThermostatResult {
+    let accel = nose_hoover_friction_accel(params, kinetic_energy_kcal);
+    let half_dt = 0.5 * dt_ps;
+
+    // Advance friction velocity
+    let new_v_xi = (curr_state).v_xi + (accel * half_dt);
+    // Advance friction position
+    let new_xi = (curr_state).xi + (new_v_xi * dt_ps);
+
+    // Rescale factor for velocities
+    let rescale = 1.0 - (new_v_xi * half_dt);
+
+    let dof_f = if (params).degrees_of_freedom > 0 { (params).degrees_of_freedom as Float } else { 1.0 };
+    let cur_temp = (2.0 * kinetic_energy_kcal) / (dof_f * (params).boltzmann_k);
+
+    // Extended Hamiltonian bath energy: 0.5 * Q * v_xi^2 + N_df * k_B * T * xi
+    let bath_e = (0.5 * (params).bath_mass_q * (new_v_xi * new_v_xi)) + (dof_f * (params).boltzmann_k * (params).target_temp_k * new_xi);
+
+    let nstate = NoseHooverState {
+        xi: new_xi,
+        v_xi: new_v_xi,
+        bath_energy: bath_e,
+    };
+
+    return ThermostatResult {
+        updated_state: nstate,
+        rescale_factor: rescale,
+        instantaneous_temp_k: cur_temp,
+    };
+}

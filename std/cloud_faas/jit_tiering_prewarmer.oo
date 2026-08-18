@@ -1,0 +1,83 @@
+// # JIT Tiering & Code Prewarmer
+//
+// Logline: Implements multi-tier JIT code compilation, profile-guided initialization, and cached machine code reuse.
+//
+// Setup: Ahead-of-time JIT pre-warmer that executes initialization paths to compile hot loops before serving traffic.
+//
+// Beats:
+//   1. Profile execution hotness and identify initialization loops requiring tier-2 JIT optimization.
+//   2. Pre-compile bytecodes into native machine code blocks during snapshot creation phase.
+//   3. Retain compiled code buffers across function instances to eliminate JIT deoptimization stalls.
+
+pub type JitCompiledBlock = struct {
+    method_name: String,
+    tier_level: Int,
+    code_size_bytes: Int,
+    execution_count: Int,
+    is_hot: Bool,
+};
+
+pub type JitPrewarmer = struct {
+    function_id: String,
+    blocks: List[JitCompiledBlock],
+    tier_threshold: Int,
+    total_compilations: Int,
+};
+
+pub fn jit_prewarmer_new(fn_id: String, threshold: Int) -> JitPrewarmer {
+    let empty_blocks: List[JitCompiledBlock] = list_new();
+    return JitPrewarmer {
+        function_id: fn_id,
+        blocks: empty_blocks,
+        tier_threshold: threshold,
+        total_compilations: 0,
+    };
+}
+
+pub fn jit_record_invocation(prewarmer: &mut JitPrewarmer, method: String, code_size: Int) {
+    let n: Int = list_len((prewarmer).blocks);
+    let mut i: Int = 0;
+    let mut found: Bool = false;
+    let mut updated: List[JitCompiledBlock] = list_new();
+
+    while i < n {
+        let blk: JitCompiledBlock = list_get((prewarmer).blocks, i);
+        if (blk).method_name == method {
+            let next_count: Int = (blk).execution_count + 1;
+            let mut next_tier: Int = (blk).tier_level;
+            let mut hot: Bool = (blk).is_hot;
+
+            if next_count >= (prewarmer).tier_threshold && (blk).tier_level < 2 {
+                next_tier = 2;
+                hot = true;
+                (prewarmer).total_compilations = (prewarmer).total_compilations + 1;
+            }
+
+            let updated_blk = JitCompiledBlock {
+                method_name: (blk).method_name,
+                tier_level: next_tier,
+                code_size_bytes: (blk).code_size_bytes,
+                execution_count: next_count,
+                is_hot: hot,
+            };
+            updated = list_push(updated, updated_blk);
+            found = true;
+        } else {
+            updated = list_push(updated, blk);
+        }
+        i = i + 1;
+    }
+
+    if !found {
+        let new_blk = JitCompiledBlock {
+            method_name: method,
+            tier_level: 1,
+            code_size_bytes: code_size,
+            execution_count: 1,
+            is_hot: false,
+        };
+        (prewarmer).blocks = list_push(updated, new_blk);
+    } else {
+        (prewarmer).blocks = updated;
+    }
+}

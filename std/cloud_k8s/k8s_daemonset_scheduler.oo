@@ -1,0 +1,88 @@
+// # Kubernetes DaemonSet Node Affinity & Pod Injector
+//
+// Logline: Implements DaemonSet node affinity matching, taint/toleration evaluation, and single-pod-per-node scheduling.
+//
+// Setup: Cluster daemon controller ensuring exactly one pod copy runs on all eligible worker nodes.
+//
+// Beats:
+//   1. Define cluster nodes with labels, architecture tags, and taint lists.
+//   2. Evaluate tolerations against node taints (NoSchedule, PreferNoSchedule, NoExecute).
+//   3. Compute node eligibility diff to spawn missing daemon pods and prune unneeded pods.
+
+pub type NodeTaint = struct {
+    key: String,
+    value: String,
+    effect: String, // NoSchedule, PreferNoSchedule, NoExecute
+};
+
+pub type ClusterNode = struct {
+    name: String,
+    is_ready: Bool,
+    is_schedulable: Bool,
+    taints: List[NodeTaint],
+};
+
+pub type DaemonSetPodBinding = struct {
+    node_name: String,
+    pod_name: String,
+    is_active: Bool,
+};
+
+pub type DaemonSetController = struct {
+    name: String,
+    namespace: String,
+    tolerates_all_taints: Bool,
+    bindings: List[DaemonSetPodBinding],
+};
+
+pub fn daemonset_controller_new(name: String, ns: String, tolerate_all: Bool) -> DaemonSetController {
+    let empty_b: List[DaemonSetPodBinding] = list_new();
+    return DaemonSetController {
+        name: name,
+        namespace: ns,
+        tolerates_all_taints: tolerate_all,
+        bindings: empty_b,
+    };
+}
+
+pub fn daemonset_node_eligible(ctrl: &DaemonSetController, node: &ClusterNode) -> Bool {
+    if !(node).is_ready || !(node).is_schedulable {
+        return false;
+    }
+
+    if (ctrl).tolerates_all_taints {
+        return true;
+    }
+
+    let taint_len: Int = list_len((node).taints);
+    return taint_len == 0;
+}
+
+pub fn daemonset_reconcile_node(
+    ctrl: &mut DaemonSetController,
+    node: &ClusterNode
+) -> Bool {
+    let eligible: Bool = daemonset_node_eligible(ctrl, node);
+    let n: Int = list_len((ctrl).bindings);
+    let mut i: Int = 0;
+    while i < n {
+        let mut b: DaemonSetPodBinding = list_get((ctrl).bindings, i);
+        if (b).node_name == (node).name {
+            (b).is_active = eligible;
+            return false; // already present
+        }
+        i = i + 1;
+    }
+
+    if eligible {
+        let new_b: DaemonSetPodBinding = DaemonSetPodBinding {
+            node_name: (node).name,
+            pod_name: (ctrl).name + "-" + (node).name,
+            is_active: true,
+        };
+        (ctrl).bindings = list_push((ctrl).bindings, new_b);
+        return true; // scheduled new pod
+    }
+
+    return false;
+}

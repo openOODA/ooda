@@ -1,0 +1,175 @@
+// # Holt-Winters Triple Exponential Smoothing
+//
+// Logline: Additive and multiplicative triple exponential smoothing for industrial time-series level, trend, and seasonality.
+//
+// Setup: Initializes smoothing factors (alpha, beta, gamma) and computes multi-step predictive forecasts.
+//
+// Beats:
+//   1. Define HoltWintersModel and HoltWintersForecast data structures.
+//   2. Fit additive level, trend, and seasonal indices across periodic cycles.
+//   3. Generate forward horizon forecasts with confidence interval widths.
+
+pub type HoltWintersModel = struct {
+    alpha: Float,
+    beta: Float,
+    gamma: Float,
+    season_len: Int,
+    is_multiplicative: Bool,
+    level: Float,
+    trend: Float,
+    seasonal: List[Float],
+};
+
+pub type HoltWintersForecast = struct {
+    point_forecast: List[Float],
+    horizon: Int,
+    residual_variance: Float,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn hw_model_new(alpha: Float, beta: Float, gamma: Float, season_len: Int, is_mult: Bool) -> HoltWintersModel {
+    let mut s: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < season_len {
+        if is_mult {
+            s = list_push(s, 1.0);
+        } else {
+            s = list_push(s, 0.0);
+        }
+        i = i + 1;
+    }
+    return HoltWintersModel {
+        alpha: alpha,
+        beta: beta,
+        gamma: gamma,
+        season_len: season_len,
+        is_multiplicative: is_mult,
+        level: 0.0,
+        trend: 0.0,
+        seasonal: s,
+    };
+}
+
+pub fn hw_fit_additive(series: &List[Float], alpha: Float, beta: Float, gamma: Float, season_len: Int) -> HoltWintersModel {
+    let n: Int = list_len(*series);
+    if n < season_len || season_len <= 0 {
+        return hw_model_new(alpha, beta, gamma, season_len, false);
+    }
+
+    let mut level: Float = 0.0;
+    let mut i: Int = 0;
+    while i < season_len {
+        level = level + list_get(*series, i);
+        i = i + 1;
+    }
+    let season_f: Float = if season_len > 0 { int_to_float(season_len) } else { 1.0 };
+    level = level / season_f;
+
+    let mut trend: Float = 0.0;
+    if n >= (2 * season_len) {
+        let mut sum2: Float = 0.0;
+        i = 0;
+        while i < season_len {
+            sum2 = sum2 + list_get(*series, season_len + i);
+            i = i + 1;
+        }
+        let level2: Float = sum2 / season_f;
+        trend = (level2 - level) / season_f;
+    }
+
+    let mut s_init: List[Float] = list_new();
+    i = 0;
+    while i < season_len {
+        let val: Float = list_get(*series, i);
+        s_init = list_push(s_init, val - level);
+        i = i + 1;
+    }
+
+    let mut current_model = HoltWintersModel {
+        alpha: alpha,
+        beta: beta,
+        gamma: gamma,
+        season_len: season_len,
+        is_multiplicative: false,
+        level: level,
+        trend: trend,
+        seasonal: s_init,
+    };
+
+    i = 0;
+    while i < n {
+        let y_t: Float = list_get(*series, i);
+        let s_idx: Int = i % season_len;
+        let s_prev: Float = list_get(current_model.seasonal, s_idx);
+        let last_level: Float = current_model.level;
+        let last_trend: Float = current_model.trend;
+
+        let new_level: Float = (alpha * (y_t - s_prev)) + ((1.0 - alpha) * (last_level + last_trend));
+        let new_trend: Float = (beta * (new_level - last_level)) + ((1.0 - beta) * last_trend);
+        let new_season: Float = (gamma * (y_t - new_level)) + ((1.0 - gamma) * s_prev);
+
+        let mut updated_s: List[Float] = list_new();
+        let mut k: Int = 0;
+        while k < season_len {
+            if k == s_idx {
+                updated_s = list_push(updated_s, new_season);
+            } else {
+                updated_s = list_push(updated_s, list_get(current_model.seasonal, k));
+            }
+            k = k + 1;
+        }
+
+        current_model = HoltWintersModel {
+            alpha: alpha,
+            beta: beta,
+            gamma: gamma,
+            season_len: season_len,
+            is_multiplicative: false,
+            level: new_level,
+            trend: new_trend,
+            seasonal: updated_s,
+        };
+        i = i + 1;
+    }
+
+    return current_model;
+}
+
+pub fn hw_forecast(model: &HoltWintersModel, horizon: Int) -> HoltWintersForecast {
+    let mut fc: List[Float] = list_new();
+    let mut h: Int = 1;
+    let s_len: Int = (model).season_len;
+
+    while h <= horizon {
+        let h_f: Float = int_to_float(h);
+        let s_idx: Int = (h - 1) % (if s_len > 0 { s_len } else { 1 });
+        let s_val: Float = if s_len > 0 { list_get((model).seasonal, s_idx) } else { 0.0 };
+
+        let pred: Float = if (model).is_multiplicative {
+            ((model).level + (h_f * (model).trend)) * s_val
+        } else {
+            (model).level + (h_f * (model).trend) + s_val
+        };
+
+        fc = list_push(fc, pred);
+        h = h + 1;
+    }
+
+    return HoltWintersForecast {
+        point_forecast: fc,
+        horizon: horizon,
+        residual_variance: 0.0,
+    };
+}

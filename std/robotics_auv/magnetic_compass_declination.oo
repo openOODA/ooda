@@ -1,0 +1,99 @@
+// # Tri-Axial Magnetometer Calibration & Tilt-Compensated Heading
+//
+// Logline: Applies hard/soft iron ellipsoid calibration and pitch/roll tilt compensation to compute geodetic true heading.
+//
+// Setup: Strapdown electronic compass processing correcting vehicle ferromagnetic disturbances and local magnetic declination.
+//
+// Beats:
+//   1. Define hard iron bias vector (v_x, v_y, v_z) and soft iron diagonal correction scale factors.
+//   2. Correct raw 3-axis magnetometer vector for hull ferromagnetic distortions.
+//   3. Project calibrated magnetic vector onto horizontal local level plane using Euler tilt (phi, theta).
+//   4. Compute true heading with local World Magnetic Model (WMM) declination correction.
+
+import "./auv_hydrodynamics_constants.oo";
+
+pub type MagnetometerCalib = struct {
+    hard_iron_offset_x: Float,
+    hard_iron_offset_y: Float,
+    hard_iron_offset_z: Float,
+    soft_iron_scale_x: Float,
+    soft_iron_scale_y: Float,
+    soft_iron_scale_z: Float,
+    declination_rad: Float,
+};
+
+pub type CompassHeadingResult = struct {
+    magnetic_heading_rad: Float,
+    true_heading_rad: Float,
+    field_strength_gauss: Float,
+    is_valid: Bool,
+};
+
+pub fn magnetometer_calib_default() -> MagnetometerCalib {
+    return MagnetometerCalib {
+        hard_iron_offset_x: 0.05,
+        hard_iron_offset_y: 0.0 - 0.02,
+        hard_iron_offset_z: 0.12,
+        soft_iron_scale_x: 1.02,
+        soft_iron_scale_y: 0.98,
+        soft_iron_scale_z: 1.00,
+        declination_rad: 0.0 - 0.087, // ~ -5 deg West
+    };
+}
+
+pub fn compute_tilt_compensated_heading(
+    calib: &MagnetometerCalib,
+    raw_mag_x: Float,
+    raw_mag_y: Float,
+    raw_mag_z: Float,
+    phi_roll_rad: Float,
+    theta_pitch_rad: Float
+) -> CompassHeadingResult {
+    // Hard iron offset subtraction
+    let mx_hi: Float = raw_mag_x - (calib).hard_iron_offset_x;
+    let my_hi: Float = raw_mag_y - (calib).hard_iron_offset_y;
+    let mz_hi: Float = raw_mag_z - (calib).hard_iron_offset_z;
+
+    // Soft iron scaling
+    let mx_cal: Float = mx_hi * (calib).soft_iron_scale_x;
+    let my_cal: Float = my_hi * (calib).soft_iron_scale_y;
+    let mz_cal: Float = mz_hi * (calib).soft_iron_scale_z;
+
+    let field_norm: Float = sqrt((mx_cal * mx_cal) + (my_cal * my_cal) + (mz_cal * mz_cal));
+    if field_norm < 0.1 {
+        return CompassHeadingResult {
+            magnetic_heading_rad: 0.0,
+            true_heading_rad: 0.0,
+            field_strength_gauss: field_norm,
+            is_valid: false,
+        };
+    }
+
+    let sphi: Float = sin(phi_roll_rad);
+    let cphi: Float = cos(phi_roll_rad);
+    let sth: Float = sin(theta_pitch_rad);
+    let cth: Float = cos(theta_pitch_rad);
+
+    // Tilt compensation: horizontal plane projection
+    let bx_comp: Float = (mx_cal * cth) + (my_cal * sphi * sth) + (mz_cal * cphi * sth);
+    let by_comp: Float = (my_cal * cphi) - (mz_cal * sphi);
+
+    let psi_mag: Float = math_atan2(0.0 - by_comp, bx_comp);
+    let mut psi_true: Float = psi_mag + (calib).declination_rad;
+
+    // Wrap to [-pi, pi]
+    let pi_val: Float = const_pi();
+    if psi_true > pi_val {
+        psi_true = psi_true - const_two_pi();
+    }
+    if psi_true < 0.0 - pi_val {
+        psi_true = psi_true + const_two_pi();
+    }
+
+    return CompassHeadingResult {
+        magnetic_heading_rad: psi_mag,
+        true_heading_rad: psi_true,
+        field_strength_gauss: field_norm,
+        is_valid: true,
+    };
+}

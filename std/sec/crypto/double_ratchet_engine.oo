@@ -1,0 +1,199 @@
+// # Double Ratchet State and Session Lifecycle
+//
+// Logline: Alice and Bob session initialization, ratchet state validation, DH key rotation, and self-testing.
+//
+// Setup: Stateful session management and Diffie-Hellman stepping for Double Ratchet participants.
+//
+// Beats:
+//   1. Initialize Alice ratchet state with initial shared secret and Bob's DH key.
+//   2. Initialize Bob ratchet state with shared secret and local DH keypair.
+//   3. Validate session state invariants, track skipped keys, and rotate DH keys.
+//   4. Implement self-test verification procedure for Double Ratchet initialization.
+
+import "./double_ratchet_types.oo";
+import "./double_ratchet_ops.oo";
+
+pub fn ratchet_state_init_alice(session_id: String, shared_key: String, bob_dh_pub: String, alice_dh: DHKeyPair) -> Result[RatchetState, String] {
+    let sk_len: Int = shared_key.len();
+    if sk_len != 32 {
+        return Err("INVALID_SHARED_KEY: Must be 32 bytes");
+    }
+    let bob_pub_len: Int = bob_dh_pub.len();
+    if bob_pub_len != 32 {
+        return Err("INVALID_BOB_PUB: Must be 32 bytes");
+    }
+    let alice_dh_ref = &alice_dh;
+    let dh_valid: Bool = dh_keypair_validate(alice_dh_ref);
+    if !dh_valid {
+        return Err("INVALID_ALICE_DH: Invalid key pair");
+    }
+
+    let empty_send_ck = ChainKey {
+        chain_id: "send_chain_init",
+        key_bytes: "00000000000000000000000000000000",
+        index: 0,
+        is_send: true,
+        checksum: 0,
+        is_valid: true,
+    };
+    let empty_recv_ck = ChainKey {
+        chain_id: "recv_chain_init",
+        key_bytes: "00000000000000000000000000000000",
+        index: 0,
+        is_send: false,
+        checksum: 0,
+        is_valid: true,
+    };
+
+    let empty_skipped: List[SkippedMessageKey] = list_new();
+
+    let st = RatchetState {
+        session_id: session_id,
+        dh_self: alice_dh,
+        dh_remote_pub: bob_dh_pub,
+        root_key: shared_key,
+        send_chain: empty_send_ck,
+        recv_chain: empty_recv_ck,
+        n_send: 0,
+        n_recv: 0,
+        pn: 0,
+        skipped_keys: empty_skipped,
+        max_skipped_keys: 2000,
+        is_alice: true,
+        is_initialized: true,
+        is_active: true,
+    };
+    return Ok(st);
+}
+
+pub fn ratchet_state_init_bob(session_id: String, shared_key: String, bob_dh: DHKeyPair) -> Result[RatchetState, String] {
+    let sk_len: Int = shared_key.len();
+    if sk_len != 32 {
+        return Err("INVALID_SHARED_KEY: Must be 32 bytes");
+    }
+    let bob_dh_ref = &bob_dh;
+    let dh_valid: Bool = dh_keypair_validate(bob_dh_ref);
+    if !dh_valid {
+        return Err("INVALID_BOB_DH: Invalid key pair");
+    }
+
+    let empty_send_ck = ChainKey {
+        chain_id: "send_chain_init",
+        key_bytes: "00000000000000000000000000000000",
+        index: 0,
+        is_send: true,
+        checksum: 0,
+        is_valid: true,
+    };
+    let empty_recv_ck = ChainKey {
+        chain_id: "recv_chain_init",
+        key_bytes: "00000000000000000000000000000000",
+        index: 0,
+        is_send: false,
+        checksum: 0,
+        is_valid: true,
+    };
+
+    let empty_skipped: List[SkippedMessageKey] = list_new();
+
+    let st = RatchetState {
+        session_id: session_id,
+        dh_self: bob_dh,
+        dh_remote_pub: "",
+        root_key: shared_key,
+        send_chain: empty_send_ck,
+        recv_chain: empty_recv_ck,
+        n_send: 0,
+        n_recv: 0,
+        pn: 0,
+        skipped_keys: empty_skipped,
+        max_skipped_keys: 2000,
+        is_alice: false,
+        is_initialized: true,
+        is_active: true,
+    };
+    return Ok(st);
+}
+
+pub fn ratchet_state_is_valid(state: &RatchetState) -> Bool {
+    let is_init: Bool = (state).is_initialized;
+    if !is_init {
+        return false;
+    }
+    let is_act: Bool = (state).is_active;
+    if !is_act {
+        return false;
+    }
+    let rk: String = (state).root_key;
+    let rk_len: Int = rk.len();
+    if rk_len != 32 {
+        return false;
+    }
+    return true;
+}
+
+pub fn ratchet_state_to_string(state: &RatchetState) -> String {
+    let sid: String = (state).session_id;
+    let rk: String = (state).root_key;
+    let hex_rk: String = double_ratchet_hex_encode(rk);
+    return "RatchetSession[" + sid + "] RK:" + hex_rk;
+}
+
+pub fn ratchet_state_skipped_count(state: &RatchetState) -> Int {
+    let sk_list: List[SkippedMessageKey] = (state).skipped_keys;
+    return list_len(sk_list);
+}
+
+pub fn ratchet_state_set_remote_dh(state: &mut RatchetState, dh_pub: String) -> Result[Bool, String] {
+    let pub_len: Int = dh_pub.len();
+    if pub_len != 32 {
+        return Err("INVALID_REMOTE_DH: Remote DH public key must be 32 bytes");
+    }
+    (state).dh_remote_pub = dh_pub;
+    return Ok(true);
+}
+
+pub fn ratchet_state_rotate_dh_self(state: &mut RatchetState, new_dh: DHKeyPair) -> Result[Bool, String] {
+    let new_dh_ref = &new_dh;
+    let valid: Bool = dh_keypair_validate(new_dh_ref);
+    if !valid {
+        return Err("INVALID_NEW_DH: New DH key pair is invalid");
+    }
+    (state).dh_self = new_dh;
+    return Ok(true);
+}
+
+pub fn double_ratchet_self_test() -> Bool {
+    let dummy_key_32: String = "01234567890123456789012345678901";
+    let kp_res = dh_keypair_create("dh_01", dummy_key_32, dummy_key_32);
+    let kp = match kp_res {
+        Ok(k) => k,
+        Err(e) => return false,
+    };
+    let kp_ref = &kp;
+    if !dh_keypair_validate(kp_ref) {
+        return false;
+    }
+
+    let hdr_res = message_header_create(dummy_key_32, 0, 1);
+    let hdr = match hdr_res {
+        Ok(h) => h,
+        Err(e) => return false,
+    };
+    let hdr_ref = &hdr;
+    if !message_header_validate(hdr_ref) {
+        return false;
+    }
+
+    let alice_res = ratchet_state_init_alice("sess_test", dummy_key_32, dummy_key_32, kp);
+    let alice = match alice_res {
+        Ok(a) => a,
+        Err(e) => return false,
+    };
+    let alice_ref = &alice;
+    if !ratchet_state_is_valid(alice_ref) {
+        return false;
+    }
+
+    return true;
+}

@@ -1,0 +1,230 @@
+// # Rigid Body Numerical Integration Engine
+//
+// Logline: Implements symplectic Euler equations of motion, angular velocity integration, and constraint resolution.
+//
+// Setup: Imports rigid_types.oo for RigidBody, RigidBodySystem, and kinematic states.
+//
+// Beats:
+//   1. Integrate linear velocity and positions under gravitational and applied forces.
+//   2. Integrate angular momentum and compute rotational updates via inertia tensors.
+//   3. Enforce positional clamps, velocity damping, and contact restitution impulses.
+
+import "./rigid_types.oo";
+import "./rigid_ops.oo";
+
+// -------------------------------------------------------------------
+// Semi-implicit Euler integration
+//
+//   1. Compute acceleration: a = force / mass
+//   2. Update velocity:      v += a * dt   (then clear force)
+//   3. Apply linear damping: v *= (1 - damping)
+//   4. Update position:      pos += v * dt
+//   5. Repeat for angular:   alpha = torque / inertia
+//                             omega += alpha * dt  (then clear torque)
+//                             omega *= (1 - ang_damp)
+//                             orient += omega * dt
+// -------------------------------------------------------------------
+
+/// Advance the rigid body by time-step dt (seconds).
+/// Gravity should be applied via rigid_body_apply_gravity *before*
+/// calling this function each step.
+pub fn rigid_body_step(rb: &mut RigidBody, dt: Float) {
+    if (rb).active == 0 {
+        return;
+    }
+    if (rb).mass < 0.000001 {
+        return;
+    }
+
+    let inv_mass = 1.0 / (rb).mass;
+
+    // Linear integration.
+    let ax = (rb).force.x * inv_mass;
+    let ay = (rb).force.y * inv_mass;
+    let az = (rb).force.z * inv_mass;
+    let accel = Vec3 { x: ax, y: ay, z: az };
+
+    let mut v = vec3_add((rb).vel, vec3_scale(accel, dt));
+    let ld = 1.0 - (rb).damping;
+    v = vec3_scale(v, ld);
+    rb.vel = v;
+
+    let p = vec3_add((rb).pos, vec3_scale(v, dt));
+    rb.pos = p;
+
+    // Clear accumulated force.
+    rb.force = vec3_zero();
+
+    // Angular integration.
+    if (rb).inertia > 0.000001 {
+        let inv_inertia = 1.0 / (rb).inertia;
+
+        let alpha_x = (rb).torque.x * inv_inertia;
+        let alpha_y = (rb).torque.y * inv_inertia;
+        let alpha_z = (rb).torque.z * inv_inertia;
+        let alpha = Vec3 { x: alpha_x, y: alpha_y, z: alpha_z };
+
+        let mut w = vec3_add((rb).ang_vel, vec3_scale(alpha, dt));
+        let ad = 1.0 - (rb).ang_damp;
+        w = vec3_scale(w, ad);
+        rb.ang_vel = w;
+
+        let o = vec3_add((rb).orient, vec3_scale(w, dt));
+        rb.orient = o;
+    }
+
+    // Clear accumulated torque.
+    rb.torque = vec3_zero();
+}
+
+// -------------------------------------------------------------------
+// Collision response
+//
+// Resolves a collision between two dynamic rigid bodies using an
+// impulse-based method derived from the coefficient of restitution and
+// relative velocity along the collision normal.
+//
+// Formula:
+//   j = -(1 + e) * (v_rel . n) / (1/m_a + 1/m_b)
+//   v_a += (j / m_a) * n
+//   v_b -= (j / m_b) * n
+//
+// Where e = min(restitution_a, restitution_b).
+//
+// residual: rotational impulse (angular correction) is not applied
+//   because computing the cross-product lever arm requires knowing the
+//   contact point relative to each body's centre — callers can do this
+//   manually with rigid_body_apply_angular_impulse if needed.
+// -------------------------------------------------------------------
+
+/// Resolve a collision between body a and body b given the collision
+/// normal (unit vector pointing from b towards a) and the penetration
+/// depth (scalar).  Both bodies are modified in place.
+pub fn rigid_body_resolve_collision(body1: &mut RigidBody, body2: &mut RigidBody, normal: Vec3, depth: Float) {
+    if (body1).active == 0 {
+        if (body2).active == 0 {
+            return;
+        }
+    }
+
+    // Relative velocity of body1 with respect to body2 along the normal.
+    let rel_vx = (body1).vel.x - (body2).vel.x;
+    let rel_vy = (body1).vel.y - (body2).vel.y;
+    let rel_vz = (body1).vel.z - (body2).vel.z;
+    let rel_v = Vec3 { x: rel_vx, y: rel_vy, z: rel_vz };
+
+    let v_along_normal = vec3_dot(rel_v, normal);
+
+    // Bodies are already separating — no impulse needed.
+    if v_along_normal > 0.0 {
+        return;
+    }
+
+    // Coefficient of restitution: use the lower of the two.
+    let mut e = (body1).restitution;
+    if (body2).restitution < e {
+        e = (body2).restitution;
+    }
+
+    // Inverse masses.
+    let mut inv_ma = 0.0;
+    if (body1).mass > 0.000001 {
+        inv_ma = 1.0 / (body1).mass;
+    }
+    let mut inv_mb = 0.0;
+    if (body2).mass > 0.000001 {
+        inv_mb = 1.0 / (body2).mass;
+    }
+
+    let inv_mass_sum = inv_ma + inv_mb;
+    if inv_mass_sum < 0.000001 {
+        // Both bodies have infinite mass — nothing to resolve.
+        return;
+    }
+
+    // Impulse scalar.
+    let j = (0.0 - (1.0 + e)) * v_along_normal / inv_mass_sum;
+
+    // Apply impulse to body1.
+    body1.vel = vec3_add((body1).vel, vec3_scale(normal, inv_ma * j));
+
+    // Apply equal and opposite impulse to body2.
+    body2.vel = vec3_sub((body2).vel, vec3_scale(normal, inv_mb * j));
+
+    // Positional correction (Baumgarte-style) to prevent sinking.
+    let slop = 0.01;
+    let mut corr = (depth) - (slop);
+    if corr < 0.0 {
+        corr = 0.0;
+    }
+    let percent = 0.2;
+    let correction = (corr / inv_mass_sum) * percent;
+
+    body1.pos = vec3_add((body1).pos, vec3_scale(normal, inv_ma * correction));
+    body2.pos = vec3_sub((body2).pos, vec3_scale(normal, inv_mb * correction));
+}
+
+// -------------------------------------------------------------------
+// Kinematic state accessors
+// -------------------------------------------------------------------
+
+/// Return the current position of the body.
+pub fn rigid_body_get_pos(rb: &RigidBody) -> Vec3 {
+    return (rb).pos;
+}
+
+/// Return the current linear velocity.
+pub fn rigid_body_get_vel(rb: &RigidBody) -> Vec3 {
+    return (rb).vel;
+}
+
+/// Return the current orientation (Euler angles, radians).
+pub fn rigid_body_get_orient(rb: &RigidBody) -> Vec3 {
+    return (rb).orient;
+}
+
+/// Return the current angular velocity (rad/s).
+pub fn rigid_body_get_ang_vel(rb: &RigidBody) -> Vec3 {
+    return (rb).ang_vel;
+}
+
+/// Return the kinetic energy: KE = 0.5 * m * v^2.
+pub fn rigid_body_kinetic_energy(rb: &RigidBody) -> Float {
+    let v_sq = vec3_length_sq((rb).vel);
+    return 0.5 * (rb).mass * v_sq;
+}
+
+/// Return the angular kinetic energy: KE_rot = 0.5 * I * omega^2.
+pub fn rigid_body_angular_kinetic_energy(rb: &RigidBody) -> Float {
+    let w_sq = vec3_length_sq((rb).ang_vel);
+    return 0.5 * (rb).inertia * w_sq;
+}
+
+/// Set the linear velocity of a body directly (e.g. for kinematic control).
+pub fn rigid_body_set_vel(rb: &mut RigidBody, vel: Vec3) {
+    rb.vel = vel;
+}
+
+/// Set the position of a body directly.
+pub fn rigid_body_set_pos(rb: &mut RigidBody, pos: Vec3) {
+    rb.pos = pos;
+}
+
+/// Enable or disable integration for a body (1 = active, 0 = static).
+pub fn rigid_body_set_active(rb: &mut RigidBody, active: Int) {
+    rb.active = active;
+}
+
+/// Return 1 if the body is active (dynamic), 0 if static.
+pub fn rigid_body_is_active(rb: &RigidBody) -> Int {
+    return (rb).active;
+}
+
+// -------------------------------------------------------------------
+// Linear momentum
+// -------------------------------------------------------------------
+
+/// Return the linear momentum p = m * v.
+pub fn rigid_body_momentum(rb: &RigidBody) -> Vec3 {
+    return vec3_scale((rb).vel, (rb).mass);
+}

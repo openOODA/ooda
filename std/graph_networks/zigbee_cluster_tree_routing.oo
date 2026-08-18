@@ -1,0 +1,111 @@
+// # ZigBee Hierarchical Cluster-Tree Network Routing
+//
+// Logline: Implements IEEE 802.15.4 / ZigBee cluster-tree address assignment (Cskip) and zero-memory hierarchical routing.
+//
+// Setup: Compact wireless mesh tree router calculating next-hop forwarders strictly via algebraic address arithmetic.
+//
+// Beats:
+//   1. Compute Cskip(d) hierarchical address offset parameters based on max depth (Lm) and children limits (Cm, Rm).
+//   2. Assign unique deterministic short addresses to child routers and end devices without central lookup tables.
+//   3. Forward packets algebraically upstream to parent or downstream to child router subtrees.
+
+pub type ZigbeeTreeConfig = struct {
+    max_children_cm: Int,
+    max_routers_rm: Int,
+    max_depth_lm: Int,
+};
+
+pub type ZigbeeNode = struct {
+    short_address: Int,
+    depth: Int,
+    parent_address: Int,
+    is_coordinator: Bool,
+};
+
+pub fn zigbee_calc_pow(base: Int, exp: Int) -> Int {
+    let mut res: Int = 1;
+    let mut i: Int = 0;
+    while i < exp {
+        res = res * base;
+        i = i + 1;
+    }
+    return res;
+}
+
+pub fn zigbee_cskip(cfg: &ZigbeeTreeConfig, depth: Int) -> Int {
+    let cm: Int = (cfg).max_children_cm;
+    let rm: Int = (cfg).max_routers_rm;
+    let lm: Int = (cfg).max_depth_lm;
+
+    if depth >= lm {
+        return 0;
+    }
+
+    if rm == 1 {
+        return 1 + cm * (lm - depth - 1);
+    }
+
+    let remaining_depth: Int = lm - depth - 1;
+    let rm_pow: Int = zigbee_calc_pow(rm, remaining_depth);
+    let num: Int = 1 + cm - rm - (cm * rm_pow);
+    let denom: Int = 1 - rm;
+
+    return num / denom;
+}
+
+pub fn zigbee_assign_child_router_addr(
+    cfg: &ZigbeeTreeConfig,
+    parent_addr: Int,
+    parent_depth: Int,
+    child_router_index: Int // 1..Rm
+) -> Int {
+    let cskip_val: Int = zigbee_cskip(cfg, parent_depth);
+    return parent_addr + 1 + (child_router_index - 1) * cskip_val;
+}
+
+pub fn zigbee_assign_end_device_addr(
+    cfg: &ZigbeeTreeConfig,
+    parent_addr: Int,
+    parent_depth: Int,
+    end_device_index: Int // 1..(Cm - Rm)
+) -> Int {
+    let rm: Int = (cfg).max_routers_rm;
+    let cskip_val: Int = zigbee_cskip(cfg, parent_depth);
+    return parent_addr + (rm * cskip_val) + end_device_index;
+}
+
+pub fn zigbee_route_next_hop(
+    cfg: &ZigbeeTreeConfig,
+    cur_node: &ZigbeeNode,
+    dest_address: Int
+) -> Int {
+    let a_k: Int = (cur_node).short_address;
+    let d: Int = (cur_node).depth;
+    let cskip_d: Int = zigbee_cskip(cfg, d);
+    let rm: Int = (cfg).max_routers_rm;
+
+    // Check if destination is this node
+    if dest_address == a_k {
+        return a_k;
+    }
+
+    // Check if destination is in this node's descendant subtree:
+    // A_k < Dest <= A_k + Cskip(d-1) - 1
+    let in_subtree: Bool = (dest_address > a_k) && (dest_address <= (a_k + cskip_d * rm));
+
+    if in_subtree {
+        // Destination is downstream in this subtree
+        if dest_address > (a_k + rm * cskip_d) {
+            // Direct child end-device
+            return dest_address;
+        }
+
+        // Child router containing destination:
+        let n: Int = (dest_address - a_k - 1) / (if cskip_d > 0 { cskip_d } else { 1 });
+        let next_router_addr: Int = a_k + 1 + n * cskip_d;
+        return next_router_addr;
+    }
+
+    // Destination is not in this subtree: forward upstream to parent
+    return (cur_node).parent_address;
+}

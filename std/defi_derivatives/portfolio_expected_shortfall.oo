@@ -1,0 +1,132 @@
+// # Portfolio Expected Shortfall & CVaR Tail Risk Engine
+//
+// Logline: Computes Conditional Value at Risk (CVaR) and Expected Shortfall over loss distributions, measuring tail risk beyond standard VaR quantiles.
+//
+// Setup: Pure quantitative risk module calculating coherent risk measures for leveraged derivative portfolios.
+//
+// Beats:
+//   1. Define EsConfig, HistoricalLossSample, and EsResult structures.
+//   2. Compute Gaussian parametric Expected Shortfall $\text{ES}_\alpha = \mu + \sigma \frac{\phi(z_\alpha)}{1 - \alpha}$.
+//   3. Average historical tail scenarios exceeding the VaR cutoff threshold.
+
+pub type EsConfig = struct {
+    confidence_level: Float, // e.g. 0.99 or 0.95
+    time_horizon_days: Float,
+    portfolio_value_usd: Float,
+};
+
+pub type EsResult = struct {
+    confidence_level: Float,
+    var_threshold_usd: Float,
+    expected_shortfall_usd: Float,
+    tail_risk_ratio: Float, // ES / VaR ratio
+    tail_observations_count: Int,
+};
+
+pub fn es_config_default() -> EsConfig {
+    return EsConfig {
+        confidence_level: 0.99,
+        time_horizon_days: 1.0,
+        portfolio_value_usd: 1000000.0,
+    };
+}
+
+pub fn es_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn calc_parametric_es(
+    daily_vol_pct: Float,
+    cfg: &EsConfig
+) -> EsResult {
+    let alpha: Float = (cfg).confidence_level;
+    let mut z: Float = 2.32635; // 99%
+    if alpha < 0.96 {
+        z = 1.64485; // 95%
+    }
+
+    let port_val: Float = (cfg).portfolio_value_usd;
+    let sigma_usd: Float = port_val * daily_vol_pct * sqrt((cfg).time_horizon_days);
+
+    let var_usd: Float = z * sigma_usd;
+    let pdf_z: Float = es_norm_pdf(z);
+    let es_factor: Float = pdf_z / (1.0 - alpha);
+    let es_usd: Float = es_factor * sigma_usd;
+
+    let mut ratio: Float = 1.0;
+    if var_usd > 0.0 {
+        ratio = es_usd / var_usd;
+    }
+
+    return EsResult {
+        confidence_level: alpha,
+        var_threshold_usd: var_usd,
+        expected_shortfall_usd: es_usd,
+        tail_risk_ratio: ratio,
+        tail_observations_count: 100,
+    };
+}
+
+pub fn calc_historical_es(
+    losses_usd: List[Float],
+    cfg: &EsConfig
+) -> EsResult {
+    let n: Int = list_len(losses_usd);
+    if n == 0 {
+        return EsResult {
+            confidence_level: (cfg).confidence_level,
+            var_threshold_usd: 0.0,
+            expected_shortfall_usd: 0.0,
+            tail_risk_ratio: 1.0,
+            tail_observations_count: 0,
+        };
+    }
+
+    // Find max losses exceeding (1 - alpha) quantile
+    let mut max_loss: Float = 0.0;
+    let mut sum_tail: Float = 0.0;
+    let mut tail_count: Int = 0;
+
+    let mut i: Int = 0;
+    while i < n {
+        let l: Float = list_get(losses_usd, i);
+        if l > max_loss {
+            max_loss = l;
+        }
+        i = i + 1;
+    }
+
+    let var_approx: Float = max_loss * (cfg).confidence_level;
+
+    let mut j: Int = 0;
+    while j < n {
+        let l_val: Float = list_get(losses_usd, j);
+        if l_val >= var_approx {
+            sum_tail = sum_tail + l_val;
+            tail_count = tail_count + 1;
+        }
+        j = j + 1;
+    }
+
+    let mut es_val: Float = var_approx;
+    if tail_count > 0 {
+        let mut count_f: Float = 0.0;
+        let mut rem_t: Int = tail_count;
+        while rem_t > 0 { count_f = count_f + 1.0; rem_t = rem_t - 1; }
+        es_val = sum_tail / count_f;
+    }
+
+    let mut ratio: Float = 1.0;
+    if var_approx > 0.0 {
+        ratio = es_val / var_approx;
+    }
+
+    return EsResult {
+        confidence_level: (cfg).confidence_level,
+        var_threshold_usd: var_approx,
+        expected_shortfall_usd: es_val,
+        tail_risk_ratio: ratio,
+        tail_observations_count: tail_count,
+    };
+}

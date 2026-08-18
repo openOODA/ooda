@@ -1,0 +1,85 @@
+// # Direct Market Access Cancel/Replace Optimizer
+//
+// Logline: Optimizes order modification sequencing to preserve FIFO queue priority and minimize in-flight race conditions.
+//
+// Setup: Order modification engine deciding between native OUCH Replace vs atomic Cancel-New pairs.
+//
+// Beats:
+//   1. Define ModifyRequest, PriorityDecision, and ModifyTracker structures.
+//   2. Determine whether size reduction preserves priority without moving to queue tail.
+//   3. Manage replacement chains and in-flight modification acknowledgments.
+
+pub type ModifyRequest = struct {
+    original_user_ref_number: Int,
+    new_user_ref_number: Int,
+    current_shares: Int,
+    new_shares: Int,
+    current_price_fixed: Int,
+    new_price_fixed: Int,
+    symbol: String,
+    timestamp_ns: Int,
+};
+
+pub type PriorityDecision = struct {
+    use_native_replace: Bool,
+    will_lose_queue_priority: Bool,
+    is_downsize_only: Bool,
+    recommended_action: String,
+};
+
+pub type ModifyTracker = struct {
+    total_modifications: Int,
+    priority_preserved_count: Int,
+    priority_lost_count: Int,
+    in_flight_modifies: Int,
+};
+
+pub fn modify_tracker_new() -> ModifyTracker {
+    return ModifyTracker {
+        total_modifications: 0,
+        priority_preserved_count: 0,
+        priority_lost_count: 0,
+        in_flight_modifies: 0,
+    };
+}
+
+pub fn optimize_modify_decision(req: &ModifyRequest) -> PriorityDecision {
+    let same_price: Bool = (req).current_price_fixed == (req).new_price_fixed;
+    let is_downsize: Bool = (req).new_shares < (req).current_shares;
+
+    if same_price && is_downsize {
+        return PriorityDecision {
+            use_native_replace: true,
+            will_lose_queue_priority: false,
+            is_downsize_only: true,
+            recommended_action: "OUCH_REPLACE_DOWNSIZE",
+        };
+    }
+
+    if same_price && !is_downsize {
+        return PriorityDecision {
+            use_native_replace: true,
+            will_lose_queue_priority: true,
+            is_downsize_only: false,
+            recommended_action: "OUCH_REPLACE_UPSIZE",
+        };
+    }
+
+    return PriorityDecision {
+        use_native_replace: true,
+        will_lose_queue_priority: true,
+        is_downsize_only: false,
+        recommended_action: "OUCH_REPLACE_PRICE_CHANGE",
+    };
+}
+
+pub fn modify_record_sent(tracker: &mut ModifyTracker, decision: &PriorityDecision) {
+    (tracker).total_modifications = (tracker).total_modifications + 1;
+    (tracker).in_flight_modifies = (tracker).in_flight_modifies + 1;
+
+    if !(decision).will_lose_queue_priority {
+        (tracker).priority_preserved_count = (tracker).priority_preserved_count + 1;
+    } else {
+        (tracker).priority_lost_count = (tracker).priority_lost_count + 1;
+    }
+}

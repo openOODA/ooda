@@ -1,0 +1,125 @@
+// # Dynamic EdgeConv Graph Convolution
+//
+// Logline: Implements EdgeConv dynamically constructing edge feature graphs from k-nearest neighbors in feature space.
+//
+// Setup: Geometric graph CNN operator computing non-local asymmetric edge features h_theta(x_i, x_j - x_i) with max-pooling aggregation.
+//
+// Beats:
+//   1. Construct asymmetric edge features [x_i || x_j - x_i] combining local neighborhood delta with global coordinates.
+//   2. Transform pairwise edge vectors via multi-layer perceptron (MLP) weights Theta.
+//   3. Aggregate edge features across neighbors using channel-wise max-pooling operations.
+
+pub type EdgeConvConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    k_neighbors: Int,
+};
+
+pub type EdgeConvLayer = struct {
+    config: EdgeConvConfig,
+    w_self: List[Float], // in_features * out_features
+    w_diff: List[Float], // in_features * out_features
+    bias: List[Float],   // out_features
+};
+
+pub fn edge_conv_config_new(
+    in_f: Int,
+    out_f: Int,
+    k: Int
+) -> EdgeConvConfig {
+    return EdgeConvConfig {
+        in_features: in_f,
+        out_features: out_f,
+        k_neighbors: k,
+    };
+}
+
+pub fn edge_conv_layer_init(config: EdgeConvConfig, seed: Int) -> EdgeConvLayer {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let total_w: Int = in_f * out_f;
+    let mut state: Int = seed;
+    let scale: Float = sqrt(2.0 / ((2 * in_f + out_f) as Float));
+
+    let mut ws: List[Float] = list_new();
+    let mut wd: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < total_w {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        ws = list_push(ws, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale);
+
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        wd = list_push(wd, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale);
+        i = i + 1;
+    }
+
+    let mut b_vec: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < out_f {
+        b_vec = list_push(b_vec, 0.0);
+        j = j + 1;
+    }
+
+    return EdgeConvLayer {
+        config: config,
+        w_self: ws,
+        w_diff: wd,
+        bias: b_vec,
+    };
+}
+
+pub fn edge_conv_forward_node(
+    layer: &EdgeConvLayer,
+    node_id: Int,
+    neighbor_ids: List[Int],
+    input_features: List[Float]
+) -> List[Float] {
+    let cfg: EdgeConvConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let out_f: Int = (cfg).out_features;
+    let num_neighbors: Int = list_len(neighbor_ids);
+    let self_off: Int = node_id * in_f;
+
+    let mut out_h: List[Float] = list_new();
+    let mut o: Int = 0;
+    while o < out_f {
+        let b: Float = list_get((*layer).bias, o);
+        let mut max_val: Float = -1000000.0;
+
+        let mut n_idx: Int = 0;
+        while n_idx < num_neighbors {
+            let n_id: Int = list_get(neighbor_ids, n_idx);
+            let n_off: Int = n_id * in_f;
+
+            let mut dot_self: Float = 0.0;
+            let mut dot_diff: Float = 0.0;
+            let mut c: Int = 0;
+            while c < in_f {
+                let xi: Float = list_get(input_features, self_off + c);
+                let xj: Float = list_get(input_features, n_off + c);
+                let diff: Float = xj - xi;
+
+                let ws_val: Float = list_get((*layer).w_self, (c * out_f) + o);
+                let wd_val: Float = list_get((*layer).w_diff, (c * out_f) + o);
+
+                dot_self = dot_self + (xi * ws_val);
+                dot_diff = dot_diff + (diff * wd_val);
+                c = c + 1;
+            }
+
+            let e_val: Float = dot_self + dot_diff + b;
+            let act: Float = if e_val > 0.0 { e_val } else { 0.0 }; // ReLU
+            if act > max_val {
+                max_val = act;
+            }
+            n_idx = n_idx + 1;
+        }
+
+        let res: Float = if num_neighbors > 0 { max_val } else { 0.0 };
+        out_h = list_push(out_h, res);
+        o = o + 1;
+    }
+    return out_h;
+}

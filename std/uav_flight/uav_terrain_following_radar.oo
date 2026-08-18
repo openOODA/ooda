@@ -1,0 +1,79 @@
+// # UAV Terrain Following Radar & Altitude Hold Controller
+//
+// Logline: Lookahead slope feedforward plus AGL error feedback. Int milli destub.
+//
+// Setup: vz = U * tan(theta) - kp * (h* - h); clamp climb/dive.
+//
+// Beats:
+//   1. Target AGL, min safe, climb/dive limits, kp, lookahead.
+//   2. slope = (h - h_fwd) / d_look.
+//   3. vz_ff = U * slope; vz_fb = -kp * e_h.
+//   4. Warn if current or lookahead AGL below min.
+
+type TerrainFollowingConfig = struct {
+    target_agl_clearance_mm: Int,
+    min_safe_clearance_mm: Int,
+    max_climb_rate_mm_s: Int,
+    max_dive_rate_mm_s: Int,
+    kp_clearance_milli: Int,
+    lookahead_dist_mm: Int
+};
+
+type TerrainSensorInputs = struct {
+    current_agl_mm: Int,
+    forward_lookahead_agl_mm: Int,
+    forward_ground_speed_mm_s: Int
+};
+
+type TerrainFollowingOutput = struct {
+    climb_rate_cmd_mm_s: Int,
+    terrain_slope_mrad: Int,
+    is_terrain_warning: Bool
+};
+
+pub fn terrain_following_config_default() -> TerrainFollowingConfig {
+    return TerrainFollowingConfig {
+        target_agl_clearance_mm: 10000,
+        min_safe_clearance_mm: 3500,
+        max_climb_rate_mm_s: 4000,
+        max_dive_rate_mm_s: 2000,
+        kp_clearance_milli: 800,
+        lookahead_dist_mm: 20000
+    };
+}
+
+pub fn compute_terrain_following(
+    sensors: TerrainSensorInputs,
+    cfg: TerrainFollowingConfig
+) -> TerrainFollowingOutput {
+    let e_clear: Int = cfg.target_agl_clearance_mm - sensors.current_agl_mm;
+    let d_look: Int = if cfg.lookahead_dist_mm < 1 { 1 } else { cfg.lookahead_dist_mm };
+    let ground_rise: Int = sensors.current_agl_mm - sensors.forward_lookahead_agl_mm;
+    let slope_tan_milli: Int = (ground_rise * 1000) / d_look;
+    let z2_term: Int = (28 * slope_tan_milli * slope_tan_milli) / 100000;
+    let atan_den: Int = 1000 + z2_term;
+    let den_use: Int = if atan_den < 1 { 1 } else { atan_den };
+    let slope_angle: Int = (slope_tan_milli * 1000) / den_use;
+    let vz_ff: Int = (sensors.forward_ground_speed_mm_s * slope_tan_milli) / 1000;
+    let vz_fb: Int = 0 - ((cfg.kp_clearance_milli * e_clear) / 1000);
+    let vz_total: Int = vz_ff + vz_fb;
+    let vz_hi: Int = if vz_total > cfg.max_climb_rate_mm_s {
+        cfg.max_climb_rate_mm_s
+    } else {
+        vz_total
+    };
+    let dive_floor: Int = 0 - cfg.max_dive_rate_mm_s;
+    let vz_clamped: Int = if vz_hi < dive_floor {
+        dive_floor
+    } else {
+        vz_hi
+    };
+    let low_now: Bool = sensors.current_agl_mm < cfg.min_safe_clearance_mm;
+    let low_fwd: Bool = sensors.forward_lookahead_agl_mm < cfg.min_safe_clearance_mm;
+    let warning: Bool = if low_now { true } else { low_fwd };
+    return TerrainFollowingOutput {
+        climb_rate_cmd_mm_s: vz_clamped,
+        terrain_slope_mrad: slope_angle,
+        is_terrain_warning: warning
+    };
+}

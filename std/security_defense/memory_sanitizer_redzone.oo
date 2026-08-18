@@ -1,0 +1,108 @@
+// # Memory Sanitizer Redzone & Shadow Byte Allocator
+//
+// Logline: Simulates address sanitizer redzones, poisoned shadow memory tags, and buffer overflow/underflow detection.
+//
+// Setup: Standalone byte-level shadow tagging and memory safety verification module.
+//
+// Beats:
+//   1. Define ShadowMemory space, allocation blocks, and redzone tag constants.
+//   2. Allocate buffers bracketed by poisoned leading and trailing redzone margins.
+//   3. Validate pointer memory accesses against shadow state and detect invalid reads/writes.
+
+pub type MemoryBlock = struct {
+    address: Int,
+    payload_size: Int,
+    redzone_size: Int,
+    is_allocated: Bool,
+    is_freed: Bool,
+};
+
+pub type ShadowMemory = struct {
+    base_address: Int,
+    total_size: Int,
+    blocks: List[MemoryBlock],
+    block_count: Int,
+    violations_detected: Int,
+};
+
+pub fn shadow_memory_new(base: Int, size: Int) -> ShadowMemory {
+    let empty_blocks: List[MemoryBlock] = list_new();
+    return ShadowMemory {
+        base_address: base,
+        total_size: size,
+        blocks: empty_blocks,
+        block_count: 0,
+        violations_detected: 0,
+    };
+}
+
+pub fn shadow_memory_alloc(
+    shadow: &mut ShadowMemory,
+    addr: Int,
+    payload_sz: Int,
+    rz_sz: Int
+) -> Bool {
+    let total_block_sz: Int = payload_sz + (rz_sz * 2);
+    if addr < (shadow).base_address || (addr + total_block_sz) > ((shadow).base_address + (shadow).total_size) {
+        return false;
+    }
+    let block = MemoryBlock {
+        address: addr,
+        payload_size: payload_sz,
+        redzone_size: rz_sz,
+        is_allocated: true,
+        is_freed: false,
+    };
+    (shadow).blocks = list_push((shadow).blocks, block);
+    (shadow).block_count = (shadow).block_count + 1;
+    return true;
+}
+
+pub fn shadow_memory_free(shadow: &mut ShadowMemory, payload_addr: Int) -> Bool {
+    let count: Int = (shadow).block_count;
+    let mut i: Int = 0;
+    while i < count {
+        let mut b: MemoryBlock = list_get((shadow).blocks, i);
+        let actual_payload_addr: Int = b.address + b.redzone_size;
+        if actual_payload_addr == payload_addr {
+            if b.is_freed {
+                (shadow).violations_detected = (shadow).violations_detected + 1;
+                return false; // Double-free violation
+            }
+            b.is_freed = true;
+            b.is_allocated = false;
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn shadow_memory_check_access(
+    shadow: &mut ShadowMemory,
+    target_addr: Int,
+    access_size: Int
+) -> Bool {
+    let count: Int = (shadow).block_count;
+    let mut i: Int = 0;
+    while i < count {
+        let b: MemoryBlock = list_get((shadow).blocks, i);
+        let block_start: Int = b.address;
+        let block_end: Int = b.address + b.payload_size + (b.redzone_size * 2);
+        if target_addr >= block_start && target_addr < block_end {
+            if b.is_freed {
+                (shadow).violations_detected = (shadow).violations_detected + 1;
+                return false; // Use-after-free
+            }
+            let valid_start: Int = b.address + b.redzone_size;
+            let valid_end: Int = valid_start + b.payload_size;
+            if target_addr < valid_start || (target_addr + access_size) > valid_end {
+                (shadow).violations_detected = (shadow).violations_detected + 1;
+                return false; // Redzone buffer overflow or underflow
+            }
+            return true; // Valid access
+        }
+        i = i + 1;
+    }
+    return false; // Unmapped access
+}

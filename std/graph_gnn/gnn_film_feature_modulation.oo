@@ -1,0 +1,114 @@
+// # GNN-FiLM Feature-wise Linear Modulation
+//
+// Logline: Applies affine feature-wise linear modulation (scaling gamma and bias beta) to relational graph message passing.
+//
+// Setup: Expressive conditional GNN layer where target node representations dynamically modulate incoming neighbor messages.
+//
+// Beats:
+//   1. Predict relational affine modulation parameters gamma_{r, ij} and beta_{r, ij} per interaction.
+//   2. Modulate linear neighbor projections via element-wise scaling and translation: gamma \odot (W h_j) + beta.
+//   3. Aggregate modulated messages across relations with LeakyReLU activations.
+
+pub type FilmConfig = struct {
+    in_features: Int,
+    out_features: Int,
+    num_relations: Int,
+};
+
+pub type FilmLayer = struct {
+    config: FilmConfig,
+    w_relation: List[Float], // num_relations * (in_features * out_features)
+    gamma_weight: List[Float],// num_relations * (in_features * out_features)
+    beta_weight: List[Float], // num_relations * (in_features * out_features)
+};
+
+pub fn film_config_new(in_f: Int, out_f: Int, num_rel: Int) -> FilmConfig {
+    return FilmConfig {
+        in_features: in_f,
+        out_features: out_f,
+        num_relations: num_rel,
+    };
+}
+
+pub fn film_layer_init(config: FilmConfig, seed: Int) -> FilmLayer {
+    let in_f: Int = (config).in_features;
+    let out_f: Int = (config).out_features;
+    let num_rel: Int = (config).num_relations;
+    let mut state: Int = seed;
+
+    let total: Int = num_rel * in_f * out_f;
+    let scale: Float = sqrt(2.0 / ((in_f + out_f) as Float));
+
+    let mut w_mat: List[Float] = list_new();
+    let mut g_mat: List[Float] = list_new();
+    let mut b_mat: List[Float] = list_new();
+
+    let mut i: Int = 0;
+    while i < total {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        w_mat = list_push(w_mat, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale);
+
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        g_mat = list_push(g_mat, ((((state % 2000) as Float) / 1000.0) - 1.0) * 0.1);
+
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        b_mat = list_push(b_mat, ((((state % 2000) as Float) / 1000.0) - 1.0) * 0.1);
+        i = i + 1;
+    }
+
+    return FilmLayer {
+        config: config,
+        w_relation: w_mat,
+        gamma_weight: g_mat,
+        beta_weight: b_mat,
+    };
+}
+
+pub fn film_modulate_message(
+    layer: &FilmLayer,
+    relation: Int,
+    h_src: List[Float],
+    src_off: Int,
+    h_dst: List[Float],
+    dst_off: Int
+) -> List[Float] {
+    let cfg: FilmConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let out_f: Int = (cfg).out_features;
+    let rel_off: Int = relation * in_f * out_f;
+
+    let mut modulated: List[Float] = list_new();
+    let mut o: Int = 0;
+    while o < out_f {
+        // Base linear message from src: W_r * h_src
+        let mut msg_base: Float = 0.0;
+        // Gamma scaling predicted from dst: gamma_r * h_dst
+        let mut gamma_val: Float = 1.0;
+        // Beta translation predicted from dst: beta_r * h_dst
+        let mut beta_val: Float = 0.0;
+
+        let mut c: Int = 0;
+        while c < in_f {
+            let x_s: Float = list_get(h_src, src_off + c);
+            let x_d: Float = list_get(h_dst, dst_off + c);
+
+            let w: Float = list_get((*layer).w_relation, rel_off + (c * out_f) + o);
+            let gw: Float = list_get((*layer).gamma_weight, rel_off + (c * out_f) + o);
+            let bw: Float = list_get((*layer).beta_weight, rel_off + (c * out_f) + o);
+
+            msg_base = msg_base + (x_s * w);
+            gamma_val = gamma_val + (x_d * gw);
+            beta_val = beta_val + (x_d * bw);
+            c = c + 1;
+        }
+
+        let mod_result: Float = (gamma_val * msg_base) + beta_val;
+        let act: Float = if mod_result > 0.0 { mod_result } else { 0.01 * mod_result }; // LeakyReLU
+        modulated = list_push(modulated, act);
+        o = o + 1;
+    }
+    return modulated;
+}

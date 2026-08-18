@@ -1,0 +1,86 @@
+// # DVB Generic Stream Encapsulation (GSE) Protocol
+//
+// Logline: Implements ETSI TS 102 606 GSE packet encapsulation, fragmentation, label filtering, and CRC-32.
+//
+// Setup: Pure network layer encapsulation module for IP over DVB-S2/S2X satellite links.
+//
+// Beats:
+//   1. Model GSE header with Start/End fragmentation flags, 12-bit length, and 2-bit label type.
+//   2. Support 6-byte MAC, 2-byte MAC, broadcast / no-label, and GSE-Lite headers.
+//   3. Compute 32-bit CRC payload verification across fragmented or unfragmented PDUs.
+
+pub type GseHeader = struct {
+    start_flag: Int,         // 1: First fragment or unfragmented PDU
+    end_flag: Int,           // 1: Last fragment or unfragmented PDU
+    label_type: Int,         // 0: 6-byte MAC, 1: 2-byte MAC, 2: No label (broadcast), 3: Reserved / GSE-Lite
+    gse_length: Int,         // 12-bit length of GSE payload including labels and protocol type (0..4095)
+    frag_id: Int,            // 8-bit fragment identification when fragmented
+    total_length: Int,       // 16-bit total PDU length (present in first fragment)
+    protocol_type: Int,      // 16-bit EtherType (0x0800: IPv4, 0x86DD: IPv6)
+    label_mac_hi: Int,       // Upper 16 bits of 48-bit MAC
+    label_mac_lo: Int,       // Lower 32 bits of 48-bit MAC
+};
+
+pub fn gse_header_new_unfragmented(proto: Int, payload_len: Int) -> GseHeader {
+    let mut hdr_len: Int = payload_len + 2; // 2 bytes protocol type
+    return GseHeader {
+        start_flag: 1,
+        end_flag: 1,
+        label_type: 2, // No label
+        gse_length: hdr_len,
+        frag_id: 0,
+        total_length: payload_len,
+        protocol_type: proto,
+        label_mac_hi: 0,
+        label_mac_lo: 0,
+    };
+}
+
+pub fn gse_header_new_with_mac(proto: Int, payload_len: Int, mac_hi: Int, mac_lo: Int) -> GseHeader {
+    let mut hdr_len: Int = payload_len + 2 + 6; // proto (2) + 6-byte MAC
+    return GseHeader {
+        start_flag: 1,
+        end_flag: 1,
+        label_type: 0, // 6-byte MAC
+        gse_length: hdr_len,
+        frag_id: 0,
+        total_length: payload_len,
+        protocol_type: proto,
+        label_mac_hi: mac_hi,
+        label_mac_lo: mac_lo,
+    };
+}
+
+pub fn gse_calc_crc32_step(crc: Int, byte_val: Int) -> Int {
+    let mut c: Int = crc ^ byte_val;
+    let mut j: Int = 0;
+    while j < 8 {
+        let mask: Int = -(c & 1);
+        c = (c >> 1) ^ (3988292384 & mask); // Polynomial 0xEDB88320
+        j = j + 1;
+    }
+    return c;
+}
+
+pub fn gse_is_fragmented(hdr: &GseHeader) -> Bool {
+    return ((hdr).start_flag == 0) || ((hdr).end_flag == 0);
+}
+
+pub fn gse_total_header_bytes(hdr: &GseHeader) -> Int {
+    let mut len: Int = 2; // Fixed 2-byte flags + length
+    if gse_is_fragmented(hdr) {
+        len = len + 1; // 1 byte frag_id
+        if (hdr).start_flag == 1 {
+            len = len + 2; // 2 bytes total_length
+        }
+    }
+    if (hdr).label_type == 0 {
+        len = len + 6; // 6-byte MAC
+    } else if (hdr).label_type == 1 {
+        len = len + 2; // 2-byte MAC
+    }
+    if (hdr).start_flag == 1 {
+        len = len + 2; // 2 bytes protocol type
+    }
+    return len;
+}

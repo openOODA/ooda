@@ -1,0 +1,163 @@
+// # Fixed Income Bond Analytics & Sensitivity Engine
+//
+// Logline: Prices fixed-rate coupon bonds, solves YTM, and calculates Macaulay duration, DV01, and convexity.
+//
+// Setup: Imports yield_curve.oo for discount factor integration.
+//
+// Beats:
+//   1. Model bond terms including notional, coupon rate, payment frequency, and settlement dates.
+//   2. Compute dirty price, clean price, accrued interest, and present value of cash flows.
+//   3. Calculate Yield-to-Maturity (YTM), Macaulay/modified duration, DV01, and convexity.
+
+import "./yield_curve.oo";
+
+pub type BondInstrument = struct {
+    cusip: String,
+    notional: Float,
+    annual_coupon_rate: Float,
+    frequency: Int,
+    maturity_years: Float,
+    settlement_fraction: Float, // Fraction of coupon period elapsed
+};
+
+pub type BondPriceResult = struct {
+    dirty_price: Float,
+    clean_price: Float,
+    accrued_interest: Float,
+    ytm: Float,
+    mac_duration: Float,
+    mod_duration: Float,
+    dv01: Float,
+    convexity: Float,
+};
+
+pub fn bond_instrument_new(
+    cusip: String,
+    notional: Float,
+    coupon: Float,
+    freq: Int,
+    mat_years: Float
+) -> BondInstrument {
+    return BondInstrument {
+        cusip: cusip,
+        notional: notional,
+        annual_coupon_rate: coupon,
+        frequency: freq,
+        maturity_years: mat_years,
+        settlement_fraction: 0.0,
+    };
+}
+
+pub fn bond_accrued_interest(bond: &BondInstrument) -> Float {
+    let freq_f: Float = int_to_float((bond).frequency);
+    if freq_f <= 0.0 { return 0.0; }
+    let coupon_pmt: Float = ((bond).notional * (bond).annual_coupon_rate) / freq_f;
+    return coupon_pmt * (bond).settlement_fraction;
+}
+
+pub fn bond_price_from_ytm(bond: &BondInstrument, ytm: Float) -> Float {
+    let freq_f: Float = int_to_float((bond).frequency);
+    if freq_f <= 0.0 { return (bond).notional; }
+    
+    let periods_total_f: Float = (bond).maturity_years * freq_f;
+    let coupon_pmt: Float = ((bond).notional * (bond).annual_coupon_rate) / freq_f;
+    let period_yield: Float = ytm / freq_f;
+    let discount_base: Float = 1.0 + period_yield;
+    
+    let mut pv: Float = 0.0;
+    let mut t: Float = 1.0;
+    let mut discount_factor: Float = 1.0 / discount_base;
+    
+    while t <= periods_total_f {
+        pv = pv + (coupon_pmt * discount_factor);
+        discount_factor = discount_factor / discount_base;
+        t = t + 1.0;
+    }
+    
+    // Principal redemption at maturity
+    let final_df: Float = exp(0.0 - (ytm * (bond).maturity_years));
+    pv = pv + ((bond).notional * final_df);
+    
+    return pv;
+}
+
+pub fn bond_calculate_analytics(bond: &BondInstrument, ytm: Float) -> BondPriceResult {
+    let dirty_px: Float = bond_price_from_ytm(bond, ytm);
+    let accrued: Float = bond_accrued_interest(bond);
+    let clean_px: Float = dirty_px - accrued;
+    
+    let freq_f: Float = int_to_float((bond).frequency);
+    let periods_total_f: Float = (bond).maturity_years * freq_f;
+    let coupon_pmt: Float = ((bond).notional * (bond).annual_coupon_rate) / freq_f;
+    let period_yield: Float = ytm / freq_f;
+    let discount_base: Float = 1.0 + period_yield;
+    
+    let mut weighted_time_sum: Float = 0.0;
+    let mut convexity_sum: Float = 0.0;
+    let mut t: Float = 1.0;
+    let mut discount_factor: Float = 1.0 / discount_base;
+    
+    while t <= periods_total_f {
+        let pv_cf: Float = coupon_pmt * discount_factor;
+        let time_years: Float = t / freq_f;
+        weighted_time_sum = weighted_time_sum + (time_years * pv_cf);
+        convexity_sum = convexity_sum + (time_years * (time_years + (1.0 / freq_f)) * pv_cf);
+        
+        discount_factor = discount_factor / discount_base;
+        t = t + 1.0;
+    }
+    
+    // Add principal cashflow to duration and convexity
+    let final_df: Float = exp(0.0 - (ytm * (bond).maturity_years));
+    let pv_principal: Float = (bond).notional * final_df;
+    weighted_time_sum = weighted_time_sum + ((bond).maturity_years * pv_principal);
+    convexity_sum = convexity_sum + ((bond).maturity_years * ((bond).maturity_years + (1.0 / freq_f)) * pv_principal);
+    
+    let mut mac_dur: Float = 0.0;
+    if dirty_px > 0.0 {
+        mac_dur = weighted_time_sum / dirty_px;
+    }
+    
+    let mod_dur: Float = mac_dur / (1.0 + (ytm / freq_f));
+    let dv01: Float = (mod_dur * dirty_px) * 0.0001; // Dollar value of 1 basis point
+    
+    let mut conv: Float = 0.0;
+    if dirty_px > 0.0 {
+        conv = convexity_sum / (dirty_px * discount_base * discount_base);
+    }
+    
+    return BondPriceResult {
+        dirty_price: dirty_px,
+        clean_price: clean_px,
+        accrued_interest: accrued,
+        ytm: ytm,
+        mac_duration: mac_dur,
+        mod_duration: mod_dur,
+        dv01: dv01,
+        convexity: conv,
+    };
+}
+
+pub fn bond_price_from_curve(bond: &BondInstrument, curve: &ZeroCurve) -> Float {
+    let freq_f: Float = int_to_float((bond).frequency);
+    if freq_f <= 0.0 { return (bond).notional; }
+    
+    let months_per_period: Int = 12 / (bond).frequency;
+    let total_periods: Int = 10; // default valuation horizon steps
+    let coupon_pmt: Float = ((bond).notional * (bond).annual_coupon_rate) / freq_f;
+    
+    let mut pv: Float = 0.0;
+    let mut p: Int = 1;
+    while p <= total_periods {
+        let tenor_m: Int = p * months_per_period;
+        let df: Float = zero_curve_discount_factor(curve, tenor_m);
+        pv = pv + (coupon_pmt * df);
+        p = p + 1;
+    }
+    
+    let final_tenor: Int = 120; // 10 years
+    let principal_df: Float = zero_curve_discount_factor(curve, final_tenor);
+    pv = pv + ((bond).notional * principal_df);
+    
+    return pv;
+}

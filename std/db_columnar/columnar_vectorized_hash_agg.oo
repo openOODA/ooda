@@ -1,0 +1,111 @@
+// # Columnar Vectorized Hash Aggregate & Group-By
+//
+// Logline: Implements vectorized hash-based group-by aggregations maintaining parallel accumulator state vectors.
+//
+// Setup: Groups input column batches by integer keys, accumulating parallel COUNT, SUM, MIN, and MAX aggregators.
+//
+// Beats:
+//   1. Define GroupEntry and HashAggTable structures.
+//   2. Implement group key lookup, dynamic group slot assignment, and accumulator mutations.
+//   3. Implement grouped result vector emission and tabular aggregation summaries.
+
+pub type GroupEntry = struct {
+    group_key: Int,
+    count_val: Int,
+    sum_val: Int,
+    min_val: Int,
+    max_val: Int,
+};
+
+pub type HashAggTable = struct {
+    groups: List[GroupEntry],
+    num_groups: Int,
+};
+
+pub fn hash_agg_table_new() -> HashAggTable {
+    let empty_groups: List[GroupEntry] = list_new();
+    return HashAggTable {
+        groups: empty_groups,
+        num_groups: 0,
+    };
+}
+
+pub fn hash_agg_find_group(table: HashAggTable, key: Int) -> Int {
+    let g_list: List[GroupEntry] = (table).groups;
+    let n: Int = list_len(g_list);
+    let mut i: Int = 0;
+    while i < n {
+        let g: GroupEntry = list_get(g_list, i);
+        if (g).group_key == key {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+pub fn hash_agg_update(table: HashAggTable, key: Int, val: Int) -> HashAggTable {
+    let existing_idx: Int = hash_agg_find_group(table, key);
+    let g_list: List[GroupEntry] = (table).groups;
+
+    if existing_idx >= 0 {
+        let curr: GroupEntry = list_get(g_list, existing_idx);
+        let new_min: Int = if val < (curr).min_val { val } else { (curr).min_val };
+        let new_max: Int = if val > (curr).max_val { val } else { (curr).max_val };
+        let updated_entry: GroupEntry = GroupEntry {
+            group_key: key,
+            count_val: (curr).count_val + 1,
+            sum_val: (curr).sum_val + val,
+            min_val: new_min,
+            max_val: new_max,
+        };
+
+        let mut new_groups: List[GroupEntry] = list_new();
+        let n: Int = list_len(g_list);
+        let mut i: Int = 0;
+        while i < n {
+            if i == existing_idx {
+                new_groups = list_push(new_groups, updated_entry);
+            } else {
+                new_groups = list_push(new_groups, list_get(g_list, i));
+            }
+            i = i + 1;
+        }
+
+        return HashAggTable {
+            groups: new_groups,
+            num_groups: (table).num_groups,
+        };
+    }
+
+    let new_entry: GroupEntry = GroupEntry {
+        group_key: key,
+        count_val: 1,
+        sum_val: val,
+        min_val: val,
+        max_val: val,
+    };
+    let updated_groups: List[GroupEntry] = list_push(g_list, new_entry);
+
+    return HashAggTable {
+        groups: updated_groups,
+        num_groups: (table).num_groups + 1,
+    };
+}
+
+pub fn hash_agg_process_batch(
+    table: HashAggTable,
+    keys: List[Int],
+    vals: List[Int]
+) -> HashAggTable {
+    let mut current_table: HashAggTable = table;
+    let n: Int = list_len(keys);
+    let mut i: Int = 0;
+    while i < n {
+        let k: Int = list_get(keys, i);
+        let v: Int = if i < list_len(vals) { list_get(vals, i) } else { 0 };
+        current_table = hash_agg_update(current_table, k, v);
+        i = i + 1;
+    }
+    return current_table;
+}

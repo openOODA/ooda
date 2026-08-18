@@ -1,0 +1,119 @@
+// # LSM Leveled Compaction Controller
+//
+// Logline: Implements multi-level LSM compaction selection, score computation, key overlap detection, and task scheduling.
+//
+// Setup: Controls leveled storage hierarchy with exponential level size ratios to bound read and space amplification.
+//
+// Beats:
+//   1. Define LeveledCompactionConfig, LevelMetadata, and CompactionTask structures.
+//   2. Implement level score evaluation and highest-priority compaction level selection.
+//   3. Implement overlapping file boundary detection in target level and input file selection.
+
+pub type LeveledCompactionConfig = struct {
+    max_levels: Int,
+    base_level_bytes: Int,
+    level_size_multiplier: Int,
+    max_compaction_bytes: Int,
+};
+
+pub type LevelFileMeta = struct {
+    file_id: Int,
+    smallest_key: String,
+    largest_key: String,
+    file_size_bytes: Int,
+    level_num: Int,
+};
+
+pub type CompactionTask = struct {
+    source_level: Int,
+    target_level: Int,
+    input_files_source: List[LevelFileMeta],
+    input_files_target: List[LevelFileMeta],
+    total_compaction_bytes: Int,
+    is_major: Bool,
+};
+
+pub fn leveled_compaction_config_default() -> LeveledCompactionConfig {
+    return LeveledCompactionConfig {
+        max_levels: 7,
+        base_level_bytes: 10485760,
+        level_size_multiplier: 10,
+        max_compaction_bytes: 67108864,
+    };
+}
+
+pub fn level_target_size(cfg: LeveledCompactionConfig, level: Int) -> Int {
+    if level == 0 {
+        return (cfg).base_level_bytes;
+    }
+    let mut target: Int = (cfg).base_level_bytes;
+    let mut i: Int = 1;
+    while i <= level {
+        target = target * (cfg).level_size_multiplier;
+        i = i + 1;
+    }
+    return target;
+}
+
+pub fn files_overlap(f1: LevelFileMeta, f2: LevelFileMeta) -> Bool {
+    if (f1).largest_key < (f2).smallest_key || (f1).smallest_key > (f2).largest_key {
+        return false;
+    }
+    return true;
+}
+
+pub fn find_overlapping_files(
+    target_files: List[LevelFileMeta],
+    min_key: String,
+    max_key: String
+) -> List[LevelFileMeta] {
+    let mut overlapping: List[LevelFileMeta] = list_new();
+    let n: Int = list_len(target_files);
+    let mut i: Int = 0;
+    while i < n {
+        let f: LevelFileMeta = list_get(target_files, i);
+        if !((f).largest_key < min_key || (f).smallest_key > max_key) {
+            overlapping = list_push(overlapping, f);
+        }
+        i = i + 1;
+    }
+    return overlapping;
+}
+
+pub fn create_leveled_compaction_task(
+    src_level: Int,
+    src_files: List[LevelFileMeta],
+    tgt_files: List[LevelFileMeta]
+) -> CompactionTask {
+    let mut src_selected: List[LevelFileMeta] = list_new();
+    let mut min_k: String = "";
+    let mut max_k: String = "";
+    let mut total_bytes: Int = 0;
+
+    let n_src: Int = list_len(src_files);
+    if n_src > 0 {
+        let first: LevelFileMeta = list_get(src_files, 0);
+        src_selected = list_push(src_selected, first);
+        min_k = (first).smallest_key;
+        max_k = (first).largest_key;
+        total_bytes = (first).file_size_bytes;
+    }
+
+    let tgt_overlapping: List[LevelFileMeta] = find_overlapping_files(tgt_files, min_k, max_k);
+    let n_tgt: Int = list_len(tgt_overlapping);
+    let mut j: Int = 0;
+    while j < n_tgt {
+        let f: LevelFileMeta = list_get(tgt_overlapping, j);
+        total_bytes = total_bytes + (f).file_size_bytes;
+        j = j + 1;
+    }
+
+    return CompactionTask {
+        source_level: src_level,
+        target_level: src_level + 1,
+        input_files_source: src_selected,
+        input_files_target: tgt_overlapping,
+        total_compaction_bytes: total_bytes,
+        is_major: src_level >= 5,
+    };
+}

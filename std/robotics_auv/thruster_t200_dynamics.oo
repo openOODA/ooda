@@ -1,0 +1,109 @@
+// # Underwater Brushless Thruster Dynamics
+//
+// Logline: T200 PWM deadband, reverse asymmetry, first-order lag. Int milli destub.
+//
+// Setup: PWM 1100-1900 us to throttle; thrust lag and electrical power.
+//
+// Beats:
+//   1. Forward/reverse max thrust, tau, deadband, rated V, Imax.
+//   2. PWM to throttle: deadband around 1500 us, 400 us span.
+//   3. First-order lag: alpha = dt / (tau + dt).
+//   4. Thrust ~ V^2; power = |T|/Tmax * V * Imax.
+
+type ThrusterParams = struct {
+    max_thrust_forward_mn: Int,
+    max_thrust_reverse_mn: Int,
+    time_constant_ms: Int,
+    pwm_neutral_us: Int,
+    pwm_deadband_us: Int,
+    rated_voltage_mv: Int,
+    max_current_ma: Int
+};
+
+type ThrusterState = struct {
+    current_thrust_mn: Int,
+    motor_rpm: Int,
+    electrical_power_mw: Int
+};
+
+pub fn thruster_params_default_t200() -> ThrusterParams {
+    return ThrusterParams {
+        max_thrust_forward_mn: 51000,
+        max_thrust_reverse_mn: 40000,
+        time_constant_ms: 80,
+        pwm_neutral_us: 1500,
+        pwm_deadband_us: 25,
+        rated_voltage_mv: 16000,
+        max_current_ma: 25000
+    };
+}
+
+pub fn thruster_state_zero() -> ThrusterState {
+    return ThrusterState {
+        current_thrust_mn: 0,
+        motor_rpm: 0,
+        electrical_power_mw: 0
+    };
+}
+
+pub fn t200_clamp_int(v: Int, lo: Int, hi: Int) -> Int {
+    if v < lo {
+        return lo;
+    }
+    if v > hi {
+        return hi;
+    }
+    return v;
+}
+
+pub fn thruster_pwm_to_throttle_milli(params: ThrusterParams, pwm_us: Int) -> Int {
+    let neutral: Int = params.pwm_neutral_us;
+    let deadband: Int = params.pwm_deadband_us;
+    let diff: Int = pwm_us - neutral;
+    let adiff: Int = if diff < 0 { 0 - diff } else { diff };
+    if adiff <= deadband {
+        return 0;
+    }
+    let max_range: Int = 400 - deadband;
+    if max_range <= 0 {
+        return 0;
+    }
+    if diff > 0 {
+        let active: Int = diff - deadband;
+        return t200_clamp_int((active * 1000) / max_range, 0, 1000);
+    }
+    let active: Int = diff + deadband;
+    return t200_clamp_int((active * 1000) / max_range, 0 - 1000, 0);
+}
+
+pub fn thruster_step(
+    params: ThrusterParams,
+    state: ThrusterState,
+    throttle_milli: Int,
+    supply_voltage_mv: Int,
+    dt_ms: Int
+) -> ThrusterState {
+    let cmd: Int = t200_clamp_int(throttle_milli, 0 - 1000, 1000);
+    let target0: Int = if cmd >= 0 {
+        (cmd * params.max_thrust_forward_mn) / 1000
+    } else {
+        (cmd * params.max_thrust_reverse_mn) / 1000
+    };
+    let rated: Int = if params.rated_voltage_mv < 1 { 1 } else { params.rated_voltage_mv };
+    let v2: Int = supply_voltage_mv * supply_voltage_mv;
+    let r2: Int = rated * rated;
+    let target: Int = (target0 * v2) / r2;
+    let tau: Int = if params.time_constant_ms < 1 { 1 } else { params.time_constant_ms };
+    let dt: Int = if dt_ms < 0 { 0 } else { dt_ms };
+    let den: Int = tau + dt;
+    let new_thrust: Int = state.current_thrust_mn + (((target - state.current_thrust_mn) * dt) / den);
+    let fwd: Int = if params.max_thrust_forward_mn < 1 { 1 } else { params.max_thrust_forward_mn };
+    let new_rpm: Int = (new_thrust * 3800) / fwd;
+    let athrust: Int = if new_thrust < 0 { 0 - new_thrust } else { new_thrust };
+    let new_power: Int = (((athrust * supply_voltage_mv) / fwd) * params.max_current_ma) / 1000;
+    return ThrusterState {
+        current_thrust_mn: new_thrust,
+        motor_rpm: new_rpm,
+        electrical_power_mw: new_power
+    };
+}

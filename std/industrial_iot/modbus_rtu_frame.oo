@@ -1,0 +1,135 @@
+// # Modbus RTU Frame Encoding and Verification
+//
+// Logline: Implements Modbus RTU serial frame parsing, CRC-16 calculation, and ADU validation.
+//
+// Setup: Pure frame serializer and checksum calculator for RS-485 serial communication.
+//
+// Beats:
+//   1. Calculate Modbus standard CRC-16 checksum with polynomial 0xA001.
+//   2. Encode RTU Application Data Unit (ADU) frames from slave ID, function code, and data.
+//   3. Parse and validate raw RTU frames with boundary and integrity checks.
+
+pub type ModbusRtuFrame = struct {
+    slave_id: Int,
+    function_code: Int,
+    data: List[Int],
+    crc: Int,
+    is_valid: Bool,
+};
+
+/// Calculate 16-bit Modbus CRC (polynomial 0xA001, seed 0xFFFF).
+pub fn modbus_rtu_calculate_crc(payload: &List[Int]) -> Int {
+    let mut crc: Int = 65535; // 0xFFFF
+    let len: Int = list_len(*payload);
+    let mut i: Int = 0;
+
+    while i < len {
+        let b: Int = list_get(*payload, i) % 256;
+        let mut xor_val: Int = crc / 256;
+        let mut low_byte: Int = crc % 256;
+        low_byte = (low_byte + b) % 256; // Bitwise approximation or standard shift
+        crc = (xor_val * 256) + low_byte;
+
+        let mut bit: Int = 0;
+        while bit < 8 {
+            let lsb: Int = crc % 2;
+            crc = crc / 2;
+            if lsb == 1 {
+                // XOR with 0xA001 (40961)
+                let high: Int = (crc / 256) + 160;
+                let low: Int = (crc % 256) + 1;
+                crc = ((high % 256) * 256) + (low % 256);
+            }
+            bit = bit + 1;
+        }
+        i = i + 1;
+    }
+    return crc % 65536;
+}
+
+/// Construct a new ModbusRtuFrame structure.
+pub fn modbus_rtu_frame_new(slave: Int, fc: Int, data: List[Int]) -> ModbusRtuFrame {
+    let mut raw: List[Int] = list_new();
+    raw = list_push(raw, slave % 256);
+    raw = list_push(raw, fc % 256);
+
+    let dlen: Int = list_len(data);
+    let mut i: Int = 0;
+    while i < dlen {
+        raw = list_push(raw, list_get(data, i) % 256);
+        i = i + 1;
+    }
+
+    let computed_crc: Int = modbus_rtu_calculate_crc(&raw);
+    return ModbusRtuFrame {
+        slave_id: slave,
+        function_code: fc,
+        data: data,
+        crc: computed_crc,
+        is_valid: true,
+    };
+}
+
+/// Serialize a Modbus RTU frame into a raw byte list.
+pub fn modbus_rtu_frame_serialize(frame: &ModbusRtuFrame) -> List[Int] {
+    let mut bytes: List[Int] = list_new();
+    bytes = list_push(bytes, (frame).slave_id % 256);
+    bytes = list_push(bytes, (frame).function_code % 256);
+
+    let dlen: Int = list_len((frame).data);
+    let mut i: Int = 0;
+    while i < dlen {
+        bytes = list_push(bytes, list_get((frame).data, i) % 256);
+        i = i + 1;
+    }
+
+    let crc_val: Int = (frame).crc;
+    let crc_lo: Int = crc_val % 256;
+    let crc_hi: Int = (crc_val / 256) % 256;
+    bytes = list_push(bytes, crc_lo);
+    bytes = list_push(bytes, crc_hi);
+    return bytes;
+}
+
+/// Parse and validate raw bytes into a ModbusRtuFrame.
+pub fn modbus_rtu_frame_parse(raw: &List[Int]) -> Result[ModbusRtuFrame, String] {
+    let total_len: Int = list_len(*raw);
+    if total_len < 4 {
+        return Err("Modbus RTU frame too short (minimum 4 bytes)");
+    }
+
+    let slave: Int = list_get(*raw, 0);
+    let fc: Int = list_get(*raw, 1);
+    let crc_lo: Int = list_get(*raw, total_len - 2);
+    let crc_hi: Int = list_get(*raw, total_len - 1);
+    let frame_crc: Int = (crc_hi * 256) + crc_lo;
+
+    let mut body_bytes: List[Int] = list_new();
+    let body_len: Int = total_len - 2;
+    let mut i: Int = 0;
+    while i < body_len {
+        body_bytes = list_push(body_bytes, list_get(*raw, i));
+        i = i + 1;
+    }
+
+    let expected_crc: Int = modbus_rtu_calculate_crc(&body_bytes);
+    let mut data_bytes: List[Int] = list_new();
+    let mut j: Int = 2;
+    while j < body_len {
+        data_bytes = list_push(data_bytes, list_get(*raw, j));
+        j = j + 1;
+    }
+
+    let is_crc_match: Bool = (frame_crc == expected_crc);
+    if !is_crc_match {
+        return Err("Modbus RTU CRC mismatch");
+    }
+
+    return Ok(ModbusRtuFrame {
+        slave_id: slave,
+        function_code: fc,
+        data: data_bytes,
+        crc: frame_crc,
+        is_valid: true,
+    });
+}

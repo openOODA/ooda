@@ -1,0 +1,93 @@
+// # Envoy xDS Dynamic Discovery Service Client
+//
+// Logline: Implements Envoy xDS v3 discovery state manager for LDS, RDS, CDS, and EDS protocol streams.
+//
+// Setup: Control plane synchronization client receiving declarative configuration updates from mesh controllers.
+//
+// Beats:
+//   1. Track resource version info, nonces, and subscription resource names for xDS APIs.
+//   2. Process Cluster Discovery Service (CDS) and Endpoint Discovery Service (EDS) updates.
+//   3. Generate ACK and NACK state transitions to prevent cluster configuration drift.
+
+pub type XdsResource = struct {
+    type_url: String, // lds, rds, cds, eds
+    resource_name: String,
+    version: String,
+    is_active: Bool,
+};
+
+pub type XdsClientState = struct {
+    node_id: String,
+    cluster_id: String,
+    resources: List[XdsResource],
+    last_nonce: String,
+    ack_count: Int,
+    nack_count: Int,
+};
+
+pub fn xds_client_new(node: String, cluster: String) -> XdsClientState {
+    let empty_res: List[XdsResource] = list_new();
+    return XdsClientState {
+        node_id: node,
+        cluster_id: cluster,
+        resources: empty_res,
+        last_nonce: "0",
+        ack_count: 0,
+        nack_count: 0,
+    };
+}
+
+pub fn xds_subscribe_resource(
+    state: &mut XdsClientState,
+    type_url: String,
+    name: String,
+    initial_version: String
+) {
+    let r = XdsResource {
+        type_url: type_url,
+        resource_name: name,
+        version: initial_version,
+        is_active: true,
+    };
+    (state).resources = list_push((state).resources, r);
+}
+
+pub fn xds_handle_update(
+    state: &mut XdsClientState,
+    type_url: String,
+    name: String,
+    new_version: String,
+    nonce: String,
+    is_valid: Bool
+) -> String {
+    (state).last_nonce = nonce;
+
+    if !is_valid {
+        (state).nack_count = (state).nack_count + 1;
+        return "NACK";
+    }
+
+    let n: Int = list_len((state).resources);
+    let mut updated: List[XdsResource] = list_new();
+    let mut i: Int = 0;
+
+    while i < n {
+        let r: XdsResource = list_get((state).resources, i);
+        if (r).type_url == type_url && (r).resource_name == name {
+            let mod_r = XdsResource {
+                type_url: (r).type_url,
+                resource_name: (r).resource_name,
+                version: new_version,
+                is_active: true,
+            };
+            updated = list_push(updated, mod_r);
+        } else {
+            updated = list_push(updated, r);
+        }
+        i = i + 1;
+    }
+
+    (state).resources = updated;
+    (state).ack_count = (state).ack_count + 1;
+    return "ACK";
+}

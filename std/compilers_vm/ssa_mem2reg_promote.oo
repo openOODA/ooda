@@ -1,0 +1,163 @@
+// # SSA Mem2Reg Promotion Engine
+//
+// Logline: Promotes stack memory allocations (alloca) to SSA registers using variable renaming stacks and version counters.
+//
+// Setup: Tracks variable definitions, stores, loads, and maintains per-variable version stacks.
+//
+// Beats:
+//   1. Define AllocaInfo, VarRenameStack, and Mem2RegContext structures.
+//   2. Push and pop SSA versions during dominator tree preorder traversal.
+//   3. Rewrite load/store instructions to direct SSA value bindings.
+
+import "./ssa_dominator_tree.oo";
+import "./ssa_phi_placement.oo";
+
+pub type AllocaInfo = struct {
+    var_name: String,
+    alloca_id: Int,
+    def_blocks: List[Int],
+    def_count: Int,
+    use_blocks: List[Int],
+    use_count: Int,
+    is_promotable: Int,
+};
+
+pub type VarRenameStack = struct {
+    var_name: String,
+    versions: List[Int],
+    stack_depth: Int,
+    current_counter: Int,
+};
+
+pub type Mem2RegContext = struct {
+    allocas: List[AllocaInfo],
+    alloca_count: Int,
+    stacks: List[VarRenameStack],
+    stack_count: Int,
+    total_promoted: Int,
+};
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn alloca_info_new(var_name: String, alloca_id: Int) -> AllocaInfo {
+    let defs: List[Int] = list_new();
+    let uses: List[Int] = list_new();
+    return AllocaInfo {
+        var_name: var_name,
+        alloca_id: alloca_id,
+        def_blocks: defs,
+        def_count: 0,
+        use_blocks: uses,
+        use_count: 0,
+        is_promotable: 1,
+    };
+}
+
+pub fn alloca_info_add_def(mut info: AllocaInfo, block_id: Int) -> AllocaInfo {
+    let mut d: List[Int] = (info).def_blocks;
+    d = list_push(d, block_id);
+    info.def_blocks = d;
+    info.def_count = (info).def_count + 1;
+    return info;
+}
+
+pub fn alloca_info_add_use(mut info: AllocaInfo, block_id: Int) -> AllocaInfo {
+    let mut u: List[Int] = (info).use_blocks;
+    u = list_push(u, block_id);
+    info.use_blocks = u;
+    info.use_count = (info).use_count + 1;
+    return info;
+}
+
+pub fn var_rename_stack_new(var_name: String) -> VarRenameStack {
+    let vers: List[Int] = list_new();
+    return VarRenameStack {
+        var_name: var_name,
+        versions: vers,
+        stack_depth: 0,
+        current_counter: 0,
+    };
+}
+
+pub fn var_rename_stack_push(mut st: VarRenameStack) -> VarRenameStack {
+    let next_ver: Int = (st).current_counter + 1;
+    let mut v: List[Int] = (st).versions;
+    v = list_push(v, next_ver);
+    st.versions = v;
+    st.stack_depth = (st).stack_depth + 1;
+    st.current_counter = next_ver;
+    return st;
+}
+
+pub fn var_rename_stack_top(st: VarRenameStack) -> Int {
+    let depth: Int = (st).stack_depth;
+    if depth <= 0 {
+        return 0;
+    }
+    return list_get((st).versions, depth - 1);
+}
+
+pub fn mem2reg_context_new() -> Mem2RegContext {
+    let empty_allocas: List[AllocaInfo] = list_new();
+    let empty_stacks: List[VarRenameStack] = list_new();
+    return Mem2RegContext {
+        allocas: empty_allocas,
+        alloca_count: 0,
+        stacks: empty_stacks,
+        stack_count: 0,
+        total_promoted: 0,
+    };
+}
+
+pub fn mem2reg_add_alloca(mut ctx: Mem2RegContext, info: AllocaInfo) -> Mem2RegContext {
+    let mut a: List[AllocaInfo] = (ctx).allocas;
+    a = list_push(a, info);
+    ctx.allocas = a;
+    ctx.alloca_count = (ctx).alloca_count + 1;
+    
+    let st: VarRenameStack = var_rename_stack_new((info).var_name);
+    let mut s: List[VarRenameStack] = (ctx).stacks;
+    s = list_push(s, st);
+    ctx.stacks = s;
+    ctx.stack_count = (ctx).stack_count + 1;
+    return ctx;
+}
+
+// -------------------------------------------------------------------
+// Renaming and Promotion Pass
+// -------------------------------------------------------------------
+
+pub fn mem2reg_promote_variable(mut ctx: Mem2RegContext, alloca_idx: Int) -> Mem2RegContext {
+    if alloca_idx >= 0 && alloca_idx < (ctx).alloca_count {
+        let mut st: VarRenameStack = list_get((ctx).stacks, alloca_idx);
+        st = var_rename_stack_push(st);
+        
+        let mut new_stacks: List[VarRenameStack] = list_new();
+        let mut i: Int = 0;
+        while i < (ctx).stack_count {
+            if i == alloca_idx {
+                new_stacks = list_push(new_stacks, st);
+            } else {
+                new_stacks = list_push(new_stacks, list_get((ctx).stacks, i));
+            }
+            i = i + 1;
+        }
+        ctx.stacks = new_stacks;
+        ctx.total_promoted = (ctx).total_promoted + 1;
+    }
+    return ctx;
+}
+
+pub fn mem2reg_get_current_version(ctx: Mem2RegContext, var_name: String) -> Int {
+    let mut i: Int = 0;
+    while i < (ctx).stack_count {
+        let st: VarRenameStack = list_get((ctx).stacks, i);
+        if (st).var_name == var_name {
+            return var_rename_stack_top(st);
+        }
+        i = i + 1;
+    }
+    return 0;
+}

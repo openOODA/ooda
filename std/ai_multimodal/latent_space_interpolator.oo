@@ -1,0 +1,154 @@
+// # Latent Space Spherical & Geodesic Interpolator
+//
+// Logline: Generates smooth trajectories across high-dimensional Gaussian prior distributions via Spherical Linear Interpolation (SLERP).
+//
+// Setup: Avoids density drops in high-dimensional spheres by interpolating along the hyperspherical great circle arc.
+//
+// Beats:
+//   1. Define LatentInterpolationConfig and InterpolatedTrajectory structs.
+//   2. Compute unit vector normalization and angular separation theta = arccos(p_0 . p_1).
+//   3. Interpolate trajectory: slerp(p_0, p_1, t) = (sin((1 - t)*theta)/sin(theta))*p_0 + (sin(t*theta)/sin(theta))*p_1.
+
+pub type LatentInterpolationConfig = struct {
+    num_interpolation_steps: Int,
+    dimension: Int,
+    use_slerp: Bool,
+};
+
+pub type InterpolatedTrajectory = struct {
+    trajectory_points: List[Float],
+    num_steps: Int,
+    dimension: Int,
+};
+
+pub fn latent_interp_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn latent_interpolation_config_new(
+    steps: Int,
+    dim: Int,
+    slerp_mode: Bool
+) -> LatentInterpolationConfig {
+    return LatentInterpolationConfig {
+        num_interpolation_steps: steps,
+        dimension: dim,
+        use_slerp: slerp_mode,
+    };
+}
+
+pub fn latent_slerp_pair(
+    p0: List[Float],
+    p1: List[Float],
+    t: Float,
+    dim: Int
+) -> List[Float] {
+    // 1. Dot product between p0 and p1
+    let mut dot: Float = 0.0;
+    let mut norm0_sq: Float = 0.0;
+    let mut norm1_sq: Float = 0.0;
+
+    let mut d: Int = 0;
+    while d < dim {
+        let v0: Float = list_get(p0, d);
+        let v1: Float = list_get(p1, d);
+        dot = dot + (v0 * v1);
+        norm0_sq = norm0_sq + (v0 * v0);
+        norm1_sq = norm1_sq + (v1 * v1);
+        d = d + 1;
+    }
+
+    let norm0: Float = sqrt(if norm0_sq > 0.000001 { norm0_sq } else { 1.0 });
+    let norm1: Float = sqrt(if norm1_sq > 0.000001 { norm1_sq } else { 1.0 });
+    let cos_theta: Float = dot / (norm0 * norm1);
+    let cos_clamped: Float = if cos_theta > 0.9999 { 0.9999 } else { if cos_theta < (0.0 - 0.9999) { 0.0 - 0.9999 } else { cos_theta } };
+
+    // Linear interpolation fallback if vectors are collinear
+    if cos_clamped > 0.999 {
+        let mut l_out: List[Float] = list_new();
+        d = 0;
+        while d < dim {
+            let v0: Float = list_get(p0, d);
+            let v1: Float = list_get(p1, d);
+            l_out = list_push(l_out, ((1.0 - t) * v0) + (t * v1));
+            d = d + 1;
+        }
+        return l_out;
+    }
+
+    // Taylor approximation of theta = acos(cos_clamped)
+    let sin_theta: Float = sqrt(1.0 - (cos_clamped * cos_clamped));
+    let theta: Float = 3.14159265 * 0.5 - cos_clamped; // 1st order approx
+
+    let coef0: Float = sin((1.0 - t) * theta) / sin_theta;
+    let coef1: Float = sin(t * theta) / sin_theta;
+
+    let mut s_out: List[Float] = list_new();
+    d = 0;
+    while d < dim {
+        let v0: Float = list_get(p0, d);
+        let v1: Float = list_get(p1, d);
+        s_out = list_push(s_out, (coef0 * v0) + (coef1 * v1));
+        d = d + 1;
+    }
+    return s_out;
+}
+
+pub fn latent_generate_trajectory(
+    cfg: &LatentInterpolationConfig,
+    p_start: List[Float],
+    p_end: List[Float]
+) -> InterpolatedTrajectory {
+    let steps: Int = (cfg).num_interpolation_steps;
+    let dim: Int = (cfg).dimension;
+
+    let mut traj: List[Float] = list_new();
+    let steps_f: Float = latent_interp_int_to_float(steps);
+
+    let mut s: Int = 0;
+    while s < steps {
+        let s_f: Float = latent_interp_int_to_float(s);
+        let t: Float = if steps > 1 { s_f / (steps_f - 1.0) } else { 0.0 };
+
+        let pt: List[Float] = if (cfg).use_slerp {
+            latent_slerp_pair(p_start, p_end, t, dim)
+        } else {
+            let mut l_pt: List[Float] = list_new();
+            let mut d: Int = 0;
+            while d < dim {
+                let v0: Float = list_get(p_start, d);
+                let v1: Float = list_get(p_end, d);
+                l_pt = list_push(l_pt, ((1.0 - t) * v0) + (t * v1));
+                d = d + 1;
+            }
+            l_pt
+        };
+
+        let mut d_idx: Int = 0;
+        while d_idx < dim {
+            traj = list_push(traj, list_get(pt, d_idx));
+            d_idx = d_idx + 1;
+        }
+
+        s = s + 1;
+    }
+
+    return InterpolatedTrajectory {
+        trajectory_points: traj,
+        num_steps: steps,
+        dimension: dim,
+    };
+}
+
+pub fn latent_space_interpolator_marker() -> Int {
+    return 1;
+}

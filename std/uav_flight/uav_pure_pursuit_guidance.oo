@@ -1,0 +1,96 @@
+// # UAV 3D Pure Pursuit & Line-Of-Sight (LOS) Guidance
+//
+// Logline: Computes 3D lookahead pursuit targets, cross-track error vectors, and coordinated turning heading commands.
+//
+// Setup: Geometric guidance law steering UAVs onto spatial path segments with adaptive lookahead distance.
+//
+// Beats:
+//   1. Define Path Segment from Waypoint A to Waypoint B.
+//   2. Project UAV position onto path segment to determine along-track distance and cross-track error e_ct.
+//   3. Compute Lookahead Target Point at distance L_lookahead forward along the segment.
+//   4. Calculate commanded heading azimuth psi_cmd and vertical climb gradient dz / dl.
+
+import "./uav_coordinate_frames.oo";
+
+pub type PathSegment3D = struct {
+    start_pt: Vector3D,
+    end_pt: Vector3D,
+    segment_length: Float,
+    unit_dir: Vector3D,
+};
+
+pub type PurePursuitConfig = struct {
+    min_lookahead_dist_m: Float,
+    lookahead_gain_k: Float,
+};
+
+pub type PurePursuitGuidance = struct {
+    lookahead_target: Vector3D,
+    cross_track_error_m: Float,
+    desired_heading_rad: Float,
+    desired_pitch_rad: Float,
+};
+
+pub fn path_segment_new(p_start: &Vector3D, p_end: &Vector3D) -> PathSegment3D {
+    let diff: Vector3D = vector3d_sub(p_end, p_start);
+    let len: Float = vector3d_norm(&diff);
+    let safe_len: Float = if len < 0.001 { 0.001 } else { len };
+    let u_dir: Vector3D = vector3d_scale(&diff, 1.0 / safe_len);
+
+    return PathSegment3D {
+        start_pt: *p_start,
+        end_pt: *p_end,
+        segment_length: len,
+        unit_dir: u_dir,
+    };
+}
+
+pub fn compute_pure_pursuit(
+    path: &PathSegment3D,
+    curr_pos: &Vector3D,
+    curr_speed: Float,
+    cfg: &PurePursuitConfig
+) -> PurePursuitGuidance {
+    // Vector from segment start to UAV
+    let v_ap: Vector3D = vector3d_sub(curr_pos, &(path).start_pt);
+
+    // Along-track projection: s = v_ap . unit_dir
+    let s_along: Float = vector3d_dot(&v_ap, &(path).unit_dir);
+
+    // Cross-track error vector: e_vec = v_ap - s * unit_dir
+    let proj_pt: Vector3D = vector3d_add(&(path).start_pt, &vector3d_scale(&(path).unit_dir, s_along));
+    let e_vec: Vector3D = vector3d_sub(curr_pos, &proj_pt);
+    let e_ct: Float = vector3d_norm(&e_vec);
+
+    // Adaptive lookahead distance: L = max(L_min, k * V)
+    let look_dist: Float = if ((cfg).lookahead_gain_k * curr_speed) > (cfg).min_lookahead_dist_m {
+        (cfg).lookahead_gain_k * curr_speed
+    } else {
+        (cfg).min_lookahead_dist_m
+    };
+
+    // Target point along path
+    let mut target_s: Float = s_along + look_dist;
+    if target_s > (path).segment_length {
+        target_s = (path).segment_length;
+    }
+    if target_s < 0.0 {
+        target_s = 0.0;
+    }
+
+    let target_pt: Vector3D = vector3d_add(&(path).start_pt, &vector3d_scale(&(path).unit_dir, target_s));
+
+    // Desired line-of-sight vector to target
+    let los_vec: Vector3D = vector3d_sub(&target_pt, curr_pos);
+    let los_horizontal: Float = sqrt((los_vec.x * los_vec.x) + (los_vec.y * los_vec.y));
+
+    let head_cmd: Float = uav_atan2_approx(los_vec.y, los_vec.x);
+    let pitch_cmd: Float = uav_atan2_approx(los_vec.z, los_horizontal);
+
+    return PurePursuitGuidance {
+        lookahead_target: target_pt,
+        cross_track_error_m: e_ct,
+        desired_heading_rad: head_cmd,
+        desired_pitch_rad: pitch_cmd,
+    };
+}

@@ -1,0 +1,76 @@
+// # Dynamic Flux Balance Analysis (dFBA)
+//
+// Logline: Integrates extracellular bioreactor substrate/biomass ODEs with intracellular quasi-steady-state FBA fluxes.
+//
+// Setup: Multi-scale dynamic metabolic modeling capturing substrate depletion, byproduct accumulation, and diauxic growth shifts.
+//
+// Beats:
+//   1. Define BioreactorState, DfbaKineticsParams, and DfbaStepResult data structures.
+//   2. Compute Michaelis-Menten extracellular substrate uptake rates and bounds.
+//   3. Advance bioreactor time step via Euler integration and update metabolic state.
+
+pub type BioreactorState = struct {
+    biomass_g_l: Float,
+    substrate_g_l: Float,
+    product_g_l: Float,
+    time_hours: Float,
+};
+
+pub type DfbaKineticsParams = struct {
+    v_max_substrate: Float, // g/gDW/h
+    k_s: Float, // g/L
+    yield_biomass_substrate: Float,
+    yield_product_biomass: Float,
+    maintenance_flux: Float,
+};
+
+pub type DfbaStepResult = struct {
+    next_state: BioreactorState,
+    growth_rate_per_hour: Float,
+    substrate_uptake_rate: Float,
+    product_secretion_rate: Float,
+};
+
+pub fn dfba_calc_uptake_bound(substrate_gl: Float, p: &DfbaKineticsParams) -> Float {
+    if substrate_gl <= 0.0001 { return 0.0; }
+    // q_s = (v_max * S) / (Ks + S)
+    let denom = (p).k_s + substrate_gl;
+    if denom <= 0.0001 { return 0.0; }
+    return ((p).v_max_substrate * substrate_gl) / denom;
+}
+
+pub fn dfba_advance_euler_step(
+    cur: &BioreactorState,
+    p: &DfbaKineticsParams,
+    dt_hours: Float,
+) -> DfbaStepResult {
+    let q_s = dfba_calc_uptake_bound((cur).substrate_g_l, p);
+    let mu = (q_s - (p).maintenance_flux) * (p).yield_biomass_substrate;
+    let growth_rate = if mu < 0.0 { 0.0 } else { mu };
+    let q_p = growth_rate * (p).yield_product_biomass;
+
+    // dX/dt = mu * X
+    let d_biomass = growth_rate * (cur).biomass_g_l;
+    // dS/dt = - q_s * X
+    let d_substrate = -q_s * (cur).biomass_g_l;
+    // dP/dt = q_p * X
+    let d_product = q_p * (cur).biomass_g_l;
+
+    let next_b = (cur).biomass_g_l + (d_biomass * dt_hours);
+    let next_s = (cur).substrate_g_l + (d_substrate * dt_hours);
+    let next_p = (cur).product_g_l + (d_product * dt_hours);
+
+    let final_state = BioreactorState {
+        biomass_g_l: if next_b < 0.0 { 0.0 } else { next_b },
+        substrate_g_l: if next_s < 0.0 { 0.0 } else { next_s },
+        product_g_l: if next_p < 0.0 { 0.0 } else { next_p },
+        time_hours: (cur).time_hours + dt_hours,
+    };
+
+    return DfbaStepResult {
+        next_state: final_state,
+        growth_rate_per_hour: growth_rate,
+        substrate_uptake_rate: q_s,
+        product_secretion_rate: q_p,
+    };
+}

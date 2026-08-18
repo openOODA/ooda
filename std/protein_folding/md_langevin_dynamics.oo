@@ -1,0 +1,100 @@
+// # Molecular Dynamics Langevin Stochastic Integrator
+//
+// Logline: Implements Langevin dynamics with viscous friction and stochastic thermal noise fluctuations.
+//
+// Setup: Stochastic differential equation integrator modeling solvent collisions and Brownian thermalization.
+//
+// Beats:
+//   1. Define LangevinParams, LangevinParticle, and LangevinResult data structures.
+//   2. Compute viscous friction dissipation force and stochastic fluctuation variance.
+//   3. Advance positions and velocities with BBK (Brünger-Brooks-Karplus) integration.
+
+pub type LangevinParams = struct {
+    target_temp_k: Float,
+    friction_gamma_ps: Float,
+    dt_ps: Float,
+    boltzmann_k: Float,
+};
+
+pub type LangevinParticle = struct {
+    mass_amu: Float,
+    pos_x: Float,
+    pos_y: Float,
+    pos_z: Float,
+    vel_x: Float,
+    vel_y: Float,
+    vel_z: Float,
+    force_x: Float,
+    force_y: Float,
+    force_z: Float,
+};
+
+pub type LangevinStepResult = struct {
+    new_pos_x: Float,
+    new_pos_y: Float,
+    new_pos_z: Float,
+    new_vel_x: Float,
+    new_vel_y: Float,
+    new_vel_z: Float,
+    friction_drag_x: Float,
+    friction_drag_y: Float,
+    friction_drag_z: Float,
+};
+
+pub fn langevin_params_default(temp_k: Float, gamma_ps: Float, dt_ps: Float) -> LangevinParams {
+    return LangevinParams {
+        target_temp_k: temp_k,
+        friction_gamma_ps: gamma_ps,
+        dt_ps: dt_ps,
+        boltzmann_k: 0.001987204, // kcal / (mol * K)
+    };
+}
+
+pub fn langevin_calc_noise_sigma(params: &LangevinParams, mass_amu: Float) -> Float {
+    // Sigma_R = sqrt(2 * gamma * k_B * T * m / dt)
+    let prod = 2.0 * (params).friction_gamma_ps * (params).boltzmann_k * (params).target_temp_k * mass_amu / (params).dt_ps;
+    if prod <= 0.0 { return 0.0; }
+    let mut guess = prod / 2.0;
+    if guess < 1.0 { guess = 1.0; }
+    let mut iter = 0;
+    while iter < 10 {
+        guess = 0.5 * (guess + (prod / guess));
+        iter = iter + 1;
+    }
+    return guess;
+}
+
+pub fn langevin_step_bbk(p: &LangevinParticle, params: &LangevinParams, noise_x: Float, noise_y: Float, noise_z: Float) -> LangevinStepResult {
+    let gamma_dt = (params).friction_gamma_ps * (params).dt_ps;
+    let c1 = 1.0 - (0.5 * gamma_dt);
+    let c2 = 1.0 / (1.0 + (0.5 * gamma_dt));
+    let inv_m = if (p).mass_amu > 0.001 { 1.0 / (p).mass_amu } else { 1.0 };
+    let dt = (params).dt_ps;
+
+    // Total force including stochastic kick
+    let tot_fx = (p).force_x + noise_x;
+    let tot_fy = (p).force_y + noise_y;
+    let tot_fz = (p).force_z + noise_z;
+
+    // Position update
+    let npx = (p).pos_x + ((p).vel_x * dt) + (0.5 * tot_fx * inv_m * dt * dt);
+    let npy = (p).pos_y + ((p).vel_y * dt) + (0.5 * tot_fy * inv_m * dt * dt);
+    let npz = (p).pos_z + ((p).vel_z * dt) + (0.5 * tot_fz * inv_m * dt * dt);
+
+    // Velocity update
+    let nvx = c2 * (c1 * (p).vel_x + (tot_fx * inv_m * dt));
+    let nvy = c2 * (c1 * (p).vel_y + (tot_fy * inv_m * dt));
+    let nvz = c2 * (c1 * (p).vel_z + (tot_fz * inv_m * dt));
+
+    return LangevinStepResult {
+        new_pos_x: npx,
+        new_pos_y: npy,
+        new_pos_z: npz,
+        new_vel_x: nvx,
+        new_vel_y: nvy,
+        new_vel_z: nvz,
+        friction_drag_x: -1.0 * (params).friction_gamma_ps * (p).mass_amu * (p).vel_x,
+        friction_drag_y: -1.0 * (params).friction_gamma_ps * (p).mass_amu * (p).vel_y,
+        friction_drag_z: -1.0 * (params).friction_gamma_ps * (p).mass_amu * (p).vel_z,
+    };
+}

@@ -1,0 +1,86 @@
+// # LiDAR Ego-Motion Deskewing & Motion Compensator
+//
+// Logline: Corrects rolling-shutter geometric distortion across rotational LiDAR sweeps using high-rate IMU/odometry poses.
+//
+// Setup: Preprocessing compensation module projecting individual point returns to a synchronized reference timestamp frame.
+//
+// Beats:
+//   1. Model linear and angular ego-vehicle velocity vectors during sweep acquisition.
+//   2. Compute normalized time offset ratio per individual beam return.
+//   3. Interpolate SE(3) ego-motion transformation at specific laser pulse firing epochs.
+//   4. Deskew 3D point coordinates into the scan start/end unified coordinate frame.
+
+import "./point_types.oo";
+
+pub type EgoVelocity = struct {
+    vx: Float,
+    vy: Float,
+    vz: Float,
+    wx: Float,
+    wy: Float,
+    wz: Float,
+};
+
+pub type DeskewConfig = struct {
+    scan_duration_sec: Float,
+    reference_at_start: Bool,
+};
+
+pub fn ego_velocity_new(
+    vx: Float, vy: Float, vz: Float,
+    wx: Float, wy: Float, wz: Float
+) -> EgoVelocity {
+    return EgoVelocity {
+        vx: vx, vy: vy, vz: vz,
+        wx: wx, wy: wy, wz: wz,
+    };
+}
+
+pub fn ego_velocity_zero() -> EgoVelocity {
+    return EgoVelocity {
+        vx: 0.0, vy: 0.0, vz: 0.0,
+        wx: 0.0, wy: 0.0, wz: 0.0,
+    };
+}
+
+pub fn deskew_config_default() -> DeskewConfig {
+    return DeskewConfig {
+        scan_duration_sec: 0.1, // 10 Hz LiDAR sweep
+        reference_at_start: true,
+    };
+}
+
+pub fn deskew_point_xyzit(
+    pt: &PointXYZIT,
+    ego_vel: &EgoVelocity,
+    cfg: &DeskewConfig
+) -> PointXYZI {
+    let dt_sec: Float = (pt).timestamp_offset_us * 0.000001;
+    let t_delta: Float = if (cfg).reference_at_start {
+        dt_sec
+    } else {
+        dt_sec - (cfg).scan_duration_sec
+    };
+
+    // Small angle / first-order motion integration
+    let d_theta_z: Float = (ego_vel).wz * t_delta;
+    let cos_t: Float = cos(d_theta_z);
+    let sin_t: Float = sin(d_theta_z);
+
+    // Apply rotation around Z
+    let rot_x: Float = ((pt).x * cos_t) - ((pt).y * sin_t);
+    let rot_y: Float = ((pt).x * sin_t) + ((pt).y * cos_t);
+    let rot_z: Float = (pt).z + ((ego_vel).wy * (pt).x * t_delta);
+
+    // Apply translation
+    let deskewed_x: Float = rot_x + ((ego_vel).vx * t_delta);
+    let deskewed_y: Float = rot_y + ((ego_vel).vy * t_delta);
+    let deskewed_z: Float = rot_z + ((ego_vel).vz * t_delta);
+
+    return PointXYZI {
+        x: deskewed_x,
+        y: deskewed_y,
+        z: deskewed_z,
+        intensity: (pt).intensity,
+    };
+}

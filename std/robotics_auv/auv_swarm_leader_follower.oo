@@ -1,0 +1,95 @@
+// # Multi-AUV Leader-Follower 3D Formation Guidance
+//
+// Logline: Coordinates 3D formation geometry for follower AUVs relative to moving leader with acoustic latency compensation.
+//
+// Setup: Distributed formation tracking algorithm computing reference positions and inter-vehicle collision avoidance repulsive vectors.
+//
+// Beats:
+//   1. Define formation geometry offset in leader body frame (dx_fwd, dy_starboard, dz_depth).
+//   2. Compensate leader position for acoustic communication packet latency tau_delay.
+//   3. Project leader body offset into global NED formation target coordinate P_target.
+//   4. Calculate inter-vehicle separation collision avoidance repulsive field.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type FormationOffset = struct {
+    dx_forward_m: Float,
+    dy_starboard_m: Float,
+    dz_down_m: Float,
+};
+
+pub type SwarmFormationConfig = struct {
+    safety_separation_m: Float,
+    repulsion_gain_k: Float,
+    max_formation_speed_m_s: Float,
+};
+
+pub type FollowerGuidanceOutput = struct {
+    target_pos_ned: Vector3,
+    formation_error_m: Float,
+    repulsion_vector_ned: Vector3,
+    commanded_velocity_ned: Vector3,
+};
+
+pub fn swarm_formation_config_default() -> SwarmFormationConfig {
+    return SwarmFormationConfig {
+        safety_separation_m: 15.0,
+        repulsion_gain_k: 2.5,
+        max_formation_speed_m_s: 2.0,
+    };
+}
+
+pub fn compute_follower_target_position(
+    leader_pos: &Vector3,
+    leader_psi: Float,
+    leader_speed: Float,
+    offset: &FormationOffset,
+    comms_latency_s: Float
+) -> Vector3 {
+    // Project leader motion forward during packet latency
+    let d_leader_adv: Float = leader_speed * comms_latency_s;
+    let adv_x: Float = (leader_pos).x + (d_leader_adv * cos(leader_psi));
+    let adv_y: Float = (leader_pos).y + (d_leader_adv * sin(leader_psi));
+    let adv_z: Float = (leader_pos).z;
+
+    // Rotate body offset into NED
+    let cpsi: Float = cos(leader_psi);
+    let spsi: Float = sin(leader_psi);
+
+    let dx_b: Float = (offset).dx_forward_m;
+    let dy_b: Float = (offset).dy_starboard_m;
+    let dz_b: Float = (offset).dz_down_m;
+
+    let target_x: Float = adv_x + (dx_b * cpsi) - (dy_b * spsi);
+    let target_y: Float = adv_y + (dx_b * spsi) + (dy_b * cpsi);
+    let target_z: Float = adv_z + dz_b;
+
+    return vec3_new(target_x, target_y, target_z);
+}
+
+pub fn compute_swarm_collision_repulsion(
+    cfg: &SwarmFormationConfig,
+    my_pos: &Vector3,
+    neighbor_pos: &Vector3
+) -> Vector3 {
+    let dx: Float = (my_pos).x - (neighbor_pos).x;
+    let dy: Float = (my_pos).y - (neighbor_pos).y;
+    let dz: Float = (my_pos).z - (neighbor_pos).z;
+    let dist: Float = sqrt((dx * dx) + (dy * dy) + (dz * dz));
+
+    let d_safe: Float = (cfg).safety_separation_m;
+    if (dist >= d_safe) || (dist <= 0.1) {
+        return vec3_zero();
+    }
+
+    // Repulsive potential: F = k * (1/d - 1/d_safe) * (r_vec / d)
+    let rep_mag: Float = (cfg).repulsion_gain_k * ((1.0 / dist) - (1.0 / d_safe));
+    let inv_d: Float = 1.0 / dist;
+
+    return vec3_new(
+        rep_mag * dx * inv_d,
+        rep_mag * dy * inv_d,
+        rep_mag * dz * inv_d
+    );
+}

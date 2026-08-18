@@ -1,0 +1,110 @@
+// # Ultra-Wideband THz Beam Squint & True Time Delay (TTD)
+//
+// Logline: Compensates for frequency-dependent beam pointing deviation (beam squint) across ultra-wideband THz channels using TTD.
+//
+// Setup: Pure standard library implementation of True Time Delay (TTD) networks and phase compensation for 10+ GHz bandwidths.
+//
+// Beats:
+//   1. Calculate physical beam squint angle deviation across subcarriers: sin(theta_f) = (f_0 / f) * sin(theta_0).
+//   2. Determine mainlobe gain loss (dB) caused by phase shifters operating away from center frequency.
+//   3. Configure True Time Delay (TTD) units to synthesize frequency-independent spatial delays.
+
+pub type WidebandBeamConfig = struct {
+    center_frequency_ghz: Float,
+    bandwidth_ghz: Float,
+    array_elements: Int,
+    steering_angle_rad: Float,
+    use_true_time_delay: Bool,
+};
+
+pub type BeamSquintResult = struct {
+    subcarrier_freq_ghz: Float,
+    nominal_angle_rad: Float,
+    squinted_angle_rad: Float,
+    angular_deviation_rad: Float,
+    array_gain_loss_db: Float,
+};
+
+pub fn wideband_beam_config_default_140ghz() -> WidebandBeamConfig {
+    return WidebandBeamConfig {
+        center_frequency_ghz: 140.0,
+        bandwidth_ghz: 10.0, // 10 GHz ultra-wideband channel
+        array_elements: 64,
+        steering_angle_rad: 0.7853981633974483, // 45 degrees
+        use_true_time_delay: false,
+    };
+}
+
+pub fn beam_squint_angle_rad(f_c_ghz: Float, f_sub_ghz: Float, theta_0_rad: Float) -> Float {
+    if f_sub_ghz <= 0.0001 { return theta_0_rad; }
+    // sin(theta_f) = (f_c / f_sub) * sin(theta_0)
+    let sin_0: Float = sin(theta_0_rad);
+    let mut sin_f: Float = (f_c_ghz / f_sub_ghz) * sin_0;
+    if sin_f > 1.0 { sin_f = 1.0; }
+    if sin_f < (0.0 - 1.0) { sin_f = 0.0 - 1.0; }
+
+    // Taylor series asin
+    let v: Float = sin_f;
+    let v3: Float = v * v * v;
+    let v5: Float = v3 * v * v;
+    return v + (v3 / 6.0) + (3.0 * v5 / 40.0);
+}
+
+pub fn beam_ttd_required_delay_ps(elem_idx: Int, elem_spacing_m: Float, theta_0_rad: Float) -> Float {
+    let idx_f: Float = squint_int_to_float(elem_idx);
+    let c: Float = 299792458.0;
+    // tau_m = (m * d * sin(theta_0)) / c
+    let delta_x: Float = idx_f * elem_spacing_m * sin(theta_0_rad);
+    let tau_s: Float = delta_x / c;
+    return tau_s * 1000000000000.0; // Picoseconds
+}
+
+pub fn beam_squint_eval(cfg: WidebandBeamConfig, subcarrier_freq_ghz: Float) -> BeamSquintResult {
+    let f_c: Float = cfg.center_frequency_ghz;
+    let theta_0: Float = cfg.steering_angle_rad;
+    let use_ttd: Bool = cfg.use_true_time_delay;
+
+    let mut theta_f: Float = theta_0;
+    let mut dev: Float = 0.0;
+    let mut loss_db: Float = 0.0;
+
+    if !use_ttd {
+        theta_f = beam_squint_angle_rad(f_c, subcarrier_freq_ghz, theta_0);
+        dev = theta_f - theta_0;
+        if dev < 0.0 { dev = 0.0 - dev; }
+
+        let n_elem: Float = squint_int_to_float(cfg.array_elements);
+        let pi: Float = 3.141592653589793;
+        let u: Float = pi * n_elem * 0.5 * (sin(theta_f) - sin(theta_0));
+        let mut sinc_val: Float = 1.0;
+        if u > 0.001 || u < (0.0 - 0.001) {
+            sinc_val = sin(u) / u;
+        }
+        let pwr_ratio: Float = sinc_val * sinc_val;
+        let ln10: Float = 2.302585092994046;
+        let mut safe_pwr: Float = pwr_ratio;
+        if safe_pwr < 0.00001 { safe_pwr = 0.00001; }
+        loss_db = 0.0 - (10.0 * (ln(safe_pwr) / ln10));
+    }
+
+    return BeamSquintResult {
+        subcarrier_freq_ghz: subcarrier_freq_ghz,
+        nominal_angle_rad: theta_0,
+        squinted_angle_rad: theta_f,
+        angular_deviation_rad: dev,
+        array_gain_loss_db: loss_db,
+    };
+}
+
+pub fn squint_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}

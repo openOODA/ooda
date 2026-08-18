@@ -1,0 +1,124 @@
+// # Atmospheric Re-Entry & Aerothermal Thermal Profiles
+//
+// Logline: Models atmospheric re-entry dynamics, ballistic coefficients, deceleration g-loads, and Sutton-Graves stagnation heat flux.
+//
+// Setup: Imports kepler_orbit.oo for planetary gravity, velocity metrics, and mathematical conversions.
+//
+// Beats:
+//   1. Calculate ballistic coefficients (beta) and exponential atmospheric density profiles.
+//   2. Compute convective stagnation-point heat flux using the Sutton-Graves aerothermal model.
+//   3. Compute peak deceleration g-loads and integrate forward trajectory re-entry states.
+
+import "./kepler_orbit.oo";
+
+pub type ReEntryVehicle = struct {
+    mass_kg: Float,
+    nose_radius_m: Float,
+    ref_area_m2: Float,
+    drag_coeff: Float,
+};
+
+pub type ReEntryState = struct {
+    altitude_m: Float,
+    velocity_m_s: Float,
+    flight_path_angle_rad: Float,
+    heat_flux_w_m2: Float,
+    g_load: Float,
+};
+
+pub fn ballistic_coefficient(m: Float, cd: Float, area: Float) -> Float {
+    let denom: Float = cd * area;
+    if denom <= 0.0 {
+        return 1.0;
+    }
+    return m / denom;
+}
+
+fn atmospheric_density_reentry(alt_m: Float) -> Float {
+    if alt_m >= 120000.0 {
+        return 0.0;
+    }
+    let rho0: Float = 1.225;
+    let h_scale: Float = 7200.0;
+    let x: Float = 0.0 - (alt_m / h_scale);
+    let mut sum: Float = 1.0;
+    let mut term: Float = 1.0;
+    let mut i: Float = 1.0;
+    while i <= 10.0 {
+        term = term * (x / i);
+        sum = sum + term;
+        i = i + 1.0;
+    }
+    if sum < 0.0 {
+        return 0.0;
+    }
+    return rho0 * sum;
+}
+
+pub fn sutton_graves_heat_flux(density: Float, velocity: Float, nose_radius: Float) -> Float {
+    if density <= 0.0 || nose_radius <= 0.0 {
+        return 0.0;
+    }
+    // Sutton-Graves constant for Earth air: k = 1.74153e-4 W/(m^1.5 * (kg/m^3)^0.5 * (m/s)^3)
+    let k_sg: Float = 0.000174153;
+    let sqrt_term: Float = sqrt(density / nose_radius);
+    let v3: Float = (velocity * velocity) * velocity;
+    return (k_sg * sqrt_term) * v3;
+}
+
+pub fn peak_reentry_deceleration_g(v_entry: Float, gamma_entry_rad: Float) -> Float {
+    let g0: Float = 9.80665;
+    let h_scale: Float = 7200.0;
+    let e_const: Float = 2.718281828459;
+    let sin_gamma: Float = math_abs(sin(gamma_entry_rad));
+
+    let num: Float = (v_entry * v_entry) * sin_gamma;
+    let den: Float = ((2.0 * e_const) * g0) * h_scale;
+    return num / den;
+}
+
+pub fn peak_heating_altitude(scale_height_m: Float, beta: Float, gamma_entry_rad: Float) -> Float {
+    let rho0: Float = 1.225;
+    let sin_gamma: Float = math_abs(sin(gamma_entry_rad));
+    let rho_peak: Float = (beta * sin_gamma) / (3.0 * scale_height_m);
+    if rho_peak <= 0.0 || rho_peak >= rho0 {
+        return 45000.0;
+    }
+    let ratio: Float = rho0 / rho_peak;
+    // scale_height * ln(ratio)
+    let y: Float = (ratio - 1.0) / (ratio + 1.0);
+    let ln_approx: Float = 2.0 * (y + ((y * y * y) / 3.0));
+    return scale_height_m * ln_approx;
+}
+
+pub fn reentry_state_step(v: ReEntryVehicle, s: ReEntryState, dt: Float) -> ReEntryState {
+    let rho: Float = atmospheric_density_reentry((s).altitude_m);
+    let beta: Float = ballistic_coefficient((v).mass_kg, (v).drag_coeff, (v).ref_area_m2);
+
+    let vel: Float = (s).velocity_m_s;
+    let gamma: Float = (s).flight_path_angle_rad;
+
+    let drag_accel: Float = (0.5 * rho * (vel * vel)) / beta;
+    let g0: Float = 9.80665;
+    let g_curr: Float = drag_accel / g0;
+
+    let v_dot: Float = (0.0 - drag_accel) + (g0 * sin(gamma));
+    let mut gamma_dot: Float = 0.0;
+    if vel > 10.0 {
+        gamma_dot = ((g0 * cos(gamma)) / vel) - ((vel * cos(gamma)) / 6378137.0);
+    }
+
+    let vel_next: Float = vel + (v_dot * dt);
+    let gamma_next: Float = gamma + (gamma_dot * dt);
+    let alt_next: Float = (s).altitude_m - ((vel * sin(gamma)) * dt);
+
+    let q_dot: Float = sutton_graves_heat_flux(rho, vel_next, (v).nose_radius_m);
+
+    return ReEntryState {
+        altitude_m: alt_next,
+        velocity_m_s: vel_next,
+        flight_path_angle_rad: gamma_next,
+        heat_flux_w_m2: q_dot,
+        g_load: g_curr,
+    };
+}

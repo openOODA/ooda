@@ -1,0 +1,255 @@
+// # TPM 2.0 Operational Constructors and Attestation Handlers
+//
+// Logline: Implements NV index management, software PCR bank extension, attestation verification, and auth policies.
+//
+// Setup: Imports tpm_types.oo for data structure definitions.
+//
+// Beats:
+//   1. Import TPM data types and structures.
+//   2. Create and validate NV storage indices and PCR banks.
+//   3. Implement software PCR bank extension and digest synthesis.
+//   4. Construct and verify quote attestations, key handles, auth sessions, and policies.
+
+import "./tpm_types.oo";
+
+pub fn tpm_nv_index_create(
+    index_id: Int,
+    name_str: String,
+    data_size: Int,
+    initial_data: String
+) -> Result[TpmNvIndex, String] {
+    if index_id <= 0 || data_size <= 0 {
+        return Err("INVALID_NV_INDEX: Handle and data size must be positive");
+    }
+    if initial_data.len() > data_size {
+        return Err("DATA_EXCEEDS_SIZE: Initial data length exceeds allocated NV size");
+    }
+    let auth_pol: String = tpm_calculate_digest("policy_" + name_str);
+    let chk: Int = tpm_checksum(initial_data);
+    return Ok(TpmNvIndex {
+        key_id: "NV_" + index_id.to_string(),
+        index_id: index_id,
+        name: name_str,
+        data_size: data_size,
+        attr_flags: 15,
+        auth_policy: auth_pol,
+        data: initial_data,
+        checksum: chk,
+        is_valid: true,
+    });
+}
+
+pub fn tpm_nv_index_validate(nv: &TpmNvIndex) -> Bool {
+    if (nv).is_valid == false || (nv).index_id <= 0 {
+        return false;
+    }
+    let d_str: String = (nv).data;
+    if d_str.len() > (nv).data_size {
+        return false;
+    }
+    return (nv).checksum == tpm_checksum(d_str);
+}
+
+pub fn tpm_pcr_bank_init(bank_id: String, hash_alg: String) -> PcrBank {
+    let mut values: List[String] = list_new();
+    let mut i: Int = 0;
+    let zero_pcr: String = "0000000000000000000000000000000000000000000000000000000000000000";
+    while i < 24 {
+        values = list_push(values, zero_pcr);
+        i = i + 1;
+    }
+    return PcrBank {
+        bank_id: bank_id,
+        hash_alg: hash_alg,
+        pcr_selection: 16777215,
+        pcr_values: values,
+        pcr_count: 24,
+        bank_digest: tpm_calculate_digest(bank_id + ":" + hash_alg),
+        is_active: true,
+    };
+}
+
+pub fn tpm_pcr_bank_validate(bank: &PcrBank) -> Bool {
+    if (bank).is_active == false || (bank).pcr_count <= 0 {
+        return false;
+    }
+    return list_len((bank).pcr_values) == (bank).pcr_count;
+}
+
+pub fn tpm_pcr_bank_compute_digest(bank: &PcrBank) -> String {
+    let values: List[String] = (bank).pcr_values;
+    let count: Int = list_len(values);
+    let mut i: Int = 0;
+    let mut combined: String = (bank).bank_id + ":" + (bank).hash_alg;
+    while i < count {
+        combined = combined + "|" + list_get(values, i);
+        i = i + 1;
+    }
+    return tpm_calculate_digest(combined);
+}
+
+pub fn tpm_pcr_extend_soft(bank: &mut PcrBank, pcr_index: Int, hash_hex: String) -> Result[Bool, String] {
+    if (bank).is_active == false {
+        return Err("PCR_BANK_INACTIVE");
+    }
+    if pcr_index < 0 || pcr_index >= (bank).pcr_count {
+        return Err("INVALID_PCR_INDEX");
+    }
+    let current_pcr: String = list_get((bank).pcr_values, pcr_index);
+    let new_pcr_val: String = tpm_calculate_digest(current_pcr + ":" + hash_hex);
+    let old_values: List[String] = (bank).pcr_values;
+    let count: Int = list_len(old_values);
+    let mut new_values: List[String] = list_new();
+    let mut i: Int = 0;
+    while i < count {
+        if i == pcr_index {
+            new_values = list_push(new_values, new_pcr_val);
+        } else {
+            new_values = list_push(new_values, list_get(old_values, i));
+        }
+        i = i + 1;
+    }
+    (bank).pcr_values = new_values;
+    (bank).bank_digest = tpm_pcr_bank_compute_digest(bank);
+    return Ok(true);
+}
+
+pub fn tpm_attestation_create(
+    quote_id: String,
+    signer: String,
+    extra_data: String,
+    clock_info_data: TpmClockInfo,
+    bank: PcrBank,
+    sig_alg: String,
+    sig_bytes: String
+) -> Result[TpmAttestation, String] {
+    if quote_id.len() == 0 || sig_bytes.len() == 0 {
+        return Err("INVALID_QUOTE_PARAMS");
+    }
+    let pcr_dig: String = bank.bank_digest;
+    let chk_raw: String = quote_id + ":" + signer + ":" + extra_data + ":" + pcr_dig;
+    return Ok(TpmAttestation {
+        key_id: quote_id,
+        quote_id: quote_id,
+        magic: 4283786055,
+        attestation_type: "TPM2_ST_ATTEST_QUOTE",
+        qualified_signer: signer,
+        extra_data: extra_data,
+        clock_info: clock_info_data,
+        firmware_version: 20260811,
+        pcr_bank: bank,
+        pcr_digest: pcr_dig,
+        signature_alg: sig_alg,
+        signature_bytes: sig_bytes,
+        checksum: tpm_checksum(chk_raw),
+        is_valid: true,
+    });
+}
+
+pub fn tpm_attestation_validate(att: &TpmAttestation) -> Bool {
+    if (att).is_valid == false || (att).magic != 4283786055 {
+        return false;
+    }
+    let bank_ref = &(att).pcr_bank;
+    if tpm_pcr_bank_validate(bank_ref) == false {
+        return false;
+    }
+    let chk_raw: String = (att).quote_id + ":" + (att).qualified_signer + ":" + (att).extra_data + ":" + (att).pcr_digest;
+    return (att).checksum == tpm_checksum(chk_raw);
+}
+
+pub fn tpm_attestation_verify_soft(att: &TpmAttestation, expected_nonce: String) -> TpmQuoteResult {
+    let qid: String = (att).quote_id;
+    let pcr_dig: String = (att).pcr_digest;
+    if tpm_attestation_validate(att) == false {
+        return TpmQuoteResult {
+            is_valid: false,
+            quote_id: qid,
+            pcr_digest: pcr_dig,
+            error_code: "ATTESTATION_VALIDATION_FAILED",
+            verification_time: 0,
+        };
+    }
+    if tpm_constant_time_eq((att).extra_data, expected_nonce) == false {
+        return TpmQuoteResult {
+            is_valid: false,
+            quote_id: qid,
+            pcr_digest: pcr_dig,
+            error_code: "NONCE_MISMATCH",
+            verification_time: 0,
+        };
+    }
+    return TpmQuoteResult {
+        is_valid: true,
+        quote_id: qid,
+        pcr_digest: pcr_dig,
+        error_code: "SUCCESS",
+        verification_time: 100,
+    };
+}
+
+pub fn tpm_key_handle_create(
+    handle_id: Int,
+    hierarchy: String,
+    key_type: String,
+    public_bytes: String
+) -> TpmKeyHandle {
+    return TpmKeyHandle {
+        key_id: "KEY_" + handle_id.to_string(),
+        handle_id: handle_id,
+        hierarchy: hierarchy,
+        key_type: key_type,
+        public_bytes: public_bytes,
+        name_alg: "SHA-256",
+        name_hash: tpm_calculate_digest(key_type + ":" + public_bytes),
+        is_persistent: true,
+        is_valid: true,
+    };
+}
+
+pub fn tpm_key_handle_validate(key: &TpmKeyHandle) -> Bool {
+    if (key).is_valid == false || (key).handle_id <= 0 {
+        return false;
+    }
+    return (key).public_bytes.len() > 0;
+}
+
+pub fn tpm_auth_session_init(
+    session_id: String,
+    handle: Int,
+    session_type: String
+) -> TpmAuthSession {
+    let n_caller: String = tpm_calculate_digest("nonce_caller_" + session_id);
+    let n_tpm: String = tpm_calculate_digest("nonce_tpm_" + session_id);
+    return TpmAuthSession {
+        session_id: session_id,
+        session_handle: handle,
+        session_type: session_type,
+        nonce_caller: n_caller,
+        nonce_tpm: n_tpm,
+        session_key: tpm_calculate_digest(n_caller + ":" + n_tpm),
+        is_bound: true,
+        is_active: true,
+    };
+}
+
+pub fn tpm_policy_init(
+    policy_id: String,
+    pcr_mask: Int,
+    expected_digest: String
+) -> TpmPolicy {
+    return TpmPolicy {
+        policy_id: policy_id,
+        policy_digest: tpm_calculate_digest(policy_id + ":" + expected_digest),
+        pcr_mask: pcr_mask,
+        expected_pcr_digest: expected_digest,
+        is_enforced: true,
+    };
+}
+
+pub fn tpm_policy_evaluate(policy: &TpmPolicy, bank: &PcrBank) -> Bool {
+    if (policy).is_enforced == false {
+        return false;
+    }
+    return tpm_constant_time_eq((bank).bank_digest, (policy).expected_pcr_digest);
+}

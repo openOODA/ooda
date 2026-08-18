@@ -1,0 +1,129 @@
+// # Real Cepstrum & Quefrency Harmonic Analysis
+//
+// Logline: Computes real cepstrum to detect harmonic families, sideband spacings, and gearbox gear-mesh modulations.
+//
+// Setup: Calculates inverse transform of the log-magnitude frequency spectrum to map harmonics into quefrency peaks.
+//
+// Beats:
+//   1. Define CepstrumResult and QuefrencyPeak structures.
+//   2. Compute logarithm of spectral power magnitudes with numerical stability bias.
+//   3. Compute discrete cosine IDFT to yield real cepstrum and extract dominant quefrency period.
+
+pub type QuefrencyPeak = struct {
+    quefrency_sec: Float,
+    harmonic_spacing_hz: Float,
+    cepstrum_magnitude: Float,
+};
+
+pub type CepstrumResult = struct {
+    cepstrum_values: List[Float],
+    dominant_peak: QuefrencyPeak,
+    num_bins: Int,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn math_ln(x: Float) -> Float {
+    if x <= 0.0 { return (0.0 - 20.0); }
+    let mut y: Float = x;
+    let mut count_e: Float = 0.0;
+    let e: Float = 2.718281828459045;
+    while y > e {
+        y = y / e;
+        count_e = count_e + 1.0;
+    }
+    while y < (1.0 / e) {
+        y = y * e;
+        count_e = count_e - 1.0;
+    }
+    let z: Float = (y - 1.0) / (y + 1.0);
+    let z2: Float = z * z;
+    let series: Float = 2.0 * z * (1.0 + (z2 / 3.0) + ((z2 * z2) / 5.0) + ((z2 * z2 * z2) / 7.0));
+    return count_e + series;
+}
+
+pub fn math_cos(x: Float) -> Float {
+    let pi: Float = 3.141592653589793;
+    let mut val: Float = x;
+    while val > pi { val = val - (2.0 * pi); }
+    while val < (0.0 - pi) { val = val + (2.0 * pi); }
+    let x2: Float = val * val;
+    let x4: Float = x2 * x2;
+    let x6: Float = x4 * x2;
+    return 1.0 - (x2 / 2.0) + (x4 / 24.0) - (x6 / 720.0);
+}
+
+pub fn cepstrum_analyze(magnitude_spectrum: &List[Float], sample_rate_hz: Float) -> CepstrumResult {
+    let n: Int = list_len(*magnitude_spectrum);
+    let mut empty_c: List[Float] = list_new();
+    let empty_peak = QuefrencyPeak { quefrency_sec: 0.0, harmonic_spacing_hz: 0.0, cepstrum_magnitude: 0.0 };
+
+    if n <= 2 || sample_rate_hz <= 0.0 {
+        return CepstrumResult { cepstrum_values: empty_c, dominant_peak: empty_peak, num_bins: 0 };
+    }
+
+    let mut log_mags: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let mag: Float = list_get(*magnitude_spectrum, i);
+        let safe_mag: Float = if mag > 0.000001 { mag } else { 0.000001 };
+        log_mags = list_push(log_mags, math_ln(safe_mag));
+        i = i + 1;
+    }
+
+    let pi: Float = 3.141592653589793;
+    let n_f: Float = int_to_float(n);
+    let mut cep: List[Float] = list_new();
+
+    let mut max_cep: Float = 0.0 - 1000.0;
+    let mut max_q_idx: Int = 1;
+
+    let mut q: Int = 0;
+    while q < n {
+        let q_f: Float = int_to_float(q);
+        let mut sum: Float = 0.0;
+        let mut k: Int = 0;
+        while k < n {
+            let k_f: Float = int_to_float(k);
+            let theta: Float = (pi * (k_f + 0.5) * q_f) / n_f;
+            let val: Float = list_get(log_mags, k);
+            sum = sum + (val * math_cos(theta));
+            k = k + 1;
+        }
+        let cep_val: Float = sum / n_f;
+        cep = list_push(cep, cep_val);
+
+        if q > 2 && (q < (n / 2)) && cep_val > max_cep {
+            max_cep = cep_val;
+            max_q_idx = q;
+        }
+        q = q + 1;
+    }
+
+    let delta_t: Float = 1.0 / sample_rate_hz;
+    let quefrency: Float = int_to_float(max_q_idx) * delta_t;
+    let spacing_hz: Float = if quefrency > 0.000001 { 1.0 / quefrency } else { 0.0 };
+
+    let best_peak = QuefrencyPeak {
+        quefrency_sec: quefrency,
+        harmonic_spacing_hz: spacing_hz,
+        cepstrum_magnitude: max_cep,
+    };
+
+    return CepstrumResult {
+        cepstrum_values: cep,
+        dominant_peak: best_peak,
+        num_bins: n,
+    };
+}

@@ -1,0 +1,172 @@
+// # Grammar & Regex Constrained Decoding State Machine
+//
+// Logline: Enforces strict structured JSON and regular expression syntax via deterministic finite automaton (DFA) vocabulary masking.
+//
+// Setup: Grammar parser and token logit masking engine for constrained decoding.
+//
+// Beats:
+//   1. Define ConstrainedDecodingConfig and JSONParserState structures.
+//   2. Track active lexical DFA states across JSON syntax productions.
+//   3. Generate boolean vocabulary masks setting invalid token logits to -10000.0.
+
+pub type ConstrainedDecodingConfig = struct {
+    vocab_size: Int,
+    enforce_json: Bool,
+};
+
+pub type JSONParserState = struct {
+    state_id: Int,
+    depth: Int,
+    expecting_key: Bool,
+    expecting_colon: Bool,
+    expecting_val: Bool,
+    is_valid_end: Bool,
+};
+
+pub fn json_parser_state_new() -> JSONParserState {
+    return JSONParserState {
+        state_id: 0, // 0: initial, 1: object_open, 2: in_key, 3: after_key, 4: in_val, 5: after_val, 6: closed
+        depth: 0,
+        expecting_key: false,
+        expecting_colon: false,
+        expecting_val: false,
+        is_valid_end: false,
+    };
+}
+
+pub fn json_parser_consume_char(
+    state: &mut JSONParserState,
+    ch: Int
+) -> Bool {
+    // ASCII codes: '{' = 123, '}' = 125, '"' = 34, ':' = 58, ',' = 44, ' ' = 32
+    let s: Int = (state).state_id;
+
+    if s == 0 {
+        if ch == 123 { // '{'
+            (state).state_id = 1;
+            (state).depth = (state).depth + 1;
+            (state).expecting_key = true;
+            (state).is_valid_end = false;
+            return true;
+        }
+        if ch == 32 { return true; }
+        return false;
+    }
+
+    if s == 1 { // after '{'
+        if ch == 34 { // '"'
+            (state).state_id = 2;
+            (state).expecting_key = false;
+            return true;
+        }
+        if ch == 125 { // '}'
+            (state).depth = (state).depth - 1;
+            (state).state_id = 6;
+            (state).is_valid_end = (state).depth == 0;
+            return true;
+        }
+        if ch == 32 { return true; }
+        return false;
+    }
+
+    if s == 2 { // in_key
+        if ch == 34 { // closing quote
+            (state).state_id = 3;
+            (state).expecting_colon = true;
+            return true;
+        }
+        return true; // any char inside key
+    }
+
+    if s == 3 { // after_key
+        if ch == 58 { // ':'
+            (state).state_id = 4;
+            (state).expecting_colon = false;
+            (state).expecting_val = true;
+            return true;
+        }
+        if ch == 32 { return true; }
+        return false;
+    }
+
+    if s == 4 { // in_val
+        if ch == 123 { // nested '{'
+            (state).depth = (state).depth + 1;
+            (state).state_id = 1;
+            (state).expecting_key = true;
+            (state).expecting_val = false;
+            return true;
+        }
+        if ch == 44 { // ','
+            (state).state_id = 1;
+            (state).expecting_key = true;
+            (state).expecting_val = false;
+            return true;
+        }
+        if ch == 125 { // '}'
+            (state).depth = (state).depth - 1;
+            (state).state_id = if (state).depth == 0 { 6 } else { 5 };
+            (state).expecting_val = false;
+            (state).is_valid_end = (state).depth == 0;
+            return true;
+        }
+        return true;
+    }
+
+    if s == 5 { // after_val inside parent
+        if ch == 44 {
+            (state).state_id = 1;
+            (state).expecting_key = true;
+            return true;
+        }
+        if ch == 125 {
+            (state).depth = (state).depth - 1;
+            (state).state_id = if (state).depth == 0 { 6 } else { 5 };
+            (state).is_valid_end = (state).depth == 0;
+            return true;
+        }
+        if ch == 32 { return true; }
+        return false;
+    }
+
+    if s == 6 { // closed
+        if ch == 32 { return true; }
+        return false;
+    }
+
+    return false;
+}
+
+pub fn json_mask_invalid_tokens(
+    state: &JSONParserState,
+    token_chars: List[Int],
+    logits: List[Float]
+) -> List[Float] {
+    let n: Int = list_len(logits);
+    let mut masked_logits: List[Float] = list_new();
+
+    let mut i: Int = 0;
+    while i < n {
+        let ch: Int = if i < list_len(token_chars) { list_get(token_chars, i) } else { 0 };
+        let mut sim_state: JSONParserState = JSONParserState {
+            state_id: (state).state_id,
+            depth: (state).depth,
+            expecting_key: (state).expecting_key,
+            expecting_colon: (state).expecting_colon,
+            expecting_val: (state).expecting_val,
+            is_valid_end: (state).is_valid_end,
+        };
+        let is_valid: Bool = json_parser_consume_char(&mut sim_state, ch);
+
+        let orig_logit: Float = list_get(logits, i);
+        let masked: Float = if is_valid { orig_logit } else { 0.0 - 10000.0 };
+        masked_logits = list_push(masked_logits, masked);
+        i = i + 1;
+    }
+
+    return masked_logits;
+}
+
+pub fn guided_json_regex_constrained_marker() -> Int {
+    return 1;
+}

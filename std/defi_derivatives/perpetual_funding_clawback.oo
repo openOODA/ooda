@@ -1,0 +1,101 @@
+// # Perpetual Funding Rate Clawback & Socialized Deficit Engine
+//
+// Logline: Balances asymmetric funding payment deficits, drawing down reserve pools and allocating proportional clawbacks when counterparties default.
+//
+// Setup: Pure quantitative risk module ensuring zero-sum funding settlement integrity during extreme market skew or insolvency.
+//
+// Beats:
+//   1. Define FundingPoolBalance and ClawbackResolution structures.
+//   2. Calculate long vs short aggregate funding payment liabilities.
+//   3. Allocate insurance reserve buffer to deficits or compute proportional haircut multipliers.
+
+pub type FundingPoolBalance = struct {
+    total_long_oi_usd: Float,
+    total_short_oi_usd: Float,
+    nominal_funding_rate: Float,
+    insurance_buffer_usd: Float,
+};
+
+pub type ClawbackResolution = struct {
+    total_due_usd: Float,
+    total_collected_usd: Float,
+    deficit_usd: Float,
+    buffer_utilized_usd: Float,
+    haircut_multiplier: Float,
+    is_fully_funded: Bool,
+};
+
+pub fn funding_pool_new(
+    long_oi: Float,
+    short_oi: Float,
+    rate: Float,
+    buf: Float
+) -> FundingPoolBalance {
+    return FundingPoolBalance {
+        total_long_oi_usd: long_oi,
+        total_short_oi_usd: short_oi,
+        nominal_funding_rate: rate,
+        insurance_buffer_usd: buf,
+    };
+}
+
+pub fn resolve_funding_deficit(pool: &mut FundingPoolBalance) -> ClawbackResolution {
+    let rate: Float = (pool).nominal_funding_rate;
+    let mut abs_rate: Float = rate;
+    if abs_rate < 0.0 {
+        abs_rate = 0.0 - abs_rate;
+    }
+
+    let mut collected: Float = 0.0;
+    let mut owed: Float = 0.0;
+
+    if rate > 0.0 {
+        // Longs pay Shorts
+        collected = (pool).total_long_oi_usd * abs_rate;
+        owed = (pool).total_short_oi_usd * abs_rate;
+    } else {
+        // Shorts pay Longs
+        collected = (pool).total_short_oi_usd * abs_rate;
+        owed = (pool).total_long_oi_usd * abs_rate;
+    }
+
+    if collected >= owed {
+        return ClawbackResolution {
+            total_due_usd: owed,
+            total_collected_usd: collected,
+            deficit_usd: 0.0,
+            buffer_utilized_usd: 0.0,
+            haircut_multiplier: 1.0,
+            is_fully_funded: true,
+        };
+    }
+
+    let raw_deficit: Float = owed - collected;
+    let mut buffer_used: Float = 0.0;
+    let mut rem_deficit: Float = raw_deficit;
+
+    if (pool).insurance_buffer_usd >= raw_deficit {
+        buffer_used = raw_deficit;
+        (pool).insurance_buffer_usd = (pool).insurance_buffer_usd - raw_deficit;
+        rem_deficit = 0.0;
+    } else {
+        buffer_used = (pool).insurance_buffer_usd;
+        rem_deficit = raw_deficit - (pool).insurance_buffer_usd;
+        (pool).insurance_buffer_usd = 0.0;
+    }
+
+    let total_available: Float = collected + buffer_used;
+    let mut haircut: Float = 1.0;
+    if owed > 0.0 {
+        haircut = total_available / owed;
+    }
+
+    return ClawbackResolution {
+        total_due_usd: owed,
+        total_collected_usd: collected,
+        deficit_usd: rem_deficit,
+        buffer_utilized_usd: buffer_used,
+        haircut_multiplier: haircut,
+        is_fully_funded: rem_deficit <= 0.0001,
+    };
+}

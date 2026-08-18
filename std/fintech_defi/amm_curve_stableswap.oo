@@ -1,0 +1,159 @@
+// # Curve Stableswap Invariant Solver
+//
+// Logline: Implements Curve Finance amplified invariant A*D*sum + prod = A*D*n^n + D^(n+1)/(n^n*prod) with Newton-Raphson solvers.
+//
+// Setup: Pure numerical module for pegged and correlated asset liquidity pools.
+//
+// Beats:
+//   1. Define StableSwapPool and StableSwapQuote structures.
+//   2. Implement iterative Newton-Raphson convergence for pool invariant D.
+//   3. Compute exchange output y given input x and calculate virtual price.
+
+pub type StableSwapPool = struct {
+    token_0: String,
+    token_1: String,
+    balance_0: Int,
+    balance_1: Int,
+    amplification_coefficient: Int,
+    fee_bps: Int,
+    admin_fee_bps: Int,
+    total_lp_supply: Int,
+};
+
+pub type StableSwapQuote = struct {
+    amount_in: Int,
+    amount_out: Int,
+    fee_amount: Int,
+    admin_fee: Int,
+    new_d: Int,
+};
+
+pub fn stableswap_pool_new(
+    token_0: String,
+    token_1: String,
+    bal_0: Int,
+    bal_1: Int,
+    amp: Int,
+    fee_bps: Int
+) -> StableSwapPool {
+    let initial_lp: Int = bal_0 + bal_1;
+    return StableSwapPool {
+        token_0: token_0,
+        token_1: token_1,
+        balance_0: bal_0,
+        balance_1: bal_1,
+        amplification_coefficient: amp,
+        fee_bps: fee_bps,
+        admin_fee_bps: 5000,
+        total_lp_supply: initial_lp,
+    };
+}
+
+pub fn stableswap_get_d(
+    balance_0: Int,
+    balance_1: Int,
+    amp_coeff: Int
+) -> Int {
+    let s: Int = balance_0 + balance_1;
+    if s == 0 {
+        return 0;
+    }
+    let mut d: Int = s;
+    let ann: Int = amp_coeff * 2;
+    let mut iter: Int = 0;
+
+    while iter < 32 {
+        let mut d_p: Int = d;
+        d_p = (d_p * d) / (balance_0 * 2);
+        d_p = (d_p * d) / (balance_1 * 2);
+
+        let d_prev: Int = d;
+        let num: Int = (ann * s) + (d_p * 2);
+        let den: Int = ((ann - 1) * d) + (d_p * 3);
+        d = (num * d) / den;
+
+        let mut diff: Int = d - d_prev;
+        if diff < 0 {
+            diff = 0 - diff;
+        }
+        if diff <= 1 {
+            return d;
+        }
+        iter = iter + 1;
+    }
+    return d;
+}
+
+pub fn stableswap_get_y(
+    x_in_pool: Int,
+    d: Int,
+    amp_coeff: Int
+) -> Int {
+    let ann: Int = amp_coeff * 2;
+    let mut c: Int = (d * d) / (x_in_pool * 2);
+    c = (c * d) / (ann * 2);
+    let b: Int = x_in_pool + (d / ann);
+
+    let mut y: Int = d;
+    let mut iter: Int = 0;
+
+    while iter < 32 {
+        let y_prev: Int = y;
+        y = ((y * y) + c) / ((2 * y) + b - d);
+
+        let mut diff: Int = y - y_prev;
+        if diff < 0 {
+            diff = 0 - diff;
+        }
+        if diff <= 1 {
+            return y;
+        }
+        iter = iter + 1;
+    }
+    return y;
+}
+
+pub fn stableswap_exchange(
+    pool: &mut StableSwapPool,
+    i_in: Int,
+    amount_in: Int
+) -> StableSwapQuote {
+    let old_x: Int = if i_in == 0 { (pool).balance_0 } else { (pool).balance_1 };
+    let old_y: Int = if i_in == 0 { (pool).balance_1 } else { (pool).balance_0 };
+
+    let current_d: Int = stableswap_get_d(old_x, old_y, (pool).amplification_coefficient);
+    let new_x: Int = old_x + amount_in;
+    let new_y: Int = stableswap_get_y(new_x, current_d, (pool).amplification_coefficient);
+
+    let dy: Int = old_y - new_y;
+    let fee: Int = (dy * (pool).fee_bps) / 10000;
+    let dy_fee: Int = dy - fee;
+    let admin_fee: Int = (fee * (pool).admin_fee_bps) / 10000;
+
+    if i_in == 0 {
+        (pool).balance_0 = new_x;
+        (pool).balance_1 = old_y - dy_fee;
+    } else {
+        (pool).balance_1 = new_x;
+        (pool).balance_0 = old_y - dy_fee;
+    }
+
+    let updated_d: Int = stableswap_get_d((pool).balance_0, (pool).balance_1, (pool).amplification_coefficient);
+
+    return StableSwapQuote {
+        amount_in: amount_in,
+        amount_out: dy_fee,
+        fee_amount: fee,
+        admin_fee: admin_fee,
+        new_d: updated_d,
+    };
+}
+
+pub fn stableswap_virtual_price_scaled(pool: &StableSwapPool) -> Int {
+    if (pool).total_lp_supply <= 0 {
+        return 0;
+    }
+    let d: Int = stableswap_get_d((pool).balance_0, (pool).balance_1, (pool).amplification_coefficient);
+    let scale: Int = 1000000;
+    return (d * scale) / (pool).total_lp_supply;
+}

@@ -1,0 +1,117 @@
+// # Stream Shard Lease Coordinator
+//
+// Logline: Implements Kinesis/Kafka streaming shard partition lease balancing, checkpointing, and sequence iteration.
+//
+// Setup: Distributed stream consumer coordinator assigning shard leases to serverless consumer workers.
+//
+// Beats:
+//   1. Track shard partition topologies, parent-child split lineage, and sequence numbers.
+//   2. Coordinate distributed lease acquisitions and renew heartbeats to detect worker failures.
+//   3. Checkpoint processed sequence offsets to guarantee at-least-once streaming delivery.
+
+pub type ShardLease = struct {
+    shard_id: String,
+    lease_owner: String,
+    checkpoint_sequence_nr: Int,
+    lease_expires_at_ms: Int,
+    is_closed: Bool,
+};
+
+pub type StreamShardCoordinator = struct {
+    stream_name: String,
+    lease_duration_ms: Int,
+    leases: List[ShardLease],
+    total_checkpoints: Int,
+};
+
+pub fn stream_shard_coordinator_new(name: String, lease_ms: Int) -> StreamShardCoordinator {
+    let empty_leases: List[ShardLease] = list_new();
+    return StreamShardCoordinator {
+        stream_name: name,
+        lease_duration_ms: lease_ms,
+        leases: empty_leases,
+        total_checkpoints: 0,
+    };
+}
+
+pub fn stream_coordinator_add_shard(coord: &mut StreamShardCoordinator, shard_id: String) {
+    let l = ShardLease {
+        shard_id: shard_id,
+        lease_owner: "",
+        checkpoint_sequence_nr: 0,
+        lease_expires_at_ms: 0,
+        is_closed: false,
+    };
+    (coord).leases = list_push((coord).leases, l);
+}
+
+pub fn stream_coordinator_acquire_lease(
+    coord: &mut StreamShardCoordinator,
+    shard_id: String,
+    worker_id: String,
+    now_ms: Int
+) -> Bool {
+    let n: Int = list_len((coord).leases);
+    let mut i: Int = 0;
+    let mut updated: List[ShardLease] = list_new();
+    let mut acquired: Bool = false;
+
+    while i < n {
+        let l: ShardLease = list_get((coord).leases, i);
+        if (l).shard_id == shard_id && !(l).is_closed {
+            if (l).lease_owner == "" || (l).lease_expires_at_ms < now_ms || (l).lease_owner == worker_id {
+                let updated_l = ShardLease {
+                    shard_id: (l).shard_id,
+                    lease_owner: worker_id,
+                    checkpoint_sequence_nr: (l).checkpoint_sequence_nr,
+                    lease_expires_at_ms: now_ms + (coord).lease_duration_ms,
+                    is_closed: false,
+                };
+                updated = list_push(updated, updated_l);
+                acquired = true;
+            } else {
+                updated = list_push(updated, l);
+            }
+        } else {
+            updated = list_push(updated, l);
+        }
+        i = i + 1;
+    }
+
+    (coord).leases = updated;
+    return acquired;
+}
+
+pub fn stream_coordinator_checkpoint(
+    coord: &mut StreamShardCoordinator,
+    shard_id: String,
+    worker_id: String,
+    seq_nr: Int
+) -> Bool {
+    let n: Int = list_len((coord).leases);
+    let mut i: Int = 0;
+    let mut updated: List[ShardLease] = list_new();
+    let mut success: Bool = false;
+
+    while i < n {
+        let l: ShardLease = list_get((coord).leases, i);
+        if (l).shard_id == shard_id && (l).lease_owner == worker_id {
+            let updated_l = ShardLease {
+                shard_id: (l).shard_id,
+                lease_owner: (l).lease_owner,
+                checkpoint_sequence_nr: seq_nr,
+                lease_expires_at_ms: (l).lease_expires_at_ms,
+                is_closed: (l).is_closed,
+            };
+            updated = list_push(updated, updated_l);
+            success = true;
+            (coord).total_checkpoints = (coord).total_checkpoints + 1;
+        } else {
+            updated = list_push(updated, l);
+        }
+        i = i + 1;
+    }
+
+    (coord).leases = updated;
+    return success;
+}

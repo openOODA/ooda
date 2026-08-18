@@ -1,0 +1,117 @@
+// # SigLIP Sigmoid Loss for Vision-Language Pre-training
+//
+// Logline: Replaces softmax normalization with pairwise independent sigmoid cross-entropy, enabling large batch contrastive learning.
+//
+// Setup: SigLIP objective: loss = - sum_{i,j} log(sigmoid(z_{ij} * (t * (x_i . y_j) + b))) where z_{ij} = 1 if i==j else -1.
+//
+// Beats:
+//   1. Define SigLIPConfig and SigLIPLossOutput structs.
+//   2. Compute pairwise dot product matrix with learnable temperature scale t and bias b.
+//   3. Calculate independent binary cross-entropy for positive diagonal and negative off-diagonal pairs.
+
+pub type SigLIPConfig = struct {
+    temp_scale: Float,
+    bias: Float,
+};
+
+pub type SigLIPLossOutput = struct {
+    loss: Float,
+    avg_pos_prob: Float,
+    avg_neg_prob: Float,
+    batch_size: Int,
+};
+
+pub fn siglip_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn siglip_config_new(scale: Float, bias_val: Float) -> SigLIPConfig {
+    return SigLIPConfig {
+        temp_scale: scale,
+        bias: bias_val,
+    };
+}
+
+pub fn siglip_sigmoid(x: Float) -> Float {
+    let neg_x: Float = 0.0 - x;
+    return 1.0 / (1.0 + exp(neg_x));
+}
+
+pub fn siglip_compute_loss(
+    cfg: &SigLIPConfig,
+    img_embeds: List[Float],
+    txt_embeds: List[Float],
+    batch_size: Int,
+    embed_dim: Int
+) -> SigLIPLossOutput {
+    let t_scale: Float = (cfg).temp_scale;
+    let bias: Float = (cfg).bias;
+
+    let mut total_loss: Float = 0.0;
+    let mut sum_pos_p: Float = 0.0;
+    let mut sum_neg_p: Float = 0.0;
+    let mut count_neg: Int = 0;
+
+    let mut i: Int = 0;
+    while i < batch_size {
+        let mut j: Int = 0;
+        while j < batch_size {
+            // Dot product
+            let mut dot: Float = 0.0;
+            let mut d: Int = 0;
+            while d < embed_dim {
+                let iv: Float = list_get(img_embeds, (i * embed_dim) + d);
+                let tv: Float = list_get(txt_embeds, (j * embed_dim) + d);
+                dot = dot + (iv * tv);
+                d = d + 1;
+            }
+
+            // Logit = t * dot + b
+            let logit: Float = (t_scale * dot) + bias;
+            let prob: Float = siglip_sigmoid(logit);
+
+            if i == j {
+                // Positive pair: z = +1 -> loss = -ln(prob)
+                let p_clamp: Float = if prob > 0.000001 { prob } else { 0.000001 };
+                total_loss = total_loss - ln(p_clamp);
+                sum_pos_p = sum_pos_p + prob;
+            } else {
+                // Negative pair: z = -1 -> loss = -ln(1 - prob)
+                let one_minus_p: Float = if (1.0 - prob) > 0.000001 { 1.0 - prob } else { 0.000001 };
+                total_loss = total_loss - ln(one_minus_p);
+                sum_neg_p = sum_neg_p + prob;
+                count_neg = count_neg + 1;
+            }
+
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    let b_f: Float = siglip_int_to_float(batch_size);
+    let neg_f: Float = siglip_int_to_float(count_neg);
+    let total_pairs: Float = b_f * b_f;
+    let avg_loss: Float = if total_pairs > 0.0 { total_loss / total_pairs } else { 0.0 };
+    let avg_pos: Float = if b_f > 0.0 { sum_pos_p / b_f } else { 0.0 };
+    let avg_neg: Float = if neg_f > 0.0 { sum_neg_p / neg_f } else { 0.0 };
+
+    return SigLIPLossOutput {
+        loss: avg_loss,
+        avg_pos_prob: avg_pos,
+        avg_neg_prob: avg_neg,
+        batch_size: batch_size,
+    };
+}
+
+pub fn siglip_sigmoid_loss_marker() -> Int {
+    return 1;
+}

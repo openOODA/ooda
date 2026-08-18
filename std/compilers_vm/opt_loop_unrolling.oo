@@ -1,0 +1,124 @@
+// # Compiler Loop Unrolling Pass
+//
+// Logline: Loop unrolling factor determination, induction variable updates, loop body replication, and epilogue peel loop generation.
+//
+// Setup: Analyzes constant trip counts, unroll factors (2x, 4x, 8x, full unroll), and code size budgets.
+//
+// Beats:
+//   1. Define LoopUnrollConfig, InductionVar, and UnrollResult structures.
+//   2. Determine optimal unroll factor based on body size and known trip count.
+//   3. Generate unrolled loop plan with main loop stride and remainder peel loop.
+
+pub type InductionVar = struct {
+    var_name: String,
+    init_val: Int,
+    step_val: Int,
+    limit_val: Int,
+    is_increasing: Int,
+};
+
+pub type LoopUnrollConfig = struct {
+    max_body_instructions: Int,
+    max_unroll_factor: Int,
+    allow_partial: Int,
+    allow_runtime_trip_count: Int,
+};
+
+pub type UnrollPlan = struct {
+    unroll_factor: Int,
+    is_full_unroll: Int,
+    main_iterations: Int,
+    peel_iterations: Int,
+    estimated_code_growth: Int,
+};
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn induction_var_new(name: String, init_v: Int, step_v: Int, limit_v: Int, inc: Int) -> InductionVar {
+    return InductionVar {
+        var_name: name,
+        init_val: init_v,
+        step_val: step_v,
+        limit_val: limit_v,
+        is_increasing: inc,
+    };
+}
+
+pub fn loop_unroll_config_default() -> LoopUnrollConfig {
+    return LoopUnrollConfig {
+        max_body_instructions: 64,
+        max_unroll_factor: 8,
+        allow_partial: 1,
+        allow_runtime_trip_count: 1,
+    };
+}
+
+pub fn unroll_plan_new(factor: Int, is_full: Int, main_iters: Int, peel_iters: Int, growth: Int) -> UnrollPlan {
+    return UnrollPlan {
+        unroll_factor: factor,
+        is_full_unroll: is_full,
+        main_iterations: main_iters,
+        peel_iterations: peel_iters,
+        estimated_code_growth: growth,
+    };
+}
+
+// -------------------------------------------------------------------
+// Unroll Plan Computation
+// -------------------------------------------------------------------
+
+pub fn compute_trip_count(iv: InductionVar) -> Int {
+    if (iv).step_val == 0 {
+        return -1; // Infinite or zero step
+    }
+    if (iv).is_increasing == 1 {
+        if (iv).limit_val <= (iv).init_val {
+            return 0;
+        }
+        let diff: Int = (iv).limit_val - (iv).init_val;
+        return diff / (iv).step_val;
+    } else {
+        if (iv).init_val <= (iv).limit_val {
+            return 0;
+        }
+        let diff: Int = (iv).init_val - (iv).limit_val;
+        return diff / (iv).step_val;
+    }
+}
+
+pub fn plan_loop_unrolling(
+    iv: InductionVar,
+    body_inst_count: Int,
+    config: LoopUnrollConfig
+) -> UnrollPlan {
+    let trip_count: Int = compute_trip_count(iv);
+    
+    // If trip count is statically known and small, consider full unrolling
+    if trip_count > 0 && trip_count <= 16 {
+        let total_size: Int = trip_count * body_inst_count;
+        if total_size <= (config).max_body_instructions * (config).max_unroll_factor {
+            return unroll_plan_new(trip_count, 1, 1, 0, total_size);
+        }
+    }
+    
+    // Choose partial unroll factor (e.g. 4 or 2)
+    let mut factor: Int = (config).max_unroll_factor;
+    if body_inst_count > 32 {
+        factor = 2;
+    } else if body_inst_count > 16 {
+        factor = 4;
+    }
+    
+    if trip_count > 0 {
+        let main_iters: Int = trip_count / factor;
+        let peel_iters: Int = trip_count - (main_iters * factor);
+        let growth: Int = (factor - 1) * body_inst_count;
+        return unroll_plan_new(factor, 0, main_iters, peel_iters, growth);
+    }
+    
+    // Dynamic trip count partial unrolling with runtime epilogue
+    let growth: Int = (factor - 1) * body_inst_count;
+    return unroll_plan_new(factor, 0, -1, -1, growth);
+}

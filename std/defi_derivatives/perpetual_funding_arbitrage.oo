@@ -1,0 +1,111 @@
+// # Perpetual Cash-and-Carry Funding Arbitrage Engine
+//
+// Logline: Calculates net yields, borrow interest drag, execution slippage, and breakeven holding periods for basis arbitrage strategies.
+//
+// Setup: Pure quantitative finance module evaluating delta-neutral basis trades between spot and perpetual contracts.
+//
+// Beats:
+//   1. Define BasisTradePosition, BasisYieldConfig, and BasisArbitrageMetrics structures.
+//   2. Compute annualized gross funding yields, borrow interest cost, and trading fee amortizations.
+//   3. Determine net APR/APY, break-even holding days, and capital efficiency.
+
+pub type BasisTradePosition = struct {
+    strategy_id: String,
+    spot_amount: Float,
+    spot_entry_price: Float,
+    perp_size_short: Float,
+    perp_entry_price: Float,
+    perp_funding_rate_8h: Float,
+    borrow_rate_annual: Float,
+};
+
+pub type BasisYieldConfig = struct {
+    spot_taker_fee: Float,
+    perp_taker_fee: Float,
+    rebalance_threshold_pct: Float,
+    target_holding_days: Float,
+};
+
+pub type BasisArbitrageMetrics = struct {
+    gross_funding_apr: Float,
+    borrow_cost_apr: Float,
+    entry_exit_fee_pct: Float,
+    net_holding_apr: Float,
+    net_apy_compounded: Float,
+    breakeven_days: Float,
+    initial_basis_spread_pct: Float,
+};
+
+pub fn basis_config_default() -> BasisYieldConfig {
+    return BasisYieldConfig {
+        spot_taker_fee: 0.001,  // 0.10%
+        perp_taker_fee: 0.0005, // 0.05%
+        rebalance_threshold_pct: 0.05,
+        target_holding_days: 30.0,
+    };
+}
+
+pub fn basis_trade_new(
+    strat_id: String,
+    spot_amt: Float,
+    spot_px: Float,
+    perp_px: Float,
+    funding_8h: Float,
+    borrow_apr: Float
+) -> BasisTradePosition {
+    return BasisTradePosition {
+        strategy_id: strat_id,
+        spot_amount: spot_amt,
+        spot_entry_price: spot_px,
+        perp_size_short: spot_amt,
+        perp_entry_price: perp_px,
+        perp_funding_rate_8h: funding_8h,
+        borrow_rate_annual: borrow_apr,
+    };
+}
+
+pub fn calc_basis_metrics(
+    pos: &BasisTradePosition,
+    cfg: &BasisYieldConfig
+) -> BasisArbitrageMetrics {
+    // 3 intervals per day * 365 days = 1095 intervals per year
+    let gross_apr: Float = (pos).perp_funding_rate_8h * 1095.0;
+    let borrow_apr: Float = (pos).borrow_rate_annual;
+
+    // Round-trip fee: 2 * (spot_fee + perp_fee)
+    let round_trip_fee: Float = 2.0 * ((cfg).spot_taker_fee + (cfg).perp_taker_fee);
+
+    // Initial price basis spread: (perp - spot) / spot
+    let mut basis_spread: Float = 0.0;
+    if (pos).spot_entry_price > 0.0 {
+        basis_spread = ((pos).perp_entry_price - (pos).spot_entry_price) / (pos).spot_entry_price;
+    }
+
+    let amortized_fee_apr: Float = (round_trip_fee * 365.0) / (cfg).target_holding_days;
+    let net_apr: Float = gross_apr - borrow_apr - amortized_fee_apr;
+
+    // Compound APY: (1 + net_apr / 1095)^1095 - 1 approx exp(net_apr) - 1
+    let mut net_apy: Float = 0.0;
+    if net_apr > 0.0 {
+        net_apy = exp(net_apr) - 1.0;
+    } else {
+        net_apy = net_apr;
+    }
+
+    // Daily gross net rate
+    let daily_net_rate: Float = (gross_apr - borrow_apr) / 365.0;
+    let mut breakeven: Float = 999.0;
+    if daily_net_rate > 0.000001 {
+        breakeven = round_trip_fee / daily_net_rate;
+    }
+
+    return BasisArbitrageMetrics {
+        gross_funding_apr: gross_apr,
+        borrow_cost_apr: borrow_apr,
+        entry_exit_fee_pct: round_trip_fee,
+        net_holding_apr: net_apr,
+        net_apy_compounded: net_apy,
+        breakeven_days: breakeven,
+        initial_basis_spread_pct: basis_spread,
+    };
+}

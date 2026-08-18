@@ -1,0 +1,165 @@
+// # Linux io_uring Asynchronous Interface Stub Module
+//
+// Logline: Asynchronous submission queue (SQ) and completion queue (CQ) interface stub emulating Linux kernel io_uring under IoCap.
+//
+// Setup: Coordinates batch asynchronous submission and zero-syscall completion queue consumption under IoCap.
+//
+// Beats:
+//   1. Construct IoUring ring buffers for submission (SQ) and completion (CQ) entries.
+//   2. Prepare asynchronous read and write SQEs (io_uring_prep_read / io_uring_prep_write).
+//   3. Submit pending SQEs into the completion queue under IoCap (io_uring_submit).
+//   4. Peek and advance CQE completion entries without kernel context transitions.
+// RULES.oot 1.4: Default-deny for OS I/O. Explicit &IoCap required.
+// RULES.oot 1.7: Under 256 lines.
+// residual: Kernel submission queue polling (IORING_SETUP_SQPOLL) lowers via backend driver.
+
+import "std/result.oo";
+
+type IoUringSqe = struct {
+    opcode: Int,
+    fd: Int,
+    offset: Int,
+    nbytes: Int,
+    user_data: Int
+};
+
+type IoUringCqe = struct {
+    user_data: Int,
+    res: Int,
+    flags: Int
+};
+
+type IoUring = struct {
+    sq_entries: List[IoUringSqe],
+    cq_entries: List[IoUringCqe],
+    ring_size: Int
+};
+
+pub fn io_uring_new(size: Int) -> IoUring {
+    let empty_sq: List[IoUringSqe] = list_new();
+    let empty_cq: List[IoUringCqe] = list_new();
+    let mut s: Int = size;
+    if s <= 0 {
+        s = 64;
+    }
+    return IoUring {
+        sq_entries: empty_sq,
+        cq_entries: empty_cq,
+        ring_size: s
+    };
+}
+
+pub fn io_uring_sq_len(ring: IoUring) -> Int {
+    return list_len(ring.sq_entries);
+}
+
+pub fn io_uring_cq_len(ring: IoUring) -> Int {
+    return list_len(ring.cq_entries);
+}
+
+pub fn io_uring_prep_read(
+    ring: IoUring,
+    fd: Int,
+    offset: Int,
+    nbytes: Int,
+    user_data: Int
+) -> Result[IoUring, String] {
+    let cur_sq_len: Int = list_len(ring.sq_entries);
+    let max_sz: Int = ring.ring_size;
+    if cur_sq_len >= max_sz {
+        return Err("sq_overflow");
+    }
+    let sqe: IoUringSqe = IoUringSqe {
+        opcode: 1,
+        fd: fd,
+        offset: offset,
+        nbytes: nbytes,
+        user_data: user_data
+    };
+    let updated_sq: List[IoUringSqe] = list_push(ring.sq_entries, sqe);
+    return Ok(IoUring {
+        sq_entries: updated_sq,
+        cq_entries: ring.cq_entries,
+        ring_size: ring.ring_size
+    });
+}
+
+pub fn io_uring_prep_write(
+    ring: IoUring,
+    fd: Int,
+    offset: Int,
+    nbytes: Int,
+    user_data: Int
+) -> Result[IoUring, String] {
+    let cur_sq_len: Int = list_len(ring.sq_entries);
+    let max_sz: Int = ring.ring_size;
+    if cur_sq_len >= max_sz {
+        return Err("sq_overflow");
+    }
+    let sqe: IoUringSqe = IoUringSqe {
+        opcode: 2,
+        fd: fd,
+        offset: offset,
+        nbytes: nbytes,
+        user_data: user_data
+    };
+    let updated_sq: List[IoUringSqe] = list_push(ring.sq_entries, sqe);
+    return Ok(IoUring {
+        sq_entries: updated_sq,
+        cq_entries: ring.cq_entries,
+        ring_size: ring.ring_size
+    });
+}
+
+pub fn io_uring_submit(io: &IoCap, ring: IoUring) -> IoUring {
+    let mut cq: List[IoUringCqe] = ring.cq_entries;
+    let nsq: Int = list_len(ring.sq_entries);
+    let mut i: Int = 0;
+    while i < nsq {
+        let sqe: IoUringSqe = list_get(ring.sq_entries, i);
+        let cqe: IoUringCqe = IoUringCqe {
+            user_data: sqe.user_data,
+            res: sqe.nbytes,
+            flags: 0
+        };
+        cq = list_push(cq, cqe);
+        i = i + 1;
+    }
+    let empty_sq: List[IoUringSqe] = list_new();
+    return IoUring {
+        sq_entries: empty_sq,
+        cq_entries: cq,
+        ring_size: ring.ring_size
+    };
+}
+
+pub fn io_uring_peek_cqe(ring: IoUring) -> Result[IoUringCqe, String] {
+    let ncq: Int = list_len(ring.cq_entries);
+    if ncq == 0 {
+        return Err("cq_empty");
+    }
+    return Ok(list_get(ring.cq_entries, 0));
+}
+
+pub fn io_uring_cq_advance(ring: IoUring) -> IoUring {
+    let ncq: Int = list_len(ring.cq_entries);
+    if ncq <= 1 {
+        let empty_cq: List[IoUringCqe] = list_new();
+        return IoUring {
+            sq_entries: ring.sq_entries,
+            cq_entries: empty_cq,
+            ring_size: ring.ring_size
+        };
+    }
+    let mut next_cq: List[IoUringCqe] = list_new();
+    let mut i: Int = 1;
+    while i < ncq {
+        next_cq = list_push(next_cq, list_get(ring.cq_entries, i));
+        i = i + 1;
+    }
+    return IoUring {
+        sq_entries: ring.sq_entries,
+        cq_entries: next_cq,
+        ring_size: ring.ring_size
+    };
+}

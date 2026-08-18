@@ -1,0 +1,176 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::sys::audit_engine
+// Pure simulation, event evaluation, format & work metrics
+// (split from audit.oo, M172)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+
+import "./audit_ops.oo";
+
+// -------------------------------------------------------------------
+// Pure Simulation & Event Evaluation Engine
+// -------------------------------------------------------------------
+
+pub fn audit_check_path_prefix(allowed_prefix: String, target_path: String) -> Bool {
+    let prefix_len: Int = allowed_prefix.len();
+    let target_len: Int = target_path.len();
+    if target_len < prefix_len {
+        return false;
+    }
+    let mut i: Int = 0;
+    while i < prefix_len {
+        let b1 = byte_at(allowed_prefix, i);
+        let b2 = byte_at(target_path, i);
+        if b1 != b2 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn audit_rule_matches_event(rule: &AuditRule, event: &AuditEvent) -> Bool {
+    if rule.is_enabled == false {
+        return false;
+    }
+    let r_path: String = rule.path;
+    let r_path_len: Int = r_path.len();
+    if r_path_len > 0 {
+        let e_exe: String = event.exe;
+        if audit_check_path_prefix(r_path, e_exe) == false {
+            return false;
+        }
+    }
+    let r_sys: Int = rule.syscall_nr;
+    if r_sys >= 0 {
+        let e_sys: Int = event.syscall_nr;
+        if r_sys != e_sys {
+            return false;
+        }
+    }
+    let r_key: String = rule.key;
+    let r_key_len: Int = r_key.len();
+    if r_key_len > 0 {
+        let e_key: String = event.key;
+        if r_key != e_key {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn auditd_client_eval_event(client: &mut AuditdClient, event: &AuditEvent) -> AuditEvaluationResult {
+    let mut client = client;
+    let old_events: Int = client.stats_events_received;
+    client.stats_events_received = old_events + 1;
+
+    let rules: List[AuditRule] = client.rules;
+    let n: Int = list_len(rules);
+    let mut i: Int = 0;
+    while i < n {
+        let r: AuditRule = list_get(rules, i);
+        if audit_rule_matches_event(&r, event) {
+            let i_str: String = i.to_string();
+            let r_key: String = r.key;
+            let r_act: Int = r.action;
+            return AuditEvaluationResult {
+                matched: true,
+                matched_rule_index: i,
+                rule_key: r_key,
+                action: r_act,
+                reason: "Event matched audit rule index " + i_str,
+            };
+        }
+        i = i + 1;
+    }
+
+    let default_act: Int = audit_never();
+    return AuditEvaluationResult {
+        matched: false,
+        matched_rule_index: -1,
+        rule_key: "",
+        action: default_act,
+        reason: "No audit rule matched event",
+    };
+}
+
+pub fn audit_event_format_line(event: &AuditEvent) -> String {
+    let t_id: Int = event.type_id;
+    let ts_sec: Int = event.timestamp_sec;
+    let ev_id: Int = event.event_id;
+    let p_id: Int = event.pid;
+    let u_id: Int = event.uid;
+    let a_uid: Int = event.auid;
+    let e_exe: String = event.exe;
+    let e_key: String = event.key;
+
+    let t_str: String = t_id.to_string();
+    let ts_str: String = ts_sec.to_string();
+    let ev_str: String = ev_id.to_string();
+    let p_str: String = p_id.to_string();
+    let u_str: String = u_id.to_string();
+    let a_str: String = a_uid.to_string();
+
+    let mut line: String = "type=" + t_str;
+    line = line + " msg=audit(" + ts_str + ".000:" + ev_str + "):";
+    line = line + " pid=" + p_str;
+    line = line + " uid=" + u_str;
+    line = line + " auid=" + a_str;
+    line = line + " exe=\"" + e_exe + "\"";
+    line = line + " key=\"" + e_key + "\"";
+    return line;
+}
+
+pub fn audit_rule_format_command(rule: &AuditRule) -> String {
+    let r_path: String = rule.path;
+    let path_len: Int = r_path.len();
+    if path_len > 0 {
+        let mut cmd: String = "-w " + r_path;
+        let r_perm: String = rule.permissions;
+        let perm_len: Int = r_perm.len();
+        if perm_len > 0 {
+            cmd = cmd + " -p " + r_perm;
+        }
+        let r_key: String = rule.key;
+        let key_len: Int = r_key.len();
+        if key_len > 0 {
+            cmd = cmd + " -k " + r_key;
+        }
+        return cmd;
+    }
+
+    let mut cmd: String = "-a always,exit";
+    let sys_nr: Int = rule.syscall_nr;
+    if sys_nr >= 0 {
+        let sys_str: String = sys_nr.to_string();
+        cmd = cmd + " -S " + sys_str;
+    }
+    let r_key2: String = rule.key;
+    let key_len2: Int = r_key2.len();
+    if key_len2 > 0 {
+        cmd = cmd + " -k " + r_key2;
+    }
+    return cmd;
+}
+
+pub fn auditd_client_do_work(client: &AuditdClient) -> Int {
+    let seq: Int = client.seq_num;
+    let pid: Int = client.pid;
+    let rate: Int = client.rate_limit;
+    let backlog: Int = client.backlog_limit;
+    let rec: Int = client.stats_events_received;
+    let loaded: Int = client.stats_rules_loaded;
+    let n_rules: Int = list_len(client.rules);
+    let s1: Int = seq + pid + rate;
+    let s2: Int = backlog + rec + loaded + n_rules;
+    return s1 + s2;
+}
+
+pub type Fail = struct {};
+pub type Default = struct {};
+
+
+pub fn __dummy_std_src_ooda_sec_sys_audit_engine_oo() -> Int {
+    return 0;
+}

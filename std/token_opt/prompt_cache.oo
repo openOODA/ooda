@@ -1,0 +1,97 @@
+// # Deterministic Static Prefix Alignment and Deduplication
+//
+// Logline: Aligns common system prompts and tool definitions onto deterministic boundary blocks for LLM KV-cache reuse.
+//
+// Setup: Pure context caching optimizer aligning prompt prefixes to hardware cache-block boundaries.
+//
+// Beats:
+//   1. Define PromptCacheBlock and PromptCacheRegistry structures.
+//   2. Compute deterministic content hashes for static system prefixes.
+//   3. Align prompt tokens to discrete boundary blocks to maximize LLM cache hits.
+
+pub type PromptCacheBlock = struct {
+    block_id: String,
+    prefix_hash: Int,
+    token_length: Int,
+    content_prefix: String,
+    hit_count: Int,
+};
+
+pub type PromptCacheRegistry = struct {
+    block_size_alignment: Int, // e.g. 128 tokens
+    blocks: List[PromptCacheBlock],
+    total_cache_hits: Int,
+    total_cache_misses: Int,
+};
+
+pub fn prompt_cache_hash_string(s: String) -> Int {
+    let len: Int = s.len();
+    let mut h: Int = 5381;
+    let mut i: Int = 0;
+    while i < len {
+        // djb2 hash step
+        h = ((h * 33) + 7) % 2147483647;
+        i = i + 1;
+    }
+    return h;
+}
+
+pub fn prompt_cache_registry_new(block_alignment: Int) -> PromptCacheRegistry {
+    let empty_blocks: List[PromptCacheBlock] = list_new();
+    let alignment: Int = if block_alignment > 0 { block_alignment } else { 128 };
+    return PromptCacheRegistry {
+        block_size_alignment: alignment,
+        blocks: empty_blocks,
+        total_cache_hits: 0,
+        total_cache_misses: 0,
+    };
+}
+
+pub fn prompt_cache_register_prefix(
+    reg: &mut PromptCacheRegistry,
+    id: String,
+    prefix_text: String,
+    est_tokens: Int
+) {
+    let h: Int = prompt_cache_hash_string(prefix_text);
+    let block: PromptCacheBlock = PromptCacheBlock {
+        block_id: id,
+        prefix_hash: h,
+        token_length: est_tokens,
+        content_prefix: prefix_text,
+        hit_count: 0,
+    };
+    reg.blocks = list_push(reg.blocks, block);
+}
+
+pub fn prompt_cache_lookup(
+    reg: &mut PromptCacheRegistry,
+    prompt_prefix: String
+) -> Int {
+    let target_hash: Int = prompt_cache_hash_string(prompt_prefix);
+    let n: Int = list_len(reg.blocks);
+    let mut i: Int = 0;
+
+    while i < n {
+        let b: PromptCacheBlock = list_get(reg.blocks, i);
+        if (b).prefix_hash == target_hash {
+            reg.total_cache_hits = reg.total_cache_hits + 1;
+            return (b).token_length;
+        }
+        i = i + 1;
+    }
+
+    reg.total_cache_misses = reg.total_cache_misses + 1;
+    return 0; // miss
+}
+
+pub fn prompt_cache_pad_to_boundary(tok_count: Int, alignment: Int) -> Int {
+    if alignment <= 0 {
+        return tok_count;
+    }
+    let rem: Int = tok_count % alignment;
+    if rem == 0 {
+        return tok_count;
+    }
+    return tok_count + (alignment - rem);
+}

@@ -1,0 +1,189 @@
+// # Locomotion Engine
+//
+// Logline: Lifecycle management, velocity command dispatch, dead reckoning integration, and verification for robot locomotion.
+//
+// Setup: Stateful locomotion controller requiring capability token.
+//
+// Beats:
+//   1. Initialize and configure locomotion runtime state with PID and gait instances.
+//   2. Manage lifecycle transitions (start, stop, emergency stop).
+//   3. Dispatch target velocity commands with acceleration rate-limiting.
+//   4. Integrate planar dead reckoning odometry and gait progression.
+//   5. Verify end-to-end kinematics, control, and state stepping.
+
+import "./locomotion_types.oo";
+import "./locomotion_ops.oo";
+
+// -------------------------------------------------------------------
+// Locomotion System Subsystem
+// -------------------------------------------------------------------
+
+pub fn locomotion_init(cap: &SysCap, config: LocomotionConfig) -> Locomotion {
+    return Locomotion {
+        ptr: 0,
+        len: 0,
+        cap: cap,
+        config: config,
+        pos: vec3_zero(),
+        orient: vec3_zero(),
+        target_twist: twist_zero(),
+        current_twist: twist_zero(),
+        is_active: false,
+        distance_traveled: 0.0,
+        steps_taken: 0,
+        pid_linear: pid_init(1.5, 0.1, 0.05, 5.0),
+        pid_angular: pid_init(2.0, 0.1, 0.1, 3.0),
+        gait: quadruped_gait_init(0, 0.05, 2.0),
+    };
+}
+
+pub fn locomotion_start(loco: &mut Locomotion) {
+    (loco).is_active = true;
+}
+
+pub fn locomotion_stop(loco: &mut Locomotion) {
+    (loco).is_active = false;
+    (loco).target_twist = twist_zero();
+    (loco).current_twist = twist_zero();
+}
+
+pub fn locomotion_emergency_stop(loco: &mut Locomotion) {
+    (loco).is_active = false;
+    (loco).target_twist = twist_zero();
+    (loco).current_twist = twist_zero();
+    pid_reset(&mut (loco).pid_linear);
+    pid_reset(&mut (loco).pid_angular);
+}
+
+pub fn locomotion_set_target_velocity(loco: &mut Locomotion, vx: Float, vy: Float, wz: Float) {
+    let mut clamped_vx = vx;
+    let max_v = (loco).config.max_linear_speed;
+    if clamped_vx > max_v {
+        clamped_vx = max_v;
+    }
+    let neg_max_v = 0.0 - max_v;
+    if clamped_vx < neg_max_v {
+        clamped_vx = neg_max_v;
+    }
+
+    let mut clamped_wz = wz;
+    let max_w = (loco).config.max_angular_speed;
+    if clamped_wz > max_w {
+        clamped_wz = max_w;
+    }
+    let neg_max_w = 0.0 - max_w;
+    if clamped_wz < neg_max_w {
+        clamped_wz = neg_max_w;
+    }
+
+    (loco).target_twist = twist_new(clamped_vx, vy, 0.0, 0.0, 0.0, clamped_wz);
+}
+
+/// Advance locomotion subsystem by time interval dt.
+/// Applies feedback control, smooth acceleration, pose integration, and distance metrics.
+pub fn locomotion_step(loco: &mut Locomotion, dt: Float) {
+    if (loco).is_active == false {
+        return;
+    }
+    if dt < 0.000001 {
+        return;
+    }
+
+    let target_vx = (loco).target_twist.linear.x;
+    let cur_vx = (loco).current_twist.linear.x;
+    let ctrl_vx = pid_update(&mut (loco).pid_linear, target_vx, cur_vx, dt);
+
+    let target_wz = (loco).target_twist.angular.z;
+    let cur_wz = (loco).current_twist.angular.z;
+    let ctrl_wz = pid_update(&mut (loco).pid_angular, target_wz, cur_wz, dt);
+
+    // Apply acceleration limit
+    let max_a = (loco).config.max_accel;
+    let max_dv = max_a * dt;
+
+    let mut dvx = ctrl_vx * dt;
+    if dvx > max_dv {
+        dvx = max_dv;
+    }
+    let neg_max_dv = 0.0 - max_dv;
+    if dvx < neg_max_dv {
+        dvx = neg_max_dv;
+    }
+
+    let new_vx = cur_vx + dvx;
+    let new_vy = (loco).target_twist.linear.y;
+    let new_wz = cur_wz + (ctrl_wz * dt);
+
+    (loco).current_twist = twist_new(new_vx, new_vy, 0.0, 0.0, 0.0, new_wz);
+
+    // Integrate dead reckoning position (x, y, yaw)
+    let yaw = (loco).orient.z;
+    let dtheta = new_wz * dt;
+    let avg_yaw = yaw + (dtheta * 0.5);
+
+    let cos_yaw = cos(avg_yaw);
+    let sin_yaw = sin(avg_yaw);
+
+    let dx = ((new_vx * cos_yaw) - (new_vy * sin_yaw)) * dt;
+    let dy = ((new_vx * sin_yaw) + (new_vy * cos_yaw)) * dt;
+
+    (loco).pos = vec3_new((loco).pos.x + dx, (loco).pos.y + dy, (loco).pos.z);
+    (loco).orient = vec3_new((loco).orient.x, (loco).orient.y, (loco).orient.z + dtheta);
+
+    let dist_step = sqrt((dx * dx) + (dy * dy));
+    (loco).distance_traveled = (loco).distance_traveled + dist_step;
+    (loco).steps_taken = (loco).steps_taken + 1;
+
+    // Step gait generator if quadruped
+    if (loco).config.drive_type == 3 {
+        quadruped_gait_step(&mut (loco).gait, dt);
+    }
+}
+
+/// Returns metric of total locomotion activity executed (steps taken).
+pub fn locomotion_do_work(obj: &Locomotion) -> Int {
+    if (obj).is_active == false {
+        return 0;
+    }
+    return (obj).steps_taken;
+}
+
+pub fn locomotion_get_pose(loco: &Locomotion) -> Pose3D {
+    return pose3d_new((loco).pos, (loco).orient);
+}
+
+pub fn locomotion_get_current_twist(loco: &Locomotion) -> Twist {
+    return (loco).current_twist;
+}
+
+pub fn locomotion_get_distance(loco: &Locomotion) -> Float {
+    return (loco).distance_traveled;
+}
+
+pub fn locomotion_is_active(loco: &Locomotion) -> Bool {
+    return (loco).is_active;
+}
+
+// -------------------------------------------------------------------
+// Module Self-Verification Suite
+// -------------------------------------------------------------------
+
+verify locomotion_engine {
+    let diff = diff_drive_new(0.1, 0.4, 10.0);
+    let twist = diff_drive_forward(5.0, 5.0, 0.1, 0.4);
+    assert_eq!(twist.linear.x, 0.5);
+
+    let mut pid = pid_init(1.0, 0.0, 0.0, 10.0);
+    let out = pid_update(&mut pid, 10.0, 2.0, 0.1);
+    assert_eq!(out, 8.0);
+
+    let config = locomotion_config_default();
+    let cap: &SysCap = 0;
+    let mut loco = locomotion_init(cap, config);
+    locomotion_start(&mut loco);
+    locomotion_set_target_velocity(&mut loco, 1.0, 0.0, 0.0);
+    locomotion_step(&mut loco, 0.1);
+    
+    let work = locomotion_do_work(&loco);
+    assert_eq!(work, 1);
+}

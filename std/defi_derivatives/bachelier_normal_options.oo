@@ -1,0 +1,122 @@
+// # Bachelier Normal Model Option Valuation Engine
+//
+// Logline: Evaluates options on assets with zero, negative, or arithmetic Gaussian spreads using Bachelier (1900) normal volatility dynamics.
+//
+// Setup: Pure quantitative finance module implementing normal model analytics for interest rate differentials, funding spreads, and synthetic pairs.
+//
+// Beats:
+//   1. Define BachelierContract and BachelierResult structures.
+//   2. Compute normal moneyness $d = (F - K)/(\sigma_N \sqrt{T})$ and Gaussian density distributions.
+//   3. Value European calls and puts with exact Bachelier analytical Greeks under negative price regimes.
+
+pub type BachelierContract = struct {
+    forward_spread: Float,     // Forward price/spread (can be negative)
+    strike_spread: Float,      // Strike price/spread (can be negative)
+    time_to_expiry_years: Float,
+    risk_free_rate: Float,
+    normal_volatility: Float,  // Absolute volatility in currency units per sqrt(year)
+    is_call: Bool,
+};
+
+pub type BachelierResult = struct {
+    option_price: Float,
+    delta: Float,
+    gamma: Float,
+    vega_normal: Float,
+    theta_daily: Float,
+    d_score: Float,
+};
+
+pub fn bachelier_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn bachelier_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (bachelier_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn bachelier_contract_new(
+    f: Float,
+    k: Float,
+    t: Float,
+    r: Float,
+    vol_n: Float,
+    is_call: Bool
+) -> BachelierContract {
+    return BachelierContract {
+        forward_spread: f,
+        strike_spread: k,
+        time_to_expiry_years: t,
+        risk_free_rate: r,
+        normal_volatility: vol_n,
+        is_call: is_call,
+    };
+}
+
+pub fn bachelier_evaluate(c: &BachelierContract) -> BachelierResult {
+    let f: Float = (c).forward_spread;
+    let k: Float = (c).strike_spread;
+    let t: Float = (c).time_to_expiry_years;
+    let r: Float = (c).risk_free_rate;
+    let sig: Float = (c).normal_volatility;
+
+    if t <= 0.0 || sig <= 0.0 {
+        let diff: Float = f - k;
+        let mut px: Float = 0.0;
+        if (c).is_call {
+            if diff > 0.0 { px = diff; }
+        } else {
+            if (0.0 - diff) > 0.0 { px = 0.0 - diff; }
+        }
+        return BachelierResult {
+            option_price: px,
+            delta: 0.0,
+            gamma: 0.0,
+            vega_normal: 0.0,
+            theta_daily: 0.0,
+            d_score: 0.0,
+        };
+    }
+
+    let sqrt_t: Float = sqrt(t);
+    let denom: Float = sig * sqrt_t;
+    let d: Float = (f - k) / denom;
+
+    let df: Float = exp((0.0 - r) * t);
+    let n_d: Float = bachelier_norm_cdf(d);
+    let pdf_d: Float = bachelier_norm_pdf(d);
+
+    let mut px: Float = 0.0;
+    let mut delta: Float = 0.0;
+
+    if (c).is_call {
+        px = df * (((f - k) * n_d) + (denom * pdf_d));
+        delta = df * n_d;
+    } else {
+        let n_minus_d: Float = bachelier_norm_cdf(0.0 - d);
+        px = df * (((k - f) * n_minus_d) + (denom * pdf_d));
+        delta = 0.0 - (df * n_minus_d);
+    }
+
+    let gamma: Float = (df * pdf_d) / denom;
+    let vega_n: Float = df * sqrt_t * pdf_d;
+
+    let theta_annual: Float = (0.0 - (df * sig * pdf_d)) / (2.0 * sqrt_t) - (r * px);
+    let theta_daily: Float = theta_annual / 365.0;
+
+    return BachelierResult {
+        option_price: px,
+        delta: delta,
+        gamma: gamma,
+        vega_normal: vega_n,
+        theta_daily: theta_daily,
+        d_score: d,
+    };
+}

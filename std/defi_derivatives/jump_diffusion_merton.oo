@@ -1,0 +1,115 @@
+// # Merton Jump-Diffusion Option Valuation Engine
+//
+// Logline: Prices European derivatives under Merton (1976) log-normal Poisson jump-diffusion via convergent infinite series expansion.
+//
+// Setup: Pure quantitative finance module capturing fat tails and crash risk in crypto and equity derivative smiles.
+//
+// Beats:
+//   1. Define MertonJumpParams and MertonPricerResult structures.
+//   2. Compute compensated Poisson jump drift offsets and conditional jump variance parameters.
+//   3. Sum Poisson-weighted conditional Black-Scholes terms up to series truncation convergence.
+
+pub type MertonJumpParams = struct {
+    spot: Float,
+    strike: Float,
+    time_years: Float,
+    risk_free_rate: Float,
+    continuous_vol: Float, // Diffusion volatility sigma
+    jump_intensity: Float, // Lambda (jumps per year)
+    jump_mean_log: Float,  // mu_J
+    jump_std_log: Float,   // delta_J
+};
+
+pub type MertonPricerResult = struct {
+    call_price: Float,
+    put_price: Float,
+    jump_risk_premium: Float,
+    series_terms_computed: Int,
+};
+
+pub fn merton_params_crypto_default() -> MertonJumpParams {
+    return MertonJumpParams {
+        spot: 3000.0,
+        strike: 3000.0,
+        time_years: 0.25,
+        risk_free_rate: 0.05,
+        continuous_vol: 0.50,
+        jump_intensity: 1.2,
+        jump_mean_log: -0.10, // -10% average jump on crash
+        jump_std_log: 0.15,
+    };
+}
+
+pub fn merton_norm_cdf(x: Float) -> Float {
+    let pi_factor: Float = 0.39894228;
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (pi_factor * exp(0.0 - (abs_x * abs_x / 2.0)) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn merton_bs_call(s: Float, k: Float, t: Float, r: Float, vol: Float) -> Float {
+    if t <= 0.0 || vol <= 0.0 {
+        let diff: Float = s - k;
+        if diff > 0.0 { return diff; }
+        return 0.0;
+    }
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + ((vol * vol) / 2.0)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    return (s * merton_norm_cdf(d1)) - (k * exp((0.0 - r) * t) * merton_norm_cdf(d2));
+}
+
+pub fn merton_price(p: &MertonJumpParams, max_terms: Int) -> MertonPricerResult {
+    let s: Float = (p).spot;
+    let k: Float = (p).strike;
+    let t: Float = (p).time_years;
+    let r: Float = (p).risk_free_rate;
+    let sig: Float = (p).continuous_vol;
+    let lam: Float = (p).jump_intensity;
+    let mu_j: Float = (p).jump_mean_log;
+    let delta_j: Float = (p).jump_std_log;
+
+    let k_jump: Float = exp(mu_j + (0.5 * delta_j * delta_j)) - 1.0;
+    let lam_prime: Float = lam * (1.0 + k_jump);
+
+    let mut total_call: Float = 0.0;
+    let mut poisson_prob: Float = exp((0.0 - lam_prime) * t);
+    let mut factorial: Float = 1.0;
+
+    let mut n: Int = 0;
+    while n < max_terms {
+        let mut n_fl: Float = 0.0;
+        let mut rem_n: Int = n;
+        while rem_n > 0 { n_fl = n_fl + 1.0; rem_n = rem_n - 1; }
+
+        if n > 0 {
+            factorial = factorial * n_fl;
+            poisson_prob = (exp((0.0 - lam_prime) * t) * exp(n_fl * ln(lam_prime * t))) / factorial;
+        }
+
+        let sig_n_sq: Float = (sig * sig) + ((n_fl * delta_j * delta_j) / t);
+        let sig_n: Float = sqrt(sig_n_sq);
+        let r_n: Float = r - (lam * k_jump) + ((n_fl * ln(1.0 + k_jump)) / t);
+
+        let bs_c: Float = merton_bs_call(s, k, t, r_n, sig_n);
+        total_call = total_call + (poisson_prob * bs_c);
+
+        n = n + 1;
+    }
+
+    let df: Float = exp((0.0 - r) * t);
+    let total_put: Float = total_call - s + (k * df);
+    let pure_bs_call: Float = merton_bs_call(s, k, t, r, sig);
+    let jump_premium: Float = total_call - pure_bs_call;
+
+    return MertonPricerResult {
+        call_price: total_call,
+        put_price: total_put,
+        jump_risk_premium: jump_premium,
+        series_terms_computed: max_terms,
+    };
+}

@@ -1,0 +1,123 @@
+// # Portfolio Rebalancing Engine
+//
+// Logline: Monitors portfolio asset weight drift against target corridors and generates optimal transaction-cost penalized rebalancing orders.
+//
+// Setup: Pure quantitative module with threshold tolerance bands and cost accounting.
+//
+// Beats:
+//   1. Define AssetHolding, RebalanceBand, and RebalanceOrder structures.
+//   2. Detect allocation drift exceeding upper/lower trigger bands.
+//   3. Compute optimal trade quantities balancing tracking error against transaction fees.
+
+pub type AssetHolding = struct {
+    symbol: String,
+    current_shares: Int,
+    current_price: Float,
+    target_weight_pct: Float,
+    tolerance_band_pct: Float,
+};
+
+pub type RebalanceOrder = struct {
+    symbol: String,
+    is_buy: Bool,
+    shares_delta: Int,
+    estimated_notional: Float,
+    estimated_fee: Float,
+};
+
+pub type RebalancePlan = struct {
+    total_portfolio_value: Float,
+    orders: List[RebalanceOrder],
+    total_turnover_notional: Float,
+    total_transaction_fees: Float,
+    requires_rebalancing: Bool,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn portfolio_generate_rebalance_plan(
+    holdings: List[AssetHolding],
+    cash_balance: Float,
+    fee_bps: Float
+) -> RebalancePlan {
+    let n: Int = list_len(holdings);
+    let mut total_val: Float = cash_balance;
+    let mut i: Int = 0;
+
+    while i < n {
+        let h: AssetHolding = list_get(holdings, i);
+        let pos_val: Float = int_to_float((h).current_shares) * (h).current_price;
+        total_val = total_val + pos_val;
+        i = i + 1;
+    }
+
+    let mut orders_list: List[RebalanceOrder] = list_new();
+    let mut total_turnover: Float = 0.0;
+    let mut total_fees: Float = 0.0;
+    let mut needs_rebal: Bool = false;
+
+    let mut j: Int = 0;
+    while j < n {
+        let h_j: AssetHolding = list_get(holdings, j);
+        let curr_val: Float = int_to_float((h_j).current_shares) * (h_j).current_price;
+        let curr_weight: Float = if total_val > 0.0 { (curr_val / total_val) * 100.0 } else { 0.0 };
+
+        let target_w: Float = (h_j).target_weight_pct;
+        let band: Float = (h_j).tolerance_band_pct;
+        let mut drift: Float = curr_weight - target_w;
+        let mut abs_drift: Float = drift;
+        if abs_drift < 0.0 {
+            abs_drift = 0.0 - abs_drift;
+        }
+
+        if abs_drift > band && (h_j).current_price > 0.0 {
+            needs_rebal = true;
+            let target_val: Float = (total_val * target_w) / 100.0;
+            let val_delta: Float = target_val - curr_val;
+
+            let mut is_buy_order: Bool = true;
+            let mut abs_val_delta: Float = val_delta;
+            if val_delta < 0.0 {
+                is_buy_order = false;
+                abs_val_delta = 0.0 - val_delta;
+            }
+
+            let shares_to_trade: Int = (abs_val_delta / (h_j).current_price) + 0;
+            let notional: Float = int_to_float(shares_to_trade) * (h_j).current_price;
+            let fee: Float = notional * (fee_bps / 10000.0);
+
+            if shares_to_trade > 0 {
+                let order = RebalanceOrder {
+                    symbol: (h_j).symbol,
+                    is_buy: is_buy_order,
+                    shares_delta: shares_to_trade,
+                    estimated_notional: notional,
+                    estimated_fee: fee,
+                };
+                orders_list = list_push(orders_list, order);
+                total_turnover = total_turnover + notional;
+                total_fees = total_fees + fee;
+            }
+        }
+        j = j + 1;
+    }
+
+    return RebalancePlan {
+        total_portfolio_value: total_val,
+        orders: orders_list,
+        total_turnover_notional: total_turnover,
+        total_transaction_fees: total_fees,
+        requires_rebalancing: needs_rebal,
+    };
+}

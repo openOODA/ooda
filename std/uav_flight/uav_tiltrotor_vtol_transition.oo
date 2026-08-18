@@ -1,0 +1,81 @@
+// # UAV Tilt-Rotor VTOL Transition & Aerodynamic Lift Blending
+//
+// Logline: Manages smooth flight mode transition corridors between hover (VTOL multi-rotor) and forward cruise (fixed-wing).
+//
+// Setup: Blends rotor nacelle tilt angles, aerodynamic wing lift generation, and control surface allocation during transition corridors.
+//
+// Beats:
+//   1. Define VTOL Aerodynamic Properties (wing area, stall speed, max tilt angle, transition airspeed).
+//   2. Compute Dynamic Pressure q = 0.5 * rho * V_inf^2 and Aerodynamic Wing Lift L = q * S * CL.
+//   3. Calculate required rotor tilt nacelle angle delta_tilt(V) and residual rotor vertical thrust.
+//   4. Blend control authority between multi-rotor differential thrust and fixed-wing elevons/rudder.
+
+import "./uav_coordinate_frames.oo";
+
+pub type VtolTransitionConfig = struct {
+    wing_area_m2: Float,
+    air_density: Float,
+    cl_max: Float,
+    v_stall_m_s: Float,
+    v_transition_m_s: Float,
+    max_tilt_rad: Float, // pi/2 rad (90 deg)
+};
+
+pub type VtolTransitionState = struct {
+    airspeed_m_s: Float,
+    tilt_angle_rad: Float,
+    wing_lift_n: Float,
+    rotor_thrust_n: Float,
+    blend_factor_fw: Float, // 0.0 = pure multirotor, 1.0 = pure fixed wing
+};
+
+pub fn vtol_transition_config_default() -> VtolTransitionConfig {
+    return VtolTransitionConfig {
+        wing_area_m2: 0.45,
+        air_density: 1.225,
+        cl_max: 1.2,
+        v_stall_m_s: 11.0,
+        v_transition_m_s: 16.0,
+        max_tilt_rad: 1.5707963267948966, // 90 degrees
+    };
+}
+
+pub fn compute_vtol_transition(
+    cfg: &VtolTransitionConfig,
+    airspeed: Float,
+    total_vehicle_weight_n: Float
+) -> VtolTransitionState {
+    let safe_v: Float = if airspeed < 0.0 { 0.0 } else { airspeed };
+
+    // Dynamic pressure q = 0.5 * rho * v^2
+    let q: Float = 0.5 * (cfg).air_density * safe_v * safe_v;
+
+    // Wing aerodynamic lift available at nominal cruise alpha (e.g. CL approx 0.5)
+    let cl_cruise: Float = 0.5;
+    let wing_lift: Float = q * (cfg).wing_area_m2 * cl_cruise;
+
+    // Fixed-wing blending factor = (v / v_trans)^2 clamped [0, 1]
+    let v_ratio: Float = safe_v / (cfg).v_transition_m_s;
+    let blend_fw_raw: Float = v_ratio * v_ratio;
+    let blend_fw: Float = if blend_fw_raw > 1.0 { 1.0 } else { blend_fw_raw };
+
+    // Nacelle tilt angle: 0 rad (vertical hover) to pi/2 (horizontal cruise)
+    let tilt: Float = blend_fw * (cfg).max_tilt_rad;
+
+    // Required vertical rotor thrust support = max(0, Weight - WingLift)
+    let rem_weight: Float = total_vehicle_weight_n - wing_lift;
+    let req_vert_thrust: Float = if rem_weight < 0.0 { 0.0 } else { rem_weight };
+
+    // Total rotor thrust accounting for nacelle tilt angle: T_rotor = T_vert / cos(tilt)
+    let cos_t: Float = cos(tilt);
+    let safe_cos: Float = if cos_t < 0.15 { 0.15 } else { cos_t };
+    let rotor_thrust: Float = req_vert_thrust / safe_cos;
+
+    return VtolTransitionState {
+        airspeed_m_s: safe_v,
+        tilt_angle_rad: tilt,
+        wing_lift_n: wing_lift,
+        rotor_thrust_n: rotor_thrust,
+        blend_factor_fw: blend_fw,
+    };
+}

@@ -1,0 +1,207 @@
+// # Modbus Server State Machine & PDU Processor
+//
+// Logline: Implements Modbus slave memory tables, register dispatch, and exception handling.
+//
+// Setup: NetCap-gated server engine processing incoming Modbus PDUs against industrial register maps.
+//
+// Beats:
+//   1. Define Modbus memory models for coils, discrete inputs, and holding/input registers.
+//   2. Validate address ranges and process standard Modbus read/write function codes.
+//   3. Generate compliant response PDUs and Modbus exception frames under &NetCap.
+
+import "./modbus_tcp_header.oo";
+
+pub type ModbusServer = struct {
+    unit_id: Int,
+    coils: List[Bool],
+    discrete_inputs: List[Bool],
+    holding_registers: List[Int],
+    input_registers: List[Int],
+    requests_processed: Int,
+    exceptions_raised: Int,
+};
+
+/// Initialize a new ModbusServer instance with preallocated register tables.
+pub fn modbus_server_new(unit_id: Int, table_size: Int) -> ModbusServer {
+    let mut coils_list: List[Bool] = list_new();
+    let mut disc_list: List[Bool] = list_new();
+    let mut hr_list: List[Int] = list_new();
+    let mut ir_list: List[Int] = list_new();
+
+    let mut i: Int = 0;
+    while i < table_size {
+        coils_list = list_push(coils_list, false);
+        disc_list = list_push(disc_list, false);
+        hr_list = list_push(hr_list, 0);
+        ir_list = list_push(ir_list, 0);
+        i = i + 1;
+    }
+
+    return ModbusServer {
+        unit_id: unit_id,
+        coils: coils_list,
+        discrete_inputs: disc_list,
+        holding_registers: hr_list,
+        input_registers: ir_list,
+        requests_processed: 0,
+        exceptions_raised: 0,
+    };
+}
+
+/// Create an exception response PDU with error code (FC + 0x80).
+pub fn modbus_server_make_exception(fc: Int, ex_code: Int) -> ModbusTcpAdu {
+    let mut pdu: List[Int] = list_new();
+    pdu = list_push(pdu, ex_code % 256);
+    let mbap: ModbusTcpMbap = modbus_mbap_new(0, 1, 2);
+    return ModbusTcpAdu {
+        mbap: mbap,
+        function_code: (fc + 128) % 256,
+        pdu_data: pdu,
+    };
+}
+
+/// Process FC03 (Read Holding Registers).
+pub fn modbus_server_read_holding_registers(
+    server: &ModbusServer,
+    start_addr: Int,
+    count: Int
+) -> Result[List[Int], Int] {
+    let total_regs: Int = list_len((server).holding_registers);
+    if count < 1 || count > 125 {
+        return Err(3); // 0x03: Illegal Data Value
+    }
+    if start_addr < 0 || (start_addr + count) > total_regs {
+        return Err(2); // 0x02: Illegal Data Address
+    }
+
+    let byte_count: Int = count * 2;
+    let mut pdu: List[Int] = list_new();
+    pdu = list_push(pdu, byte_count);
+
+    let mut i: Int = 0;
+    while i < count {
+        let val: Int = list_get((server).holding_registers, start_addr + i);
+        pdu = list_push(pdu, (val / 256) % 256);
+        pdu = list_push(pdu, val % 256);
+        i = i + 1;
+    }
+    return Ok(pdu);
+}
+
+/// Process FC06 (Write Single Register).
+pub fn modbus_server_write_single_register(
+    server: &mut ModbusServer,
+    addr: Int,
+    value: Int
+) -> Result[List[Int], Int] {
+    let total_regs: Int = list_len((server).holding_registers);
+    if addr < 0 || addr >= total_regs {
+        return Err(2); // 0x02: Illegal Data Address
+    }
+
+    let mut new_hr: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < total_regs {
+        if i == addr {
+            new_hr = list_push(new_hr, value % 65536);
+        } else {
+            new_hr = list_push(new_hr, list_get((server).holding_registers, i));
+        }
+        i = i + 1;
+    }
+    (server).holding_registers = new_hr;
+
+    // Normal response echoes the address and value written
+    let mut pdu: List[Int] = list_new();
+    pdu = list_push(pdu, (addr / 256) % 256);
+    pdu = list_push(pdu, addr % 256);
+    pdu = list_push(pdu, (value / 256) % 256);
+    pdu = list_push(pdu, value % 256);
+    return Ok(pdu);
+}
+
+/// Dispatch incoming Modbus PDU and construct response under &NetCap.
+pub fn modbus_server_handle_adu(
+    net: &NetCap,
+    server: &mut ModbusServer,
+    req_adu: &ModbusTcpAdu
+) -> ModbusTcpAdu {
+    (server).requests_processed = (server).requests_processed + 1;
+    let fc: Int = (req_adu).function_code;
+    let tx_id: Int = (req_adu).mbap.transaction_id;
+    let uid: Int = (req_adu).mbap.unit_id;
+    let data_len: Int = list_len((req_adu).pdu_data);
+
+    if fc == 3 {
+        // Read Holding Registers
+        if data_len < 4 {
+            (server).exceptions_raised = (server).exceptions_raised + 1;
+            return modbus_server_make_exception(fc, 3);
+        }
+        let addr_hi: Int = list_get((req_adu).pdu_data, 0);
+        let addr_lo: Int = list_get((req_adu).pdu_data, 1);
+        let cnt_hi: Int = list_get((req_adu).pdu_data, 2);
+        let cnt_lo: Int = list_get((req_adu).pdu_data, 3);
+        let start_addr: Int = (addr_hi * 256) + addr_lo;
+        let count: Int = (cnt_hi * 256) + cnt_lo;
+
+        let res: Result[List[Int], Int] = modbus_server_read_holding_registers(server, start_addr, count);
+        if res.is_ok() {
+            let pdu: List[Int] = res.unwrap();
+            let mbap: ModbusTcpMbap = modbus_mbap_new(tx_id, uid, list_len(pdu) + 1);
+            return ModbusTcpAdu {
+                mbap: mbap,
+                function_code: fc,
+                pdu_data: pdu,
+            };
+        } else {
+            (server).exceptions_raised = (server).exceptions_raised + 1;
+            let ex: Int = res.unwrap_err();
+            let mbap: ModbusTcpMbap = modbus_mbap_new(tx_id, uid, 2);
+            let mut err_pdu: List[Int] = list_new();
+            err_pdu = list_push(err_pdu, ex);
+            return ModbusTcpAdu {
+                mbap: mbap,
+                function_code: (fc + 128) % 256,
+                pdu_data: err_pdu,
+            };
+        }
+    } else if fc == 6 {
+        // Write Single Register
+        if data_len < 4 {
+            (server).exceptions_raised = (server).exceptions_raised + 1;
+            return modbus_server_make_exception(fc, 3);
+        }
+        let addr_hi: Int = list_get((req_adu).pdu_data, 0);
+        let addr_lo: Int = list_get((req_adu).pdu_data, 1);
+        let val_hi: Int = list_get((req_adu).pdu_data, 2);
+        let val_lo: Int = list_get((req_adu).pdu_data, 3);
+        let addr: Int = (addr_hi * 256) + addr_lo;
+        let val: Int = (val_hi * 256) + val_lo;
+
+        let res2: Result[List[Int], Int] = modbus_server_write_single_register(server, addr, val);
+        if res2.is_ok() {
+            let pdu2: List[Int] = res2.unwrap();
+            let mbap2: ModbusTcpMbap = modbus_mbap_new(tx_id, uid, list_len(pdu2) + 1);
+            return ModbusTcpAdu {
+                mbap: mbap2,
+                function_code: fc,
+                pdu_data: pdu2,
+            };
+        } else {
+            (server).exceptions_raised = (server).exceptions_raised + 1;
+            let ex2: Int = res2.unwrap_err();
+            let mbap_err: ModbusTcpMbap = modbus_mbap_new(tx_id, uid, 2);
+            let mut err_pdu2: List[Int] = list_new();
+            err_pdu2 = list_push(err_pdu2, ex2);
+            return ModbusTcpAdu {
+                mbap: mbap_err,
+                function_code: (fc + 128) % 256,
+                pdu_data: err_pdu2,
+            };
+        }
+    } else {
+        (server).exceptions_raised = (server).exceptions_raised + 1;
+        return modbus_server_make_exception(fc, 1); // 0x01: Illegal Function
+    }
+}

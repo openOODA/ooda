@@ -1,0 +1,136 @@
+// # eBPF ELF Object Loader & Section Parser
+//
+// Logline: Parses ELF BPF sections, extracts program types, and links map file descriptors.
+//
+// Setup: User-space loader linking compiled eBPF ELF objects against kernel subsystem interfaces.
+//
+// Beats:
+//   1. Parse ELF section headers for BPF program annotations (kprobe/, xdp, tc, cgroup/skb).
+//   2. Relocate map references within instruction streams using allocated map file descriptors.
+//   3. Bind attached interface indices and attach flags to loaded BPF program descriptors.
+
+pub type EbpfProgType = struct {
+    type_id: Int,
+    section_name: String,
+    expected_attach_type: Int,
+};
+
+pub type BpfMapDesc = struct {
+    map_name: String,
+    map_type: Int,
+    key_size: Int,
+    value_size: Int,
+    max_entries: Int,
+    fd: Int,
+};
+
+pub type LoadedEbpfProgram = struct {
+    prog_name: String,
+    prog_type: EbpfProgType,
+    insn_bytes_count: Int,
+    attached_ifindex: Int,
+    is_loaded: Bool,
+    fd: Int,
+};
+
+pub type EbpfLoaderContext = struct {
+    programs: List[LoadedEbpfProgram],
+    maps: List[BpfMapDesc],
+    next_fd: Int,
+};
+
+pub fn ebpf_loader_new() -> EbpfLoaderContext {
+    let empty_progs: List[LoadedEbpfProgram] = list_new();
+    let empty_maps: List[BpfMapDesc] = list_new();
+    return EbpfLoaderContext {
+        programs: empty_progs,
+        maps: empty_maps,
+        next_fd: 100,
+    };
+}
+
+pub fn ebpf_loader_add_map(
+    ctx: &mut EbpfLoaderContext,
+    name: String,
+    map_type: Int,
+    key_size: Int,
+    val_size: Int,
+    max_entries: Int
+) -> Int {
+    let fd: Int = (ctx).next_fd;
+    (ctx).next_fd = (ctx).next_fd + 1;
+
+    let m = BpfMapDesc {
+        map_name: name,
+        map_type: map_type,
+        key_size: key_size,
+        value_size: val_size,
+        max_entries: max_entries,
+        fd: fd,
+    };
+
+    (ctx).maps = list_push((ctx).maps, m);
+    return fd;
+}
+
+pub fn ebpf_loader_load_program(
+    ctx: &mut EbpfLoaderContext,
+    name: String,
+    type_id: Int,
+    section: String,
+    insn_count: Int
+) -> Int {
+    let fd: Int = (ctx).next_fd;
+    (ctx).next_fd = (ctx).next_fd + 1;
+
+    let ptype = EbpfProgType {
+        type_id: type_id,
+        section_name: section,
+        expected_attach_type: type_id,
+    };
+
+    let prog = LoadedEbpfProgram {
+        prog_name: name,
+        prog_type: ptype,
+        insn_bytes_count: insn_count * 8,
+        attached_ifindex: 0,
+        is_loaded: true,
+        fd: fd,
+    };
+
+    (ctx).programs = list_push((ctx).programs, prog);
+    return fd;
+}
+
+pub fn ebpf_loader_attach_xdp(
+    ctx: &mut EbpfLoaderContext,
+    prog_fd: Int,
+    ifindex: Int
+) -> Bool {
+    let n: Int = list_len((ctx).programs);
+    let mut updated: List[LoadedEbpfProgram] = list_new();
+    let mut attached: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let p: LoadedEbpfProgram = list_get((ctx).programs, i);
+        if (p).fd == prog_fd && (p).prog_type.type_id == 3 {
+            let mod_p = LoadedEbpfProgram {
+                prog_name: (p).prog_name,
+                prog_type: (p).prog_type,
+                insn_bytes_count: (p).insn_bytes_count,
+                attached_ifindex: ifindex,
+                is_loaded: (p).is_loaded,
+                fd: (p).fd,
+            };
+            updated = list_push(updated, mod_p);
+            attached = true;
+        } else {
+            updated = list_push(updated, p);
+        }
+        i = i + 1;
+    }
+
+    (ctx).programs = updated;
+    return attached;
+}

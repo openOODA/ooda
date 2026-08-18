@@ -1,0 +1,124 @@
+// # Synchronized Quorum-Sensing Oscillator ODEs
+//
+// Logline: Simulates population-level synchronized genetic oscillations in microfluidic chambers via intercellular AHL coupling.
+//
+// Setup: Danino-Hasty multi-cellular oscillator combining positive feedback LuxI/LuxR AHL synthesis and negative feedback AiiA degradation.
+//
+// Beats:
+//   1. Define DaninoOscillatorParams, DaninoCellState, and PopulationSyncMetrics data structures.
+//   2. Compute 4-variable ODE system for LuxI, AiiA, intracellular AHL (C_i), and extracellular AHL (C_e).
+//   3. Step coupled colony trajectories using Runge-Kutta numerical integration and measure macroscopic synchronization index.
+
+pub type DaninoOscillatorParams = struct {
+    c_a: Float,
+    c_i: Float,
+    b_a: Float,
+    b_i: Float,
+    gamma_a: Float,
+    gamma_i: Float,
+    gamma_c: Float,
+    k_diff: Float,
+    mu_washout: Float,
+    cell_density_d: Float,
+};
+
+pub type DaninoCellState = struct {
+    lux_i: Float,
+    aii_a: Float,
+    ahl_internal: Float,
+    ahl_external: Float,
+    time_min: Float,
+};
+
+pub type PopulationSyncMetrics = struct {
+    internal_external_gradient: Float,
+    oscillation_amplitude: Float,
+    is_synchronized: Bool,
+};
+
+pub fn danino_hill_act(ahl: Float, base_rate: Float, coeff: Float) -> Float {
+    let ahl_sq = ahl * ahl;
+    let denom = 1.0 + ahl_sq;
+    let frac = ahl_sq / denom;
+    return base_rate * (1.0 + (coeff * frac));
+}
+
+pub fn danino_derivatives(
+    st: &DaninoCellState,
+    p: &DaninoOscillatorParams,
+) -> DaninoCellState {
+    let p_a = danino_hill_act((st).ahl_internal, (p).c_a, (p).b_a);
+    let p_i = danino_hill_act((st).ahl_internal, (p).c_i, (p).b_i);
+
+    // dA/dt = P_A - gamma_A * A / (1 + A + I)
+    let denom_enz = 1.0 + (st).aii_a + (st).lux_i;
+    let da = p_a - (((p).gamma_a * (st).aii_a) / denom_enz);
+
+    // dI/dt = P_I - gamma_I * I / (1 + A + I)
+    let di = p_i - (((p).gamma_i * (st).lux_i) / denom_enz);
+
+    // dC_internal/dt = b_I * I - gamma_C * A * C_i / (1 + C_i) + d * diff_term
+    let diff_term = (p).k_diff * ((st).ahl_external - (st).ahl_internal);
+    let deg_ahl = ((p).gamma_c * (st).aii_a * (st).ahl_internal) / (1.0 + (st).ahl_internal);
+    let d_ci = ((p).b_i * (st).lux_i) - deg_ahl + diff_term;
+
+    // dC_external/dt = - d/(1-d) * diff_term - mu * C_e
+    let factor_d = (p).cell_density_d / (1.0 - (p).cell_density_d);
+    let d_ce = (-factor_d * diff_term) - ((p).mu_washout * (st).ahl_external);
+
+    return DaninoCellState {
+        lux_i: di,
+        aii_a: da,
+        ahl_internal: d_ci,
+        ahl_external: d_ce,
+        time_min: (st).time_min,
+    };
+}
+
+pub fn danino_rk4_step(
+    st: &DaninoCellState,
+    p: &DaninoOscillatorParams,
+    dt: Float,
+) -> DaninoCellState {
+    let k1 = danino_derivatives(st, p);
+
+    let s2 = DaninoCellState {
+        lux_i: (st).lux_i + (0.5 * dt * (k1).lux_i),
+        aii_a: (st).aii_a + (0.5 * dt * (k1).aii_a),
+        ahl_internal: (st).ahl_internal + (0.5 * dt * (k1).ahl_internal),
+        ahl_external: (st).ahl_external + (0.5 * dt * (k1).ahl_external),
+        time_min: (st).time_min + (0.5 * dt),
+    };
+    let k2 = danino_derivatives(&s2, p);
+
+    let s3 = DaninoCellState {
+        lux_i: (st).lux_i + (0.5 * dt * (k2).lux_i),
+        aii_a: (st).aii_a + (0.5 * dt * (k2).aii_a),
+        ahl_internal: (st).ahl_internal + (0.5 * dt * (k2).ahl_internal),
+        ahl_external: (st).ahl_external + (0.5 * dt * (k2).ahl_external),
+        time_min: (st).time_min + (0.5 * dt),
+    };
+    let k3 = danino_derivatives(&s3, p);
+
+    let s4 = DaninoCellState {
+        lux_i: (st).lux_i + (dt * (k3).lux_i),
+        aii_a: (st).aii_a + (dt * (k3).aii_a),
+        ahl_internal: (st).ahl_internal + (dt * (k3).ahl_internal),
+        ahl_external: (st).ahl_external + (dt * (k3).ahl_external),
+        time_min: (st).time_min + dt,
+    };
+    let k4 = danino_derivatives(&s4, p);
+
+    let li = (st).lux_i + (dt / 6.0) * ((k1).lux_i + (2.0 * (k2).lux_i) + (2.0 * (k3).lux_i) + (k4).lux_i);
+    let aa = (st).aii_a + (dt / 6.0) * ((k1).aii_a + (2.0 * (k2).aii_a) + (2.0 * (k3).aii_a) + (k4).aii_a);
+    let ci = (st).ahl_internal + (dt / 6.0) * ((k1).ahl_internal + (2.0 * (k2).ahl_internal) + (2.0 * (k3).ahl_internal) + (k4).ahl_internal);
+    let ce = (st).ahl_external + (dt / 6.0) * ((k1).ahl_external + (2.0 * (k2).ahl_external) + (2.0 * (k3).ahl_external) + (k4).ahl_external);
+
+    return DaninoCellState {
+        lux_i: if li < 0.0 { 0.0 } else { li },
+        aii_a: if aa < 0.0 { 0.0 } else { aa },
+        ahl_internal: if ci < 0.0 { 0.0 } else { ci },
+        ahl_external: if ce < 0.0 { 0.0 } else { ce },
+        time_min: (st).time_min + dt,
+    };
+}

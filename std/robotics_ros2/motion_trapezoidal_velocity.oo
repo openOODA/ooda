@@ -1,0 +1,124 @@
+// # Trapezoidal Velocity Profile Generator
+//
+// Logline: Plans time-optimal trapezoidal and triangular motion profiles subject to maximum velocity and acceleration limits.
+//
+// Setup: Industrial motion planning profile evaluating 3-phase (accel, cruise, decel) kinematic trajectories.
+//
+// Beats:
+//   1. Define Trapezoidal Profile parameters and phase timing durations.
+//   2. Determine reachable peak velocity and detect triangular profiles without cruise phase.
+//   3. Compute analytical switching times (t_acc, t_cruise, t_total).
+//   4. Evaluate instantaneous position, velocity, and acceleration along profile.
+
+pub type TrapezoidalProfile = struct {
+    q0: Float,
+    q1: Float,
+    v_max: Float,
+    a_max: Float,
+    t_acc: Float,
+    t_cruise: Float,
+    t_total: Float,
+    v_peak: Float,
+    direction: Float, // +1.0 or -1.0
+};
+
+pub type MotionProfileSample = struct {
+    position: Float,
+    velocity: Float,
+    acceleration: Float,
+};
+
+pub fn trapezoidal_profile_plan(
+    q0: Float,
+    q1: Float,
+    v_max: Float,
+    a_max: Float
+) -> TrapezoidalProfile {
+    let raw_dist: Float = q1 - q0;
+    let dist: Float = if raw_dist < 0.0 { 0.0 - raw_dist } else { raw_dist };
+    let dir: Float = if raw_dist < 0.0 { -1.0 } else { 1.0 };
+
+    let v_limit: Float = if v_max < 0.001 { 0.001 } else { v_max };
+    let a_limit: Float = if a_max < 0.001 { 0.001 } else { a_max };
+
+    // Distance required to reach v_max and brake to 0: d_crit = v_max^2 / a_max
+    let d_crit: Float = (v_limit * v_limit) / a_limit;
+
+    if dist < d_crit {
+        // Triangular profile (no constant velocity cruise)
+        let v_peak: Float = sqrt(dist * a_limit);
+        let ta: Float = v_peak / a_limit;
+        return TrapezoidalProfile {
+            q0: q0, q1: q1,
+            v_max: v_limit, a_max: a_limit,
+            t_acc: ta,
+            t_cruise: 0.0,
+            t_total: 2.0 * ta,
+            v_peak: v_peak,
+            direction: dir,
+        };
+    } else {
+        // Full trapezoidal profile
+        let ta: Float = v_limit / a_limit;
+        let d_cruise: Float = dist - d_crit;
+        let tc: Float = d_cruise / v_limit;
+        return TrapezoidalProfile {
+            q0: q0, q1: q1,
+            v_max: v_limit, a_max: a_limit,
+            t_acc: ta,
+            t_cruise: tc,
+            t_total: (2.0 * ta) + tc,
+            v_peak: v_limit,
+            direction: dir,
+        };
+    }
+}
+
+pub fn trapezoidal_profile_eval(prof: &TrapezoidalProfile, t_query: Float) -> MotionProfileSample {
+    let mut t: Float = t_query;
+    if t < 0.0 {
+        t = 0.0;
+    }
+    if t > (prof).t_total {
+        t = (prof).t_total;
+    }
+
+    let ta: Float = (prof).t_acc;
+    let tc: Float = (prof).t_cruise;
+    let a: Float = (prof).a_max;
+    let vp: Float = (prof).v_peak;
+    let dir: Float = (prof).direction;
+    let q0: Float = (prof).q0;
+
+    let mut s: Float = 0.0;
+    let mut v: Float = 0.0;
+    let mut acc: Float = 0.0;
+
+    if t <= ta {
+        // Phase 1: Acceleration
+        s = 0.5 * a * t * t;
+        v = a * t;
+        acc = a;
+    } else if t <= ta + tc {
+        // Phase 2: Cruise
+        let dt: Float = t - ta;
+        let s_acc: Float = 0.5 * a * ta * ta;
+        s = s_acc + (vp * dt);
+        v = vp;
+        acc = 0.0;
+    } else {
+        // Phase 3: Deceleration
+        let dt: Float = t - (ta + tc);
+        let s_acc: Float = 0.5 * a * ta * ta;
+        let s_cruise: Float = vp * tc;
+        s = s_acc + s_cruise + (vp * dt) - (0.5 * a * dt * dt);
+        v = vp - (a * dt);
+        acc = 0.0 - a;
+    }
+
+    return MotionProfileSample {
+        position: q0 + (dir * s),
+        velocity: dir * v,
+        acceleration: dir * acc,
+    };
+}

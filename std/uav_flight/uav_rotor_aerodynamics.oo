@@ -1,0 +1,123 @@
+// # UAV Rotor Aerodynamics & Blade Element Momentum Theory
+//
+// Logline: Calculates rotor thrust, power, torque, advance ratio, and induced inflow velocity using Blade Element Momentum (BEM) theory.
+//
+// Setup: Aerodynamic propeller modeling determining lift, induced drag, and aerodynamic efficiency under forward flight and hover.
+//
+// Beats:
+//   1. Define Rotor Geometry (radius, chord, pitch angle, number of blades, air density).
+//   2. Compute Advance Ratio mu = V_inf / (omega * R) and inflow ratio lambda.
+//   3. Solve induced inflow velocity vi using momentum theory iterative approximation.
+//   4. Calculate Thrust Coefficient CT, Power Coefficient CP, and Figure of Merit (FM).
+
+import "./uav_coordinate_frames.oo";
+
+pub type RotorGeometry = struct {
+    radius: Float,
+    blade_chord: Float,
+    num_blades: Float,
+    pitch_angle_rad: Float,
+    air_density: Float,
+    lift_slope: Float,
+    profile_drag_cd0: Float,
+};
+
+pub type RotorAeroOutput = struct {
+    thrust_n: Float,
+    torque_nm: Float,
+    power_watts: Float,
+    induced_velocity: Float,
+    figure_of_merit: Float,
+};
+
+pub fn rotor_geometry_default() -> RotorGeometry {
+    return RotorGeometry {
+        radius: 0.127, // 5-inch prop radius
+        blade_chord: 0.018,
+        num_blades: 2.0,
+        pitch_angle_rad: 0.20,
+        air_density: 1.225, // ISA sea level kg/m^3
+        lift_slope: 5.7,     // 2*pi approx
+        profile_drag_cd0: 0.015,
+    };
+}
+
+pub fn compute_induced_velocity_hover(thrust: Float, geom: &RotorGeometry) -> Float {
+    let pi_val: Float = 3.141592653589793;
+    let r: Float = (geom).radius;
+    let area: Float = pi_val * r * r;
+    let rho: Float = (geom).air_density;
+
+    if thrust <= 0.0 {
+        return 0.0;
+    }
+    // vi_hover = sqrt(T / (2 * rho * A))
+    return sqrt(thrust / (2.0 * rho * area));
+}
+
+pub fn compute_rotor_aerodynamics(
+    geom: &RotorGeometry,
+    omega_rad_s: Float,
+    axial_speed: Float
+) -> RotorAeroOutput {
+    let pi_val: Float = 3.141592653589793;
+    let r: Float = (geom).radius;
+    let rho: Float = (geom).air_density;
+    let area: Float = pi_val * r * r;
+    let v_tip: Float = omega_rad_s * r;
+
+    if omega_rad_s < 1.0 {
+        return RotorAeroOutput {
+            thrust_n: 0.0,
+            torque_nm: 0.0,
+            power_watts: 0.0,
+            induced_velocity: 0.0,
+            figure_of_merit: 0.0,
+        };
+    }
+
+    // Solidity sigma = (N_blades * chord) / (pi * R)
+    let sigma: Float = ((geom).num_blades * (geom).blade_chord) / (pi_val * r);
+
+    // Hover thrust coefficient CT = (sigma * a / 2) * (theta_0 / 3 - lambda / 2)
+    let a: Float = (geom).lift_slope;
+    let theta0: Float = (geom).pitch_angle_rad;
+
+    // Approximate inflow ratio
+    let lambda_hover: Float = sqrt(sigma * a / 16.0);
+    let ct: Float = (sigma * a / 2.0) * ((theta0 / 3.0) - (lambda_hover / 2.0));
+    let safe_ct: Float = if ct < 0.0 { 0.0 } else { ct };
+
+    // Total thrust T = CT * rho * A * (omega * R)^2
+    let thrust: Float = safe_ct * rho * area * v_tip * v_tip;
+
+    // Induced velocity
+    let vi: Float = compute_induced_velocity_hover(thrust, geom);
+
+    // Profile power CP0 = (sigma * cd0) / 8
+    let cp0: Float = (sigma * (geom).profile_drag_cd0) / 8.0;
+    // Induced power CPi = CT * lambda
+    let cpi: Float = safe_ct * (vi / v_tip);
+    let cp_total: Float = cp0 + cpi;
+
+    // Power P = CP * rho * A * (omega * R)^3
+    let power: Float = cp_total * rho * area * v_tip * v_tip * v_tip;
+
+    // Torque Q = P / omega
+    let torque: Float = power / omega_rad_s;
+
+    // Figure of Merit FM = (CT^(3/2) / sqrt(2)) / CP
+    let fm: Float = if cp_total > 0.000001 {
+        (safe_ct * sqrt(safe_ct) / 1.41421356) / cp_total
+    } else {
+        0.0
+    };
+
+    return RotorAeroOutput {
+        thrust_n: thrust,
+        torque_nm: torque,
+        power_watts: power,
+        induced_velocity: vi,
+        figure_of_merit: fm,
+    };
+}

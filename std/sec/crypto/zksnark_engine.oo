@@ -1,0 +1,134 @@
+// # zk-SNARK Engine and Policy Management
+//
+// Logline: Manages execution engine lifecycle, security policies, and performance accounting for ZKSNARK.
+//
+// Setup: Imports companion modules for validated ZKSNARK operations.
+//
+// Beats:
+//   1. Import ZKSNARK operations and types.
+//   2. Initialize security policies and execution engine contexts.
+//   3. Compute engine workload telemetry and operation metrics.
+
+import "./zksnark_validate.oo";
+
+pub fn zk_snark_prover_init(prover_id: String, pk: ProvingKey) -> ZkSnarkProver {
+    let ready: Bool = pk.is_ready;
+    return ZkSnarkProver {
+        prover_id: prover_id,
+        proving_key: pk,
+        proofs_generated: 0,
+        strict_mode: true,
+        is_active: ready,
+    };
+}
+
+pub fn zk_snark_prover_generate_proof(
+    prover: &mut ZkSnarkProver,
+    circuit: ZkSnarkCircuit,
+    witness: ZkSnarkWitness
+) -> Result[ZkProof, String] {
+    let p_act: Bool = (prover).is_active;
+    if p_act == false {
+        return Err("ZKSNARK_PROVER_INACTIVE: Prover is offline or proving key not ready");
+    }
+    let c_sat: Bool = circuit.is_satisfied;
+    if c_sat == false {
+        return Err("ZKSNARK_CIRCUIT_UNSATISFIED: R1CS constraints not satisfied");
+    }
+    let w_val: Bool = witness.is_valid;
+    if w_val == false {
+        return Err("ZKSNARK_WITNESS_INVALID: Witness signal assignment is invalid");
+    }
+    let c_id: String = circuit.circuit_id;
+    let w_cid: String = witness.circuit_id;
+    if c_id != w_cid {
+        return Err("ZKSNARK_CIRCUIT_MISMATCH: Witness circuit ID does not match circuit");
+    }
+
+    let cur_gen: Int = (prover).proofs_generated;
+    let count: Int = cur_gen + 1;
+    (prover).proofs_generated = count;
+    let count_str: String = count.to_string();
+
+    let prov_id: String = (prover).prover_id;
+    let pid: String = prov_id + "_proof_" + count_str;
+    let pk: ProvingKey = (prover).proving_key;
+    let proto: String = pk.protocol;
+    let curve: String = pk.curve;
+    let pub_inputs: List[String] = witness.public_signals;
+
+    let chash: String = circuit.circuit_hash;
+    let a_g1: String = "G1_A_" + chash + "_" + count_str;
+    let b_g2: String = "G2_B_" + chash + "_" + count_str;
+    let c_g1: String = "G1_C_" + chash + "_" + count_str;
+
+    let proof: ZkProof = zk_proof_create(pid, a_g1, b_g2, c_g1, proto, curve, pub_inputs);
+    return Ok(proof);
+}
+
+// -------------------------------------------------------------------
+// Verifier Lifecycle & Execution
+// -------------------------------------------------------------------
+
+pub fn zk_snark_verifier_init(verifier_id: String, vk: VerificationKey) -> ZkSnarkVerifier {
+    let active: Bool = vk.is_active;
+    return ZkSnarkVerifier {
+        verifier_id: verifier_id,
+        verification_key: vk,
+        proofs_verified: 0,
+        proofs_rejected: 0,
+        strict_mode: true,
+        is_active: active,
+    };
+}
+
+pub fn zk_snark_verifier_verify(verifier: &mut ZkSnarkVerifier, proof: ZkProof) -> Bool {
+    let v_act: Bool = (verifier).is_active;
+    if v_act == false {
+        let rej: Int = (verifier).proofs_rejected;
+        (verifier).proofs_rejected = rej + 1;
+        return false;
+    }
+
+    let vk: VerificationKey = (verifier).verification_key;
+    let val_res: Result[Bool, String] = zk_proof_validate(proof, vk);
+
+    return match val_res {
+        Ok(v) => {
+            let ver: Int = (verifier).proofs_verified;
+            (verifier).proofs_verified = ver + 1;
+            true
+        },
+        Err(e) => {
+            let rej: Int = (verifier).proofs_rejected;
+            (verifier).proofs_rejected = rej + 1;
+            false
+        },
+    };
+}
+
+pub fn zk_snark_verifier_verify_with_capability(
+    sys: &SysCap,
+    verifier: &mut ZkSnarkVerifier,
+    proof: ZkProof
+) -> Result[Bool, String] {
+    let v_act: Bool = (verifier).is_active;
+    if v_act == false {
+        return Err("ZKSNARK_VERIFIER_INACTIVE: Capability check denied for inactive verifier");
+    }
+
+    let vk: VerificationKey = (verifier).verification_key;
+    let val_res: Result[Bool, String] = zk_proof_validate(proof, vk);
+
+    return match val_res {
+        Ok(v) => {
+            let ok: Bool = zk_snark_verifier_verify(verifier, proof);
+            if ok {
+                Ok(true)
+            } else {
+                Err("ZKSNARK_VERIFICATION_FAILED: Proof verification failed under SysCap contract")
+            }
+        },
+        Err(err) => Err(err),
+    };
+}

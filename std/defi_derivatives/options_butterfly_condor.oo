@@ -1,0 +1,140 @@
+// # Options Butterfly and Iron Condor Strategy Engine
+//
+// Logline: Analyzes defined-risk neutral range strategies (Long Butterflies and Iron Condors), evaluating wing risk caps, pin risk, and payoff profiles.
+//
+// Setup: Pure quantitative finance module calculating net debit/credit boundaries and max profit plateaus.
+//
+// Beats:
+//   1. Define ButterflyPosition, IronCondorPosition, and RangeStrategyResult structures.
+//   2. Compute net premium cost, maximum payoff cap, and downside/upside breakeven strikes.
+//   3. Model expiration pin risk and terminal payoff curvature around center strikes.
+
+pub type ButterflyPosition = struct {
+    lower_strike: Float,
+    middle_strike: Float,
+    upper_strike: Float,
+    expiry_years: Float,
+    volatility: Float,
+    spot_price: Float,
+    risk_free_rate: Float,
+    is_call: Bool,
+};
+
+pub type IronCondorPosition = struct {
+    long_put_strike: Float,
+    short_put_strike: Float,
+    short_call_strike: Float,
+    long_call_strike: Float,
+    expiry_years: Float,
+    volatility: Float,
+    spot_price: Float,
+    risk_free_rate: Float,
+};
+
+pub type RangeStrategyResult = struct {
+    net_cost_debit: Float,
+    net_credit_received: Float,
+    max_profit: Float,
+    max_loss: Float,
+    lower_breakeven: Float,
+    upper_breakeven: Float,
+    risk_reward_ratio: Float,
+};
+
+pub fn bc_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn bc_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (bc_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn bc_bs_call(s: Float, k: Float, t: Float, r: Float, vol: Float) -> Float {
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    let df: Float = exp((0.0 - r) * t);
+    return (s * bc_norm_cdf(d1)) - (k * df * bc_norm_cdf(d2));
+}
+
+pub fn evaluate_butterfly(p: &ButterflyPosition) -> RangeStrategyResult {
+    let s: Float = (p).spot_price;
+    let t: Float = (p).expiry_years;
+    let r: Float = (p).risk_free_rate;
+    let v: Float = (p).volatility;
+
+    let p1: Float = bc_bs_call(s, (p).lower_strike, t, r, v);
+    let p2: Float = bc_bs_call(s, (p).middle_strike, t, r, v);
+    let p3: Float = bc_bs_call(s, (p).upper_strike, t, r, v);
+
+    let net_debit: Float = p1 - (2.0 * p2) + p3;
+    let wing_width: Float = (p).middle_strike - (p).lower_strike;
+    let max_gain: Float = wing_width - net_debit;
+
+    let lower_be: Float = (p).lower_strike + net_debit;
+    let upper_be: Float = (p).upper_strike - net_debit;
+
+    let mut rr: Float = 0.0;
+    if net_debit > 0.0 {
+        rr = max_gain / net_debit;
+    }
+
+    return RangeStrategyResult {
+        net_cost_debit: net_debit,
+        net_credit_received: 0.0,
+        max_profit: max_gain,
+        max_loss: net_debit,
+        lower_breakeven: lower_be,
+        upper_breakeven: upper_be,
+        risk_reward_ratio: rr,
+    };
+}
+
+pub fn evaluate_iron_condor(p: &IronCondorPosition) -> RangeStrategyResult {
+    let s: Float = (p).spot_price;
+    let t: Float = (p).expiry_years;
+    let r: Float = (p).risk_free_rate;
+    let v: Float = (p).volatility;
+    let df: Float = exp((0.0 - r) * t);
+
+    let c_lp: Float = bc_bs_call(s, (p).long_put_strike, t, r, v);
+    let p_lp: Float = c_lp - s + ((p).long_put_strike * df);
+
+    let c_sp: Float = bc_bs_call(s, (p).short_put_strike, t, r, v);
+    let p_sp: Float = c_sp - s + ((p).short_put_strike * df);
+
+    let c_sc: Float = bc_bs_call(s, (p).short_call_strike, t, r, v);
+    let c_lc: Float = bc_bs_call(s, (p).long_call_strike, t, r, v);
+
+    let put_credit: Float = p_sp - p_lp;
+    let call_credit: Float = c_sc - c_lc;
+    let net_credit: Float = put_credit + call_credit;
+
+    let wing_width: Float = (p).short_put_strike - (p).long_put_strike;
+    let max_loss: Float = wing_width - net_credit;
+
+    let lower_be: Float = (p).short_put_strike - net_credit;
+    let upper_be: Float = (p).short_call_strike + net_credit;
+
+    let mut rr: Float = 0.0;
+    if max_loss > 0.0 {
+        rr = net_credit / max_loss;
+    }
+
+    return RangeStrategyResult {
+        net_cost_debit: 0.0,
+        net_credit_received: net_credit,
+        max_profit: net_credit,
+        max_loss: max_loss,
+        lower_breakeven: lower_be,
+        upper_breakeven: upper_be,
+        risk_reward_ratio: rr,
+    };
+}

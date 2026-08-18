@@ -1,0 +1,153 @@
+// # KMS Keys and Key Lifecycle
+//
+// Logline: Manages key generation, validation, and serialization for KMS.
+//
+// Setup: Imports kms_types.oo for key representations.
+//
+// Beats:
+//   1. Generate and validate KMS public and private keys.
+//   2. Implement key serialization and formatting routines.
+//   3. Enforce security policies on key length and parameters.
+
+import "./kms_ops.oo";
+
+pub fn kms_key_create(
+    key_id: String,
+    arn: String,
+    algorithm: String,
+    policy: KmsKeyPolicy,
+    raw_key_bytes: String,
+    created_at: Int
+) -> Result[KmsKey, String] {
+    let raw_len: Int = raw_key_bytes.len();
+    if raw_len == 0 {
+        return Err("INVALID_KEY: Key bytes cannot be empty");
+    }
+    let pol_ref = &policy;
+    let pol_valid: Bool = kms_key_policy_validate(pol_ref);
+    if !pol_valid {
+        return Err("INVALID_KEY: Key policy validation failed");
+    }
+    let chk: Int = kms_checksum(raw_key_bytes);
+    let key = KmsKey {
+        key_id: key_id,
+        arn: arn,
+        algorithm: algorithm,
+        current_version: 1,
+        policy: policy,
+        raw_key_bytes: raw_key_bytes,
+        checksum: chk,
+        created_at: created_at,
+        is_enabled: true,
+        is_destroyed: false,
+    };
+    return Ok(key);
+}
+
+pub fn kms_key_validate(key: &KmsKey) -> Bool {
+    let destroyed: Bool = (key).is_destroyed;
+    if destroyed {
+        return false;
+    }
+    let enabled: Bool = (key).is_enabled;
+    if !enabled {
+        return false;
+    }
+    let raw: String = (key).raw_key_bytes;
+    let raw_len: Int = raw.len();
+    if raw_len == 0 {
+        return false;
+    }
+    let expected_chk: Int = kms_checksum(raw);
+    let k_chk: Int = (key).checksum;
+    if k_chk != expected_chk {
+        return false;
+    }
+    let pol_ref = &(key).policy;
+    return kms_key_policy_validate(pol_ref);
+}
+
+pub fn kms_key_rotate(mut_key: &mut KmsKey, reason: String, current_time: Int) -> Result[KmsKeyRotation, String] {
+    let k_destroyed: Bool = (mut_key).is_destroyed;
+    if k_destroyed {
+        return Err("ROTATION_FAILED: Key is destroyed");
+    }
+    let k_enabled: Bool = (mut_key).is_enabled;
+    if !k_enabled {
+        return Err("ROTATION_FAILED: Key is disabled");
+    }
+    let prev_ver: Int = (mut_key).current_version;
+    let next_ver: Int = prev_ver + 1;
+    (mut_key).current_version = next_ver;
+
+    let kid: String = (mut_key).key_id;
+    let ts_str: String = current_time.to_string();
+    let ver_str: String = next_ver.to_string();
+    let rot_id: String = "rot_" + kid + "_v" + ver_str + "_" + ts_str;
+
+    return kms_key_rotation_create(rot_id, kid, prev_ver, next_ver, current_time, reason);
+}
+
+pub fn kms_key_disable(mut_key: &mut KmsKey) {
+    (mut_key).is_enabled = false;
+}
+
+pub fn kms_key_enable(mut_key: &mut KmsKey) {
+    if !(mut_key).is_destroyed {
+        (mut_key).is_enabled = true;
+    }
+}
+
+pub fn kms_key_destroy(mut_key: &mut KmsKey) {
+    (mut_key).raw_key_bytes = "";
+    (mut_key).checksum = 0;
+    (mut_key).is_enabled = false;
+    (mut_key).is_destroyed = true;
+}
+
+pub fn kms_grant_create(
+    grant_id: String,
+    key_id: String,
+    grantee_principal: String,
+    operations: String,
+    issued_at: Int,
+    ttl_seconds: Int
+) -> Result[KmsGrant, String] {
+    let p_len: Int = grantee_principal.len();
+    if p_len == 0 {
+        return Err("INVALID_GRANT: Grantee principal cannot be empty");
+    }
+    let op_len: Int = operations.len();
+    if op_len == 0 {
+        return Err("INVALID_GRANT: Grant operations cannot be empty");
+    }
+    let expires: Int = issued_at + ttl_seconds;
+    let grant = KmsGrant {
+        grant_id: grant_id,
+        key_id: key_id,
+        grantee_principal: grantee_principal,
+        operations: operations,
+        issued_at: issued_at,
+        expires_at: expires,
+        is_revoked: false,
+    };
+    return Ok(grant);
+}
+
+pub fn kms_grant_is_valid(grant: &KmsGrant, current_time: Int) -> Bool {
+    let revoked: Bool = (grant).is_revoked;
+    if revoked {
+        return false;
+    }
+    let exp: Int = (grant).expires_at;
+    if current_time >= exp {
+        return false;
+    }
+    return true;
+}
+
+pub fn kms_grant_revoke(mut_grant: &mut KmsGrant) {
+    (mut_grant).is_revoked = true;
+}
+
+

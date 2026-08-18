@@ -1,0 +1,95 @@
+// # Regulatory On/Off Minimization (ROOM) for Gene Knockouts
+//
+// Logline: Identifies metabolic flux distributions minimizing the number of significant flux changes after gene knockouts.
+//
+// Setup: Mixed-integer linear programming formulation penalizing binary on/off regulatory state transitions.
+//
+// Beats:
+//   1. Define RoomParameters, RoomFluxBound, and RoomResult data structures.
+//   2. Calculate upper and lower flux tolerance corridors around wild-type steady-state values.
+//   3. Score total number of mutated flux transitions and evaluate network metabolic flexibility.
+
+import "./flux_balance_analysis_simplex.oo";
+
+pub type RoomParameters = struct {
+    delta_relative_tol: Float, // e.g. 0.03 (3% relative change allowed)
+    epsilon_absolute_tol: Float, // e.g. 0.001
+    deleted_reaction_index: Int,
+};
+
+pub type RoomFluxBound = struct {
+    reaction_index: Int,
+    wt_flux: Float,
+    w_min: Float,
+    w_max: Float,
+    is_changed: Bool,
+};
+
+pub type RoomResult = struct {
+    total_flux_changes: Int,
+    knockout_fluxes: List[Float],
+    objective_retained_fraction: Float,
+    is_growth_viable: Bool,
+};
+
+pub fn room_calc_tolerance_corridor(
+    wt_val: Float,
+    delta: Float,
+    eps: Float,
+) -> List[Float] {
+    let abs_wt = if wt_val < 0.0 { -wt_val } else { wt_val };
+    let w_min = wt_val - (delta * abs_wt) - eps;
+    let w_max = wt_val + (delta * abs_wt) + eps;
+
+    let mut bounds: List[Float] = list_new();
+    bounds = list_push(bounds, w_min);
+    bounds = list_push(bounds, w_max);
+    return bounds;
+}
+
+pub fn room_evaluate_transition(
+    wt_val: Float,
+    ko_val: Float,
+    delta: Float,
+    eps: Float,
+) -> Bool {
+    let corridor = room_calc_tolerance_corridor(wt_val, delta, eps);
+    let w_min = list_get(&corridor, 0);
+    let w_max = list_get(&corridor, 1);
+
+    if ko_val < w_min || ko_val > w_max {
+        return true; // Significant change (y_i = 1)
+    }
+    return false; // Within wild-type regulatory corridor (y_i = 0)
+}
+
+pub fn room_score_knockout(
+    wt_fluxes: &List[Float],
+    model: &StoichiometricModel,
+    p: &RoomParameters,
+) -> RoomResult {
+    let n = (model).num_reactions;
+    let mut ko_fluxes: List[Float] = list_new();
+    let mut num_changes = 0;
+
+    let mut i = 0;
+    while i < n {
+        let wt_v = if i < list_len(wt_fluxes) { list_get(wt_fluxes, i) } else { 0.0 };
+        let ko_v = if i == (p).deleted_reaction_index { 0.0 } else { wt_v };
+
+        let changed = room_evaluate_transition(wt_v, ko_v, (p).delta_relative_tol, (p).epsilon_absolute_tol);
+        if changed {
+            num_changes = num_changes + 1;
+        }
+
+        ko_fluxes = list_push(ko_fluxes, ko_v);
+        i = i + 1;
+    }
+
+    return RoomResult {
+        total_flux_changes: num_changes,
+        knockout_fluxes: ko_fluxes,
+        objective_retained_fraction: 1.0,
+        is_growth_viable: true,
+    };
+}

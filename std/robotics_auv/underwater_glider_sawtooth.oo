@@ -1,0 +1,168 @@
+// # Underwater Buoyancy-Driven Glider Sawtooth Dynamics
+//
+// Logline: Steady glide speed from lift/drag polar and depth inflection. Int milli destub.
+//
+// Setup: Graver-Leonard equilibrium; dive/climb switch at depth gates.
+//
+// Beats:
+//   1. Polar: S, CL_alpha, CD0, k induced, max gamma.
+//   2. CL = CL_a * alpha; CD = CD0 + k CL^2; C = hypot(CL, CD).
+//   3. U = sqrt(2 |B| / (rho S C)).
+//   4. Inflect at min/max depth; gamma = +/- 300 mrad.
+
+type GliderAeroPolar = struct {
+    wing_area_mm2: Int,
+    c_l_alpha_milli: Int,
+    c_d_0_milli: Int,
+    induced_drag_k_milli: Int,
+    max_glide_angle_mrad: Int
+};
+
+type GliderSawtoothState = struct {
+    is_descending: Bool,
+    target_min_depth_mm: Int,
+    target_max_depth_mm: Int,
+    current_gamma_mrad: Int,
+    steady_speed_mm_s: Int
+};
+
+pub fn glider_aero_polar_default() -> GliderAeroPolar {
+    return GliderAeroPolar {
+        wing_area_mm2: 120000,
+        c_l_alpha_milli: 2800,
+        c_d_0_milli: 45,
+        induced_drag_k_milli: 250,
+        max_glide_angle_mrad: 610
+    };
+}
+
+pub fn glider_sawtooth_init(min_depth_mm: Int, max_depth_mm: Int) -> GliderSawtoothState {
+    return GliderSawtoothState {
+        is_descending: true,
+        target_min_depth_mm: min_depth_mm,
+        target_max_depth_mm: max_depth_mm,
+        current_gamma_mrad: 0 - 300,
+        steady_speed_mm_s: 350
+    };
+}
+
+pub fn gldr_isqrt_seed(n: Int, g: Int) -> Int {
+    let g2: Int = g * 2;
+    if g2 <= 0 {
+        return g;
+    }
+    if (g2 * g2) > n {
+        return g;
+    }
+    if g2 <= g {
+        return g;
+    }
+    return gldr_isqrt_seed(n, g2);
+}
+
+pub fn gldr_isqrt_iter(n: Int, guess: Int, steps: Int) -> Int {
+    if steps <= 0 {
+        return guess;
+    }
+    if guess <= 0 {
+        return 0;
+    }
+    let next: Int = (guess + (n / guess)) / 2;
+    let diff: Int = next - guess;
+    if diff == 0 {
+        return next;
+    }
+    if diff < 0 {
+        if (0 - diff) <= 1 {
+            return next;
+        }
+        return gldr_isqrt_iter(n, next, steps - 1);
+    }
+    if diff <= 1 {
+        return guess;
+    }
+    return gldr_isqrt_iter(n, next, steps - 1);
+}
+
+pub fn gldr_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if n < 4 {
+        return 1;
+    }
+    let seed: Int = gldr_isqrt_seed(n, 1);
+    return gldr_isqrt_iter(n, seed, 8);
+}
+
+pub fn gldr_abs_int(v: Int) -> Int {
+    if v < 0 {
+        return 0 - v;
+    }
+    return v;
+}
+
+pub fn compute_steady_glide_speed(
+    polar: GliderAeroPolar,
+    net_buoyancy_mn: Int,
+    alpha_mrad: Int,
+    water_density: Int
+) -> Int {
+    let cl_milli: Int = (polar.c_l_alpha_milli * alpha_mrad) / 1000;
+    let cd_ind: Int = ((polar.induced_drag_k_milli * cl_milli) * cl_milli) / 1000000;
+    let cd_milli: Int = polar.c_d_0_milli + cd_ind;
+    let abs_b: Int = gldr_abs_int(net_buoyancy_mn);
+    if abs_b < 10 {
+        return 50;
+    }
+    let hyp2: Int = (cl_milli * cl_milli) + (cd_milli * cd_milli);
+    let total_hydro_milli: Int = gldr_isqrt(hyp2);
+    if total_hydro_milli < 1 {
+        return 50;
+    }
+    let area: Int = if polar.wing_area_mm2 < 1 { 1 } else { polar.wing_area_mm2 };
+    let rho: Int = if water_density < 1 { 1 } else { water_density };
+    let den: Int = (rho * area) * total_hydro_milli;
+    if den < 1 {
+        return 50;
+    }
+    let v2: Int = (2000000000000 * abs_b) / den;
+    return gldr_isqrt(v2);
+}
+
+pub fn glider_sawtooth_step(
+    polar: GliderAeroPolar,
+    state: GliderSawtoothState,
+    current_depth_mm: Int,
+    vbs_delta_b_mn: Int,
+    water_density: Int,
+    dt_ms: Int
+) -> GliderSawtoothState {
+    let descending: Bool = if state.is_descending {
+        if current_depth_mm >= state.target_max_depth_mm {
+            false
+        } else {
+            true
+        }
+    } else {
+        if current_depth_mm <= state.target_min_depth_mm {
+            true
+        } else {
+            false
+        }
+    };
+    let alpha_nominal: Int = 87;
+    let v_steady: Int = compute_steady_glide_speed(polar, vbs_delta_b_mn, alpha_nominal, water_density);
+    let gamma_target: Int = if descending {
+        0 - 300
+    } else {
+        300
+    };
+    return GliderSawtoothState {
+        is_descending: descending,
+        target_min_depth_mm: state.target_min_depth_mm,
+        target_max_depth_mm: state.target_max_depth_mm,
+        current_gamma_mrad: gamma_target,
+        steady_speed_mm_s: v_steady
+    };
+}

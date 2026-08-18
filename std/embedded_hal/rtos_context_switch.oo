@@ -1,0 +1,197 @@
+// # RTOS Preemptive Scheduler & Context Switch
+//
+// Logline: Priority bitmap scheduler, round-robin dispatching, PendSV context switch triggers, and ready queue management.
+//
+// Setup: Multi-task scheduling engine with 32 priority levels and deterministic O(1) task selection.
+//
+// Beats:
+//   1. Define scheduler data structure, priority ready bitmap, and execution context.
+//   2. Implement deterministic highest-priority-ready task selection and bitmap scanning.
+//   3. Manage context switch triggers, PendSV pending state, and task dispatching.
+//   4. Process periodic SysTick time slicing, sleep timer decrements, and cooperative yields.
+
+import "./rtos_task_tcb.oo";
+
+pub type RtosScheduler = struct {
+    ready_bitmap: Int,          // 32-bit bitmap of priorities with ready tasks
+    current_task_id: Int,
+    next_task_id: Int,
+    pendsv_flag: Bool,          // Set when context switch is required
+    tick_count: Int,
+    tasks: List[RtosTaskState],
+    is_running: Bool,
+};
+
+pub fn rtos_scheduler_new() -> RtosScheduler {
+    let empty_tasks: List[RtosTaskState] = list_new();
+    return RtosScheduler {
+        ready_bitmap: 0,
+        current_task_id: 0 - 1,
+        next_task_id: 0 - 1,
+        pendsv_flag: false,
+        tick_count: 0,
+        tasks: empty_tasks,
+        is_running: false,
+    };
+}
+
+fn rtos_update_task_in_list(tasks: List[RtosTaskState], task_id: Int, updated: RtosTaskState) -> List[RtosTaskState] {
+    let mut result: List[RtosTaskState] = list_new();
+    let len: Int = list_len(tasks);
+    let mut i: Int = 0;
+    while i < len {
+        let t: RtosTaskState = list_get(tasks, i);
+        if (t).task_id == task_id {
+            result = list_push(result, updated);
+        } else {
+            result = list_push(result, t);
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn rtos_scheduler_add_task(sched: &mut RtosScheduler, task: RtosTaskState) {
+    (sched).tasks = list_push((sched).tasks, task);
+    let prio: Int = (task).priority;
+    let mut mask: Int = 1;
+    let mut b: Int = 0;
+    while b < prio {
+        mask = mask * 2;
+        b = b + 1;
+    }
+    (sched).ready_bitmap = (sched).ready_bitmap + mask;
+}
+
+fn rtos_find_highest_priority(bitmap: Int) -> Int {
+    if bitmap <= 0 {
+        return 0 - 1;
+    }
+    let mut p: Int = 31;
+    let mut mask: Int = 1073741824; // 1 << 30
+    mask = mask * 2; // 1 << 31
+    // Let's use downward power check
+    let mut current_bit: Int = 31;
+    let mut cur_val: Int = 2147483648; // 2^31
+    while current_bit >= 0 {
+        if (bitmap / cur_val) % 2 == 1 {
+            return current_bit;
+        }
+        cur_val = cur_val / 2;
+        current_bit = current_bit - 1;
+    }
+    return 0 - 1;
+}
+
+pub fn rtos_scheduler_select_next(sched: &mut RtosScheduler) -> Int {
+    let best_prio: Int = rtos_find_highest_priority((sched).ready_bitmap);
+    if best_prio < 0 {
+        return 0 - 1;
+    }
+    let num_tasks: Int = list_len((sched).tasks);
+    let mut i: Int = 0;
+    while i < num_tasks {
+        let t: RtosTaskState = list_get((sched).tasks, i);
+        if (t).priority == best_prio {
+            if rtos_tcb_is_ready(&t) {
+                return (t).task_id;
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+pub fn rtos_scheduler_step_tick(sched: &mut RtosScheduler) {
+    (sched).tick_count = (sched).tick_count + 1;
+    let num_tasks: Int = list_len((sched).tasks);
+    let mut i: Int = 0;
+    let mut recompute_bitmap: Bool = false;
+
+    while i < num_tasks {
+        let mut t: RtosTaskState = list_get((sched).tasks, i);
+        if rtos_tcb_is_running(&t) {
+            rtos_tcb_accumulate_runtime(&mut t, 1);
+            (sched).tasks = rtos_update_task_in_list((sched).tasks, (t).task_id, t);
+        } else {
+            if rtos_tcb_is_blocked(&t) {
+                let unblocked: Bool = rtos_tcb_tick_delay(&mut t);
+                if unblocked {
+                    recompute_bitmap = true;
+                }
+                (sched).tasks = rtos_update_task_in_list((sched).tasks, (t).task_id, t);
+            }
+        }
+        i = i + 1;
+    }
+
+    if recompute_bitmap {
+        rtos_scheduler_refresh_bitmap(sched);
+    }
+
+    // Select candidate task
+    let candidate_id: Int = rtos_scheduler_select_next(sched);
+    if candidate_id != (sched).current_task_id {
+        (sched).next_task_id = candidate_id;
+        (sched).pendsv_flag = true;
+    }
+}
+
+pub fn rtos_scheduler_refresh_bitmap(sched: &mut RtosScheduler) {
+    let mut new_bitmap: Int = 0;
+    let num_tasks: Int = list_len((sched).tasks);
+    let mut i: Int = 0;
+    while i < num_tasks {
+        let t: RtosTaskState = list_get((sched).tasks, i);
+        if rtos_tcb_is_ready(&t) {
+            let prio: Int = (t).priority;
+            let mut mask: Int = 1;
+            let mut b: Int = 0;
+            while b < prio {
+                mask = mask * 2;
+                b = b + 1;
+            }
+            if (new_bitmap / mask) % 2 == 0 {
+                new_bitmap = new_bitmap + mask;
+            }
+        }
+        i = i + 1;
+    }
+    (sched).ready_bitmap = new_bitmap;
+}
+
+pub fn rtos_scheduler_switch_context(sched: &mut RtosScheduler) -> Bool {
+    if (sched).pendsv_flag {
+        let cur_id: Int = (sched).current_task_id;
+        let next_id: Int = (sched).next_task_id;
+
+        let num_tasks: Int = list_len((sched).tasks);
+        let mut i: Int = 0;
+        while i < num_tasks {
+            let mut t: RtosTaskState = list_get((sched).tasks, i);
+            if (t).task_id == cur_id {
+                if (t).state == 1 { // Running -> Ready
+                    (t).state = 0;
+                }
+                (sched).tasks = rtos_update_task_in_list((sched).tasks, cur_id, t);
+            } else {
+                if (t).task_id == next_id {
+                    (t).state = 1; // Running
+                    (sched).tasks = rtos_update_task_in_list((sched).tasks, next_id, t);
+                }
+            }
+            i = i + 1;
+        }
+
+        (sched).current_task_id = next_id;
+        (sched).pendsv_flag = false;
+        return true;
+    }
+    return false;
+}
+
+pub fn rtos_scheduler_yield(sched: &mut RtosScheduler) {
+    let candidate_id: Int = rtos_scheduler_select_next(sched);
+    (sched).next_task_id = candidate_id;
+    (sched).pendsv_flag = true;
+}

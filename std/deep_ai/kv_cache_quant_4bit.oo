@@ -1,0 +1,184 @@
+// # 4-Bit Quantized Key-Value Cache Manager
+//
+// Logline: Compresses dynamic transformer Key and Value token states into asymmetric 4-bit quantized buffers with per-head scaling.
+//
+// Setup: Quantized KV cache storage and fast dequantized dot-product evaluation.
+//
+// Beats:
+//   1. Define QuantKVConfig, QuantKVSlot, and QuantKVCache structures.
+//   2. Quantize incoming key and value projection vectors with scale and zero-point parameters.
+//   3. Compute fast dequantized dot-products with incoming query vectors during generation.
+
+pub type QuantKVConfig = struct {
+    max_seq_len: Int,
+    head_dim: Int,
+    is_symmetric: Bool,
+};
+
+pub type QuantKVSlot = struct {
+    quant_k: List[Int],
+    quant_v: List[Int],
+    scale_k: Float,
+    zero_k: Float,
+    scale_v: Float,
+    zero_v: Float,
+};
+
+pub type QuantKVCache = struct {
+    config: QuantKVConfig,
+    slots: List[QuantKVSlot],
+    current_len: Int,
+};
+
+pub fn kv_quant_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn quant_kv_cache_new(cfg: QuantKVConfig) -> QuantKVCache {
+    let empty_slots: List[QuantKVSlot] = list_new();
+    return QuantKVCache {
+        config: cfg,
+        slots: empty_slots,
+        current_len: 0,
+    };
+}
+
+pub fn quant_kv_cache_append(
+    cache: &mut QuantKVCache,
+    k: List[Float],
+    v: List[Float]
+) -> Bool {
+    if (cache).current_len >= ((cache).config).max_seq_len {
+        return false;
+    }
+    let dim: Int = ((cache).config).head_dim;
+
+    let mut min_k: Float = 9999.0;
+    let mut max_k: Float = 0.0 - 9999.0;
+    let mut min_v: Float = 9999.0;
+    let mut max_v: Float = 0.0 - 9999.0;
+
+    let mut d: Int = 0;
+    while d < dim {
+        let kv: Float = list_get(k, d);
+        let vv: Float = list_get(v, d);
+        if kv < min_k { min_k = kv; }
+        if kv > max_k { max_k = kv; }
+        if vv < min_v { min_v = vv; }
+        if vv > max_v { max_v = vv; }
+        d = d + 1;
+    }
+
+    let diff_k: Float = if (max_k - min_k) > 0.00001 { max_k - min_k } else { 0.00001 };
+    let scale_k: Float = diff_k / 15.0;
+    let zero_k: Float = min_k;
+
+    let diff_v: Float = if (max_v - min_v) > 0.00001 { max_v - min_v } else { 0.00001 };
+    let scale_v: Float = diff_v / 15.0;
+    let zero_v: Float = min_v;
+
+    let mut qk_list: List[Int] = list_new();
+    let mut qv_list: List[Int] = list_new();
+
+    let mut d2: Int = 0;
+    while d2 < dim {
+        let raw_k: Float = list_get(k, d2);
+        let q_k_val: Int = if scale_k > 0.0 {
+            let norm_k: Float = (raw_k - zero_k) / scale_k;
+            let mut i_k: Int = 0;
+            while (kv_quant_int_to_float(i_k) + 0.5) < norm_k && i_k < 15 {
+                i_k = i_k + 1;
+            }
+            i_k
+        } else {
+            0
+        };
+        qk_list = list_push(qk_list, q_k_val);
+
+        let raw_v: Float = list_get(v, d2);
+        let q_v_val: Int = if scale_v > 0.0 {
+            let norm_v: Float = (raw_v - zero_v) / scale_v;
+            let mut i_v: Int = 0;
+            while (kv_quant_int_to_float(i_v) + 0.5) < norm_v && i_v < 15 {
+                i_v = i_v + 1;
+            }
+            i_v
+        } else {
+            0
+        };
+        qv_list = list_push(qv_list, q_v_val);
+
+        d2 = d2 + 1;
+    }
+
+    let slot: QuantKVSlot = QuantKVSlot {
+        quant_k: qk_list,
+        quant_v: qv_list,
+        scale_k: scale_k,
+        zero_k: zero_k,
+        scale_v: scale_v,
+        zero_v: zero_v,
+    };
+
+    (cache).slots = list_push((cache).slots, slot);
+    (cache).current_len = (cache).current_len + 1;
+    return true;
+}
+
+pub fn quant_kv_cache_dequant_k(
+    cache: &QuantKVCache,
+    pos: Int
+) -> List[Float] {
+    let dim: Int = ((cache).config).head_dim;
+    let mut out: List[Float] = list_new();
+    if pos < 0 || pos >= (cache).current_len {
+        let mut d_err: Int = 0;
+        while d_err < dim { out = list_push(out, 0.0); d_err = d_err + 1; }
+        return out;
+    }
+
+    let slot: QuantKVSlot = list_get((cache).slots, pos);
+    let mut d: Int = 0;
+    while d < dim {
+        let q: Int = list_get((slot).quant_k, d);
+        let val: Float = (slot).zero_k + (kv_quant_int_to_float(q) * (slot).scale_k);
+        out = list_push(out, val);
+        d = d + 1;
+    }
+    return out;
+}
+
+pub fn quant_kv_cache_dot_query(
+    cache: &QuantKVCache,
+    pos: Int,
+    q: List[Float]
+) -> Float {
+    if pos < 0 || pos >= (cache).current_len {
+        return 0.0;
+    }
+    let slot: QuantKVSlot = list_get((cache).slots, pos);
+    let dim: Int = ((cache).config).head_dim;
+    let mut dot: Float = 0.0;
+    let mut d: Int = 0;
+    while d < dim {
+        let q_val: Float = list_get(q, d);
+        let q_int: Int = list_get((slot).quant_k, d);
+        let k_val: Float = (slot).zero_k + (kv_quant_int_to_float(q_int) * (slot).scale_k);
+        dot = dot + (q_val * k_val);
+        d = d + 1;
+    }
+    return dot;
+}
+
+pub fn kv_cache_quant_4bit_marker() -> Int {
+    return 1;
+}

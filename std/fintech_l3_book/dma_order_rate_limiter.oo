@@ -1,0 +1,83 @@
+// # Direct Market Access High-Frequency Rate Limiter
+//
+// Logline: Implements leaky-bucket and sliding-window rate limiters to throttle order submission bursts and prevent exchange throttling penalties.
+//
+// Setup: Traffic policing module regulating order entry velocity per OUCH port, symbol, and trading account.
+//
+// Beats:
+//   1. Define TokenBucketState, RateLimitConfig, and RateLimitDecision structures.
+//   2. Refill token buckets based on elapsed nanoseconds and token refill rate.
+//   3. Deduct tokens on order submission and reject or defer rate-exceeding messages.
+
+pub type RateLimitConfig = struct {
+    max_tokens: Int,
+    refill_rate_per_sec: Int,
+    max_burst_size: Int,
+};
+
+pub type TokenBucketState = struct {
+    available_tokens: Int,
+    last_refill_timestamp_ns: Int,
+    total_messages_allowed: Int,
+    total_messages_throttled: Int,
+};
+
+pub type RateLimitDecision = struct {
+    allowed: Bool,
+    tokens_remaining: Int,
+    wait_time_ns: Int,
+};
+
+pub fn rate_limit_config_new(capacity: Int, refill_sec: Int) -> RateLimitConfig {
+    return RateLimitConfig {
+        max_tokens: capacity,
+        refill_rate_per_sec: refill_sec,
+        max_burst_size: capacity,
+    };
+}
+
+pub fn token_bucket_state_new(capacity: Int, start_ts_ns: Int) -> TokenBucketState {
+    return TokenBucketState {
+        available_tokens: capacity,
+        last_refill_timestamp_ns: start_ts_ns,
+        total_messages_allowed: 0,
+        total_messages_throttled: 0,
+    };
+}
+
+pub fn evaluate_rate_limit(
+    bucket: &mut TokenBucketState,
+    cfg: &RateLimitConfig,
+    now_ns: Int
+) -> RateLimitDecision {
+    let elapsed_ns: Int = now_ns - (bucket).last_refill_timestamp_ns;
+    if elapsed_ns > 0 {
+        let tokens_to_add: Int = (elapsed_ns * (cfg).refill_rate_per_sec) / 1000000000;
+        if tokens_to_add > 0 {
+            let mut new_tokens: Int = (bucket).available_tokens + tokens_to_add;
+            if new_tokens > (cfg).max_tokens {
+                new_tokens = (cfg).max_tokens;
+            }
+            (bucket).available_tokens = new_tokens;
+            (bucket).last_refill_timestamp_ns = now_ns;
+        }
+    }
+
+    if (bucket).available_tokens >= 1 {
+        (bucket).available_tokens = (bucket).available_tokens - 1;
+        (bucket).total_messages_allowed = (bucket).total_messages_allowed + 1;
+        return RateLimitDecision {
+            allowed: true,
+            tokens_remaining: (bucket).available_tokens,
+            wait_time_ns: 0,
+        };
+    }
+
+    (bucket).total_messages_throttled = (bucket).total_messages_throttled + 1;
+    let wait_ns: Int = 1000000000 / (cfg).refill_rate_per_sec;
+    return RateLimitDecision {
+        allowed: false,
+        tokens_remaining: 0,
+        wait_time_ns: wait_ns,
+    };
+}

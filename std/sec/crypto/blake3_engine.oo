@@ -1,0 +1,220 @@
+// # BLAKE3 Engine and Policy Management
+//
+// Logline: Manages execution engine lifecycle, security policies, and performance accounting for BLAKE3.
+//
+// Setup: Imports companion modules for validated BLAKE3 operations.
+//
+// Beats:
+//   1. Import BLAKE3 operations and types.
+//   2. Initialize security policies and execution engine contexts.
+//   3. Compute engine workload telemetry and operation metrics.
+
+import "./blake3_ops.oo";
+
+// -------------------------------------------------------------------
+// Tree State / Hasher / Digest / Engine Constructors & Validation
+// -------------------------------------------------------------------
+
+pub fn blake3_tree_state_init() -> Blake3TreeState {
+    let empty_stack: List[String] = list_new();
+    return Blake3TreeState {
+        cv_stack: empty_stack,
+        stack_depth: 0,
+        total_chunks: 0,
+        total_bytes: 0,
+        is_keyed: false,
+        is_derive_key: false,
+        is_initialized: true,
+    };
+}
+
+pub fn blake3_tree_state_validate(ts: &Blake3TreeState) -> Bool {
+    let is_init: Bool = (ts).is_initialized;
+    if is_init == false {
+        return false;
+    }
+    let depth: Int = (ts).stack_depth;
+    let stack_len: Int = list_len((ts).cv_stack);
+    return depth == stack_len;
+}
+
+pub fn blake3_hasher_new(hasher_id: String) -> Result[Blake3Hasher, String] {
+    let dummy_key = Blake3Key {
+        key_id: "default_iv_key",
+        key_bytes: "",
+        checksum: 0,
+        is_valid: false,
+    };
+    let iv_cv: List[Int] = blake3_iv_words();
+    let cs: Blake3ChunkState = blake3_chunk_state_init(iv_cv, 0, 0);
+    let ts: Blake3TreeState = blake3_tree_state_init();
+    let hasher = Blake3Hasher {
+        hasher_id: hasher_id,
+        key: dummy_key,
+        chunk_state: cs,
+        tree_state: ts,
+        hasher_mode: 0,
+        context_string: "",
+        is_initialized: true,
+    };
+    return Ok(hasher);
+}
+
+pub fn blake3_hasher_new_keyed(hasher_id: String, key: Blake3Key) -> Result[Blake3Hasher, String] {
+    let k_ref = &key;
+    let valid: Bool = blake3_key_validate(k_ref);
+    if valid == false {
+        return Err("INVALID_KEY: Key failed validation");
+    }
+    let iv_cv: List[Int] = blake3_iv_words();
+    let cs: Blake3ChunkState = blake3_chunk_state_init(iv_cv, 0, blake3_flag_keyed_hash());
+    let mut ts: Blake3TreeState = blake3_tree_state_init();
+    ts = Blake3TreeState {
+        cv_stack: ts.cv_stack,
+        stack_depth: ts.stack_depth,
+        total_chunks: ts.total_chunks,
+        total_bytes: ts.total_bytes,
+        is_keyed: true,
+        is_derive_key: false,
+        is_initialized: true,
+    };
+    let hasher = Blake3Hasher {
+        hasher_id: hasher_id,
+        key: key,
+        chunk_state: cs,
+        tree_state: ts,
+        hasher_mode: 1,
+        context_string: "",
+        is_initialized: true,
+    };
+    return Ok(hasher);
+}
+
+pub fn blake3_hasher_new_derive_key(hasher_id: String, context_str: String) -> Result[Blake3Hasher, String] {
+    let ctx_len: Int = context_str.len();
+    if ctx_len == 0 {
+        return Err("INVALID_CONTEXT: Context string must not be empty");
+    }
+    let dummy_key = Blake3Key {
+        key_id: "context_key",
+        key_bytes: "",
+        checksum: 0,
+        is_valid: false,
+    };
+    let iv_cv: List[Int] = blake3_iv_words();
+    let cs: Blake3ChunkState = blake3_chunk_state_init(iv_cv, 0, blake3_flag_derive_key_context());
+    let mut ts: Blake3TreeState = blake3_tree_state_init();
+    ts = Blake3TreeState {
+        cv_stack: ts.cv_stack,
+        stack_depth: ts.stack_depth,
+        total_chunks: ts.total_chunks,
+        total_bytes: ts.total_bytes,
+        is_keyed: false,
+        is_derive_key: true,
+        is_initialized: true,
+    };
+    let hasher = Blake3Hasher {
+        hasher_id: hasher_id,
+        key: dummy_key,
+        chunk_state: cs,
+        tree_state: ts,
+        hasher_mode: 2,
+        context_string: context_str,
+        is_initialized: true,
+    };
+    return Ok(hasher);
+}
+
+pub fn blake3_hasher_validate(hasher: &Blake3Hasher) -> Bool {
+    let is_init: Bool = (hasher).is_initialized;
+    if is_init == false {
+        return false;
+    }
+    let cs_ref = &(hasher).chunk_state;
+    let ts_ref = &(hasher).tree_state;
+    let cs_val: Bool = blake3_chunk_state_validate(cs_ref);
+    let ts_val: Bool = blake3_tree_state_validate(ts_ref);
+    if cs_val == false {
+        return false;
+    }
+    if ts_val == false {
+        return false;
+    }
+    let is_k: Bool = ts_ref.is_keyed;
+    if is_k == true {
+        let k_ref = &(hasher).key;
+        return blake3_key_validate(k_ref);
+    }
+    return true;
+}
+
+pub fn blake3_digest_create(raw_bytes: String) -> Result[Blake3Digest, String] {
+    let raw_len: Int = raw_bytes.len();
+    if raw_len == 0 {
+        return Err("INVALID_DIGEST: Digest length must be non-zero");
+    }
+    let chk: Int = blake3_checksum(raw_bytes);
+    let hex_s: String = hex_encode(raw_bytes);
+    let digest = Blake3Digest {
+        raw_bytes: raw_bytes,
+        hex_str: hex_s,
+        len: raw_len,
+        checksum: chk,
+        is_valid: true,
+    };
+    return Ok(digest);
+}
+
+pub fn blake3_digest_validate(digest: &Blake3Digest) -> Bool {
+    let d_valid: Bool = (digest).is_valid;
+    if d_valid == false {
+        return false;
+    }
+    let raw: String = (digest).raw_bytes;
+    let raw_len: Int = raw.len();
+    let d_len: Int = (digest).len;
+    if raw_len != d_len {
+        return false;
+    }
+    let expected_chk: Int = blake3_checksum(raw);
+    let d_chk: Int = (digest).checksum;
+    return d_chk == expected_chk;
+}
+
+pub fn blake3_security_policy_default() -> Blake3SecurityPolicy {
+    return Blake3SecurityPolicy {
+        fail_closed: true,
+        allow_custom_xof_len: true,
+        require_keyed: false,
+        is_active: true,
+    };
+}
+
+pub fn blake3_engine_init(engine_id: String) -> Result[Blake3Engine, String] {
+    let hasher_res: Result[Blake3Hasher, String] = blake3_hasher_new("engine_hasher");
+    let policy: Blake3SecurityPolicy = blake3_security_policy_default();
+    return match hasher_res {
+        Ok(h) => Ok(Blake3Engine {
+            engine_id: engine_id,
+            policy: policy,
+            hasher: h,
+            bytes_hashed: 0,
+            chunks_processed: 0,
+            system_halted: false,
+        }),
+        Err(e) => Err(e),
+    };
+}
+
+pub fn blake3_xof_reader_init(hasher_id: String) -> Blake3XofReader {
+    return Blake3XofReader {
+        hasher_id: hasher_id,
+        position: 0,
+        is_active: true,
+    };
+}
+
+
+pub fn __dummy_std_src_ooda_sec_crypto_blake3_engine_oo() -> Int {
+    return 0;
+}

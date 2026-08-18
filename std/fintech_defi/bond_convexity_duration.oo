@@ -1,0 +1,147 @@
+// # Bond Duration and Convexity Analyzer
+//
+// Logline: Computes Macaulay duration, modified duration, dollar duration (DV01), and second-order convexity adjustments for fixed-rate bonds.
+//
+// Setup: Pure quantitative finance module for interest rate sensitivity analysis.
+//
+// Beats:
+//   1. Define FixedBond, BondRiskMetrics, and PriceSensitivityResult structures.
+//   2. Calculate bond dirty price, weighted cashflow timing (Macaulay duration), and Modified duration.
+//   3. Compute bond convexity and Taylor series price change approximation for arbitrary yield shifts.
+
+pub type FixedBond = struct {
+    face_value: Float,
+    coupon_rate: Float,
+    tenor_years: Float,
+    coupon_frequency: Int,
+    yield_to_maturity: Float,
+};
+
+pub type BondRiskMetrics = struct {
+    clean_price: Float,
+    dirty_price: Float,
+    macaulay_duration: Float,
+    modified_duration: Float,
+    convexity: Float,
+    dollar_duration: Float,
+    dv01: Float,
+};
+
+pub type PriceSensitivityResult = struct {
+    yield_shift_bps: Float,
+    duration_linear_change: Float,
+    convexity_adjustment: Float,
+    total_estimated_price_change: Float,
+    new_estimated_price: Float,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn bond_calculate_metrics(bond: &FixedBond) -> BondRiskMetrics {
+    let f: Float = (bond).face_value;
+    let c_rate: Float = (bond).coupon_rate;
+    let t: Float = (bond).tenor_years;
+    let freq: Int = (bond).coupon_frequency;
+    let ytm: Float = (bond).yield_to_maturity;
+
+    if t <= 0.0 || freq <= 0 || f <= 0.0 {
+        return BondRiskMetrics {
+            clean_price: f,
+            dirty_price: f,
+            macaulay_duration: 0.0,
+            modified_duration: 0.0,
+            convexity: 0.0,
+            dollar_duration: 0.0,
+            dv01: 0.0,
+        };
+    }
+
+    let freq_f: Float = int_to_float(freq);
+    let dt: Float = 1.0 / freq_f;
+    let c_pmt: Float = (f * c_rate) / freq_f;
+    let y_per_period: Float = ytm / freq_f;
+    let total_periods: Int = (t * freq_f) + 0;
+
+    let mut pv_sum: Float = 0.0;
+    let mut weighted_t_sum: Float = 0.0;
+    let mut convexity_sum: Float = 0.0;
+
+    let mut i: Int = 1;
+    while i <= total_periods {
+        let ti: Float = int_to_float(i) * dt;
+        let mut cf: Float = c_pmt;
+        if i == total_periods {
+            cf = cf + f;
+        }
+
+        let mut disc: Float = 1.0;
+        let mut p_idx: Int = 0;
+        while p_idx < i {
+            disc = disc * (1.0 + y_per_period);
+            p_idx = p_idx + 1;
+        }
+
+        let pv_cf: Float = cf / disc;
+        pv_sum = pv_sum + pv_cf;
+        weighted_t_sum = weighted_t_sum + (ti * pv_cf);
+        convexity_sum = convexity_sum + (ti * (ti + dt) * pv_cf);
+        i = i + 1;
+    }
+
+    let mut mac_dur: Float = 0.0;
+    let mut mod_dur: Float = 0.0;
+    let mut conv: Float = 0.0;
+
+    if pv_sum > 0.0 {
+        mac_dur = weighted_t_sum / pv_sum;
+        mod_dur = mac_dur / (1.0 + y_per_period);
+        let conv_den: Float = pv_sum * (1.0 + y_per_period) * (1.0 + y_per_period);
+        conv = convexity_sum / conv_den;
+    }
+
+    let dollar_dur: Float = mod_dur * pv_sum;
+    let dv01_val: Float = dollar_dur * 0.0001;
+
+    return BondRiskMetrics {
+        clean_price: pv_sum,
+        dirty_price: pv_sum,
+        macaulay_duration: mac_dur,
+        modified_duration: mod_dur,
+        convexity: conv,
+        dollar_duration: dollar_dur,
+        dv01: dv01_val,
+    };
+}
+
+pub fn bond_estimate_price_change(
+    metrics: &BondRiskMetrics,
+    yield_shift_bps: Float
+) -> PriceSensitivityResult {
+    let dy: Float = yield_shift_bps / 10000.0;
+    let p0: Float = (metrics).dirty_price;
+    let d_mod: Float = (metrics).modified_duration;
+    let conv: Float = (metrics).convexity;
+
+    let delta_p_linear: Float = (0.0 - p0) * d_mod * dy;
+    let delta_p_convexity: Float = 0.5 * p0 * conv * (dy * dy);
+    let total_delta: Float = delta_p_linear + delta_p_convexity;
+
+    return PriceSensitivityResult {
+        yield_shift_bps: yield_shift_bps,
+        duration_linear_change: delta_p_linear,
+        convexity_adjustment: delta_p_convexity,
+        total_estimated_price_change: total_delta,
+        new_estimated_price: p0 + total_delta,
+    };
+}

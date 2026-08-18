@@ -1,0 +1,139 @@
+// # Multi-Hop AMM Router
+//
+// Logline: Computes optimal multi-hop swap execution paths, cross-pool intermediate token hops, and split-route quotes.
+//
+// Setup: Imports amm_constant_product.oo for hop-by-hop reserve transformations.
+//
+// Beats:
+//   1. Define PoolHop, MultiHopRoute, and RouteQuote structures.
+//   2. Calculate end-to-end exact input routing across sequential pool hops.
+//   3. Compute price impact aggregation and minimum output with slippage tolerance.
+
+import "./amm_constant_product.oo";
+
+pub type PoolHop = struct {
+    pool_id: String,
+    token_in: String,
+    token_out: String,
+    reserve_in: Int,
+    reserve_out: Int,
+    fee_bps: Int,
+};
+
+pub type MultiHopRoute = struct {
+    route_id: String,
+    hops: List[PoolHop],
+    total_fee_bps: Int,
+};
+
+pub type RouteQuote = struct {
+    amount_in: Int,
+    expected_out: Int,
+    min_amount_out: Int,
+    total_fee_paid: Int,
+    cumulative_impact_bps: Int,
+    hops_count: Int,
+};
+
+pub fn pool_hop_new(
+    pool_id: String,
+    token_in: String,
+    token_out: String,
+    res_in: Int,
+    res_out: Int,
+    fee_bps: Int
+) -> PoolHop {
+    return PoolHop {
+        pool_id: pool_id,
+        token_in: token_in,
+        token_out: token_out,
+        reserve_in: res_in,
+        reserve_out: res_out,
+        fee_bps: fee_bps,
+    };
+}
+
+pub fn multi_hop_route_new(route_id: String) -> MultiHopRoute {
+    let hops_empty: List[PoolHop] = list_new();
+    return MultiHopRoute {
+        route_id: route_id,
+        hops: hops_empty,
+        total_fee_bps: 0,
+    };
+}
+
+pub fn multi_hop_add_hop(route: &mut MultiHopRoute, hop: PoolHop) {
+    (route).hops = list_push((route).hops, hop);
+    (route).total_fee_bps = (route).total_fee_bps + (hop).fee_bps;
+}
+
+pub fn multi_hop_get_quote(
+    route: &MultiHopRoute,
+    amount_in: Int,
+    slippage_bps: Int
+) -> RouteQuote {
+    let num_hops: Int = list_len((route).hops);
+    if num_hops == 0 || amount_in <= 0 {
+        return RouteQuote {
+            amount_in: amount_in,
+            expected_out: 0,
+            min_amount_out: 0,
+            total_fee_paid: 0,
+            cumulative_impact_bps: 0,
+            hops_count: 0,
+        };
+    }
+
+    let mut cur_amount: Int = amount_in;
+    let mut total_fee: Int = 0;
+    let mut total_impact: Int = 0;
+    let mut i: Int = 0;
+
+    while i < num_hops {
+        let hop: PoolHop = list_get((route).hops, i);
+        let quote: SwapQuote = amm_get_amount_out(cur_amount, (hop).reserve_in, (hop).reserve_out, (hop).fee_bps);
+        cur_amount = (quote).amount_out;
+        total_fee = total_fee + (quote).fee_amount;
+        total_impact = total_impact + (quote).price_impact_bps;
+        i = i + 1;
+    }
+
+    let min_out: Int = (cur_amount * (10000 - slippage_bps)) / 10000;
+
+    return RouteQuote {
+        amount_in: amount_in,
+        expected_out: cur_amount,
+        min_amount_out: min_out,
+        total_fee_paid: total_fee,
+        cumulative_impact_bps: total_impact,
+        hops_count: num_hops,
+    };
+}
+
+pub fn multi_hop_split_quote(
+    route_a: &MultiHopRoute,
+    route_b: &MultiHopRoute,
+    total_amount_in: Int,
+    split_pct_a: Int,
+    slippage_bps: Int
+) -> RouteQuote {
+    let in_a: Int = (total_amount_in * split_pct_a) / 100;
+    let in_b: Int = total_amount_in - in_a;
+
+    let quote_a: RouteQuote = multi_hop_get_quote(route_a, in_a, slippage_bps);
+    let quote_b: RouteQuote = multi_hop_get_quote(route_b, in_b, slippage_bps);
+
+    let total_expected: Int = (quote_a).expected_out + (quote_b).expected_out;
+    let total_min: Int = (quote_a).min_amount_out + (quote_b).min_amount_out;
+    let total_fee: Int = (quote_a).total_fee_paid + (quote_b).total_fee_paid;
+    let avg_impact: Int = ((quote_a).cumulative_impact_bps + (quote_b).cumulative_impact_bps) / 2;
+
+    return RouteQuote {
+        amount_in: total_amount_in,
+        expected_out: total_expected,
+        min_amount_out: total_min,
+        total_fee_paid: total_fee,
+        cumulative_impact_bps: avg_impact,
+        hops_count: (quote_a).hops_count + (quote_b).hops_count,
+    };
+}

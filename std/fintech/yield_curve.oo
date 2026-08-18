@@ -1,0 +1,128 @@
+// # Zero-Coupon Yield Curve & Discount Factor Engine
+//
+// Logline: Constructs calibrated zero curves, bootstraps discount factors, and computes forward rates.
+//
+// Setup: Pure fixed-income term structure and rate interpolation math.
+//
+// Beats:
+//   1. Define curve tenors, market instruments, and zero-coupon rate points.
+//   2. Bootstrap zero rates and discount factors across money market and swap tenors.
+//   3. Compute instantaneous and forward rates with linear and log-linear interpolation.
+
+pub type YieldTenor = struct {
+    tenor_months: Int,
+    rate_bps: Int,
+    discount_factor: Float,
+};
+
+pub type ZeroCurve = struct {
+    curve_id: String,
+    base_date: Int,
+    tenors: List[YieldTenor],
+    is_calibrated: Bool,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 100000 { f = f + 100000.0; count = count - 100000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn yield_tenor_new(tenor_months: Int, rate_bps: Int) -> YieldTenor {
+    let t_years: Float = int_to_float(tenor_months) / 12.0;
+    let r_dec: Float = int_to_float(rate_bps) / 10000.0;
+    let df: Float = exp(0.0 - (r_dec * t_years));
+    return YieldTenor {
+        tenor_months: tenor_months,
+        rate_bps: rate_bps,
+        discount_factor: df,
+    };
+}
+
+pub fn zero_curve_new(curve_id: String, base_date: Int) -> ZeroCurve {
+    let tens: List[YieldTenor] = list_new();
+    return ZeroCurve {
+        curve_id: curve_id,
+        base_date: base_date,
+        tenors: tens,
+        is_calibrated: false,
+    };
+}
+
+pub fn zero_curve_add_tenor(curve: &mut ZeroCurve, tenor: YieldTenor) {
+    let cur_tens: List[YieldTenor] = (curve).tenors;
+    (curve).tenors = list_push(cur_tens, tenor);
+    (curve).is_calibrated = true;
+}
+
+pub fn zero_curve_get_tenor_count(curve: &ZeroCurve) -> Int {
+    return list_len((curve).tenors);
+}
+
+pub fn zero_curve_zero_rate(curve: &ZeroCurve, tenor_months: Int) -> Float {
+    let tens: List[YieldTenor] = (curve).tenors;
+    let n: Int = list_len(tens);
+    if n == 0 { return 0.0; }
+    
+    let mut i: Int = 0;
+    while i < n {
+        let t: YieldTenor = list_get(tens, i);
+        if (t).tenor_months == tenor_months {
+            return int_to_float((t).rate_bps) / 10000.0;
+        }
+        i = i + 1;
+    }
+    
+    // Linear interpolation between adjacent tenors
+    let first: YieldTenor = list_get(tens, 0);
+    if tenor_months <= (first).tenor_months {
+        return int_to_float((first).rate_bps) / 10000.0;
+    }
+    let last: YieldTenor = list_get(tens, n - 1);
+    if tenor_months >= (last).tenor_months {
+        return int_to_float((last).rate_bps) / 10000.0;
+    }
+    
+    let mut j: Int = 0;
+    while j < (n - 1) {
+        let t1: YieldTenor = list_get(tens, j);
+        let t2: YieldTenor = list_get(tens, j + 1);
+        if (tenor_months >= (t1).tenor_months) && (tenor_months <= (t2).tenor_months) {
+            let r1: Float = int_to_float((t1).rate_bps) / 10000.0;
+            let r2: Float = int_to_float((t2).rate_bps) / 10000.0;
+            let span: Float = int_to_float((t2).tenor_months - (t1).tenor_months);
+            let frac: Float = int_to_float(tenor_months - (t1).tenor_months) / span;
+            return r1 + (frac * (r2 - r1));
+        }
+        j = j + 1;
+    }
+    return 0.0;
+}
+
+pub fn zero_curve_discount_factor(curve: &ZeroCurve, tenor_months: Int) -> Float {
+    let r: Float = zero_curve_zero_rate(curve, tenor_months);
+    let t_years: Float = int_to_float(tenor_months) / 12.0;
+    return exp(0.0 - (r * t_years));
+}
+
+pub fn zero_curve_forward_rate(
+    curve: &ZeroCurve,
+    t1_months: Int,
+    t2_months: Int
+) -> Float {
+    if t2_months <= t1_months { return 0.0; }
+    let df1: Float = zero_curve_discount_factor(curve, t1_months);
+    let df2: Float = zero_curve_discount_factor(curve, t2_months);
+    let dt_years: Float = int_to_float(t2_months - t1_months) / 12.0;
+    if (df2 <= 0.0) || (dt_years <= 0.0) { return 0.0; }
+    return ln(df1 / df2) / dt_years;
+}

@@ -1,0 +1,129 @@
+// # Orbital Propagation & Maneuver Engine
+//
+// Logline: Propagates orbits with J2 Earth oblateness perturbations and computes Hohmann transfer delta-v.
+//
+// Setup: Astrodynamics propagation engine importing orbit_coords.oo.
+//
+// Beats:
+//   1. Propagate two-body orbital motion over time steps.
+//   2. Apply J2 secular nodal regression and argument of perigee precession.
+//   3. Calculate delta-v requirements for coplanar Hohmann transfer maneuvers.
+
+import "./orbit_coords.oo";
+
+pub fn propagate_kepler(elem: KeplerianElements, dt: Float, mu: Float) -> KeplerianElements {
+    let a: Float = (elem).semi_major_axis;
+    let e: Float = (elem).eccentricity;
+    let nu0: Float = (elem).true_anomaly;
+
+    let n: Float = mean_motion(a, mu);
+    let e_anom0: Float = true_to_eccentric_anomaly(nu0, e);
+    let m0: Float = eccentric_to_mean_anomaly(e_anom0, e);
+
+    let m_t: Float = math_normalize_angle(m0 + (n * dt));
+    let e_anom_t: Float = solve_kepler_eccentric(m_t, e);
+    let nu_t: Float = eccentric_to_true_anomaly(e_anom_t, e);
+
+    return keplerian_new(a, e, (elem).inclination, (elem).raan, (elem).arg_of_perigee, nu_t);
+}
+
+/// Calculate J2 secular perturbation rates for RAAN (dOmega/dt) and Argument of Perigee (domega/dt)
+pub fn calculate_j2_secular_rates(elem: KeplerianElements, mu: Float, r_earth: Float, j2: Float) -> OrbitPerturbations {
+    let a: Float = (elem).semi_major_axis;
+    let e: Float = (elem).eccentricity;
+    let inc: Float = (elem).inclination;
+
+    let p: Float = a * (1.0 - (e * e));
+    if p <= 0.0 {
+        return OrbitPerturbations { j2_secular_raan_dot: 0.0, j2_secular_argp_dot: 0.0 };
+    }
+    let n: Float = mean_motion(a, mu);
+    let re_over_p: Float = r_earth / p;
+    let factor: Float = 1.5 * j2 * (re_over_p * re_over_p) * n;
+
+    let cos_inc: Float = cos(inc);
+    let raan_dot: Float = (0.0 - factor) * cos_inc;
+
+    let five_cos2_minus1: Float = (5.0 * (cos_inc * cos_inc)) - 1.0;
+    let argp_dot: Float = (0.75 * j2 * (re_over_p * re_over_p) * n) * five_cos2_minus1;
+
+    return OrbitPerturbations {
+        j2_secular_raan_dot: raan_dot,
+        j2_secular_argp_dot: argp_dot,
+    };
+}
+
+/// Propagate Keplerian elements forward by time dt including J2 secular nodal precession
+pub fn propagate_j2(elem: KeplerianElements, dt: Float, mu: Float, r_earth: Float, j2: Float) -> KeplerianElements {
+    let rates: OrbitPerturbations = calculate_j2_secular_rates(elem, mu, r_earth, j2);
+    let propagated_kepler: KeplerianElements = propagate_kepler(elem, dt, mu);
+
+    let new_raan: Float = math_normalize_angle((elem).raan + ((rates).j2_secular_raan_dot * dt));
+    let new_argp: Float = math_normalize_angle((elem).arg_of_perigee + ((rates).j2_secular_argp_dot * dt));
+
+    return keplerian_new(
+        (propagated_kepler).semi_major_axis,
+        (propagated_kepler).eccentricity,
+        (propagated_kepler).inclination,
+        new_raan,
+        new_argp,
+        (propagated_kepler).true_anomaly
+    );
+}
+
+// -------------------------------------------------------------------
+// Orbital Maneuvers and Mission Planning
+// -------------------------------------------------------------------
+
+/// Compute Hohmann Transfer parameters between two circular coplanar orbits (r1 -> r2)
+pub fn calculate_hohmann_transfer(r1: Float, r2: Float, mu: Float) -> HohmannTransfer {
+    if r1 <= 0.0 {
+        return HohmannTransfer { r1: r1, r2: r2, delta_v1: 0.0, delta_v2: 0.0, total_delta_v: 0.0, transfer_time: 0.0 };
+    }
+    if r2 <= 0.0 {
+        return HohmannTransfer { r1: r1, r2: r2, delta_v1: 0.0, delta_v2: 0.0, total_delta_v: 0.0, transfer_time: 0.0 };
+    }
+
+    let a_trans: Float = (r1 + r2) / 2.0;
+
+    let v1: Float = circular_orbit_speed(r1, mu);
+    let v_trans1: Float = vis_viva_speed(r1, a_trans, mu);
+    let dv1: Float = math_abs(v_trans1 - v1);
+
+    let v2: Float = circular_orbit_speed(r2, mu);
+    let v_trans2: Float = vis_viva_speed(r2, a_trans, mu);
+    let dv2: Float = math_abs(v2 - v_trans2);
+
+    let total_dv: Float = dv1 + dv2;
+    let tof: Float = orbital_period(a_trans, mu) / 2.0;
+
+    return HohmannTransfer {
+        r1: r1,
+        r2: r2,
+        delta_v1: dv1,
+        delta_v2: dv2,
+        total_delta_v: total_dv,
+        transfer_time: tof,
+    };
+}
+
+/// Compute Delta-V required for an orbital inclination plane change: dv = 2 * v * sin(delta_i / 2)
+pub fn calculate_inclination_change_dv(v: Float, delta_i: Float) -> Float {
+    return (2.0 * v) * sin(delta_i / 2.0);
+}
+
+/// Check if orbit is near geostationary orbit parameters
+pub fn is_geostationary_orbit(elem: KeplerianElements, mu: Float) -> Bool {
+    let geo_radius: Float = 42164140.0; // r_geo in meters
+    let diff_a: Float = math_abs((elem).semi_major_axis - geo_radius);
+    if diff_a > 100000.0 {
+        return false;
+    }
+    if (elem).eccentricity > 0.01 {
+        return false;
+    }
+    if (elem).inclination > 0.05 {
+        return false;
+    }
+    return true;
+}

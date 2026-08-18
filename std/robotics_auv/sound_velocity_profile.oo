@@ -1,0 +1,112 @@
+// # Sound Velocity Profile (SVP) & Snell's Law Acoustic Ray Tracing
+//
+// Logline: Models stratified ocean sound speed profiles (thermocline/SOFAR channel) and traces refracted acoustic ray paths via Snell's law.
+//
+// Setup: Ocean acoustic ray tracing simulator predicting sound refraction, acoustic turning depths, and transmission shadow zones.
+//
+// Beats:
+//   1. Define stratified ocean SVP layers (surface duct, thermocline gradient, SOFAR axis, deep isothermal).
+//   2. Compute local sound speed c(z) and vertical sound velocity gradient g = dc/dz.
+//   3. Implement Snell's law of refraction cos(theta(z)) / c(z) = const for acoustic wave rays.
+//   4. Calculate ray path horizontal range, vertex turning depth, and propagation travel time.
+
+import "./auv_hydrodynamics_constants.oo";
+
+pub type SvpLayer = struct {
+    depth_m: Float,
+    sound_speed_m_s: Float,
+    gradient_s_inv: Float,
+};
+
+pub type OceanSoundProfile = struct {
+    surface_c_m_s: Float,
+    thermocline_base_depth_m: Float,
+    thermocline_min_c_m_s: Float,
+    deep_gradient_s_inv: Float,
+};
+
+pub type AcousticRayStep = struct {
+    depth_m: Float,
+    horiz_range_m: Float,
+    travel_time_s: Float,
+    ray_angle_rad: Float,
+    is_turned: Bool,
+};
+
+pub fn ocean_sound_profile_default_atlantic() -> OceanSoundProfile {
+    return OceanSoundProfile {
+        surface_c_m_s: 1530.0,            // Warm surface mixed layer
+        thermocline_base_depth_m: 800.0,  // SOFAR axis at ~800m
+        thermocline_min_c_m_s: 1485.0,    // Minimum sound speed
+        deep_gradient_s_inv: 0.016,       // Positive hydrostatic gradient below SOFAR
+    };
+}
+
+pub fn svp_sound_speed_at_depth(
+    prof: &OceanSoundProfile,
+    depth_m: Float
+) -> Float {
+    let mut d: Float = depth_m;
+    if d < 0.0 {
+        d = 0.0;
+    }
+    let z_axis: Float = (prof).thermocline_base_depth_m;
+    let c_min: Float = (prof).thermocline_min_c_m_s;
+    let c_surf: Float = (prof).surface_c_m_s;
+
+    if d <= z_axis {
+        // Negative gradient in thermocline (downward refraction)
+        let ratio: Float = d / z_axis;
+        return c_surf - (ratio * (c_surf - c_min));
+    } else {
+        // Positive gradient below SOFAR channel (upward refraction)
+        let delta_z: Float = d - z_axis;
+        return c_min + (delta_z * (prof).deep_gradient_s_inv);
+    }
+}
+
+pub fn svp_ray_step(
+    prof: &OceanSoundProfile,
+    current_depth: Float,
+    current_range: Float,
+    initial_c: Float,
+    initial_angle_rad: Float,
+    step_dz_m: Float
+) -> AcousticRayStep {
+    // Snell's invariant: cos(theta) / c = cos(theta_0) / c_0 = k_snell
+    let k_snell: Float = cos(initial_angle_rad) / initial_c;
+
+    let next_depth: Float = current_depth + step_dz_m;
+    let next_c: Float = svp_sound_speed_at_depth(prof, next_depth);
+
+    let cos_next_theta: Float = k_snell * next_c;
+
+    if (cos_next_theta > 1.0) || (cos_next_theta < 0.0 - 1.0) {
+        // Ray has reached turning point (vertex) and turned horizontally
+        return AcousticRayStep {
+            depth_m: current_depth,
+            horiz_range_m: current_range,
+            travel_time_s: step_dz_m / next_c,
+            ray_angle_rad: 0.0,
+            is_turned: true,
+        };
+    }
+
+    let next_theta: Float = math_acos(cos_next_theta);
+    let avg_c: Float = 0.5 * (svp_sound_speed_at_depth(prof, current_depth) + next_c);
+    let mut safe_sin: Float = sin(next_theta);
+    if math_abs(safe_sin) < 0.01 {
+        safe_sin = 0.01;
+    }
+
+    let delta_x: Float = step_dz_m / safe_sin;
+    let dt: Float = delta_x / avg_c;
+
+    return AcousticRayStep {
+        depth_m: next_depth,
+        horiz_range_m: current_range + delta_x,
+        travel_time_s: dt,
+        ray_angle_rad: next_theta,
+        is_turned: false,
+    };
+}

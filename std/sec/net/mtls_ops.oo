@@ -1,0 +1,191 @@
+// ===================================================================
+// openOODA Standard Library — ooda::sec::net::mtls_ops
+// mTLS handshake/config/peer ops (split from mtls.oo, M172)
+// ===================================================================
+// RULES.oot 1.4: Default-deny for privileged effects.
+// CAP-G6: preferred &TcpCap for TLS/TCP session effects; &NetCap still works via supersede.
+// RULES.oot 1.3: Fail-closed residual for unimplemented builtins / compiler limitations.
+
+import "./mtls_types.oo";
+import "./mtls_cert.oo";
+
+pub fn tls_handshake_state_init(session_id: String) -> TlsHandshakeState {
+    return TlsHandshakeState {
+        session_id: session_id,
+        stage: "INIT",
+        cipher_suite: "TLS_AES_256_GCM_SHA384",
+        tls_version: "TLSv1.3",
+        client_random: "",
+        server_random: "",
+        pre_master_secret_hash: "",
+        client_auth_requested: true,
+        client_auth_completed: false,
+        is_handshake_complete: false,
+        error_message: "",
+    };
+}
+
+pub fn peer_identity_empty() -> PeerIdentity {
+    let empty_domains: List[String] = [];
+    let empty_ips: List[String] = [];
+    return PeerIdentity {
+        peer_id: "",
+        common_name: "",
+        organization: "",
+        san_domains: empty_domains,
+        san_ips: empty_ips,
+        cert_serial: "",
+        fingerprint_sha256: "",
+        trust_score: 0,
+        is_authenticated: false,
+    };
+}
+
+// -------------------------------------------------------------------
+// TlsHandshakeState Operations
+// -------------------------------------------------------------------
+
+pub fn tls_handshake_state_transition(
+    state: TlsHandshakeState,
+    next_stage: String
+) -> Result[TlsHandshakeState, String] {
+    let cur: String = state.stage;
+    let mut valid_trans: Bool = false;
+
+    if str_eq(cur, "INIT") {
+        if str_eq(next_stage, "CLIENT_HELLO") {
+            valid_trans = true;
+        }
+    }
+    if str_eq(cur, "CLIENT_HELLO") {
+        if str_eq(next_stage, "SERVER_HELLO") {
+            valid_trans = true;
+        }
+    }
+    if str_eq(cur, "SERVER_HELLO") {
+        if str_eq(next_stage, "CERTIFICATE_VERIFY") {
+            valid_trans = true;
+        }
+    }
+    if str_eq(cur, "CERTIFICATE_VERIFY") {
+        if str_eq(next_stage, "FINISHED") {
+            valid_trans = true;
+        }
+        if str_eq(next_stage, "FAILED") {
+            valid_trans = true;
+        }
+    }
+
+    if valid_trans == false {
+        return Err("INVALID_HANDSHAKE_TRANSITION: Invalid TLS handshake state transition");
+    }
+
+    let mut is_comp: Bool = false;
+    if str_eq(next_stage, "FINISHED") {
+        is_comp = true;
+    }
+
+    let new_state = TlsHandshakeState {
+        session_id: state.session_id,
+        stage: next_stage,
+        cipher_suite: state.cipher_suite,
+        tls_version: state.tls_version,
+        client_random: state.client_random,
+        server_random: state.server_random,
+        pre_master_secret_hash: state.pre_master_secret_hash,
+        client_auth_requested: state.client_auth_requested,
+        client_auth_completed: state.client_auth_completed,
+        is_handshake_complete: is_comp,
+        error_message: state.error_message,
+    };
+    return Ok(new_state);
+}
+
+// -------------------------------------------------------------------
+// MtlsConfig Operations
+// -------------------------------------------------------------------
+
+pub fn mtls_config_default() -> MtlsConfig {
+    let empty_ciphers: List[String] = [];
+    let empty_roots: List[MtlsCertificate] = [];
+    let dummy_cert: MtlsCertificate = mtls_certificate_empty();
+    let dummy_chain: CertificateChain = certificate_chain_empty();
+
+    return MtlsConfig {
+        config_id: "default_mtls_cfg",
+        server_name_indication: "localhost",
+        require_client_cert: true,
+        verify_hostname: true,
+        min_tls_version: "TLSv1.3",
+        allowed_cipher_suites: empty_ciphers,
+        max_chain_depth: 4,
+        ca_roots: empty_roots,
+        client_cert: dummy_cert,
+        client_chain: dummy_chain,
+        session_timeout_seconds: 3600,
+        enforce_revocation_check: true,
+        is_valid: true,
+    };
+}
+
+pub fn mtls_config_validate(cfg_ref: &MtlsConfig) -> Bool {
+    let is_v: Bool = cfg_ref.is_valid;
+    if is_v == false {
+        return false;
+    }
+    let cid: String = cfg_ref.config_id;
+    let cid_len: Int = cid.len();
+    if cid_len == 0 {
+        return false;
+    }
+    let max_d: Int = cfg_ref.max_chain_depth;
+    if max_d <= 0 {
+        return false;
+    }
+    let timeout: Int = cfg_ref.session_timeout_seconds;
+    if timeout <= 0 {
+        return false;
+    }
+    return true;
+}
+
+// -------------------------------------------------------------------
+// PeerIdentity Operations
+// -------------------------------------------------------------------
+
+pub fn peer_identity_create(cert_ref: &MtlsCertificate, trust_score: Int) -> PeerIdentity {
+    let empty_domains: List[String] = [];
+    let empty_ips: List[String] = [];
+    let cn: String = cert_ref.subject_cn;
+    let serial: String = cert_ref.serial_number;
+    let is_auth: Bool = cert_ref.is_valid;
+    let pid: String = "peer_" + cn + "_" + serial;
+
+    return PeerIdentity {
+        peer_id: pid,
+        common_name: cn,
+        organization: "DefaultOrg",
+        san_domains: empty_domains,
+        san_ips: empty_ips,
+        cert_serial: serial,
+        fingerprint_sha256: cert_ref.raw_pem,
+        trust_score: trust_score,
+        is_authenticated: is_auth,
+    };
+}
+
+pub fn peer_identity_add_san_domain(peer: PeerIdentity, san: String) -> PeerIdentity {
+    let cur_domains: List[String] = peer.san_domains;
+    let new_domains: List[String] = list_push(cur_domains, san);
+    return PeerIdentity {
+        peer_id: peer.peer_id,
+        common_name: peer.common_name,
+        organization: peer.organization,
+        san_domains: new_domains,
+        san_ips: peer.san_ips,
+        cert_serial: peer.cert_serial,
+        fingerprint_sha256: peer.fingerprint_sha256,
+        trust_score: peer.trust_score,
+        is_authenticated: peer.is_authenticated,
+    };
+}

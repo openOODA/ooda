@@ -1,0 +1,133 @@
+// # Options Calendar (Horizontal) Spread Strategy Engine
+//
+// Logline: Analyzes time decay differentials, term structure roll yields, and net Theta/Vega exposures for calendar spread derivatives.
+//
+// Setup: Pure quantitative finance module evaluating horizontal calendar spreads across varying expiry tenors.
+//
+// Beats:
+//   1. Define CalendarSpreadPosition and CalendarSpreadMetrics structures.
+//   2. Compute net theta harvest vs vega risk across front and back month expirations.
+//   3. Determine estimated maximum profit at near-term maturity and term structure slope sensitivity.
+
+pub type CalendarSpreadPosition = struct {
+    strike: Float,
+    front_expiry_years: Float,
+    back_expiry_years: Float,
+    front_implied_vol: Float,
+    back_implied_vol: Float,
+    spot_price: Float,
+    risk_free_rate: Float,
+    contracts_count: Float,
+    is_call: Bool,
+};
+
+pub type CalendarSpreadMetrics = struct {
+    front_option_price: Float,
+    back_option_price: Float,
+    net_debit_cost: Float,
+    net_theta_daily: Float,
+    net_vega: Float,
+    net_delta: Float,
+    estimated_max_profit: Float,
+    roll_yield_apr: Float,
+};
+
+pub fn cal_norm_pdf(x: Float) -> Float {
+    let pi_factor: Float = 0.3989422804;
+    return pi_factor * exp(0.0 - (x * x / 2.0));
+}
+
+pub fn cal_norm_cdf(x: Float) -> Float {
+    let mut abs_x: Float = x;
+    if x < 0.0 { abs_x = 0.0 - x; }
+    let k: Float = 1.0 / (1.0 + (0.2316419 * abs_x));
+    let poly: Float = k * (0.31938153 + (k * (-0.35656378 + (k * (1.78147794 + (k * (-1.82125598 + (1.33027443 * k))))))));
+    let mut cdf: Float = 1.0 - (cal_norm_pdf(abs_x) * poly);
+    if x < 0.0 { cdf = 1.0 - cdf; }
+    return cdf;
+}
+
+pub fn cal_bs_eval(s: Float, k: Float, t: Float, r: Float, vol: Float, is_call: Bool) -> Float {
+    let sqrt_t: Float = sqrt(t);
+    let d1: Float = (ln(s / k) + ((r + (0.5 * vol * vol)) * t)) / (vol * sqrt_t);
+    let d2: Float = d1 - (vol * sqrt_t);
+    let df: Float = exp((0.0 - r) * t);
+
+    if is_call {
+        return (s * cal_norm_cdf(d1)) - (k * df * cal_norm_cdf(d2));
+    }
+    return (k * df * cal_norm_cdf(0.0 - d2)) - (s * cal_norm_cdf(0.0 - d1));
+}
+
+pub fn calendar_spread_new(
+    strike: Float,
+    t_front: Float,
+    t_back: Float,
+    vol_front: Float,
+    vol_back: Float,
+    spot: Float,
+    r: Float,
+    contracts: Float,
+    is_call: Bool
+) -> CalendarSpreadPosition {
+    return CalendarSpreadPosition {
+        strike: strike,
+        front_expiry_years: t_front,
+        back_expiry_years: t_back,
+        front_implied_vol: vol_front,
+        back_implied_vol: vol_back,
+        spot_price: spot,
+        risk_free_rate: r,
+        contracts_count: contracts,
+        is_call: is_call,
+    };
+}
+
+pub fn evaluate_calendar_spread(p: &CalendarSpreadPosition) -> CalendarSpreadMetrics {
+    let s: Float = (p).spot_price;
+    let k: Float = (p).strike;
+    let r: Float = (p).risk_free_rate;
+
+    let p_front: Float = cal_bs_eval(s, k, (p).front_expiry_years, r, (p).front_implied_vol, (p).is_call);
+    let p_back: Float = cal_bs_eval(s, k, (p).back_expiry_years, r, (p).back_implied_vol, (p).is_call);
+
+    let net_debit: Float = (p_back - p_front) * (p).contracts_count;
+
+    // Greeks comparison
+    let sqrt_t_f: Float = sqrt((p).front_expiry_years);
+    let sqrt_t_b: Float = sqrt((p).back_expiry_years);
+
+    let d1_f: Float = (ln(s / k) + ((r + (0.5 * (p).front_implied_vol * (p).front_implied_vol)) * (p).front_expiry_years)) / ((p).front_implied_vol * sqrt_t_f);
+    let d1_b: Float = (ln(s / k) + ((r + (0.5 * (p).back_implied_vol * (p).back_implied_vol)) * (p).back_expiry_years)) / ((p).back_implied_vol * sqrt_t_b);
+
+    let vega_f: Float = s * sqrt_t_f * cal_norm_pdf(d1_f) * 0.01;
+    let vega_b: Float = s * sqrt_t_b * cal_norm_pdf(d1_b) * 0.01;
+    let net_vega: Float = (vega_b - vega_f) * (p).contracts_count;
+
+    let theta_f: Float = ((0.0 - (s * cal_norm_pdf(d1_f) * (p).front_implied_vol)) / (2.0 * sqrt_t_f) - (r * p_front)) / 365.0;
+    let theta_b: Float = ((0.0 - (s * cal_norm_pdf(d1_b) * (p).back_implied_vol)) / (2.0 * sqrt_t_b) - (r * p_back)) / 365.0;
+    // Long back (pays theta decay) and short front (earns theta decay)
+    let net_theta: Float = (theta_b - theta_f) * (p).contracts_count;
+
+    let delta_f: Float = cal_norm_cdf(d1_f);
+    let delta_b: Float = cal_norm_cdf(d1_b);
+    let net_delta: Float = (delta_b - delta_f) * (p).contracts_count;
+
+    // Max profit estimation at near term expiry when S = K
+    let rem_back_t: Float = (p).back_expiry_years - (p).front_expiry_years;
+    let back_val_at_front_expiry: Float = cal_bs_eval(k, k, rem_back_t, r, (p).back_implied_vol, (p).is_call);
+    let max_p: Float = (back_val_at_front_expiry - (p_back - p_front)) * (p).contracts_count;
+
+    let roll_yield: Float = (net_theta * 365.0) / (net_debit + 0.0001);
+
+    return CalendarSpreadMetrics {
+        front_option_price: p_front,
+        back_option_price: p_back,
+        net_debit_cost: net_debit,
+        net_theta_daily: net_theta,
+        net_vega: net_vega,
+        net_delta: net_delta,
+        estimated_max_profit: max_p,
+        roll_yield_apr: roll_yield,
+    };
+}

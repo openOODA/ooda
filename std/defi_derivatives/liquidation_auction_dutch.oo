@@ -1,0 +1,135 @@
+// # Fractional Dutch Auction Liquidation Engine
+//
+// Logline: Executes continuous declining price Dutch auctions for liquidated collateral, mitigating market slippage and front-running extraction.
+//
+// Setup: Pure quantitative DeFi protocol module managing Dutch auction price decay curves and fractional lot settlements.
+//
+// Beats:
+//   1. Define DutchAuctionConfig, DutchAuctionLot, and DutchAuctionBidResult structures.
+//   2. Calculate continuous decaying clearing prices from start bonus down to reserve floor.
+//   3. Process partial lot purchases, update collateral balances, and return surplus to liquidator/vault.
+
+pub type DutchAuctionConfig = struct {
+    auction_duration_sec: Int,
+    starting_premium_pct: Float, // e.g. +0.08 (+8% above oracle)
+    reserve_discount_pct: Float, // e.g. -0.15 (-15% below oracle)
+};
+
+pub type DutchAuctionLot = struct {
+    auction_id: String,
+    collateral_token: String,
+    total_collateral_amount: Float,
+    remaining_collateral_amount: Float,
+    debt_to_cover_usd: Float,
+    oracle_reference_price: Float,
+    start_timestamp_sec: Int,
+    is_active: Bool,
+};
+
+pub type DutchAuctionBidResult = struct {
+    purchased_collateral_amount: Float,
+    clearing_price_usd: Float,
+    total_payment_usd: Float,
+    remaining_debt_usd: Float,
+    is_auction_settled: Bool,
+};
+
+pub fn dutch_auction_config_default() -> DutchAuctionConfig {
+    return DutchAuctionConfig {
+        auction_duration_sec: 1800, // 30 minutes
+        starting_premium_pct: 0.05,
+        reserve_discount_pct: 0.15,
+    };
+}
+
+pub fn dutch_auction_lot_new(
+    auction_id: String,
+    token: String,
+    collateral_amt: Float,
+    debt_usd: Float,
+    oracle_px: Float,
+    start_time: Int
+) -> DutchAuctionLot {
+    return DutchAuctionLot {
+        auction_id: auction_id,
+        collateral_token: token,
+        total_collateral_amount: collateral_amt,
+        remaining_collateral_amount: collateral_amt,
+        debt_to_cover_usd: debt_usd,
+        oracle_reference_price: oracle_px,
+        start_timestamp_sec: start_time,
+        is_active: true,
+    };
+}
+
+pub fn calc_dutch_price(
+    lot: &DutchAuctionLot,
+    current_time_sec: Int,
+    cfg: &DutchAuctionConfig
+) -> Float {
+    let start_px: Float = (lot).oracle_reference_price * (1.0 + (cfg).starting_premium_pct);
+    let floor_px: Float = (lot).oracle_reference_price * (1.0 - (cfg).reserve_discount_pct);
+
+    let elapsed: Int = current_time_sec - (lot).start_timestamp_sec;
+    if elapsed <= 0 {
+        return start_px;
+    }
+    if elapsed >= (cfg).auction_duration_sec {
+        return floor_px;
+    }
+
+    let mut elapsed_f: Float = 0.0;
+    let mut rem_e: Int = elapsed;
+    while rem_e > 0 { elapsed_f = elapsed_f + 1.0; rem_e = rem_e - 1; }
+
+    let mut dur_f: Float = 0.0;
+    let mut rem_d: Int = (cfg).auction_duration_sec;
+    while rem_d > 0 { dur_f = dur_f + 1.0; rem_d = rem_d - 1; }
+
+    let progress: Float = elapsed_f / dur_f;
+    return start_px - (progress * (start_px - floor_px));
+}
+
+pub fn buy_dutch_lot_fraction(
+    lot: &mut DutchAuctionLot,
+    payment_amount_usd: Float,
+    current_time_sec: Int,
+    cfg: &DutchAuctionConfig
+) -> DutchAuctionBidResult {
+    let clearing_px: Float = calc_dutch_price(lot, current_time_sec, cfg);
+    if clearing_px <= 0.0 || !(lot).is_active {
+        return DutchAuctionBidResult {
+            purchased_collateral_amount: 0.0,
+            clearing_price_usd: clearing_px,
+            total_payment_usd: 0.0,
+            remaining_debt_usd: (lot).debt_to_cover_usd,
+            is_auction_settled: false,
+        };
+    }
+
+    let requested_collateral: Float = payment_amount_usd / clearing_px;
+    let mut actual_collateral: Float = requested_collateral;
+    let mut actual_payment: Float = payment_amount_usd;
+
+    if actual_collateral >= (lot).remaining_collateral_amount {
+        actual_collateral = (lot).remaining_collateral_amount;
+        actual_payment = actual_collateral * clearing_px;
+        (lot).remaining_collateral_amount = 0.0;
+        (lot).is_active = false;
+    } else {
+        (lot).remaining_collateral_amount = (lot).remaining_collateral_amount - actual_collateral;
+    }
+
+    let remaining_debt: Float = (lot).debt_to_cover_usd - actual_payment;
+    if remaining_debt <= 0.0 {
+        (lot).is_active = false;
+    }
+
+    return DutchAuctionBidResult {
+        purchased_collateral_amount: actual_collateral,
+        clearing_price_usd: clearing_px,
+        total_payment_usd: actual_payment,
+        remaining_debt_usd: remaining_debt,
+        is_auction_settled: !(lot).is_active,
+    };
+}

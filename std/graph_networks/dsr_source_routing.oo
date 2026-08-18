@@ -1,0 +1,122 @@
+// # Dynamic Source Routing (DSR) Protocol
+//
+// Logline: Implements reactive source-routed packet forwarding, full route caching, and salvage error recovery.
+//
+// Setup: Source-routing mesh protocol carrying complete ordered node paths in packet headers without hop tables.
+//
+// Beats:
+//   1. Encode explicit end-to-end node traversal sequences in packet source headers.
+//   2. Forward packets deterministically along header route vectors.
+//   3. Cache discovered subpaths and salvage packets upon link failure detection.
+
+pub type DsrPacketHeader = struct {
+    source_id: Int,
+    dest_id: Int,
+    route_hops: List[Int],
+    current_hop_idx: Int,
+};
+
+pub type DsrCachedRoute = struct {
+    dest_id: Int,
+    path: List[Int],
+    hop_length: Int,
+    expires_at_ms: Int,
+};
+
+pub type DsrRouteCache = struct {
+    local_id: Int,
+    routes: List[DsrCachedRoute],
+};
+
+pub fn dsr_cache_create(local_id: Int) -> DsrRouteCache {
+    let empty: List[DsrCachedRoute] = list_new();
+    return DsrRouteCache {
+        local_id: local_id,
+        routes: empty,
+    };
+}
+
+pub fn dsr_cache_add_path(cache: &mut DsrRouteCache, dest_id: Int, path: List[Int], ttl_ms: Int) -> Bool {
+    let hops: Int = list_len(path);
+    let new_entry: DsrCachedRoute = DsrCachedRoute {
+        dest_id: dest_id,
+        path: path,
+        hop_length: hops,
+        expires_at_ms: ttl_ms,
+    };
+
+    // Check if better or existing
+    let n: Int = list_len((cache).routes);
+    let mut i: Int = 0;
+    let mut existing_idx: Int = -1;
+    while i < n {
+        let r: DsrCachedRoute = list_get((cache).routes, i);
+        if (r).dest_id == dest_id {
+            existing_idx = i;
+        }
+        i = i + 1;
+    }
+
+    if existing_idx >= 0 {
+        let cur: DsrCachedRoute = list_get((cache).routes, existing_idx);
+        if hops < (cur).hop_length {
+            let mut updated: List[DsrCachedRoute] = list_new();
+            let mut j: Int = 0;
+            while j < n {
+                if j == existing_idx {
+                    updated = list_push(updated, new_entry);
+                } else {
+                    updated = list_push(updated, list_get((cache).routes, j));
+                }
+                j = j + 1;
+            }
+            (cache).routes = updated;
+            return true;
+        }
+        return false;
+    }
+
+    (cache).routes = list_push((cache).routes, new_entry);
+    return true;
+}
+
+pub fn dsr_cache_lookup(cache: &DsrRouteCache, dest_id: Int) -> List[Int] {
+    let n: Int = list_len((cache).routes);
+    let mut i: Int = 0;
+    while i < n {
+        let r: DsrCachedRoute = list_get((cache).routes, i);
+        if (r).dest_id == dest_id {
+            return (r).path;
+        }
+        i = i + 1;
+    }
+    let empty: List[Int] = list_new();
+    return empty;
+}
+
+pub fn dsr_forward_step(local_id: Int, header: &mut DsrPacketHeader) -> Int {
+    let hops: List[Int] = (header).route_hops;
+    let num_hops: Int = list_len(hops);
+    let cur_idx: Int = (header).current_hop_idx;
+
+    if cur_idx < 0 || cur_idx >= num_hops {
+        return -1; // Route error
+    }
+
+    let cur_node: Int = list_get(hops, cur_idx);
+    if cur_node != local_id {
+        return -1; // Header mismatch
+    }
+
+    if (header).dest_id == local_id {
+        return local_id; // Delivered locally
+    }
+
+    let next_idx: Int = cur_idx + 1;
+    if next_idx < num_hops {
+        (header).current_hop_idx = next_idx;
+        return list_get(hops, next_idx); // Next hop node ID
+    }
+
+    return -1;
+}

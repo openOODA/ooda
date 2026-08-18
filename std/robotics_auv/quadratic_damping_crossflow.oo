@@ -1,0 +1,100 @@
+// # Crossflow Drag Principle & Slender Body Hydrodynamic Damping
+//
+// Logline: Integrates Hoerner cross-flow viscous drag along vehicle cylindrical sections for coupled sway-yaw and heave-pitch damping.
+//
+// Setup: Strip-theory numerical integration of nonlinear cross-flow drag forces and moments on slender cylindrical AUV hulls.
+//
+// Beats:
+//   1. Define hull geometric strip discretization (length, radius profile, cross-flow drag coefficient C_dc).
+//   2. Compute local transverse velocity at each longitudinal strip x_i.
+//   3. Integrate cross-flow forces Y_cf, Z_cf and cross-flow moments M_cf, N_cf.
+//   4. Compute axial skin friction drag based on Reynolds number and ITTC-1957 friction line.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type SlenderHullGeometry = struct {
+    length_m: Float,
+    diameter_m: Float,
+    c_dc: Float,
+    c_d_axial: Float,
+    num_strips: Int,
+};
+
+pub fn slender_hull_geometry_default() -> SlenderHullGeometry {
+    return SlenderHullGeometry {
+        length_m: 1.6,
+        diameter_m: 0.19,
+        c_dc: 0.85, // Cross-flow drag coefficient for circular cylinder
+        c_d_axial: 0.0035, // Axial skin friction coefficient
+        num_strips: 16,
+    };
+}
+
+pub fn ittc_skin_friction_coefficient(reynolds_number: Float) -> Float {
+    // ITTC-1957 model-ship correlation line: C_f = 0.075 / (log10(Re) - 2)^2
+    if reynolds_number <= 1000.0 {
+        return 0.01;
+    }
+    // Base 10 log approximation: log10(Re) = ln(Re) / 2.302585
+    let ln_re: Float = 0.0;
+    // Approximating log10(Re) in range 1e5 .. 1e7 ~ 5.0 .. 7.0
+    let mut log10_val: Float = 6.0;
+    if reynolds_number < 1000000.0 {
+        log10_val = 5.5;
+    }
+    if reynolds_number > 5000000.0 {
+        log10_val = 6.7;
+    }
+    let denom: Float = log10_val - 2.0;
+    return 0.075 / (denom * denom);
+}
+
+pub fn compute_crossflow_damping(
+    geom: &SlenderHullGeometry,
+    nu_r: &AuvVelocity,
+    rho: Float
+) -> Vector6 {
+    let l: Float = (geom).length_m;
+    let d: Float = (geom).diameter_m;
+    let cdc: Float = (geom).c_dc;
+    let n_strips: Float = 16.0;
+    let dx: Float = l / n_strips;
+
+    let v: Float = (nu_r).v;
+    let w: Float = (nu_r).w;
+    let q: Float = (nu_r).q;
+    let r: Float = (nu_r).r;
+    let u: Float = (nu_r).u;
+
+    let mut y_cf: Float = 0.0;
+    let mut z_cf: Float = 0.0;
+    let mut m_cf: Float = 0.0;
+    let mut n_cf: Float = 0.0;
+
+    let mut i: Float = 0.0;
+    while i < n_strips {
+        let x_i: Float = (0.0 - (l / 2.0)) + ((i + 0.5) * dx);
+        let v_cross: Float = v + (x_i * r);
+        let w_cross: Float = w - (x_i * q);
+
+        let v_mag: Float = math_abs(v_cross);
+        let w_mag: Float = math_abs(w_cross);
+
+        let d_force_y: Float = (0.0 - 0.5) * rho * cdc * d * (v_cross * v_mag) * dx;
+        let d_force_z: Float = (0.0 - 0.5) * rho * cdc * d * (w_cross * w_mag) * dx;
+
+        y_cf = y_cf + d_force_y;
+        z_cf = z_cf + d_force_z;
+        n_cf = n_cf + (d_force_y * x_i);
+        m_cf = m_cf - (d_force_z * x_i);
+
+        i = i + 1.0;
+    }
+
+    // Axial surge drag: 0.5 * rho * S_wet * C_d_axial * u * |u|
+    let s_wet: Float = const_pi() * d * l;
+    let x_drag: Float = (0.0 - 0.5) * rho * s_wet * (geom).c_d_axial * (u * math_abs(u));
+
+    return vec6_new(x_drag, y_cf, z_cf, 0.0, m_cf, n_cf);
+}

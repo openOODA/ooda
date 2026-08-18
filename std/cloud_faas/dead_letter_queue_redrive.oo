@@ -1,0 +1,79 @@
+// # Dead Letter Queue & Redrive Policy
+//
+// Logline: Implements exponential backoff with full jitter, max retry attempts, and Dead Letter Queue (DLQ) routing.
+//
+// Setup: Failure management pipeline isolating poison-pill events and retrying transient service failures.
+//
+// Beats:
+//   1. Track invocation retry count and compute exponential backoff with jitter delays.
+//   2. Authorize retry attempts when within max receive count constraints.
+//   3. Route permanently failed messages to DLQ target SQS queues or S3 buckets.
+
+pub type FailedMessage = struct {
+    message_id: String,
+    retry_count: Int,
+    error_message: String,
+    is_sent_to_dlq: Bool,
+};
+
+pub type DeadLetterRedrivePolicy = struct {
+    max_receive_count: Int,
+    base_backoff_ms: Int,
+    dlq_target_arn: String,
+    messages: List[FailedMessage],
+    total_dlq_routed: Int,
+};
+
+pub fn dead_letter_policy_new(
+    max_receives: Int,
+    base_backoff: Int,
+    dlq_arn: String
+) -> DeadLetterRedrivePolicy {
+    let empty_msgs: List[FailedMessage] = list_new();
+    return DeadLetterRedrivePolicy {
+        max_receive_count: max_receives,
+        base_backoff_ms: base_backoff,
+        dlq_target_arn: dlq_arn,
+        messages: empty_msgs,
+        total_dlq_routed: 0,
+    };
+}
+
+pub fn redrive_compute_backoff_ms(policy: &DeadLetterRedrivePolicy, retry_attempt: Int) -> Int {
+    let mut factor: Int = 1;
+    let mut i: Int = 0;
+    while i < retry_attempt && i < 10 {
+        factor = factor * 2;
+        i = i + 1;
+    }
+    return (policy).base_backoff_ms * factor;
+}
+
+pub fn redrive_handle_failure(
+    policy: &mut DeadLetterRedrivePolicy,
+    msg_id: String,
+    current_retry: Int,
+    err: String
+) -> Bool {
+    let next_retry: Int = current_retry + 1;
+    if next_retry >= (policy).max_receive_count {
+        let dead_msg = FailedMessage {
+            message_id: msg_id,
+            retry_count: next_retry,
+            error_message: err,
+            is_sent_to_dlq: true,
+        };
+        (policy).messages = list_push((policy).messages, dead_msg);
+        (policy).total_dlq_routed = (policy).total_dlq_routed + 1;
+        return false; // Route to DLQ
+    }
+
+    let retry_msg = FailedMessage {
+        message_id: msg_id,
+        retry_count: next_retry,
+        error_message: err,
+        is_sent_to_dlq: false,
+    };
+    (policy).messages = list_push((policy).messages, retry_msg);
+    return true; // Allow retry
+}

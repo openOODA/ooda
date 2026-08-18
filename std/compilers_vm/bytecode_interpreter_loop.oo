@@ -1,0 +1,163 @@
+// # Virtual Machine Bytecode Interpreter Loop
+//
+// Logline: Direct-threaded bytecode execution loop, program counter dispatch, operand stack evaluation, and cycle metering.
+//
+// Setup: Executes bytecode programs inside a virtual machine runtime, maintaining gas/cycle limits and frame state.
+//
+// Beats:
+//   1. Define VmState, ExecutionResult, and CycleMeter structures.
+//   2. Step instruction: decode opcode, pop operands, compute result, push to operand stack.
+//   3. Handle jumps, branches, and execution termination (halt / error).
+
+import "./bytecode_instruction_set.oo";
+
+pub type VmState = struct {
+    pc: Int,
+    stack: List[Int],
+    stack_pointer: Int,
+    locals: List[Int],
+    local_count: Int,
+    is_halted: Int,
+    exit_code: Int,
+    cycles_executed: Int,
+};
+
+pub type VmConfig = struct {
+    max_cycles: Int,
+    stack_limit: Int,
+};
+
+// -------------------------------------------------------------------
+// Constructors
+// -------------------------------------------------------------------
+
+pub fn vm_state_new(num_locals: Int) -> VmState {
+    let empty_st: List[Int] = list_new();
+    let mut locs: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < num_locals {
+        locs = list_push(locs, 0);
+        i = i + 1;
+    }
+    return VmState {
+        pc: 0,
+        stack: empty_st,
+        stack_pointer: 0,
+        locals: locs,
+        local_count: num_locals,
+        is_halted: 0,
+        exit_code: 0,
+        cycles_executed: 0,
+    };
+}
+
+pub fn vm_config_default() -> VmConfig {
+    return VmConfig {
+        max_cycles: 100000,
+        stack_limit: 1024,
+    };
+}
+
+// -------------------------------------------------------------------
+// VM Evaluation Step
+// -------------------------------------------------------------------
+
+pub fn vm_push(mut state: VmState, val: Int) -> VmState {
+    let mut s: List[Int] = (state).stack;
+    s = list_push(s, val);
+    state.stack = s;
+    state.stack_pointer = (state).stack_pointer + 1;
+    return state;
+}
+
+pub fn vm_pop(mut state: VmState) -> VmState {
+    let sp: Int = (state).stack_pointer;
+    if sp > 0 {
+        let mut new_stack: List[Int] = list_new();
+        let mut i: Int = 0;
+        while i < sp - 1 {
+            new_stack = list_push(new_stack, list_get((state).stack, i));
+            i = i + 1;
+        }
+        state.stack = new_stack;
+        state.stack_pointer = sp - 1;
+    }
+    return state;
+}
+
+pub fn vm_step(mut state: VmState, program: BytecodeProgram) -> VmState {
+    if (state).is_halted == 1 {
+        return state;
+    }
+    
+    let cur_pc: Int = (state).pc;
+    if cur_pc < 0 || cur_pc >= (program).instruction_count {
+        state.is_halted = 1;
+        state.exit_code = 0;
+        return state;
+    }
+    
+    let inst: BytecodeInstruction = list_get((program).instructions, cur_pc);
+    let op: Int = (inst).opcode;
+    state.cycles_executed = (state).cycles_executed + 1;
+    state.pc = cur_pc + 1;
+    
+    // op_load_const (1)
+    if op == 1 {
+        state = vm_push(state, (inst).arg0);
+        return state;
+    }
+    // op_load_local (2)
+    if op == 2 {
+        let l_idx: Int = (inst).arg0;
+        if l_idx >= 0 && l_idx < (state).local_count {
+            state = vm_push(state, list_get((state).locals, l_idx));
+        }
+        return state;
+    }
+    // op_iadd (10)
+    if op == 10 {
+        let sp: Int = (state).stack_pointer;
+        if sp >= 2 {
+            let b: Int = list_get((state).stack, sp - 1);
+            let a: Int = list_get((state).stack, sp - 2);
+            state = vm_pop(state);
+            state = vm_pop(state);
+            state = vm_push(state, a + b);
+        }
+        return state;
+    }
+    // op_imul (12)
+    if op == 12 {
+        let sp: Int = (state).stack_pointer;
+        if sp >= 2 {
+            let b: Int = list_get((state).stack, sp - 1);
+            let a: Int = list_get((state).stack, sp - 2);
+            state = vm_pop(state);
+            state = vm_pop(state);
+            state = vm_push(state, a * b);
+        }
+        return state;
+    }
+    // op_halt (255)
+    if op == 255 {
+        state.is_halted = 1;
+        state.exit_code = (inst).arg0;
+        return state;
+    }
+    
+    return state;
+}
+
+pub fn vm_run_program(mut state: VmState, program: BytecodeProgram, config: VmConfig) -> VmState {
+    let mut guard: Int = 0;
+    while (state).is_halted == 0 && guard < (config).max_cycles {
+        state = vm_step(state, program);
+        guard = guard + 1;
+    }
+    if (state).is_halted == 0 {
+        state.is_halted = 1;
+        state.exit_code = 124; // Timeout
+    }
+    return state;
+}

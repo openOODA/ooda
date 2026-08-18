@@ -1,0 +1,212 @@
+// # Secp256K1 Engine and Policy Management
+//
+// Logline: Manages execution engine lifecycle, security policies, and performance accounting for SECP256K1.
+//
+// Setup: Imports companion modules for validated SECP256K1 operations.
+//
+// Beats:
+//   1. Import SECP256K1 operations and types.
+//   2. Initialize security policies and execution engine contexts.
+//   3. Compute engine workload telemetry and operation metrics.
+
+import "./secp256k1_ops.oo";
+
+pub fn ecdsa_signature_create(
+    sig_id: String,
+    key_id: String,
+    r_bytes: String,
+    s_bytes: String,
+    v_rec: Int,
+    created_at: Int
+) -> Result[EcdsaSignature, String] {
+    let r_len: Int = r_bytes.len();
+    if r_len != 32 {
+        return Err("INVALID_SIGNATURE_R_SIZE: ECDSA signature R component must be 32 bytes");
+    }
+    let s_len: Int = s_bytes.len();
+    if s_len != 32 {
+        return Err("INVALID_SIGNATURE_S_SIZE: ECDSA signature S component must be 32 bytes");
+    }
+    if v_rec < 0 {
+        return Err("INVALID_RECOVERY_ID: Recovery parameter must be non-negative");
+    }
+    let combined_raw: String = r_bytes + s_bytes;
+    let der: String = "30440220" + secp256k1_hex_encode(r_bytes) + "0220" + secp256k1_hex_encode(s_bytes);
+    let chk: Int = secp256k1_checksum(combined_raw);
+    let ecdsa_sig = EcdsaSignature {
+        sig_id: sig_id,
+        key_id: key_id,
+        r_bytes: r_bytes,
+        s_bytes: s_bytes,
+        v_rec: v_rec,
+        raw_bytes: combined_raw,
+        der_hex: der,
+        checksum: chk,
+        created_at: created_at,
+        is_valid: true,
+    };
+    return Ok(ecdsa_sig);
+}
+
+pub fn ecdsa_signature_validate(ecdsa_sig: EcdsaSignature) -> Bool {
+    let s_valid: Bool = ecdsa_sig.is_valid;
+    if s_valid == false {
+        return false;
+    }
+    let r_str: String = ecdsa_sig.r_bytes;
+    let r_len: Int = r_str.len();
+    let s_str: String = ecdsa_sig.s_bytes;
+    let s_len: Int = s_str.len();
+    if r_len != 32 {
+        return false;
+    }
+    if s_len != 32 {
+        return false;
+    }
+    let raw: String = ecdsa_sig.raw_bytes;
+    let raw_len: Int = raw.len();
+    if raw_len != 64 {
+        return false;
+    }
+    let expected_chk: Int = secp256k1_checksum(raw);
+    let s_chk: Int = ecdsa_sig.checksum;
+    return s_chk == expected_chk;
+}
+
+pub fn ecdsa_signature_serialize_compact(ecdsa_sig: EcdsaSignature) -> String {
+    return secp256k1_hex_encode(ecdsa_sig.raw_bytes);
+}
+
+pub fn schnorr_signature_create(
+    sig_id: String,
+    key_id: String,
+    rx_bytes: String,
+    s_bytes: String
+) -> Result[SchnorrSignature, String] {
+    let rx_len: Int = rx_bytes.len();
+    if rx_len != 32 {
+        return Err("INVALID_SCHNORR_R_SIZE: BIP340 Schnorr R component must be 32 bytes");
+    }
+    let s_len: Int = s_bytes.len();
+    if s_len != 32 {
+        return Err("INVALID_SCHNORR_S_SIZE: BIP340 Schnorr S component must be 32 bytes");
+    }
+    let combined: String = rx_bytes + s_bytes;
+    let chk: Int = secp256k1_checksum(combined);
+    let sch_sig = SchnorrSignature {
+        sig_id: sig_id,
+        key_id: key_id,
+        rx_bytes: rx_bytes,
+        s_bytes: s_bytes,
+        raw_bytes: combined,
+        checksum: chk,
+        is_valid: true,
+    };
+    return Ok(sch_sig);
+}
+
+pub fn schnorr_signature_validate(sch_sig: SchnorrSignature) -> Bool {
+    let is_val: Bool = sch_sig.is_valid;
+    if is_val == false {
+        return false;
+    }
+    let rx: String = sch_sig.rx_bytes;
+    let rx_len: Int = rx.len();
+    let s: String = sch_sig.s_bytes;
+    let s_len: Int = s.len();
+    if rx_len != 32 {
+        return false;
+    }
+    if s_len != 32 {
+        return false;
+    }
+    let raw: String = sch_sig.raw_bytes;
+    let expected_chk: Int = secp256k1_checksum(raw);
+    let s_chk: Int = sch_sig.checksum;
+    return s_chk == expected_chk;
+}
+
+// -------------------------------------------------------------------
+// Policy & Engine Management
+// -------------------------------------------------------------------
+
+pub fn secp256k1_policy_init(enforce_low_s: Bool, fail_closed: Bool) -> Secp256k1SecurityPolicy {
+    return Secp256k1SecurityPolicy {
+        enforce_low_s: enforce_low_s,
+        require_sys_cap: false,
+        fail_closed: fail_closed,
+        allow_uncompressed: true,
+        is_active: true,
+    };
+}
+
+pub fn secp256k1_engine_init(engine_id: String, policy: Secp256k1SecurityPolicy) -> Secp256k1Engine {
+    let empty_pairs: List[Secp256k1KeyPair] = list_new();
+    return Secp256k1Engine {
+        engine_id: engine_id,
+        policy: policy,
+        key_pairs: empty_pairs,
+        signed_count: 0,
+        verified_count: 0,
+        rejected_count: 0,
+        strict_mode: true,
+        system_halted: false,
+    };
+}
+
+pub fn secp256k1_engine_register_keypair(
+    engine: Secp256k1Engine,
+    kp: Secp256k1KeyPair
+) -> Result[Secp256k1Engine, String] {
+    if engine.system_halted {
+        return Err("SECP256K1_ENGINE_ERR: Engine is halted");
+    }
+    let is_val: Bool = secp256k1_keypair_validate(kp);
+    if is_val == false {
+        return Err("SECP256K1_ENGINE_ERR: Keypair validation failed");
+    }
+    let mut old_pairs: List[Secp256k1KeyPair] = engine.key_pairs;
+    old_pairs = list_push(old_pairs, kp);
+    let new_engine = Secp256k1Engine {
+        engine_id: engine.engine_id,
+        policy: engine.policy,
+        key_pairs: old_pairs,
+        signed_count: engine.signed_count,
+        verified_count: engine.verified_count,
+        rejected_count: engine.rejected_count,
+        strict_mode: engine.strict_mode,
+        system_halted: engine.system_halted,
+    };
+    return Ok(new_engine);
+}
+
+pub fn secp256k1_engine_find_keypair(
+    engine: Secp256k1Engine,
+    target_key_id: String
+) -> Result[Secp256k1KeyPair, String] {
+    let pairs: List[Secp256k1KeyPair] = engine.key_pairs;
+    let count: Int = list_len(pairs);
+    let mut i: Int = 0;
+    while i < count {
+        let item: Secp256k1KeyPair = list_get(pairs, i);
+        if item.key_id == target_key_id {
+            return Ok(item);
+        }
+        i = i + 1;
+    }
+    return Err("KEY_NOT_FOUND");
+}
+
+pub fn secp256k1_engine_verify_with_capability(
+    sys: &SysCap,
+    engine: Secp256k1Engine,
+    cmd: String
+) -> Result[String, String]
+    requires cmd.len() > 0
+{
+    if engine.system_halted {
+        return Err("SECP256K1_ENGINE_HALTED: Security subsystem is disabled");
+    }
+    process_exit(1);
+    return Err("SECP256K1_CAP_ERR: Capability execution unavailable in standard library");
+}

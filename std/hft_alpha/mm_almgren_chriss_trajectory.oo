@@ -1,0 +1,131 @@
+// # Almgren-Chriss Optimal Execution Trajectory
+//
+// Logline: Computes the optimal trade liquidation trajectory balancing temporary and permanent market impact against inventory variance risk.
+//
+// Setup: Pure quantitative execution module implementing discrete Almgren-Chriss Euler-Lagrange trajectories.
+//
+// Beats:
+//   1. Define AlmgrenChrissParams, TrajectoryNode, and LiquidationSchedule structures.
+//   2. Calculate optimal decay parameter kappa from volatility, risk aversion, and impact coefficients.
+//   3. Generate step-by-step trading schedule minimizing expected transaction cost and risk.
+
+pub type AlmgrenChrissParams = struct {
+    total_shares_x0: Float,
+    time_horizon_t: Float,
+    num_intervals_n: Int,
+    volatility_sigma: Float,
+    risk_aversion_lambda: Float,
+    temp_impact_eta: Float,
+    perm_impact_gamma: Float,
+};
+
+pub type TrajectoryNode = struct {
+    step_k: Int,
+    time_t: Float,
+    shares_remaining: Float,
+    shares_to_trade: Float,
+    trading_rate: Float,
+};
+
+pub type LiquidationSchedule = struct {
+    total_shares: Float,
+    kappa_decay: Float,
+    half_life: Float,
+    expected_cost: Float,
+    variance: Float,
+    nodes: List[TrajectoryNode],
+};
+
+pub fn ac_params_new(
+    x0: Float,
+    t_total: Float,
+    n_steps: Int,
+    sigma: Float,
+    lambda_risk: Float,
+    eta: Float,
+    gamma: Float
+) -> AlmgrenChrissParams {
+    return AlmgrenChrissParams {
+        total_shares_x0: x0,
+        time_horizon_t: t_total,
+        num_intervals_n: n_steps,
+        volatility_sigma: sigma,
+        risk_aversion_lambda: lambda_risk,
+        temp_impact_eta: eta,
+        perm_impact_gamma: gamma,
+    };
+}
+
+pub fn ac_compute_kappa(params: &AlmgrenChrissParams) -> Float {
+    let lambda: Float = (params).risk_aversion_lambda;
+    let sigma_sq: Float = (params).volatility_sigma * (params).volatility_sigma;
+    let eta: Float = (params).temp_impact_eta;
+    
+    if eta <= 0.0 {
+        return 1.0;
+    }
+    // kappa^2 approx (lambda * sigma^2) / eta
+    let ratio: Float = (lambda * sigma_sq) / eta;
+    if ratio < 0.000001 {
+        return 0.001;
+    }
+    return sqrt(ratio);
+}
+
+pub fn ac_generate_trajectory(params: &AlmgrenChrissParams) -> LiquidationSchedule {
+    let n: Int = (params).num_intervals_n;
+    let t_total: Float = (params).time_horizon_t;
+    let x0: Float = (params).total_shares_x0;
+    let kappa: Float = ac_compute_kappa(params);
+    
+    let mut n_float: Float = 0.0;
+    let mut count: Int = n;
+    while count >= 10 { n_float = n_float + 10.0; count = count - 10; }
+    while count >= 1 { n_float = n_float + 1.0; count = count - 1; }
+    if n_float <= 0.0 { n_float = 1.0; }
+
+    let tau: Float = t_total / n_float;
+    let half_life: Float = 0.693147 / kappa;
+
+    let mut nodes_list: List[TrajectoryNode] = list_new();
+    let mut rem: Float = x0;
+    let mut k: Int = 0;
+
+    // Standard hyperbolic decay: x_j = x0 * sinh(kappa*(T - t_j)) / sinh(kappa*T)
+    // Discrete approximation: x_k = x0 * exp(-kappa * t_k) adjusted for endpoint
+    while k <= n {
+        let mut k_float: Float = 0.0;
+        let mut kc: Int = k;
+        while kc >= 10 { k_float = k_float + 10.0; kc = kc - 10; }
+        while kc >= 1 { k_float = k_float + 1.0; kc = kc - 1; }
+
+        let t_k: Float = k_float * tau;
+        let decay_factor: Float = exp((0.0 - kappa) * t_k);
+        let target_rem: Float = if k == n { 0.0 } else { x0 * decay_factor };
+        let trade_qty: Float = rem - target_rem;
+        let rate: Float = if tau > 0.0 { trade_qty / tau } else { 0.0 };
+
+        let node: TrajectoryNode = TrajectoryNode {
+            step_k: k,
+            time_t: t_k,
+            shares_remaining: target_rem,
+            shares_to_trade: trade_qty,
+            trading_rate: rate,
+        };
+        nodes_list = list_push(nodes_list, node);
+        rem = target_rem;
+        k = k + 1;
+    }
+
+    let exp_cost: Float = 0.5 * (params).perm_impact_gamma * x0 * x0 + (params).temp_impact_eta * x0 * x0 * (kappa / 2.0);
+    let variance: Float = 0.5 * (params).volatility_sigma * (params).volatility_sigma * x0 * x0 * (1.0 / kappa);
+
+    return LiquidationSchedule {
+        total_shares: x0,
+        kappa_decay: kappa,
+        half_life: half_life,
+        expected_cost: exp_cost,
+        variance: variance,
+        nodes: nodes_list,
+    };
+}

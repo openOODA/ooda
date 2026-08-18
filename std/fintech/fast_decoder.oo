@@ -1,0 +1,153 @@
+// # FAST Binary Protocol Streaming Decoder
+//
+// Logline: Decodes FAST streaming market data using presence maps, stop-bit bitmasks, and field operators.
+//
+// Setup: Pure binary stream unpacking and compression operator state machine.
+//
+// Beats:
+//   1. Parse presence maps (PMAP) from 7-bit stop-bit encoded bitstreams.
+//   2. Decode unsigned/signed integers, strings, and decimals with stop-bit continuation rules.
+//   3. Apply FAST dictionary field operators (Constant, Default, Copy, Increment, Delta).
+
+pub type FastFieldDef = struct {
+    field_id: Int,
+    operator_type: Int, // 0 = None, 1 = Constant, 2 = Default, 3 = Copy, 4 = Increment, 5 = Delta
+    default_val: Int,
+    prev_val: Int,
+    is_present: Bool,
+};
+
+pub type FastPmap = struct {
+    bits: Int,
+    length_bits: Int,
+};
+
+pub type FastDecoderState = struct {
+    template_id: Int,
+    pmap: FastPmap,
+    dictionary_values: List[Int],
+    bytes_consumed: Int,
+};
+
+pub type FastDecimal = struct {
+    exponent: Int,
+    mantissa: Int,
+};
+
+pub fn fast_pmap_new(bits: Int, length: Int) -> FastPmap {
+    return FastPmap {
+        bits: bits,
+        length_bits: length,
+    };
+}
+
+pub fn fast_pmap_is_set(pmap: &FastPmap, bit_index: Int) -> Bool {
+    if bit_index < 0 {
+        return false;
+    }
+    if bit_index >= (pmap).length_bits {
+        return false;
+    }
+    let mut shift: Int = (pmap).length_bits - 1 - bit_index;
+    let mut mask: Int = 1;
+    while shift > 0 {
+        mask = mask * 2;
+        shift = shift - 1;
+    }
+    let bit_val: Int = (pmap).bits / mask;
+    return (bit_val % 2) == 1;
+}
+
+pub fn fast_decode_uint_stopbit(raw_bytes: List[Int], offset: Int) -> Result[Int, String] {
+    let total_len: Int = list_len(raw_bytes);
+    if offset >= total_len {
+        return Err("EOF: Offset exceeds byte stream length");
+    }
+    let mut result: Int = 0;
+    let mut idx: Int = offset;
+    let mut stop_found: Bool = false;
+    
+    while idx < total_len {
+        let b: Int = list_get(raw_bytes, idx);
+        if b >= 128 { // Stop bit set (0x80)
+            let val: Int = b - 128;
+            result = (result * 128) + val;
+            stop_found = true;
+            return Ok(result);
+        } else {
+            result = (result * 128) + b;
+        }
+        idx = idx + 1;
+    }
+    
+    return Err("STOP_BIT_NOT_FOUND: Incomplete stop-bit encoded integer");
+}
+
+pub fn fast_decode_sint_stopbit(raw_bytes: List[Int], offset: Int) -> Result[Int, String] {
+    let total_len: Int = list_len(raw_bytes);
+    if offset >= total_len {
+        return Err("EOF: Offset exceeds byte stream length");
+    }
+    let first_byte: Int = list_get(raw_bytes, offset);
+    let is_negative: Bool = (first_byte & 64) != 0; // Sign bit in 7-bit payload (0x40)
+    
+    let u_res: Result[Int, String] = fast_decode_uint_stopbit(raw_bytes, offset);
+    match u_res {
+        Ok(u_val) => {
+            if is_negative {
+                return Ok(0 - u_val);
+            }
+            return Ok(u_val);
+        },
+        Err(err) => {
+            return Err(err);
+        },
+    }
+}
+
+pub fn fast_apply_copy_operator(prev_val: Int, has_presence: Bool, new_val: Int) -> Int {
+    if has_presence {
+        return new_val;
+    }
+    return prev_val;
+}
+
+pub fn fast_apply_delta_operator(prev_val: Int, delta: Int) -> Int {
+    return prev_val + delta;
+}
+
+pub fn fast_apply_increment_operator(prev_val: Int, has_presence: Bool) -> Int {
+    if has_presence {
+        return prev_val + 1;
+    }
+    return prev_val;
+}
+
+pub fn fast_decimal_to_float(dec: &FastDecimal) -> Float {
+    let mut exp_factor: Float = 1.0;
+    let mut e: Int = (dec).exponent;
+    if e < 0 {
+        while e < 0 {
+            exp_factor = exp_factor / 10.0;
+            e = e + 1;
+        }
+    } else {
+        while e > 0 {
+            exp_factor = exp_factor * 10.0;
+            e = e - 1;
+        }
+    }
+    let m_float: Float = 1.0 * (dec).mantissa;
+    return m_float * exp_factor;
+}
+
+pub fn fast_decoder_init(template_id: Int) -> FastDecoderState {
+    let dict: List[Int] = list_new();
+    let pmap: FastPmap = fast_pmap_new(0, 0);
+    return FastDecoderState {
+        template_id: template_id,
+        pmap: pmap,
+        dictionary_values: dict,
+        bytes_consumed: 0,
+    };
+}

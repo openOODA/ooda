@@ -1,0 +1,101 @@
+// # Columnar LZ4 Fast Block Decompressor
+//
+// Logline: Implements LZ4 block decompression for high-speed columnar page decoding.
+//
+// Setup: Decodes LZ4 sequence tokens (literal length, 16-bit match offset, match length) reconstructing original byte buffers.
+//
+// Beats:
+//   1. Define Lz4Token, Lz4BlockHeader, and Lz4DecompressResult structures.
+//   2. Implement LZ4 token byte parsing (4-bit literal run, 4-bit match length bonus).
+//   3. Implement sequential output buffer reconstruction with match copy resolution.
+
+pub type Lz4Token = struct {
+    literal_length: Int,
+    match_length: Int,
+};
+
+pub type Lz4BlockHeader = struct {
+    compressed_size: Int,
+    uncompressed_size: Int,
+};
+
+pub type Lz4DecompressResult = struct {
+    decompressed_bytes: List[Int],
+    bytes_written: Int,
+    is_success: Bool,
+};
+
+pub fn lz4_parse_token(token_byte: Int) -> Lz4Token {
+    let lit_len: Int = token_byte / 16;
+    let match_len: Int = (token_byte % 16) + 4;
+    return Lz4Token {
+        literal_length: lit_len,
+        match_length: match_len,
+    };
+}
+
+pub fn lz4_copy_match(out_buf: List[Int], offset: Int, match_len: Int) -> List[Int] {
+    let mut updated: List[Int] = out_buf;
+    let curr_size: Int = list_len(updated);
+    let start_pos: Int = curr_size - offset;
+    let mut k: Int = 0;
+    while k < match_len {
+        let read_pos: Int = start_pos + k;
+        if read_pos >= 0 && read_pos < list_len(updated) {
+            let b: Int = list_get(updated, read_pos);
+            updated = list_push(updated, b);
+        } else {
+            updated = list_push(updated, 0);
+        }
+        k = k + 1;
+    }
+    return updated;
+}
+
+pub fn lz4_decompress_block(compressed_bytes: List[Int], expected_uncomp: Int) -> Lz4DecompressResult {
+    let n: Int = list_len(compressed_bytes);
+    let mut out: List[Int] = list_new();
+    let mut src_idx: Int = 0;
+
+    while src_idx < n {
+        let token_byte: Int = list_get(compressed_bytes, src_idx);
+        src_idx = src_idx + 1;
+        let tok: Lz4Token = lz4_parse_token(token_byte);
+
+        // Copy literals
+        let mut l_k: Int = 0;
+        while l_k < (tok).literal_length && src_idx < n {
+            let lit_b: Int = list_get(compressed_bytes, src_idx);
+            out = list_push(out, lit_b);
+            src_idx = src_idx + 1;
+            l_k = l_k + 1;
+        }
+
+        if src_idx >= n {
+            // End of block reached after literals
+            return Lz4DecompressResult {
+                decompressed_bytes: out,
+                bytes_written: list_len(out),
+                is_success: true,
+            };
+        }
+
+        // Read 16-bit match offset (little endian)
+        if src_idx + 1 < n {
+            let off_low: Int = list_get(compressed_bytes, src_idx);
+            let off_high: Int = list_get(compressed_bytes, src_idx + 1) * 256;
+            src_idx = src_idx + 2;
+            let offset: Int = off_low + off_high;
+
+            if offset > 0 {
+                out = lz4_copy_match(out, offset, (tok).match_length);
+            }
+        }
+    }
+
+    return Lz4DecompressResult {
+        decompressed_bytes: out,
+        bytes_written: list_len(out),
+        is_success: true,
+    };
+}

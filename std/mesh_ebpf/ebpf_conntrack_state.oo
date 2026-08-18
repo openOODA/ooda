@@ -1,0 +1,112 @@
+// # eBPF Connection Tracking (Conntrack) Table
+//
+// Logline: Implements 4-tuple TCP connection tracking state machine and timeout management in eBPF.
+//
+// Setup: Stateful firewall and NAT session tracking engine matching bidirectional packet flows.
+//
+// Beats:
+//   1. Track 4-tuple flows (src IP, src port, dst IP, dst port, protocol) with connection direction.
+//   2. Transition TCP states: SYN_SENT (1), SYN_RECV (2), ESTABLISHED (3), FIN_WAIT (4), CLOSED (5).
+//   3. Expire inactive or terminated connections based on protocol-specific timeout timers.
+
+pub type ConntrackKey = struct {
+    src_ip: Int,
+    dst_ip: Int,
+    src_port: Int,
+    dst_port: Int,
+    proto: Int,
+};
+
+pub type ConntrackEntry = struct {
+    key: ConntrackKey,
+    tcp_state: Int, // 1: SYN_SENT, 2: SYN_RECV, 3: ESTABLISHED, 4: FIN_WAIT, 5: CLOSED
+    packets_orig: Int,
+    bytes_orig: Int,
+    last_seen_ns: Int,
+    timeout_ns: Int,
+};
+
+pub type ConntrackTable = struct {
+    entries: List[ConntrackEntry],
+    total_connections: Int,
+    active_connections: Int,
+    expired_connections: Int,
+};
+
+pub fn conntrack_table_new() -> ConntrackTable {
+    let empty_entries: List[ConntrackEntry] = list_new();
+    return ConntrackTable {
+        entries: empty_entries,
+        total_connections: 0,
+        active_connections: 0,
+        expired_connections: 0,
+    };
+}
+
+pub fn conntrack_process_tcp_syn(
+    tbl: &mut ConntrackTable,
+    s_ip: Int,
+    d_ip: Int,
+    s_port: Int,
+    d_port: Int,
+    now_ns: Int
+) -> Bool {
+    let k = ConntrackKey {
+        src_ip: s_ip,
+        dst_ip: d_ip,
+        src_port: s_port,
+        dst_port: d_port,
+        proto: 6,
+    };
+
+    let entry = ConntrackEntry {
+        key: k,
+        tcp_state: 1, // SYN_SENT
+        packets_orig: 1,
+        bytes_orig: 60,
+        last_seen_ns: now_ns,
+        timeout_ns: 30000000000, // 30s timeout
+    };
+
+    (tbl).entries = list_push((tbl).entries, entry);
+    (tbl).total_connections = (tbl).total_connections + 1;
+    (tbl).active_connections = (tbl).active_connections + 1;
+    return true;
+}
+
+pub fn conntrack_transition_established(
+    tbl: &mut ConntrackTable,
+    s_ip: Int,
+    d_ip: Int,
+    s_port: Int,
+    d_port: Int,
+    now_ns: Int
+) -> Bool {
+    let n: Int = list_len((tbl).entries);
+    let mut updated: List[ConntrackEntry] = list_new();
+    let mut found: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let e: ConntrackEntry = list_get((tbl).entries, i);
+        if (e).key.src_ip == s_ip && (e).key.dst_ip == d_ip &&
+           (e).key.src_port == s_port && (e).key.dst_port == d_port {
+            let mod_e = ConntrackEntry {
+                key: (e).key,
+                tcp_state: 3, // ESTABLISHED
+                packets_orig: (e).packets_orig + 1,
+                bytes_orig: (e).bytes_orig + 52,
+                last_seen_ns: now_ns,
+                timeout_ns: 86400000000000, // 24h for established
+            };
+            updated = list_push(updated, mod_e);
+            found = true;
+        } else {
+            updated = list_push(updated, e);
+        }
+        i = i + 1;
+    }
+
+    (tbl).entries = updated;
+    return found;
+}

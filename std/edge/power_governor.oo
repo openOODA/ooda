@@ -1,0 +1,96 @@
+// # Edge Power Governor Engine
+//
+// Logline: Implements dynamic power profile governance, thermal throttling checks, and auto-switching logic.
+//
+// Setup: Imports power_ops.oo; requires SysCap capability token for system governor administration.
+//
+// Beats:
+//   1. Initialize governor configuration with telemetry thresholds.
+//   2. Evaluate telemetry to auto-switch performance profiles under thermal or battery strain.
+//   3. Provide queries for throttling state, remaining battery life, and critical status.
+
+import "./power_ops.oo";
+
+pub fn power_governor_init(cap: &SysCap, nominal_capacity_mwh: Int) -> PowerGovernor {
+    return PowerGovernor {
+        battery: battery_state_default(),
+        profile: power_profile_balanced(),
+        nominal_capacity_mwh: nominal_capacity_mwh,
+        low_battery_threshold_pct: 20,
+        critical_battery_threshold_pct: 5,
+        auto_profile_switching: true,
+        thermal_throttled: false,
+        emergency_shutdown_triggered: false,
+        total_energy_used_mwh: 0,
+        cap: cap,
+    };
+}
+
+pub fn power_governor_set_profile(gov: &mut PowerGovernor, profile: PowerProfile) {
+    (gov).profile = profile;
+}
+
+pub fn power_governor_update_telemetry(gov: &mut PowerGovernor, battery: BatteryState) {
+    (gov).battery = battery;
+}
+
+/// Evaluates system status and returns current active power mode (0..4)
+pub fn power_governor_evaluate(gov: &mut PowerGovernor) -> Int {
+    if (gov).emergency_shutdown_triggered {
+        return 4; // Deep sleep / shutdown
+    }
+
+    let bat = &(gov).battery;
+    let temp = (bat).temperature_c;
+    let cap_pct = (bat).capacity_pct;
+    let p_src = (bat).power_source;
+
+    // Thermal throttling check
+    let max_temp = (gov).profile.thermal_limit_c;
+    if temp >= max_temp {
+        (gov).thermal_throttled = true;
+        (gov).profile = power_profile_critical();
+        return 3;
+    } else {
+        (gov).thermal_throttled = false;
+    }
+
+    // If auto-switching enabled and on battery power
+    if (gov).auto_profile_switching {
+        if p_src == 0 {
+            // Discharging on battery
+            if cap_pct <= (gov).critical_battery_threshold_pct {
+                (gov).emergency_shutdown_triggered = true;
+                (gov).profile = power_profile_deep_sleep();
+                return 4;
+            }
+            if cap_pct <= (gov).low_battery_threshold_pct {
+                (gov).profile = power_profile_saver();
+                return 2;
+            }
+        } else {
+            // Plugged into external power source
+            if (gov).profile.mode != 0 {
+                (gov).profile = power_profile_performance();
+            }
+        }
+    }
+
+    return (gov).profile.mode;
+}
+
+pub fn power_governor_is_throttled(gov: &PowerGovernor) -> Bool {
+    return (gov).thermal_throttled;
+}
+
+pub fn power_governor_get_remaining_sec(gov: &PowerGovernor) -> Int {
+    return battery_estimate_runtime_sec(&(gov).battery, (gov).nominal_capacity_mwh);
+}
+
+pub fn power_governor_is_critical(gov: &PowerGovernor) -> Bool {
+    let cap_pct = (gov).battery.capacity_pct;
+    if cap_pct <= (gov).critical_battery_threshold_pct {
+        return true;
+    }
+    return (gov).emergency_shutdown_triggered;
+}

@@ -1,0 +1,90 @@
+// # Robust Sliding Mode (SMC) Heading Autopilot
+//
+// Logline: Tracks desired yaw heading in waves using variable structure sliding mode control with boundary layer chattering alleviation.
+//
+// Setup: Non-linear sliding surface s = e_dot + lambda * e ensuring asymptotic Lyapunov stability under hydrodynamic parameter uncertainty.
+//
+// Beats:
+//   1. Define SMC heading parameters (sliding slope lambda, switching gain eta, boundary layer thickness phi_bl).
+//   2. Compute sliding surface scalar value s = (r - r_d) + lambda * (psi - psi_d).
+//   3. Calculate continuous boundary layer saturation switching term sat(s / phi_bl).
+//   4. Deliver chattering-free rudder deflection and yaw moment commands.
+
+import "./auv_hydrodynamics_constants.oo";
+import "./fossen_6dof_hydrodynamics.oo";
+
+pub type SmcHeadingGains = struct {
+    lambda_slope: Float,
+    eta_switching_gain: Float,
+    boundary_layer_thickness: Float,
+    rudder_max_rad: Float,
+    n_rdot_inertia: Float,
+    n_r_damping: Float,
+};
+
+pub type SmcHeadingOutput = struct {
+    sliding_surface_value: Float,
+    rudder_deflection_rad: Float,
+    yaw_torque_cmd_nm: Float,
+};
+
+pub fn smc_heading_gains_default() -> SmcHeadingGains {
+    return SmcHeadingGains {
+        lambda_slope: 0.8,
+        eta_switching_gain: 15.0,
+        boundary_layer_thickness: 0.05,
+        rudder_max_rad: 0.4363, // 25 deg
+        n_rdot_inertia: 8.33,  // I_zz - N_rdot
+        n_r_damping: 12.5,
+    };
+}
+
+pub fn sat_boundary_layer(s: Float, epsilon: Float) -> Float {
+    if epsilon <= 0.0001 {
+        if s > 0.0 { return 1.0; }
+        if s < 0.0 { return 0.0 - 1.0; }
+        return 0.0;
+    }
+    let ratio: Float = s / epsilon;
+    return math_clamp(ratio, 0.0 - 1.0, 1.0);
+}
+
+pub fn smc_heading_step(
+    gains: &SmcHeadingGains,
+    desired_heading_rad: Float,
+    current_heading_rad: Float,
+    current_yaw_rate_rad_s: Float
+) -> SmcHeadingOutput {
+    // Heading tracking error wrapped to [-pi, pi]
+    let mut psi_err: Float = current_heading_rad - desired_heading_rad;
+    let pi_val: Float = const_pi();
+    if psi_err > pi_val {
+        psi_err = psi_err - const_two_pi();
+    }
+    if psi_err < 0.0 - pi_val {
+        psi_err = psi_err + const_two_pi();
+    }
+
+    // Sliding surface: s = r + lambda * e_psi
+    let s: Float = current_yaw_rate_rad_s + ((gains).lambda_slope * psi_err);
+
+    // Equivalent control cancellation: tau_eq = - D_r * r - J_z * lambda * r
+    let tau_eq: Float = 0.0 - ((gains).n_r_damping * current_yaw_rate_rad_s) - ((gains).n_rdot_inertia * (gains).lambda_slope * current_yaw_rate_rad_s);
+
+    // Robust switching control with boundary layer
+    let s_sat: Float = sat_boundary_layer(s, (gains).boundary_layer_thickness);
+    let tau_sw: Float = 0.0 - ((gains).eta_switching_gain * s_sat);
+
+    let total_tau: Float = tau_eq + tau_sw;
+
+    // Convert commanded torque into rudder deflection command
+    let rudder_scale: Float = 0.0 - (total_tau / 40.0);
+    let max_rudder: Float = (gains).rudder_max_rad;
+    let rudder_cmd: Float = math_clamp(rudder_scale, 0.0 - max_rudder, max_rudder);
+
+    return SmcHeadingOutput {
+        sliding_surface_value: s,
+        rudder_deflection_rad: rudder_cmd,
+        yaw_torque_cmd_nm: total_tau,
+    };
+}

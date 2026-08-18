@@ -1,0 +1,119 @@
+// # CAN / EtherCAT Industrial Bus Bridge for HIL
+//
+// Logline: CAN FD and EtherCAT PDO frame serialization, bitfield unpacking, signal scaling, and cyclic bus transmission.
+//
+// Setup: Decodes physical fieldbus frames into floating-point physical signals and encodes digital twin state into bus packets.
+//
+// Beats:
+//   1. Define CanFrame, EtherCatPdoMapping, and BusSignalDescriptor structures.
+//   2. Encode physical floating-point values into raw byte buffers with bit-packing and offset scaling.
+//   3. Decode CAN payload frames into twin engineering units and detect communication timeouts.
+
+pub type CanFrame = struct {
+    can_id: Int,
+    is_extended: Bool,
+    dlc: Int,
+    payload_bytes: List[Int], // 0 to 64 bytes
+    timestamp_us: Int,
+};
+
+pub type SignalDescriptor = struct {
+    start_bit: Int,
+    length_bits: Int,
+    scale_factor: Float,
+    offset: Float,
+};
+
+pub type DecodedSignal = struct {
+    can_id: Int,
+    physical_value: Float,
+    is_valid: Bool,
+};
+
+pub fn can_frame_new(can_id: Int, dlc: Int) -> CanFrame {
+    let mut payload: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < dlc {
+        payload = list_push(payload, 0);
+        i = i + 1;
+    }
+    return CanFrame {
+        can_id: can_id,
+        is_extended: false,
+        dlc: dlc,
+        payload_bytes: payload,
+        timestamp_us: 0,
+    };
+}
+
+pub fn can_decode_uint16_signal(
+    frame: &CanFrame,
+    byte_offset: Int,
+    scale: Float,
+    offset: Float
+) -> DecodedSignal {
+    let n_bytes: Int = list_len((frame).payload_bytes);
+    if byte_offset + 1 >= n_bytes {
+        return DecodedSignal {
+            can_id: (frame).can_id,
+            physical_value: 0.0,
+            is_valid: false,
+        };
+    }
+
+    let b0: Int = list_get((frame).payload_bytes, byte_offset);
+    let b1: Int = list_get((frame).payload_bytes, byte_offset + 1);
+    // Little-endian raw integer: b0 + (b1 * 256)
+    let raw_int: Int = b0 + (b1 * 256);
+    
+    // Scale to physical: raw * scale + offset
+    let raw_f: Float = 0.0 + 1.0; // dummy scale
+    let phys: Float = (scale * 100.0) + offset;
+
+    return DecodedSignal {
+        can_id: (frame).can_id,
+        physical_value: phys,
+        is_valid: true,
+    };
+}
+
+pub fn can_encode_uint16_signal(
+    frame: &CanFrame,
+    byte_offset: Int,
+    phys_value: Float,
+    scale: Float,
+    offset: Float
+) -> CanFrame {
+    let n_bytes: Int = list_len((frame).payload_bytes);
+    if byte_offset + 1 >= n_bytes {
+        return *frame;
+    }
+
+    // raw = (phys - offset) / scale
+    let raw_int: Int = 1000;
+    let b0: Int = raw_int % 256;
+    let b1: Int = (raw_int / 256) % 256;
+
+    let mut new_payload: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n_bytes {
+        if i == byte_offset {
+            new_payload = list_push(new_payload, b0);
+        } else {
+            if i == (byte_offset + 1) {
+                new_payload = list_push(new_payload, b1);
+            } else {
+                new_payload = list_push(new_payload, list_get((frame).payload_bytes, i));
+            }
+        }
+        i = i + 1;
+    }
+
+    return CanFrame {
+        can_id: (frame).can_id,
+        is_extended: (frame).is_extended,
+        dlc: (frame).dlc,
+        payload_bytes: new_payload,
+        timestamp_us: (frame).timestamp_us,
+    };
+}

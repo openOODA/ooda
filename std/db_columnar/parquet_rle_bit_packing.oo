@@ -1,0 +1,140 @@
+// # Parquet RLE & Bit-Packing Hybrid Encoding
+//
+// Logline: Implements Parquet hybrid Run-Length Encoding (RLE) and bit-packing for definition and repetition levels.
+//
+// Setup: Decodes and encodes variable bit-width integer streams optimizing null mask and nested repetition levels.
+//
+// Beats:
+//   1. Define RleEncoderConfig, RleRunHeader, and RleDecoderState structures.
+//   2. Implement hybrid RLE runs and 8-value bit-packed block unpacking.
+//   3. Implement level unpacking into definition vectors and boolean validity masks.
+
+pub type RleEncoderConfig = struct {
+    bit_width: Int,
+    max_level: Int,
+};
+
+pub type RleRunHeader = struct {
+    is_rle: Bool,
+    count: Int,
+    value: Int,
+};
+
+pub type RleDecoderState = struct {
+    bit_width: Int,
+    total_values: Int,
+    consumed_values: Int,
+    current_run: RleRunHeader,
+    buffered_values: List[Int],
+};
+
+pub fn rle_config_new(bw: Int, max_lvl: Int) -> RleEncoderConfig {
+    return RleEncoderConfig {
+        bit_width: bw,
+        max_level: max_lvl,
+    };
+}
+
+pub fn rle_decoder_state_new(bw: Int, num_vals: Int) -> RleDecoderState {
+    let empty_buf: List[Int] = list_new();
+    let initial_run: RleRunHeader = RleRunHeader {
+        is_rle: true,
+        count: 0,
+        value: 0,
+    };
+    return RleDecoderState {
+        bit_width: bw,
+        total_values: num_vals,
+        consumed_values: 0,
+        current_run: initial_run,
+        buffered_values: empty_buf,
+    };
+}
+
+pub fn rle_decode_header_byte(header_val: Int) -> RleRunHeader {
+    let is_rle_run: Bool = (header_val % 2) == 0;
+    if is_rle_run {
+        let rle_count: Int = header_val / 2;
+        return RleRunHeader {
+            is_rle: true,
+            count: rle_count,
+            value: 0,
+        };
+    } else {
+        let num_groups: Int = header_val / 2;
+        let bp_count: Int = num_groups * 8;
+        return RleRunHeader {
+            is_rle: false,
+            count: bp_count,
+            value: 0,
+        };
+    }
+}
+
+pub fn rle_unpack_bit_packed_group(packed_byte: Int, bit_width: Int) -> List[Int] {
+    let mut unpacked: List[Int] = list_new();
+    let mask: Int = if bit_width == 1 { 1 } else { if bit_width == 2 { 3 } else { 15 } };
+    let mut temp: Int = packed_byte;
+    let mut i: Int = 0;
+    let items_per_byte: Int = if bit_width > 0 { 8 / bit_width } else { 1 };
+    while i < items_per_byte {
+        let val: Int = temp % (mask + 1);
+        unpacked = list_push(unpacked, val);
+        temp = temp / (mask + 1);
+        i = i + 1;
+    }
+    return unpacked;
+}
+
+pub fn rle_decode_levels(state: RleDecoderState, raw_bytes: List[Int]) -> List[Int] {
+    let mut result_levels: List[Int] = list_new();
+    let n_bytes: Int = list_len(raw_bytes);
+    let mut byte_idx: Int = 0;
+    let total_needed: Int = (state).total_values;
+
+    while byte_idx < n_bytes && list_len(result_levels) < total_needed {
+        let hdr_byte: Int = list_get(raw_bytes, byte_idx);
+        byte_idx = byte_idx + 1;
+        let run: RleRunHeader = rle_decode_header_byte(hdr_byte);
+
+        if (run).is_rle {
+            if byte_idx < n_bytes {
+                let rle_val: Int = list_get(raw_bytes, byte_idx);
+                byte_idx = byte_idx + 1;
+                let mut k: Int = 0;
+                while k < (run).count && list_len(result_levels) < total_needed {
+                    result_levels = list_push(result_levels, rle_val);
+                    k = k + 1;
+                }
+            }
+        } else {
+            let mut g: Int = 0;
+            while g < (run).count && byte_idx < n_bytes && list_len(result_levels) < total_needed {
+                let p_byte: Int = list_get(raw_bytes, byte_idx);
+                byte_idx = byte_idx + 1;
+                let unpacked_chunk: List[Int] = rle_unpack_bit_packed_group(p_byte, (state).bit_width);
+                let u_len: Int = list_len(unpacked_chunk);
+                let mut u_i: Int = 0;
+                while u_i < u_len && list_len(result_levels) < total_needed {
+                    result_levels = list_push(result_levels, list_get(unpacked_chunk, u_i));
+                    u_i = u_i + 1;
+                }
+                g = g + u_len;
+            }
+        }
+    }
+    return result_levels;
+}
+
+pub fn rle_levels_to_validity_mask(levels: List[Int], max_def_level: Int) -> List[Bool] {
+    let mut validity: List[Bool] = list_new();
+    let n: Int = list_len(levels);
+    let mut i: Int = 0;
+    while i < n {
+        let lvl: Int = list_get(levels, i);
+        let is_valid: Bool = (lvl == max_def_level);
+        validity = list_push(validity, is_valid);
+        i = i + 1;
+    }
+    return validity;
+}

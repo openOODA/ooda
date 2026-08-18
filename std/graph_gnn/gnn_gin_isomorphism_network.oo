@@ -1,0 +1,166 @@
+// # Graph Isomorphism Networks (GIN)
+//
+// Logline: Implements maximally expressive 1-WL equivalent Graph Isomorphism Networks with parameterized epsilon and MLP operators.
+//
+// Setup: Provably expressive multiset aggregation architecture distinguishing non-isomorphic graph structures.
+//
+// Beats:
+//   1. Sum multiset features across incoming neighbor nodes sum_{u in N(v)} h_u.
+//   2. Scale center node representations by adaptive (1 + epsilon) factor.
+//   3. Apply multi-layer perceptron (MLP) transformation with Universal Approximation Theorem expressiveness.
+
+pub type GINConfig = struct {
+    in_features: Int,
+    hidden_features: Int,
+    out_features: Int,
+    learn_epsilon: Bool,
+    initial_epsilon: Float,
+};
+
+pub type GINLayer = struct {
+    config: GINConfig,
+    epsilon: Float,
+    mlp_w1: List[Float], // in_features * hidden_features
+    mlp_b1: List[Float], // hidden_features
+    mlp_w2: List[Float], // hidden_features * out_features
+    mlp_b2: List[Float], // out_features
+};
+
+pub fn gin_config_new(
+    in_f: Int,
+    hid_f: Int,
+    out_f: Int,
+    learn_eps: Bool,
+    init_eps: Float
+) -> GINConfig {
+    return GINConfig {
+        in_features: in_f,
+        hidden_features: hid_f,
+        out_features: out_f,
+        learn_epsilon: learn_eps,
+        initial_epsilon: init_eps,
+    };
+}
+
+pub fn gin_layer_init(config: GINConfig, seed: Int) -> GINLayer {
+    let in_f: Int = (config).in_features;
+    let hid_f: Int = (config).hidden_features;
+    let out_f: Int = (config).out_features;
+    let mut state: Int = seed;
+
+    let total_w1: Int = in_f * hid_f;
+    let mut w1: List[Float] = list_new();
+    let scale1: Float = sqrt(2.0 / ((in_f + hid_f) as Float));
+    let mut i: Int = 0;
+    while i < total_w1 {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        w1 = list_push(w1, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale1);
+        i = i + 1;
+    }
+
+    let mut b1: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < hid_f {
+        b1 = list_push(b1, 0.0);
+        j = j + 1;
+    }
+
+    let total_w2: Int = hid_f * out_f;
+    let mut w2: List[Float] = list_new();
+    let scale2: Float = sqrt(2.0 / ((hid_f + out_f) as Float));
+    let mut k: Int = 0;
+    while k < total_w2 {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        w2 = list_push(w2, ((((state % 2000) as Float) / 1000.0) - 1.0) * scale2);
+        k = k + 1;
+    }
+
+    let mut b2: List[Float] = list_new();
+    let mut l: Int = 0;
+    while l < out_f {
+        b2 = list_push(b2, 0.0);
+        l = l + 1;
+    }
+
+    return GINLayer {
+        config: config,
+        epsilon: (config).initial_epsilon,
+        mlp_w1: w1,
+        mlp_b1: b1,
+        mlp_w2: w2,
+        mlp_b2: b2,
+    };
+}
+
+pub fn gin_forward_node(
+    layer: &GINLayer,
+    node_id: Int,
+    neighbor_ids: List[Int],
+    input_features: List[Float]
+) -> List[Float] {
+    let cfg: GINConfig = (*layer).config;
+    let in_f: Int = (cfg).in_features;
+    let hid_f: Int = (cfg).hidden_features;
+    let out_f: Int = (cfg).out_features;
+    let eps: Float = (*layer).epsilon;
+    let num_neighbors: Int = list_len(neighbor_ids);
+    let v_off: Int = node_id * in_f;
+
+    // Step 1: Multiset aggregation: (1 + eps) * h_v + sum_{u in N(v)} h_u
+    let mut agg_in: List[Float] = list_new();
+    let mut d: Int = 0;
+    while d < in_f {
+        let h_v: Float = list_get(input_features, v_off + d);
+        let mut sum_neigh: Float = 0.0;
+        let mut n_idx: Int = 0;
+        while n_idx < num_neighbors {
+            let u_id: Int = list_get(neighbor_ids, n_idx);
+            let h_u: Float = list_get(input_features, (u_id * in_f) + d);
+            sum_neigh = sum_neigh + h_u;
+            n_idx = n_idx + 1;
+        }
+        let total_d: Float = ((1.0 + eps) * h_v) + sum_neigh;
+        agg_in = list_push(agg_in, total_d);
+        d = d + 1;
+    }
+
+    // Step 2: MLP Layer 1 (Linear + ReLU)
+    let mut hid: List[Float] = list_new();
+    let mut h_idx: Int = 0;
+    while h_idx < hid_f {
+        let b: Float = list_get((*layer).mlp_b1, h_idx);
+        let mut dot: Float = 0.0;
+        let mut in_c: Int = 0;
+        while in_c < in_f {
+            let x: Float = list_get(agg_in, in_c);
+            let w: Float = list_get((*layer).mlp_w1, (in_c * hid_f) + h_idx);
+            dot = dot + (x * w);
+            in_c = in_c + 1;
+        }
+        let act: Float = if (dot + b) > 0.0 { dot + b } else { 0.0 };
+        hid = list_push(hid, act);
+        h_idx = h_idx + 1;
+    }
+
+    // Step 3: MLP Layer 2 (Linear + ReLU)
+    let mut out_h: List[Float] = list_new();
+    let mut out_idx: Int = 0;
+    while out_idx < out_f {
+        let b2: Float = list_get((*layer).mlp_b2, out_idx);
+        let mut dot2: Float = 0.0;
+        let mut h_c: Int = 0;
+        while h_c < hid_f {
+            let x2: Float = list_get(hid, h_c);
+            let w2: Float = list_get((*layer).mlp_w2, (h_c * out_f) + out_idx);
+            dot2 = dot2 + (x2 * w2);
+            h_c = h_c + 1;
+        }
+        let act2: Float = if (dot2 + b2) > 0.0 { dot2 + b2 } else { 0.0 };
+        out_h = list_push(out_h, act2);
+        out_idx = out_idx + 1;
+    }
+
+    return out_h;
+}

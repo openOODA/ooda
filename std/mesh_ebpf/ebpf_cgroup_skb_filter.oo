@@ -1,0 +1,100 @@
+// # eBPF CGroup v2 Socket Buffer Filter
+//
+// Logline: Enforces container egress and ingress network isolation policies attached to CGroup v2 hierarchies.
+//
+// Setup: Container network policy enforcement barrier operating at cgroup boundary before socket transmission.
+//
+// Beats:
+//   1. Inspect socket metadata including cgroup ID, effective UID/GID, and local bind port.
+//   2. Validate destination IPs against container egress egress allowlist/denylist rules.
+//   3. Return 1 (BPF_CGROUP_ALLOW) or 0 (BPF_CGROUP_DROP) to kernel network stack.
+
+pub type CgroupSkbPolicy = struct {
+    cgroup_id: Int,
+    allow_egress_lan: Bool,
+    allow_egress_wan: Bool,
+    denied_dst_port: Int,
+    allowed_uid: Int,
+};
+
+pub type CgroupSkbFilterState = struct {
+    policies: List[CgroupSkbPolicy],
+    packets_evaluated: Int,
+    packets_allowed: Int,
+    packets_blocked: Int,
+};
+
+pub fn cgroup_skb_filter_new() -> CgroupSkbFilterState {
+    let empty_policies: List[CgroupSkbPolicy] = list_new();
+    return CgroupSkbFilterState {
+        policies: empty_policies,
+        packets_evaluated: 0,
+        packets_allowed: 0,
+        packets_blocked: 0,
+    };
+}
+
+pub fn cgroup_add_policy(
+    state: &mut CgroupSkbFilterState,
+    cg_id: Int,
+    allow_lan: Bool,
+    allow_wan: Bool,
+    deny_port: Int,
+    uid: Int
+) {
+    let pol = CgroupSkbPolicy {
+        cgroup_id: cg_id,
+        allow_egress_lan: allow_lan,
+        allow_egress_wan: allow_wan,
+        denied_dst_port: deny_port,
+        allowed_uid: uid,
+    };
+    (state).policies = list_push((state).policies, pol);
+}
+
+pub fn cgroup_evaluate_egress(
+    state: &mut CgroupSkbFilterState,
+    cg_id: Int,
+    uid: Int,
+    dst_ip: Int,
+    dst_port: Int,
+    is_wan: Bool
+) -> Int {
+    (state).packets_evaluated = (state).packets_evaluated + 1;
+    let n: Int = list_len((state).policies);
+    let mut i: Int = 0;
+
+    while i < n {
+        let p: CgroupSkbPolicy = list_get((state).policies, i);
+        if (p).cgroup_id == cg_id {
+            // Check UID restriction
+            if (p).allowed_uid != 0 && (p).allowed_uid != uid {
+                (state).packets_blocked = (state).packets_blocked + 1;
+                return 0; // Drop
+            }
+            // Check port restriction
+            if (p).denied_dst_port != 0 && (p).denied_dst_port == dst_port {
+                (state).packets_blocked = (state).packets_blocked + 1;
+                return 0; // Drop
+            }
+            // Check WAN access
+            if is_wan && !(p).allow_egress_wan {
+                (state).packets_blocked = (state).packets_blocked + 1;
+                return 0; // Drop
+            }
+            // Check LAN access
+            if !is_wan && !(p).allow_egress_lan {
+                (state).packets_blocked = (state).packets_blocked + 1;
+                return 0; // Drop
+            }
+
+            (state).packets_allowed = (state).packets_allowed + 1;
+            return 1; // Allow
+        }
+        i = i + 1;
+    }
+
+    // Default policy: Allow
+    (state).packets_allowed = (state).packets_allowed + 1;
+    return 1;
+}

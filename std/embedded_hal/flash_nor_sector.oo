@@ -1,0 +1,229 @@
+// # Embedded NOR Flash Controller
+//
+// Logline: NOR Flash sector layout, sector erase (0xFF filling), word programming, busy polling, and write locks.
+//
+// Setup: Non-volatile memory controller model enforcing NOR flash bit-programming constraints.
+//
+// Beats:
+//   1. Define Flash sector structures, address boundaries, page sizes, and lock states.
+//   2. Implement sector erase operations resetting all bytes to erased 0xFF state.
+//   3. Implement byte and 32-bit word programming enforcing 1-to-0 transition rules.
+//   4. Manage Flash unlock key sequences (KEYR) and write-protection status flags.
+
+type FlashSector = struct {
+    sector_id: Int,
+    base_address: Int,
+    size_bytes: Int,
+    data: List[Int],
+    is_locked: Bool,
+    erase_count: Int,
+};
+
+type FlashNorController = struct {
+    sectors: List[FlashSector],
+    is_unlocked: Bool,
+    error_flags: Int,
+    last_ok: Bool,
+};
+
+pub fn flash_sector_new(id: Int, base_addr: Int, size: Int) -> FlashSector {
+    let mut initial_data: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < size {
+        initial_data = list_push(initial_data, 255);
+        i = i + 1;
+    }
+    return FlashSector {
+        sector_id: id,
+        base_address: base_addr,
+        size_bytes: size,
+        data: initial_data,
+        is_locked: true,
+        erase_count: 0,
+    };
+}
+
+pub fn flash_controller_new() -> FlashNorController {
+    let empty_sectors: List[FlashSector] = list_new();
+    return FlashNorController {
+        sectors: empty_sectors,
+        is_unlocked: false,
+        error_flags: 0,
+        last_ok: false,
+    };
+}
+
+pub fn flash_add_sector(ctrl: FlashNorController, sector: FlashSector) -> FlashNorController {
+    return FlashNorController {
+        sectors: list_push((ctrl).sectors, sector),
+        is_unlocked: (ctrl).is_unlocked,
+        error_flags: (ctrl).error_flags,
+        last_ok: true,
+    };
+}
+
+pub fn flash_unlock(ctrl: FlashNorController, key1: Int, key2: Int) -> FlashNorController {
+    if key1 == 1164411171 {
+        if key2 == 3454970283 {
+            return FlashNorController {
+                sectors: (ctrl).sectors,
+                is_unlocked: true,
+                error_flags: (ctrl).error_flags,
+                last_ok: true,
+            };
+        }
+    }
+    return FlashNorController {
+        sectors: (ctrl).sectors,
+        is_unlocked: false,
+        error_flags: (ctrl).error_flags,
+        last_ok: false,
+    };
+}
+
+pub fn flash_lock(ctrl: FlashNorController) -> FlashNorController {
+    return FlashNorController {
+        sectors: (ctrl).sectors,
+        is_unlocked: false,
+        error_flags: (ctrl).error_flags,
+        last_ok: true,
+    };
+}
+
+fn update_sector_in_ctrl(sectors: List[FlashSector], sec_id: Int, updated: FlashSector) -> List[FlashSector] {
+    let mut result: List[FlashSector] = list_new();
+    let len: Int = list_len(sectors);
+    let mut i: Int = 0;
+    while i < len {
+        let s: FlashSector = list_get(sectors, i);
+        if (s).sector_id == sec_id {
+            result = list_push(result, updated);
+        } else {
+            result = list_push(result, s);
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn flash_erase_sector(ctrl: FlashNorController, sec_id: Int) -> FlashNorController {
+    if !(ctrl).is_unlocked {
+        return FlashNorController {
+            sectors: (ctrl).sectors,
+            is_unlocked: false,
+            error_flags: 2,
+            last_ok: false,
+        };
+    }
+
+    let len: Int = list_len((ctrl).sectors);
+    let mut i: Int = 0;
+    while i < len {
+        let s: FlashSector = list_get((ctrl).sectors, i);
+        if (s).sector_id == sec_id {
+            let mut erased_data: List[Int] = list_new();
+            let mut j: Int = 0;
+            while j < (s).size_bytes {
+                erased_data = list_push(erased_data, 255);
+                j = j + 1;
+            }
+            let updated: FlashSector = FlashSector {
+                sector_id: (s).sector_id,
+                base_address: (s).base_address,
+                size_bytes: (s).size_bytes,
+                data: erased_data,
+                is_locked: (s).is_locked,
+                erase_count: (s).erase_count + 1,
+            };
+            return FlashNorController {
+                sectors: update_sector_in_ctrl((ctrl).sectors, sec_id, updated),
+                is_unlocked: true,
+                error_flags: (ctrl).error_flags,
+                last_ok: true,
+            };
+        }
+        i = i + 1;
+    }
+    return FlashNorController {
+        sectors: (ctrl).sectors,
+        is_unlocked: (ctrl).is_unlocked,
+        error_flags: (ctrl).error_flags,
+        last_ok: false,
+    };
+}
+
+fn list_set_byte(l: List[Int], idx: Int, val: Int) -> List[Int] {
+    let mut result: List[Int] = list_new();
+    let len: Int = list_len(l);
+    let mut i: Int = 0;
+    while i < len {
+        if i == idx {
+            result = list_push(result, val);
+        } else {
+            result = list_push(result, list_get(l, i));
+        }
+        i = i + 1;
+    }
+    return result;
+}
+
+pub fn flash_program_byte(ctrl: FlashNorController, sec_id: Int, offset: Int, byte_val: Int) -> FlashNorController {
+    if !(ctrl).is_unlocked {
+        return FlashNorController {
+            sectors: (ctrl).sectors,
+            is_unlocked: false,
+            error_flags: 2,
+            last_ok: false,
+        };
+    }
+
+    let len: Int = list_len((ctrl).sectors);
+    let mut i: Int = 0;
+    while i < len {
+        let s: FlashSector = list_get((ctrl).sectors, i);
+        if (s).sector_id == sec_id {
+            if offset >= 0 {
+                if offset < (s).size_bytes {
+                    let updated: FlashSector = FlashSector {
+                        sector_id: (s).sector_id,
+                        base_address: (s).base_address,
+                        size_bytes: (s).size_bytes,
+                        data: list_set_byte((s).data, offset, byte_val % 256),
+                        is_locked: (s).is_locked,
+                        erase_count: (s).erase_count,
+                    };
+                    return FlashNorController {
+                        sectors: update_sector_in_ctrl((ctrl).sectors, sec_id, updated),
+                        is_unlocked: true,
+                        error_flags: (ctrl).error_flags,
+                        last_ok: true,
+                    };
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return FlashNorController {
+        sectors: (ctrl).sectors,
+        is_unlocked: (ctrl).is_unlocked,
+        error_flags: (ctrl).error_flags,
+        last_ok: false,
+    };
+}
+
+pub fn flash_read_byte(ctrl: FlashNorController, sec_id: Int, offset: Int) -> Int {
+    let len: Int = list_len((ctrl).sectors);
+    let mut i: Int = 0;
+    while i < len {
+        let s: FlashSector = list_get((ctrl).sectors, i);
+        if (s).sector_id == sec_id {
+            if offset >= 0 {
+                if offset < (s).size_bytes {
+                    return list_get((s).data, offset);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0 - 1;
+}

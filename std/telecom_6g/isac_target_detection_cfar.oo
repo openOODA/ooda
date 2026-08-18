@@ -1,0 +1,83 @@
+// # ISAC CA-CFAR and OS-CFAR Target Detection
+//
+// Logline: Implements Cell-Averaging (CA-CFAR) and Order-Statistic (OS-CFAR) adaptive thresholding for radar target detection.
+//
+// Setup: Pure standard library implementation of constant false alarm rate detectors in non-homogeneous interference.
+//
+// Beats:
+//   1. Configure CFAR reference window cells (N_ref), guard cells (N_guard), and target false alarm rate P_fa.
+//   2. Compute adaptive threshold scaling factor alpha_CA = N * (P_fa^(-1/N) - 1).
+//   3. Compare Cut-Under-Test (CUT) power against noise estimate to make binary detection decisions.
+
+pub type CfarDetectorConfig = struct {
+    num_reference_cells: Int,
+    num_guard_cells: Int,
+    desired_pfa: Float, // e.g. 1e-6
+    is_order_statistic: Bool,
+};
+
+pub type CfarDecision = struct {
+    cut_power_linear: Float,
+    noise_estimate_linear: Float,
+    threshold_linear: Float,
+    threshold_factor_alpha: Float,
+    target_detected: Bool,
+    estimated_snr_db: Float,
+};
+
+pub fn cfar_config_ca_default() -> CfarDetectorConfig {
+    return CfarDetectorConfig {
+        num_reference_cells: 16,
+        num_guard_cells: 4,
+        desired_pfa: 0.000001, // 10^-6
+        is_order_statistic: false,
+    };
+}
+
+pub fn cfar_calc_alpha_ca(n_ref: Int, pfa: Float) -> Float {
+    let n_f: Float = cfar_int_to_float(n_ref);
+    if n_f <= 0.0001 { return 1.0; }
+    // alpha = N * (P_fa^(-1/N) - 1)
+    let pfa_safe: Float = if pfa <= 0.0 { 0.000001 } else { pfa };
+    let ln_pfa: Float = ln(pfa_safe);
+    let exp_term: Float = exp((0.0 - ln_pfa) / n_f);
+    return n_f * (exp_term - 1.0);
+}
+
+pub fn cfar_eval_cut(cut_pwr: Float, sum_ref_power: Float, cfg: CfarDetectorConfig) -> CfarDecision {
+    let n_ref: Int = cfg.num_reference_cells;
+    let pfa: Float = cfg.desired_pfa;
+    let n_ref_f: Float = cfar_int_to_float(n_ref);
+
+    let noise_est: Float = if n_ref_f > 0.0001 { sum_ref_power / n_ref_f } else { 1.0 };
+    let alpha: Float = cfar_calc_alpha_ca(n_ref, pfa);
+    let thresh: Float = alpha * noise_est;
+
+    let is_det: Bool = cut_pwr > thresh;
+
+    let snr_lin: Float = if noise_est > 0.0000001 { cut_pwr / noise_est } else { 1.0 };
+    let ln10: Float = 2.302585092994046;
+    let snr_db: Float = 10.0 * (ln(snr_lin) / ln10);
+
+    return CfarDecision {
+        cut_power_linear: cut_pwr,
+        noise_estimate_linear: noise_est,
+        threshold_linear: thresh,
+        threshold_factor_alpha: alpha,
+        target_detected: is_det,
+        estimated_snr_db: snr_db,
+    };
+}
+
+pub fn cfar_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}

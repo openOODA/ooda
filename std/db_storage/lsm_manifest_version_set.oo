@@ -1,0 +1,149 @@
+// # LSM Manifest Log & Version Set Manager
+//
+// Logline: Manages point-in-time LSM Version Sets, applying atomic VersionEdit deltas and tracking active SSTable files.
+//
+// Setup: Crash-resilient metadata tracking maintaining active level state and garbage collection references.
+//
+// Beats:
+//   1. Define VersionEdit, FileDeltaRecord, LevelState, and VersionSet structures.
+//   2. Implement atomic VersionEdit creation and delta application to active version sets.
+//   3. Implement obsolete file cleanup identifier tracking across compaction cycles.
+
+pub type FileDeltaRecord = struct {
+    level: Int,
+    file_id: Int,
+    file_size_bytes: Int,
+    smallest_key: String,
+    largest_key: String,
+    is_addition: Bool,
+};
+
+pub type VersionEdit = struct {
+    edit_id: Int,
+    comparator_name: String,
+    log_number: Int,
+    prev_log_number: Int,
+    next_file_id: Int,
+    last_sequence_number: Int,
+    deltas: List[FileDeltaRecord],
+};
+
+pub type LevelState = struct {
+    level: Int,
+    active_file_ids: List[Int],
+    total_level_bytes: Int,
+};
+
+pub type VersionSet = struct {
+    manifest_file_id: Int,
+    current_version_id: Int,
+    levels: List[LevelState],
+    last_sequence_num: Int,
+    next_available_file_id: Int,
+};
+
+pub fn version_set_new(manifest_fid: Int) -> VersionSet {
+    let mut initial_levels: List[LevelState] = list_new();
+    let mut i: Int = 0;
+    while i < 7 {
+        let empty_files: List[Int] = list_new();
+        let lvl: LevelState = LevelState {
+            level: i,
+            active_file_ids: empty_files,
+            total_level_bytes: 0,
+        };
+        initial_levels = list_push(initial_levels, lvl);
+        i = i + 1;
+    }
+
+    return VersionSet {
+        manifest_file_id: manifest_fid,
+        current_version_id: 1,
+        levels: initial_levels,
+        last_sequence_num: 0,
+        next_available_file_id: 100,
+    };
+}
+
+pub fn version_edit_new(eid: Int) -> VersionEdit {
+    let empty_deltas: List[FileDeltaRecord] = list_new();
+    return VersionEdit {
+        edit_id: eid,
+        comparator_name: "bytewise",
+        log_number: 0,
+        prev_log_number: 0,
+        next_file_id: 0,
+        last_sequence_number: 0,
+        deltas: empty_deltas,
+    };
+}
+
+pub fn version_edit_add_file(
+    edit: VersionEdit,
+    lvl: Int,
+    fid: Int,
+    sz: Int,
+    min_k: String,
+    max_k: String
+) -> VersionEdit {
+    let delta: FileDeltaRecord = FileDeltaRecord {
+        level: lvl,
+        file_id: fid,
+        file_size_bytes: sz,
+        smallest_key: min_k,
+        largest_key: max_k,
+        is_addition: true,
+    };
+    let updated_deltas: List[FileDeltaRecord] = list_push((edit).deltas, delta);
+    return VersionEdit {
+        edit_id: (edit).edit_id,
+        comparator_name: (edit).comparator_name,
+        log_number: (edit).log_number,
+        prev_log_number: (edit).prev_log_number,
+        next_file_id: (edit).next_file_id,
+        last_sequence_number: (edit).last_sequence_number,
+        deltas: updated_deltas,
+    };
+}
+
+pub fn version_set_apply(vset: VersionSet, edit: VersionEdit) -> VersionSet {
+    let old_levels: List[LevelState] = (vset).levels;
+    let deltas: List[FileDeltaRecord] = (edit).deltas;
+    let num_deltas: Int = list_len(deltas);
+    let mut updated_levels: List[LevelState] = list_new();
+
+    let mut l_idx: Int = 0;
+    while l_idx < list_len(old_levels) {
+        let cur_lvl: LevelState = list_get(old_levels, l_idx);
+        let mut cur_files: List[Int] = (cur_lvl).active_file_ids;
+        let mut cur_bytes: Int = (cur_lvl).total_level_bytes;
+
+        let mut d_idx: Int = 0;
+        while d_idx < num_deltas {
+            let delta: FileDeltaRecord = list_get(deltas, d_idx);
+            if (delta).level == l_idx {
+                if (delta).is_addition {
+                    cur_files = list_push(cur_files, (delta).file_id);
+                    cur_bytes = cur_bytes + (delta).file_size_bytes;
+                }
+            }
+            d_idx = d_idx + 1;
+        }
+
+        let new_lvl_state: LevelState = LevelState {
+            level: l_idx,
+            active_file_ids: cur_files,
+            total_level_bytes: cur_bytes,
+        };
+        updated_levels = list_push(updated_levels, new_lvl_state);
+        l_idx = l_idx + 1;
+    }
+
+    return VersionSet {
+        manifest_file_id: (vset).manifest_file_id,
+        current_version_id: (vset).current_version_id + 1,
+        levels: updated_levels,
+        last_sequence_num: (edit).last_sequence_number,
+        next_available_file_id: (vset).next_available_file_id + 1,
+    };
+}

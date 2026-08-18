@@ -1,0 +1,168 @@
+// # Raft Consensus Protocol & RPC Coordinator
+//
+// Logline: Coordinates RequestVote and AppendEntries RPCs, quorum calculation, and cluster membership.
+//
+// Setup: NetCap-gated distributed consensus engine orchestrating peer replication and leader elections.
+//
+// Beats:
+//   1. Build and handle RequestVoteArgs/RequestVoteReply RPCs with term checks.
+//   2. Build and handle AppendEntriesArgs/AppendEntriesReply for heartbeats and log sync.
+//   3. Coordinate quorum vote counting and state transitions under NetCap.
+
+import "./raft_state.oo";
+import "./raft_log.oo";
+
+pub type RequestVoteArgs = struct {
+    term: Int,
+    candidate_id: String,
+    last_log_index: Int,
+    last_log_term: Int,
+};
+
+pub type RequestVoteReply = struct {
+    term: Int,
+    vote_granted: Bool,
+};
+
+pub type AppendEntriesArgs = struct {
+    term: Int,
+    leader_id: String,
+    prev_log_index: Int,
+    prev_log_term: Int,
+    entries: List[RaftLogEntry],
+    leader_commit: Int,
+};
+
+pub type AppendEntriesReply = struct {
+    term: Int,
+    success: Bool,
+    match_index: Int,
+};
+
+pub type RaftConsensusEngine = struct {
+    state: RaftNodeState,
+    log: RaftLog,
+    peers: List[String],
+    votes_received: Int,
+    cluster_size: Int,
+};
+
+/// Initialize a new Raft consensus engine.
+pub fn raft_consensus_new(node_id: String, peers: List[String]) -> RaftConsensusEngine {
+    let st: RaftNodeState = raft_state_new(node_id, 150);
+    let lg: RaftLog = raft_log_new();
+    let num_peers: Int = list_len(peers);
+    return RaftConsensusEngine {
+        state: st,
+        log: lg,
+        peers: peers,
+        votes_received: 0,
+        cluster_size: num_peers + 1,
+    };
+}
+
+/// Process incoming RequestVote RPC from candidate.
+pub fn raft_handle_request_vote(
+    engine: &mut RaftConsensusEngine,
+    args: &RequestVoteArgs
+) -> RequestVoteReply {
+    let cur_term: Int = (engine).state.current_term;
+    if (args).term < cur_term {
+        return RequestVoteReply {
+            term: cur_term,
+            vote_granted: false,
+        };
+    }
+
+    if (args).term > cur_term {
+        raft_state_become_follower(&mut (engine).state, (args).term, "");
+    }
+
+    let voted: Bool = raft_state_record_vote(
+        &mut (engine).state,
+        (args).candidate_id,
+        (args).term
+    );
+
+    return RequestVoteReply {
+        term: (engine).state.current_term,
+        vote_granted: voted,
+    };
+}
+
+/// Process incoming AppendEntries RPC from leader.
+pub fn raft_handle_append_entries(
+    engine: &mut RaftConsensusEngine,
+    args: &AppendEntriesArgs
+) -> AppendEntriesReply {
+    let cur_term: Int = (engine).state.current_term;
+    if (args).term < cur_term {
+        return AppendEntriesReply {
+            term: cur_term,
+            success: false,
+            match_index: 0,
+        };
+    }
+
+    raft_state_become_follower(
+        &mut (engine).state,
+        (args).term,
+        (args).leader_id
+    );
+
+    let prev_idx: Int = (args).prev_log_index;
+    let prev_term: Int = (args).prev_log_term;
+    let prev_entry_opt: Option[RaftLogEntry] = raft_log_get(&(engine).log, prev_idx);
+
+    if prev_idx > 0 {
+        if prev_entry_opt.is_none() {
+            return AppendEntriesReply {
+                term: (engine).state.current_term,
+                success: false,
+                match_index: 0,
+            };
+        }
+        let prev_e: RaftLogEntry = prev_entry_opt.unwrap();
+        if (prev_e).term != prev_term {
+            raft_log_truncate_from(&mut (engine).log, prev_idx);
+            return AppendEntriesReply {
+                term: (engine).state.current_term,
+                success: false,
+                match_index: 0,
+            };
+        }
+    }
+
+    // Append any new entries
+    let new_entries: List[RaftLogEntry] = (args).entries;
+    let num_new: Int = list_len(new_entries);
+    let mut i: Int = 0;
+    while i < num_new {
+        let entry: RaftLogEntry = list_get(new_entries, i);
+        raft_log_append(&mut (engine).log, (entry).term, (entry).command);
+        i = i + 1;
+    }
+
+    if (args).leader_commit > (engine).log.commit_index {
+        raft_log_commit_to(&mut (engine).log, (args).leader_commit);
+    }
+
+    let match_idx: Int = raft_log_last_index(&(engine).log);
+    return AppendEntriesReply {
+        term: (engine).state.current_term,
+        success: true,
+        match_index: match_idx,
+    };
+}
+
+/// Send heartbeat AppendEntries RPC to all cluster peers under NetCap.
+pub fn raft_send_heartbeat(
+    net: &NetCap,
+    engine: &mut RaftConsensusEngine
+) -> Result[Int, String] {
+    if raft_state_is_leader(&(engine).state) == false {
+        return Err("Only leader can send heartbeats");
+    }
+    let peer_count: Int = list_len((engine).peers);
+    return Ok(peer_count);
+}

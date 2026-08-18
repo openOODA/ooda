@@ -1,0 +1,110 @@
+// # Service Mesh Circuit Breaker & Outlier Detection
+//
+// Logline: Detects consecutive 5xx error anomalies and temporarily ejects unhealthy upstream hosts.
+//
+// Setup: Resiliency filter protecting upstream clusters from failing instances through automatic ejection.
+//
+// Beats:
+//   1. Track consecutive 5xx gateway errors and total request counts per upstream host.
+//   2. Eject unhealthy hosts when consecutive error threshold is breached for an ejection duration.
+//   3. Enforce maximum ejection percentage limits (panic threshold) to avoid cluster starvation.
+
+pub type UpstreamHost = struct {
+    host_id: String,
+    consecutive_5xx_count: Int,
+    is_ejected: Bool,
+    ejected_until_ms: Int,
+    total_ejections: Int,
+};
+
+pub type OutlierDetector = struct {
+    hosts: List[UpstreamHost],
+    consecutive_5xx_threshold: Int,
+    base_ejection_time_ms: Int,
+    max_ejection_percent: Int,
+    total_hosts: Int,
+    ejected_hosts_count: Int,
+};
+
+pub fn outlier_detector_new(consec_5xx: Int, ejection_time_ms: Int, max_eject_pct: Int) -> OutlierDetector {
+    let empty_hosts: List[UpstreamHost] = list_new();
+    return OutlierDetector {
+        hosts: empty_hosts,
+        consecutive_5xx_threshold: consec_5xx,
+        base_ejection_time_ms: ejection_time_ms,
+        max_ejection_percent: max_eject_pct,
+        total_hosts: 0,
+        ejected_hosts_count: 0,
+    };
+}
+
+pub fn outlier_add_host(detector: &mut OutlierDetector, host: String) {
+    let h = UpstreamHost {
+        host_id: host,
+        consecutive_5xx_count: 0,
+        is_ejected: false,
+        ejected_until_ms: 0,
+        total_ejections: 0,
+    };
+    (detector).hosts = list_push((detector).hosts, h);
+    (detector).total_hosts = (detector).total_hosts + 1;
+}
+
+pub fn outlier_record_response(
+    detector: &mut OutlierDetector,
+    host_id: String,
+    status_code: Int,
+    now_ms: Int
+) -> Bool {
+    let n: Int = list_len((detector).hosts);
+    let mut updated: List[UpstreamHost] = list_new();
+    let mut i: Int = 0;
+
+    while i < n {
+        let h: UpstreamHost = list_get((detector).hosts, i);
+        if (h).host_id == host_id {
+            let mut consec: Int = (h).consecutive_5xx_count;
+            let mut ejected: Bool = (h).is_ejected;
+            let mut eject_until: Int = (h).ejected_until_ms;
+            let mut total_e: Int = (h).total_ejections;
+
+            // Check if existing ejection expired
+            if ejected && now_ms >= eject_until {
+                ejected = false;
+                consec = 0;
+                (detector).ejected_hosts_count = (detector).ejected_hosts_count - 1;
+            }
+
+            if status_code >= 500 && status_code <= 599 {
+                consec = consec + 1;
+                if !ejected && consec >= (detector).consecutive_5xx_threshold {
+                    // Check max ejection limit
+                    let max_allowed: Int = ((detector).total_hosts * (detector).max_ejection_percent) / 100;
+                    if (detector).ejected_hosts_count < max_allowed {
+                        ejected = true;
+                        total_e = total_e + 1;
+                        eject_until = now_ms + (detector).base_ejection_time_ms * total_e;
+                        (detector).ejected_hosts_count = (detector).ejected_hosts_count + 1;
+                    }
+                }
+            } else if status_code < 400 {
+                consec = 0;
+            }
+
+            let mod_h = UpstreamHost {
+                host_id: (h).host_id,
+                consecutive_5xx_count: consec,
+                is_ejected: ejected,
+                ejected_until_ms: eject_until,
+                total_ejections: total_e,
+            };
+            updated = list_push(updated, mod_h);
+        } else {
+            updated = list_push(updated, h);
+        }
+        i = i + 1;
+    }
+
+    (detector).hosts = updated;
+    return true;
+}

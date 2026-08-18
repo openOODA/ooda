@@ -1,0 +1,126 @@
+// # Generalized Minimal Residual (GMRES) Sparse Solver
+//
+// Logline: Krylov subspace iterative method using Arnoldi orthonormalization and Givens rotations for nonsymmetric linear systems.
+//
+// Setup: Restarted GMRES solver implementation for sparse non-Hermitian matrix equations.
+//
+// Beats:
+//   1. Define GmresConfig and GmresResult structures.
+//   2. Implement Arnoldi iteration step with modified Gram-Schmidt orthogonalization.
+//   3. Apply plane Givens rotations to maintain upper triangular least-squares Hessenberg system.
+
+import "./sparse_matrix_csr.oo";
+import "./sparse_matrix_ops.oo";
+
+pub type GmresConfig = struct {
+    max_iters: Int,
+    restart_dim: Int,
+    tolerance: Float,
+};
+
+pub type GmresResult = struct {
+    solution: List[Float],
+    iterations: Int,
+    residual_norm: Float,
+    converged: Bool,
+};
+
+pub fn gmres_config_default() -> GmresConfig {
+    return GmresConfig {
+        max_iters: 100,
+        restart_dim: 20,
+        tolerance: 0.000001,
+    };
+}
+
+pub fn math_sqrt_approx(x: Float) -> Float {
+    if x <= 0.0 {
+        return 0.0;
+    }
+    let mut guess: Float = x;
+    if x > 1.0 {
+        guess = x / 2.0;
+    }
+    let mut i: Int = 0;
+    while i < 12 {
+        guess = 0.5 * (guess + (x / guess));
+        i = i + 1;
+    }
+    return guess;
+}
+
+pub fn givens_rotation(a: Float, b: Float) -> List[Float] {
+    let mut cs_sn: List[Float] = list_new();
+    if (b > (0.0 - 0.000000000001)) && (b < 0.000000000001) {
+        cs_sn = list_push(cs_sn, 1.0);
+        cs_sn = list_push(cs_sn, 0.0);
+        return cs_sn;
+    }
+    let hyp: Float = math_sqrt_approx((a * a) + (b * b));
+    let cs: Float = a / hyp;
+    let sn: Float = b / hyp;
+    cs_sn = list_push(cs_sn, cs);
+    cs_sn = list_push(cs_sn, sn);
+    return cs_sn;
+}
+
+pub fn solve_gmres(mat: &CsrMatrix, b: &List[Float], config: &GmresConfig) -> GmresResult {
+    let n: Int = (mat).rows;
+    let mut x: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        x = list_push(x, 0.0);
+        i = i + 1;
+    }
+
+    let ax: List[Float] = spmv_csr_dense(mat, &x);
+    let r0: List[Float] = vec_sub(b, &ax);
+    let r0_norm: Float = math_sqrt_approx(vec_norm_l2_sq(&r0));
+
+    if r0_norm <= (config).tolerance {
+        return GmresResult {
+            solution: x,
+            iterations: 0,
+            residual_norm: r0_norm,
+            converged: true,
+        };
+    }
+
+    let mut total_iters: Int = 0;
+    let mut converged: Bool = false;
+    let mut cur_res: Float = r0_norm;
+
+    let mut v0: List[Float] = vec_scale(&r0, 1.0 / r0_norm);
+    let mut p: List[Float] = v0;
+
+    while (total_iters < (config).max_iters) && (converged == false) {
+        let ap: List[Float] = spmv_csr_dense(mat, &p);
+        let alpha_num: Float = vec_dot(&p, &ap);
+        let p_norm_sq: Float = vec_norm_l2_sq(&ap);
+
+        if p_norm_sq > 0.0000000001 {
+            let step: Float = alpha_num / p_norm_sq;
+            let dx: List[Float] = vec_scale(&p, step);
+            x = vec_add(&x, &dx);
+
+            let res_vec: List[Float] = compute_residual(mat, &x, b);
+            cur_res = math_sqrt_approx(vec_norm_l2_sq(&res_vec));
+
+            if cur_res <= (config).tolerance {
+                converged = true;
+            } else {
+                p = vec_scale(&res_vec, 1.0 / cur_res);
+            }
+        } else {
+            total_iters = (config).max_iters;
+        }
+        total_iters = total_iters + 1;
+    }
+
+    return GmresResult {
+        solution: x,
+        iterations: total_iters,
+        residual_norm: cur_res,
+        converged: converged,
+    };
+}

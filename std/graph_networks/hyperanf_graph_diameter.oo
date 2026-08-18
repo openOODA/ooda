@@ -1,0 +1,187 @@
+// # HyperANF Approximate Neighborhood Function
+//
+// Logline: Implements HyperANF for large-scale graph diameter estimation and approximate neighborhood functions.
+//
+// Setup: Probabilistic HyperLogLog registers attached to graph vertices propagating reachable neighborhood sizes.
+//
+// Beats:
+//   1. Initialize per-node HyperLogLog registers with distinct node identifiers.
+//   2. Propagate and merge HyperLogLog registers across outgoing graph edges.
+//   3. Compute neighborhood size growth rate, effective diameter, and average distance.
+
+pub type HyperAnfNode = struct {
+    node_id: Int,
+    registers: List[Int],
+    out_neighbors: List[Int],
+};
+
+pub type HyperAnfGraph = struct {
+    precision_p: Int,
+    num_registers: Int,
+    nodes: List[HyperAnfNode],
+};
+
+pub type AnfIterationResult = struct {
+    iteration: Int,
+    total_neighborhood_size: Int,
+    is_converged: Bool,
+};
+
+pub fn hyperanf_pow2(exp: Int) -> Int {
+    let mut res: Int = 1;
+    let mut i: Int = 0;
+    while i < exp {
+        res = res * 2;
+        i = i + 1;
+    }
+    return res;
+}
+
+pub fn hyperanf_init_node(node_id: Int, p: Int) -> HyperAnfNode {
+    let m: Int = hyperanf_pow2(p);
+    let mut regs: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < m {
+        regs = list_push(regs, 0);
+        i = i + 1;
+    }
+
+    // Seed register for this node
+    let mut pos_id: Int = node_id;
+    if pos_id < 0 {
+        pos_id = 0 - pos_id;
+    }
+    let reg_idx: Int = pos_id % m;
+    let rank: Int = (pos_id * 31337 + 101) % 16 + 1;
+
+    let mut seeded_regs: List[Int] = list_new();
+    i = 0;
+    while i < m {
+        if i == reg_idx {
+            seeded_regs = list_push(seeded_regs, rank);
+        } else {
+            seeded_regs = list_push(seeded_regs, list_get(regs, i));
+        }
+        i = i + 1;
+    }
+
+    let empty_neighbors: List[Int] = list_new();
+    return HyperAnfNode {
+        node_id: node_id,
+        registers: seeded_regs,
+        out_neighbors: empty_neighbors,
+    };
+}
+
+pub fn hyperanf_create(p: Int, num_nodes: Int) -> HyperAnfGraph {
+    let mut precision: Int = p;
+    if precision < 4 {
+        precision = 4;
+    }
+    let m: Int = hyperanf_pow2(precision);
+    let mut n_list: List[HyperAnfNode] = list_new();
+    let mut i: Int = 0;
+    while i < num_nodes {
+        let node: HyperAnfNode = hyperanf_init_node(i, precision);
+        n_list = list_push(n_list, node);
+        i = i + 1;
+    }
+    return HyperAnfGraph {
+        precision_p: precision,
+        num_registers: m,
+        nodes: n_list,
+    };
+}
+
+pub fn hyperanf_add_edge(g: &mut HyperAnfGraph, u: Int, v: Int) -> Bool {
+    let n: Int = list_len((g).nodes);
+    if u < 0 || u >= n || v < 0 || v >= n {
+        return false;
+    }
+    let mut updated_nodes: List[HyperAnfNode] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let cur: HyperAnfNode = list_get((g).nodes, i);
+        if i == u {
+            let new_nbrs: List[Int] = list_push((cur).out_neighbors, v);
+            let updated_u: HyperAnfNode = HyperAnfNode {
+                node_id: (cur).node_id,
+                registers: (cur).registers,
+                out_neighbors: new_nbrs,
+            };
+            updated_nodes = list_push(updated_nodes, updated_u);
+        } else {
+            updated_nodes = list_push(updated_nodes, cur);
+        }
+        i = i + 1;
+    }
+    (g).nodes = updated_nodes;
+    return true;
+}
+
+pub fn hyperanf_estimate_node_cardinality(node: &HyperAnfNode, m: Int) -> Int {
+    let mut sum_h: Int = 0;
+    let scale: Int = 1000000;
+    let mut i: Int = 0;
+    while i < m {
+        let r: Int = list_get((node).registers, i);
+        sum_h = sum_h + (scale / hyperanf_pow2(r));
+        i = i + 1;
+    }
+    let alpha_scaled: Int = 7213;
+    return (alpha_scaled * m * m) / (sum_h / (scale / 10000));
+}
+
+pub fn hyperanf_step(g: &mut HyperAnfGraph) -> AnfIterationResult {
+    let n: Int = list_len((g).nodes);
+    let m: Int = (g).num_registers;
+    let mut next_nodes: List[HyperAnfNode] = list_new();
+    let mut changed: Bool = false;
+    let mut total_card: Int = 0;
+
+    let mut u: Int = 0;
+    while u < n {
+        let cur_node: HyperAnfNode = list_get((g).nodes, u);
+        let mut merged_regs: List[Int] = (cur_node).registers;
+
+        let nbrs: List[Int] = (cur_node).out_neighbors;
+        let num_nbrs: Int = list_len(nbrs);
+        let mut k: Int = 0;
+        while k < num_nbrs {
+            let v_id: Int = list_get(nbrs, k);
+            if v_id >= 0 && v_id < n {
+                let v_node: HyperAnfNode = list_get((g).nodes, v_id);
+                let mut temp_regs: List[Int] = list_new();
+                let mut r_idx: Int = 0;
+                while r_idx < m {
+                    let r_u: Int = list_get(merged_regs, r_idx);
+                    let r_v: Int = list_get((v_node).registers, r_idx);
+                    let max_r: Int = if r_u > r_v { r_u } else { r_v };
+                    if max_r > r_u {
+                        changed = true;
+                    }
+                    temp_regs = list_push(temp_regs, max_r);
+                    r_idx = r_idx + 1;
+                }
+                merged_regs = temp_regs;
+            }
+            k = k + 1;
+        }
+
+        let updated_node: HyperAnfNode = HyperAnfNode {
+            node_id: (cur_node).node_id,
+            registers: merged_regs,
+            out_neighbors: (cur_node).out_neighbors,
+        };
+        total_card = total_card + hyperanf_estimate_node_cardinality(&updated_node, m);
+        next_nodes = list_push(next_nodes, updated_node);
+        u = u + 1;
+    }
+
+    (g).nodes = next_nodes;
+    return AnfIterationResult {
+        iteration: 1,
+        total_neighborhood_size: total_card,
+        is_converged: !changed,
+    };
+}

@@ -1,0 +1,145 @@
+// # Isolated Margin Perpetual Position Manager
+//
+// Logline: Calculates isolated position leverage, exact bankruptcy/liquidation triggers, return on equity (ROE), and manual collateral adjustments.
+//
+// Setup: Pure quantitative risk module managing isolated margin ring-fencing for individual perpetual positions.
+//
+// Beats:
+//   1. Define IsolatedPosition, IsolatedMarginAdjustment, and IsolatedLiquidationPriceResult.
+//   2. Compute isolated liquidation price formulas for long and short contracts.
+//   3. Handle collateral top-ups, margin removals, and realized/unrealized ROE tracking.
+
+pub type IsolatedPosition = struct {
+    position_id: String,
+    symbol: String,
+    size: Float,
+    entry_price: Float,
+    allocated_margin_usd: Float,
+    maintenance_margin_rate: Float,
+    taker_fee_rate: Float,
+};
+
+pub type IsolatedLiquidationPriceResult = struct {
+    liquidation_price: Float,
+    bankruptcy_price: Float,
+    distance_to_liq_pct: Float,
+    is_safe: Bool,
+};
+
+pub type IsolatedMarginAdjustment = struct {
+    delta_margin_usd: Float,
+    new_allocated_margin_usd: Float,
+    new_liquidation_price: Float,
+    is_valid: Bool,
+};
+
+pub fn isolated_position_new(
+    pos_id: String,
+    symbol: String,
+    size: Float,
+    entry_px: Float,
+    margin_usd: Float,
+    mm_rate: Float
+) -> IsolatedPosition {
+    return IsolatedPosition {
+        position_id: pos_id,
+        symbol: symbol,
+        size: size,
+        entry_price: entry_px,
+        allocated_margin_usd: margin_usd,
+        maintenance_margin_rate: mm_rate,
+        taker_fee_rate: 0.0005, // 0.05%
+    };
+}
+
+pub fn calc_isolated_liq_price(
+    pos: &IsolatedPosition,
+    current_mark_px: Float
+) -> IsolatedLiquidationPriceResult {
+    let is_long: Bool = (pos).size > 0.0;
+    let mut abs_size: Float = (pos).size;
+    if abs_size < 0.0 {
+        abs_size = 0.0 - abs_size;
+    }
+    if abs_size == 0.0 {
+        return IsolatedLiquidationPriceResult {
+            liquidation_price: 0.0,
+            bankruptcy_price: 0.0,
+            distance_to_liq_pct: 1.0,
+            is_safe: true,
+        };
+    }
+
+    let mut liq_px: Float = 0.0;
+    let mut bk_px: Float = 0.0;
+
+    if is_long {
+        bk_px = (pos).entry_price - ((pos).allocated_margin_usd / abs_size);
+        liq_px = (pos).entry_price - (((pos).allocated_margin_usd - (abs_size * (pos).entry_price * (pos).maintenance_margin_rate)) / (abs_size * (1.0 - (pos).maintenance_margin_rate)));
+    } else {
+        bk_px = (pos).entry_price + ((pos).allocated_margin_usd / abs_size);
+        liq_px = (pos).entry_price + (((pos).allocated_margin_usd - (abs_size * (pos).entry_price * (pos).maintenance_margin_rate)) / (abs_size * (1.0 + (pos).maintenance_margin_rate)));
+    }
+
+    let mut dist_pct: Float = 0.0;
+    if current_mark_px > 0.0 {
+        let diff: Float = current_mark_px - liq_px;
+        let mut abs_diff: Float = diff;
+        if abs_diff < 0.0 {
+            abs_diff = 0.0 - abs_diff;
+        }
+        dist_pct = abs_diff / current_mark_px;
+    }
+
+    let safe: Bool = (is_long && current_mark_px > liq_px) || (!is_long && current_mark_px < liq_px);
+
+    return IsolatedLiquidationPriceResult {
+        liquidation_price: liq_px,
+        bankruptcy_price: bk_px,
+        distance_to_liq_pct: dist_pct,
+        is_safe: safe,
+    };
+}
+
+pub fn calc_isolated_roe(
+    pos: &IsolatedPosition,
+    mark_px: Float
+) -> Float {
+    if (pos).allocated_margin_usd <= 0.0 {
+        return 0.0;
+    }
+    let upnl: Float = (pos).size * (mark_px - (pos).entry_price);
+    return upnl / (pos).allocated_margin_usd;
+}
+
+pub fn apply_margin_adjustment(
+    pos: &mut IsolatedPosition,
+    delta_usd: Float,
+    current_mark_px: Float
+) -> IsolatedMarginAdjustment {
+    let new_margin: Float = (pos).allocated_margin_usd + delta_usd;
+    let mut abs_size: Float = (pos).size;
+    if abs_size < 0.0 {
+        abs_size = 0.0 - abs_size;
+    }
+    let min_req: Float = abs_size * (pos).entry_price * (pos).maintenance_margin_rate;
+
+    if new_margin < min_req {
+        return IsolatedMarginAdjustment {
+            delta_margin_usd: delta_usd,
+            new_allocated_margin_usd: (pos).allocated_margin_usd,
+            new_liquidation_price: 0.0,
+            is_valid: false,
+        };
+    }
+
+    (pos).allocated_margin_usd = new_margin;
+    let res: IsolatedLiquidationPriceResult = calc_isolated_liq_price(pos, current_mark_px);
+
+    return IsolatedMarginAdjustment {
+        delta_margin_usd: delta_usd,
+        new_allocated_margin_usd: new_margin,
+        new_liquidation_price: (res).liquidation_price,
+        is_valid: true,
+    };
+}

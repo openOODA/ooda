@@ -1,0 +1,117 @@
+// # Direct Market Access (DMA) Pre-Trade Risk Engine
+//
+// Logline: Enforces sub-microsecond pre-trade risk controls including fat-finger collars, size limits, notional caps, and credit headroom.
+//
+// Setup: Ultra-fast inline risk validator blocking non-compliant orders before submission to exchange wire gateways.
+//
+// Beats:
+//   1. Define DmaRiskLimits, DmaOrderIntent, and RiskCheckResult structures.
+//   2. Check price deviation collars against prevailing NBBO bid/ask reference.
+//   3. Validate single-order max quantity, max notional, and cumulative daily limits.
+
+pub type DmaRiskLimits = struct {
+    max_order_shares: Int,
+    max_order_notional_fixed: Int,
+    max_price_collar_bps: Int,
+    max_daily_notional_fixed: Int,
+    allow_short_selling: Bool,
+    is_kill_switch_engaged: Bool,
+};
+
+pub type DmaOrderIntent = struct {
+    symbol: String,
+    side: String,
+    shares: Int,
+    price_fixed: Int,
+    account_id: String,
+};
+
+pub type RiskCheckResult = struct {
+    passed: Bool,
+    reject_reason: String,
+    computed_notional_fixed: Int,
+    price_collar_bps: Int,
+};
+
+pub fn dma_risk_limits_default() -> DmaRiskLimits {
+    return DmaRiskLimits {
+        max_order_shares: 10000,
+        max_order_notional_fixed: 5000000000,
+        max_price_collar_bps: 500,
+        max_daily_notional_fixed: 50000000000,
+        allow_short_selling: true,
+        is_kill_switch_engaged: false,
+    };
+}
+
+pub fn dma_order_intent_new(
+    symbol: String,
+    side: String,
+    qty: Int,
+    px: Int,
+    acct: String
+) -> DmaOrderIntent {
+    return DmaOrderIntent {
+        symbol: symbol,
+        side: side,
+        shares: qty,
+        price_fixed: px,
+        account_id: acct,
+    };
+}
+
+pub fn evaluate_pretrade_risk(
+    intent: &DmaOrderIntent,
+    limits: &DmaRiskLimits,
+    reference_price_fixed: Int
+) -> RiskCheckResult {
+    if (limits).is_kill_switch_engaged {
+        return RiskCheckResult {
+            passed: false,
+            reject_reason: "KILL_SWITCH_ACTIVE",
+            computed_notional_fixed: 0,
+            price_collar_bps: 0,
+        };
+    }
+
+    if (intent).shares <= 0 || (intent).shares > (limits).max_order_shares {
+        return RiskCheckResult {
+            passed: false,
+            reject_reason: "MAX_SHARES_EXCEEDED",
+            computed_notional_fixed: 0,
+            price_collar_bps: 0,
+        };
+    }
+
+    let notional: Int = (intent).shares * (intent).price_fixed;
+    if notional > (limits).max_order_notional_fixed {
+        return RiskCheckResult {
+            passed: false,
+            reject_reason: "MAX_NOTIONAL_EXCEEDED",
+            computed_notional_fixed: notional,
+            price_collar_bps: 0,
+        };
+    }
+
+    if reference_price_fixed > 0 {
+        let diff: Int = (intent).price_fixed - reference_price_fixed;
+        let abs_diff: Int = if diff < 0 { 0 - diff } else { diff };
+        let collar_bps: Int = (abs_diff * 10000) / reference_price_fixed;
+
+        if collar_bps > (limits).max_price_collar_bps {
+            return RiskCheckResult {
+                passed: false,
+                reject_reason: "PRICE_COLLAR_EXCEEDED",
+                computed_notional_fixed: notional,
+                price_collar_bps: collar_bps,
+            };
+        }
+    }
+
+    return RiskCheckResult {
+        passed: true,
+        reject_reason: "PASSED",
+        computed_notional_fixed: notional,
+        price_collar_bps: 0,
+    };
+}

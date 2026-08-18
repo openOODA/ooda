@@ -1,0 +1,170 @@
+// # Flash-Based Virtual EEPROM Emulation
+//
+// Logline: Virtual EEPROM key-value storage atop Flash sectors, dual-page ping-pong swapping, and garbage collection.
+//
+// Setup: High-endurance virtual EEPROM engine for non-volatile configuration variables on NOR Flash.
+//
+// Beats:
+//   1. Define virtual record structures, 16-bit variable IDs, and page lifecycle states.
+//   2. Read virtual variables by scanning records backwards to locate most recent updates.
+//   3. Append new variable records to the active valid page.
+//   4. Execute dual-page transfer compaction when the active page reaches full capacity.
+
+type EepromRecord = struct {
+    virt_address: Int,
+    data: Int,
+};
+
+type EepromPage = struct {
+    page_id: Int,
+    status: Int,
+    records: List[EepromRecord],
+    capacity: Int,
+};
+
+type VirtualEeprom = struct {
+    page0: EepromPage,
+    page1: EepromPage,
+    active_page_id: Int,
+    compaction_count: Int,
+    last_ok: Bool,
+};
+
+pub fn eeprom_page_new(p_id: Int, max_records: Int) -> EepromPage {
+    let empty_records: List[EepromRecord] = list_new();
+    return EepromPage {
+        page_id: p_id,
+        status: 0,
+        records: empty_records,
+        capacity: max_records,
+    };
+}
+
+pub fn virtual_eeprom_new(max_records_per_page: Int) -> VirtualEeprom {
+    let p0: EepromPage = EepromPage {
+        page_id: 0,
+        status: 2,
+        records: list_new(),
+        capacity: max_records_per_page,
+    };
+    let p1: EepromPage = eeprom_page_new(1, max_records_per_page);
+    return VirtualEeprom {
+        page0: p0,
+        page1: p1,
+        active_page_id: 0,
+        compaction_count: 0,
+        last_ok: true,
+    };
+}
+
+pub fn eeprom_read_variable(eeprom: VirtualEeprom, virt_addr: Int) -> Int {
+    let active_page: EepromPage = if (eeprom).active_page_id == 0 { (eeprom).page0 } else { (eeprom).page1 };
+    let recs: List[EepromRecord] = (active_page).records;
+    let len: Int = list_len(recs);
+    let mut i: Int = len - 1;
+
+    while i >= 0 {
+        let r: EepromRecord = list_get(recs, i);
+        if (r).virt_address == virt_addr {
+            return (r).data;
+        }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+pub fn eeprom_compact(eeprom: VirtualEeprom) -> VirtualEeprom {
+    let old_p0: Bool = ((eeprom).active_page_id == 0);
+    let old_page: EepromPage = if old_p0 { (eeprom).page0 } else { (eeprom).page1 };
+    let new_base: EepromPage = if old_p0 { (eeprom).page1 } else { (eeprom).page0 };
+
+    let mut new_recs: List[EepromRecord] = list_new();
+    let old_recs: List[EepromRecord] = (old_page).records;
+    let old_len: Int = list_len(old_recs);
+    let mut copied_keys: List[Int] = list_new();
+    let mut i: Int = old_len - 1;
+
+    while i >= 0 {
+        let r: EepromRecord = list_get(old_recs, i);
+        let k: Int = (r).virt_address;
+
+        let num_copied: Int = list_len(copied_keys);
+        let mut already_copied: Bool = false;
+        let mut j: Int = 0;
+        while j < num_copied {
+            if list_get(copied_keys, j) == k {
+                already_copied = true;
+            }
+            j = j + 1;
+        }
+
+        if !already_copied {
+            new_recs = list_push(new_recs, r);
+            copied_keys = list_push(copied_keys, k);
+        }
+        i = i - 1;
+    }
+
+    let new_page: EepromPage = EepromPage {
+        page_id: (new_base).page_id,
+        status: 2,
+        records: new_recs,
+        capacity: (new_base).capacity,
+    };
+    let erased_old_page: EepromPage = eeprom_page_new((old_page).page_id, (old_page).capacity);
+
+    if old_p0 {
+        return VirtualEeprom {
+            page0: erased_old_page,
+            page1: new_page,
+            active_page_id: 1,
+            compaction_count: (eeprom).compaction_count + 1,
+            last_ok: true,
+        };
+    }
+    return VirtualEeprom {
+        page0: new_page,
+        page1: erased_old_page,
+        active_page_id: 0,
+        compaction_count: (eeprom).compaction_count + 1,
+        last_ok: true,
+    };
+}
+
+pub fn eeprom_write_variable(eeprom: VirtualEeprom, virt_addr: Int, data: Int) -> VirtualEeprom {
+    let is_p0: Bool = ((eeprom).active_page_id == 0);
+    let cur_page: EepromPage = if is_p0 { (eeprom).page0 } else { (eeprom).page1 };
+
+    if list_len((cur_page).records) >= (cur_page).capacity {
+        let compacted: VirtualEeprom = eeprom_compact(eeprom);
+        return eeprom_write_variable(compacted, virt_addr, data);
+    }
+
+    let rec: EepromRecord = EepromRecord {
+        virt_address: virt_addr,
+        data: data,
+    };
+    let updated_page: EepromPage = EepromPage {
+        page_id: (cur_page).page_id,
+        status: (cur_page).status,
+        records: list_push((cur_page).records, rec),
+        capacity: (cur_page).capacity,
+    };
+
+    if is_p0 {
+        return VirtualEeprom {
+            page0: updated_page,
+            page1: (eeprom).page1,
+            active_page_id: (eeprom).active_page_id,
+            compaction_count: (eeprom).compaction_count,
+            last_ok: true,
+        };
+    }
+    return VirtualEeprom {
+        page0: (eeprom).page0,
+        page1: updated_page,
+        active_page_id: (eeprom).active_page_id,
+        compaction_count: (eeprom).compaction_count,
+        last_ok: true,
+    };
+}

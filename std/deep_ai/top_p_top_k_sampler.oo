@@ -1,0 +1,255 @@
+// # Top-k / nucleus token sampler
+//
+// Logline: Fan top-k and Holtzman top-p. 4-slot milli-softmax. Renorm then sample.
+// residual: destubbed to Int floor.
+
+type SamplingConfig = struct {
+    top_k: Int,
+    top_p_milli: Int,
+    temp_milli: Int
+}
+
+type TokenDist = struct {
+    p0: Int,
+    p1: Int,
+    p2: Int,
+    p3: Int
+}
+
+fn tpk_temp(temp_milli: Int) -> Int {
+    if temp_milli <= 0 {
+        return 1000;
+    }
+    return temp_milli;
+}
+
+fn tpk_max2(a: Int, b: Int) -> Int {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn tpk_exp_milli(z: Int) -> Int {
+    if z >= 0 {
+        return 1000;
+    }
+    if z == (0 - 1) {
+        return 367;
+    }
+    if z == (0 - 2) {
+        return 135;
+    }
+    if z == (0 - 3) {
+        return 49;
+    }
+    if z == (0 - 4) {
+        return 18;
+    }
+    if z == (0 - 5) {
+        return 6;
+    }
+    if z == (0 - 6) {
+        return 2;
+    }
+    if z == (0 - 7) {
+        return 1;
+    }
+    return 0;
+}
+
+fn tpk_p_at(i: Int, d: TokenDist) -> Int {
+    if i == 0 {
+        return d.p0;
+    }
+    if i == 1 {
+        return d.p1;
+    }
+    if i == 2 {
+        return d.p2;
+    }
+    if i == 3 {
+        return d.p3;
+    }
+    return 0;
+}
+
+fn tpk_better_i(cur_i: Int, cur_p: Int, i: Int, p: Int, unused: Int) -> Int {
+    if unused == 0 {
+        return cur_i;
+    }
+    if cur_i < 0 {
+        return i;
+    }
+    if p > cur_p {
+        return i;
+    }
+    return cur_i;
+}
+
+fn tpk_unused(i: Int, t0: Int, t1: Int, t2: Int) -> Int {
+    if i == t0 {
+        return 0;
+    }
+    if i == t1 {
+        return 0;
+    }
+    if i == t2 {
+        return 0;
+    }
+    return 1;
+}
+
+fn tpk_argmax(d: TokenDist, t0: Int, t1: Int, t2: Int) -> Int {
+    let i0: Int = tpk_better_i(0 - 1, 0 - 1, 0, d.p0, tpk_unused(0, t0, t1, t2));
+    let i1: Int = tpk_better_i(i0, tpk_p_at(i0, d), 1, d.p1, tpk_unused(1, t0, t1, t2));
+    let i2: Int = tpk_better_i(i1, tpk_p_at(i1, d), 2, d.p2, tpk_unused(2, t0, t1, t2));
+    return tpk_better_i(i2, tpk_p_at(i2, d), 3, d.p3, tpk_unused(3, t0, t1, t2));
+}
+
+fn tpk_want_more(have: Int, k: Int, cum: Int, pcut: Int) -> Int {
+    if have >= k {
+        return 0;
+    }
+    if cum >= pcut {
+        return 0;
+    }
+    return 1;
+}
+
+fn tpk_renorm(p: Int, sel: Int, cum: Int) -> Int {
+    if sel == 0 {
+        return 0;
+    }
+    if cum <= 0 {
+        return 0;
+    }
+    return (p * 1000) / cum;
+}
+
+fn tpk_next_keep(prev: Int, have: Int, k: Int, cum: Int, pcut: Int) -> Int {
+    if prev == 0 {
+        return 0;
+    }
+    return tpk_want_more(have, k, cum, pcut);
+}
+
+fn tpk_cum_kept(keep1: Int, keep2: Int, keep3: Int, n1: Int, n2: Int, n3: Int, n4: Int) -> Int {
+    if keep3 == 1 {
+        return n4;
+    }
+    if keep2 == 1 {
+        return n3;
+    }
+    if keep1 == 1 {
+        return n2;
+    }
+    return n1;
+}
+
+fn tpk_keep_i(i: Int, i0: Int, i1: Int, i2: Int, i3: Int, keep1: Int, keep2: Int, keep3: Int) -> Int {
+    if i == i0 {
+        return 1;
+    }
+    if i == i1 {
+        return keep1;
+    }
+    if i == i2 {
+        return keep2;
+    }
+    if i == i3 {
+        return keep3;
+    }
+    return 0;
+}
+
+pub fn sampling_config_new(top_k: Int, top_p_milli: Int, temp_milli: Int) -> SamplingConfig {
+    return SamplingConfig {
+        top_k: top_k,
+        top_p_milli: top_p_milli,
+        temp_milli: temp_milli
+    };
+}
+
+pub fn tpk_softmax4(l0: Int, l1: Int, l2: Int, l3: Int, temp_milli: Int) -> TokenDist {
+    let t: Int = tpk_temp(temp_milli);
+    let s0: Int = (l0 * 1000) / t;
+    let s1: Int = (l1 * 1000) / t;
+    let s2: Int = (l2 * 1000) / t;
+    let s3: Int = (l3 * 1000) / t;
+    let mx: Int = tpk_max2(tpk_max2(s0, s1), tpk_max2(s2, s3));
+    let e0: Int = tpk_exp_milli((s0 - mx) / 1000);
+    let e1: Int = tpk_exp_milli((s1 - mx) / 1000);
+    let e2: Int = tpk_exp_milli((s2 - mx) / 1000);
+    let e3: Int = tpk_exp_milli((s3 - mx) / 1000);
+    let sum_e: Int = ((e0 + e1) + e2) + e3;
+    if sum_e == 0 {
+        return TokenDist {
+            p0: 250,
+            p1: 250,
+            p2: 250,
+            p3: 250
+        };
+    }
+    return TokenDist {
+        p0: (e0 * 1000) / sum_e,
+        p1: (e1 * 1000) / sum_e,
+        p2: (e2 * 1000) / sum_e,
+        p3: (e3 * 1000) / sum_e
+    };
+}
+
+pub fn tpk_filter(d: TokenDist, cfg: SamplingConfig) -> TokenDist {
+    let k: Int = cfg.top_k;
+    let pcut: Int = cfg.top_p_milli;
+    let i0: Int = tpk_argmax(d, 0 - 1, 0 - 1, 0 - 1);
+    let i1: Int = tpk_argmax(d, i0, 0 - 1, 0 - 1);
+    let i2: Int = tpk_argmax(d, i0, i1, 0 - 1);
+    let i3: Int = tpk_argmax(d, i0, i1, i2);
+    let n1: Int = tpk_p_at(i0, d);
+    let n2: Int = n1 + tpk_p_at(i1, d);
+    let n3: Int = n2 + tpk_p_at(i2, d);
+    let n4: Int = n3 + tpk_p_at(i3, d);
+    let keep1: Int = tpk_want_more(1, k, n1, pcut);
+    let keep2: Int = tpk_next_keep(keep1, 2, k, n2, pcut);
+    let keep3: Int = tpk_next_keep(keep2, 3, k, n3, pcut);
+    let cum: Int = tpk_cum_kept(keep1, keep2, keep3, n1, n2, n3, n4);
+    return TokenDist {
+        p0: tpk_renorm(d.p0, tpk_keep_i(0, i0, i1, i2, i3, keep1, keep2, keep3), cum),
+        p1: tpk_renorm(d.p1, tpk_keep_i(1, i0, i1, i2, i3, keep1, keep2, keep3), cum),
+        p2: tpk_renorm(d.p2, tpk_keep_i(2, i0, i1, i2, i3, keep1, keep2, keep3), cum),
+        p3: tpk_renorm(d.p3, tpk_keep_i(3, i0, i1, i2, i3, keep1, keep2, keep3), cum)
+    };
+}
+
+pub fn tpk_sample(d: TokenDist, rand_milli: Int) -> Int {
+    if d.p0 > 0 {
+        if d.p0 >= rand_milli {
+            return 0;
+        }
+    }
+    let a1: Int = d.p0 + d.p1;
+    if d.p1 > 0 {
+        if a1 >= rand_milli {
+            return 1;
+        }
+    }
+    let a2: Int = a1 + d.p2;
+    if d.p2 > 0 {
+        if a2 >= rand_milli {
+            return 2;
+        }
+    }
+    if d.p3 > 0 {
+        return 3;
+    }
+    return 0;
+}
+
+pub fn tpk_p0(d: TokenDist) -> Int {
+    return d.p0;
+}
+
+pub fn tpk_p1(d: TokenDist) -> Int {
+    return d.p1;
+}

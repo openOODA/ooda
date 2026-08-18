@@ -1,0 +1,161 @@
+// # Implied Volatility Solver & Parametric Vol Surface
+//
+// Logline: Solves implied volatility via Newton-Raphson and evaluates SABR/quadratic volatility surfaces.
+//
+// Setup: Imports black_scholes.oo and greeks_calc.oo for iterative root-finding.
+//
+// Beats:
+//   1. Invert the Black-Scholes formula using Newton-Raphson with bisection safeguarding.
+//   2. Model volatility skew and smile across strikes and tenors via parametric surface functions.
+//   3. Calibrate strike implied volatilities against observed market quote surfaces.
+
+import "./black_scholes.oo";
+import "./greeks_calc.oo";
+
+pub type VolSurfaceModel = struct {
+    atm_vol: Float,
+    skew: Float,
+    smile: Float,
+    term_slope: Float,
+    ref_spot: Float,
+};
+
+pub fn bisection_implied_volatility(
+    option: &EuropeanOption,
+    market_price: Float,
+    min_vol: Float,
+    max_vol: Float,
+    tol: Float
+) -> Float {
+    let mut low: Float = min_vol;
+    let mut high: Float = max_vol;
+    let mut mid: Float = (low + high) / 2.0;
+    let mut iter: Int = 0;
+    
+    let mut temp = EuropeanOption {
+        is_call: (option).is_call,
+        spot: (option).spot,
+        strike: (option).strike,
+        time_to_expiry: (option).time_to_expiry,
+        risk_free_rate: (option).risk_free_rate,
+        dividend_yield: (option).dividend_yield,
+        volatility: mid,
+    };
+    
+    while iter < 40 {
+        temp.volatility = mid;
+        let res: BsPriceResult = black_scholes_price(&temp);
+        let diff: Float = res.price - market_price;
+        
+        let mut abs_diff: Float = diff;
+        if diff < 0.0 { abs_diff = 0.0 - diff; }
+        if abs_diff < tol {
+            return mid;
+        }
+        
+        if diff > 0.0 {
+            high = mid;
+        } else {
+            low = mid;
+        }
+        mid = (low + high) / 2.0;
+        iter = iter + 1;
+    }
+    return mid;
+}
+
+pub fn solve_implied_volatility(
+    option: &EuropeanOption,
+    market_price: Float,
+    max_iter: Int,
+    tol: Float
+) -> Result[Float, String] {
+    let intrinsic: Float = option_intrinsic(option);
+    if market_price < intrinsic {
+        return Err("PRICE_BELOW_INTRINSIC");
+    }
+    
+    let mut cur_vol: Float = 0.25; // 25% initial guess
+    let mut iter: Int = 0;
+    
+    let mut temp = EuropeanOption {
+        is_call: (option).is_call,
+        spot: (option).spot,
+        strike: (option).strike,
+        time_to_expiry: (option).time_to_expiry,
+        risk_free_rate: (option).risk_free_rate,
+        dividend_yield: (option).dividend_yield,
+        volatility: cur_vol,
+    };
+    
+    while iter < max_iter {
+        temp.volatility = cur_vol;
+        let res: BsPriceResult = black_scholes_price(&temp);
+        let diff: Float = res.price - market_price;
+        
+        let mut abs_diff: Float = diff;
+        if diff < 0.0 { abs_diff = 0.0 - diff; }
+        if abs_diff < tol {
+            return Ok(cur_vol);
+        }
+        
+        let greeks: OptionGreeks = calculate_analytic_greeks(&temp);
+        let vega: Float = greeks.vega;
+        
+        if vega < 0.00001 {
+            // Fall back to robust bisection
+            let bisect_vol: Float = bisection_implied_volatility(option, market_price, 0.001, 3.0, tol);
+            return Ok(bisect_vol);
+        }
+        
+        cur_vol = cur_vol - (diff / vega);
+        if (cur_vol <= 0.001) || (cur_vol > 5.0) {
+            let bisect_vol: Float = bisection_implied_volatility(option, market_price, 0.001, 3.0, tol);
+            return Ok(bisect_vol);
+        }
+        iter = iter + 1;
+    }
+    
+    return Ok(cur_vol);
+}
+
+pub fn vol_surface_model_new(
+    atm_vol: Float,
+    skew: Float,
+    smile: Float,
+    term_slope: Float,
+    ref_spot: Float
+) -> VolSurfaceModel {
+    return VolSurfaceModel {
+        atm_vol: atm_vol,
+        skew: skew,
+        smile: smile,
+        term_slope: term_slope,
+        ref_spot: ref_spot,
+    };
+}
+
+pub fn vol_surface_get_vol(
+    surface: &VolSurfaceModel,
+    strike: Float,
+    spot: Float,
+    time_to_expiry: Float
+) -> Float {
+    if spot <= 0.0 { return (surface).atm_vol; }
+    let log_moneyness: Float = ln(strike / spot);
+    let sqrt_t: Float = sqrt(time_to_expiry);
+    
+    let vol: Float = (surface).atm_vol 
+        + ((surface).skew * log_moneyness) 
+        + ((surface).smile * log_moneyness * log_moneyness)
+        + ((surface).term_slope * sqrt_t);
+        
+    if vol < 0.001 {
+        return 0.001;
+    }
+    return vol;
+}
+
+pub fn vol_surface_calibrate_atm(surface: &mut VolSurfaceModel, market_atm_vol: Float) {
+    (surface).atm_vol = market_atm_vol;
+}

@@ -1,0 +1,111 @@
+// # LSM Size-Tiered Compaction Controller (STCS)
+//
+// Logline: Implements size-tiered compaction grouping similar-sized SSTables into buckets to minimize write amplification.
+//
+// Setup: Compaction policy clustering files within size threshold ratios and scheduling horizontal merges.
+//
+// Beats:
+//   1. Define SizeTierConfig, SSTableSizeBucket, and TieredCompactionPlan structures.
+//   2. Implement size-similarity bucketing and min/max threshold filtering.
+//   3. Implement compaction candidate selection and major compaction grouping.
+
+pub type SizeTierConfig = struct {
+    min_threshold: Int,
+    max_threshold: Int,
+    bucket_low: Float,
+    bucket_high: Float,
+    min_sstable_size: Int,
+};
+
+pub type SSTableSizeBucket = struct {
+    bucket_index: Int,
+    avg_size_bytes: Int,
+    file_ids: List[Int],
+    total_size_bytes: Int,
+    file_count: Int,
+};
+
+pub type TieredCompactionPlan = struct {
+    selected_bucket_index: Int,
+    files_to_compact: List[Int],
+    estimated_output_bytes: Int,
+    is_ready: Bool,
+};
+
+pub fn size_tier_config_default() -> SizeTierConfig {
+    return SizeTierConfig {
+        min_threshold: 4,
+        max_threshold: 32,
+        bucket_low: 0.5,
+        bucket_high: 1.5,
+        min_sstable_size: 52428800,
+    };
+}
+
+pub fn sstable_size_bucket_new(idx: Int) -> SSTableSizeBucket {
+    let empty_ids: List[Int] = list_new();
+    return SSTableSizeBucket {
+        bucket_index: idx,
+        avg_size_bytes: 0,
+        file_ids: empty_ids,
+        total_size_bytes: 0,
+        file_count: 0,
+    };
+}
+
+pub fn add_file_to_bucket(bucket: SSTableSizeBucket, fid: Int, sz: Int) -> SSTableSizeBucket {
+    let updated_ids: List[Int] = list_push((bucket).file_ids, fid);
+    let new_total: Int = (bucket).total_size_bytes + sz;
+    let new_count: Int = (bucket).file_count + 1;
+    let new_avg: Int = new_total / new_count;
+
+    return SSTableSizeBucket {
+        bucket_index: (bucket).bucket_index,
+        avg_size_bytes: new_avg,
+        file_ids: updated_ids,
+        total_size_bytes: new_total,
+        file_count: new_count,
+    };
+}
+
+pub fn plan_tiered_compaction(
+    buckets: List[SSTableSizeBucket],
+    cfg: SizeTierConfig
+) -> TieredCompactionPlan {
+    let n: Int = list_len(buckets);
+    let mut best_bucket_idx: Int = -1;
+    let mut max_count: Int = 0;
+    let mut selected_files: List[Int] = list_new();
+    let mut est_output: Int = 0;
+
+    let mut i: Int = 0;
+    while i < n {
+        let b: SSTableSizeBucket = list_get(buckets, i);
+        if (b).file_count >= (cfg).min_threshold {
+            if (b).file_count > max_count {
+                max_count = (b).file_count;
+                best_bucket_idx = (b).bucket_index;
+                selected_files = (b).file_ids;
+                est_output = (b).total_size_bytes;
+            }
+        }
+        i = i + 1;
+    }
+
+    if best_bucket_idx >= 0 {
+        return TieredCompactionPlan {
+            selected_bucket_index: best_bucket_idx,
+            files_to_compact: selected_files,
+            estimated_output_bytes: est_output,
+            is_ready: true,
+        };
+    }
+
+    let empty_plan: List[Int] = list_new();
+    return TieredCompactionPlan {
+        selected_bucket_index: -1,
+        files_to_compact: empty_plan,
+        estimated_output_bytes: 0,
+        is_ready: false,
+    };
+}

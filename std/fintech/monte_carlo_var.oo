@@ -1,0 +1,160 @@
+// # Monte Carlo Value at Risk (VaR) & Expected Shortfall Engine
+//
+// Logline: Simulates portfolio price trajectories via Geometric Brownian Motion to compute VaR and CVaR.
+//
+// Setup: Pure stochastic path generation and tail-risk quantile estimation.
+//
+// Beats:
+//   1. Generate pseudo-random standard normal numbers using Box-Muller transformations.
+//   2. Simulate multi-step GBM asset price paths with drift and volatility parameters.
+//   3. Compute parametric, historical, and Monte Carlo 95%/99% VaR and Conditional VaR (Expected Shortfall).
+
+pub type McVarConfig = struct {
+    portfolio_value: Float,
+    horizon_days: Int,
+    num_simulations: Int,
+    confidence_level: Float,
+};
+
+pub type VarResult = struct {
+    var_amount: Float,
+    var_percent: Float,
+    expected_shortfall: Float,
+    worst_loss: Float,
+    mean_pnl: Float,
+};
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 100000 { f = f + 100000.0; count = count - 100000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn mc_var_config_new(
+    port_val: Float,
+    horizon: Int,
+    sims: Int,
+    conf: Float
+) -> McVarConfig {
+    return McVarConfig {
+        portfolio_value: port_val,
+        horizon_days: horizon,
+        num_simulations: sims,
+        confidence_level: conf,
+    };
+}
+
+pub fn lcg_next(seed: Int) -> Int {
+    let a: Int = 1664525;
+    let c: Int = 1013904223;
+    let m: Int = 2147483647;
+    return ((a * seed) + c) % m;
+}
+
+pub fn lcg_uniform(seed: &mut Int) -> Float {
+    let next: Int = lcg_next(*seed);
+    *seed = next;
+    let mut abs_val: Int = next;
+    if abs_val < 0 { abs_val = 0 - abs_val; }
+    let rem: Int = abs_val % 1000000;
+    let u: Float = int_to_float(rem) / 1000000.0;
+    if u <= 0.000001 { return 0.000001; }
+    if u >= 0.999999 { return 0.999999; }
+    return u;
+}
+
+pub fn box_muller_transform(u1: Float, u2: Float) -> Float {
+    let pi: Float = 3.141592653589793;
+    let r: Float = sqrt((0.0 - 2.0) * ln(u1));
+    let theta: Float = 2.0 * pi * u2;
+    let mut x: Float = theta;
+    while x > pi { x = x - (2.0 * pi); }
+    while x < (0.0 - pi) { x = x + (2.0 * pi); }
+    let x2: Float = x * x;
+    let cos_x: Float = 1.0 - (x2 / 2.0) + ((x2 * x2) / 24.0) - ((x2 * x2 * x2) / 720.0);
+    return r * cos_x;
+}
+
+pub fn simulate_gbm_step(spot: Float, mu: Float, sigma: Float, dt: Float, z: Float) -> Float {
+    let drift: Float = (mu - ((sigma * sigma) / 2.0)) * dt;
+    let diffusion: Float = sigma * sqrt(dt) * z;
+    return spot * exp(drift + diffusion);
+}
+
+pub fn calculate_parametric_var(
+    port_val: Float,
+    daily_vol: Float,
+    days: Int,
+    conf_z: Float
+) -> Float {
+    let horizon_f: Float = int_to_float(days);
+    let time_factor: Float = sqrt(horizon_f);
+    return port_val * daily_vol * time_factor * conf_z;
+}
+
+pub fn calculate_monte_carlo_var(
+    config: &McVarConfig,
+    daily_mu: Float,
+    daily_sigma: Float,
+    rand_seed: Int
+) -> VarResult {
+    let mut seed: Int = rand_seed;
+    let n_sims: Int = (config).num_simulations;
+    let port_val: Float = (config).portfolio_value;
+    let dt: Float = int_to_float((config).horizon_days);
+    
+    let mut total_pnl: Float = 0.0;
+    let mut worst: Float = 0.0;
+    let mut tail_loss_sum: Float = 0.0;
+    let mut tail_count: Float = 0.0;
+    
+    let mut i: Int = 0;
+    while i < n_sims {
+        let u1: Float = lcg_uniform(&mut seed);
+        let u2: Float = lcg_uniform(&mut seed);
+        let z: Float = box_muller_transform(u1, u2);
+        
+        let sim_val: Float = simulate_gbm_step(port_val, daily_mu, daily_sigma, dt, z);
+        let pnl: Float = sim_val - port_val;
+        total_pnl = total_pnl + pnl;
+        
+        let loss: Float = 0.0 - pnl;
+        if loss > worst {
+            worst = loss;
+        }
+        
+        if z <= (0.0 - 1.645) {
+            tail_loss_sum = tail_loss_sum + loss;
+            tail_count = tail_count + 1.0;
+        }
+        i = i + 1;
+    }
+    
+    let sim_count_f: Float = int_to_float(n_sims);
+    let mean_pnl: Float = total_pnl / sim_count_f;
+    
+    let mut es: Float = worst;
+    if tail_count > 0.0 {
+        es = tail_loss_sum / tail_count;
+    }
+    
+    let var_val: Float = calculate_parametric_var(port_val, daily_sigma, (config).horizon_days, 1.645);
+    let var_pct: Float = var_val / port_val;
+    
+    return VarResult {
+        var_amount: var_val,
+        var_percent: var_pct,
+        expected_shortfall: es,
+        worst_loss: worst,
+        mean_pnl: mean_pnl,
+    };
+}

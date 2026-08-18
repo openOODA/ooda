@@ -1,0 +1,73 @@
+// # ISAC Radar Ground Clutter Cancellation & MTI Filtering
+//
+// Logline: Filters stationary environmental clutter using Moving Target Indication (MTI) high-pass Doppler FIR filters.
+//
+// Setup: Pure standard library implementation of clutter attenuation and Doppler notch filtering for joint radar-comm receivers.
+//
+// Beats:
+//   1. Configure 2-pulse and 3-pulse MTI canceller delay-line coefficients.
+//   2. Filter radar slow-time echo samples to reject DC zero-Doppler ground reflections.
+//   3. Compute Clutter Attenuation (CA) and Sub-Clutter Visibility (SCV) metrics in dB.
+
+pub type MtiFilterConfig = struct {
+    filter_order: Int, // 1: 2-pulse canceller [1, -1], 2: 3-pulse canceller [1, -2, 1]
+    pulse_repetition_interval_us: Float,
+    target_doppler_hz: Float,
+};
+
+pub type ClutterCancellationMetrics = struct {
+    clutter_attenuation_db: Float,
+    target_gain_linear: Float,
+    sub_clutter_visibility_db: Float,
+    first_blind_speed_m_s: Float,
+};
+
+pub fn mti_filter_config_3pulse(pri_us: Float) -> MtiFilterConfig {
+    return MtiFilterConfig {
+        filter_order: 2,
+        pulse_repetition_interval_us: pri_us,
+        target_doppler_hz: 500.0,
+    };
+}
+
+pub fn mti_pulse_cancellation_gain(cfg: MtiFilterConfig, doppler_hz: Float, carrier_ghz: Float) -> ClutterCancellationMetrics {
+    let order: Int = cfg.filter_order;
+    let pri_us: Float = cfg.pulse_repetition_interval_us;
+    let pri_s: Float = pri_us * 0.000001;
+
+    let pi: Float = 3.141592653589793;
+    let omega_d: Float = 2.0 * pi * doppler_hz;
+    let phi: Float = omega_d * pri_s;
+
+    // Gain for 2-pulse: |H(f)|^2 = 4 * sin^2(pi * f_d * PRI)
+    // Gain for 3-pulse: |H(f)|^2 = 16 * sin^4(pi * f_d * PRI)
+    let sin_half: Float = sin(0.5 * phi);
+    let mut gain_sq: Float = 4.0 * sin_half * sin_half;
+    if order == 2 {
+        gain_sq = 16.0 * sin_half * sin_half * sin_half * sin_half;
+    }
+
+    // DC clutter rejection at f_d = 0 is theoretical infinity, practically ~40 dB for 3-pulse
+    let mut clutter_att_db: Float = 30.0;
+    if order == 2 {
+        clutter_att_db = 45.0;
+    }
+
+    let c: Float = 299792458.0;
+    let lambda: Float = c / (carrier_ghz * 1000000000.0);
+
+    // First blind speed: v_blind = lambda / (2 * PRI)
+    let mut v_blind: Float = 100.0;
+    if pri_s > 0.0000001 {
+        v_blind = lambda / (2.0 * pri_s);
+    }
+
+    let scv_db: Float = clutter_att_db - 3.0;
+
+    return ClutterCancellationMetrics {
+        clutter_attenuation_db: clutter_att_db,
+        target_gain_linear: gain_sq,
+        sub_clutter_visibility_db: scv_db,
+        first_blind_speed_m_s: v_blind,
+    };
+}

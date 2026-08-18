@@ -1,0 +1,103 @@
+// # Service Mesh Token Bucket Rate Limiter
+//
+// Logline: Implements descriptor-based rate limiting with fractional refill token buckets.
+//
+// Setup: Traffic policing filter matching route descriptors and enforcing requests-per-second thresholds.
+//
+// Beats:
+//   1. Define rate limit descriptors with key-value pairs (e.g., `generic_key=api`, `header:x-user=admin`).
+//   2. Maintain continuous token replenishment based on elapsed milliseconds.
+//   3. Return HTTP 429 Too Many Requests status when token balance is depleted.
+
+pub type RateLimitDescriptor = struct {
+    descriptor_key: String,
+    max_tokens: Int,
+    refill_rate_per_sec: Int,
+    current_tokens: Int,
+    last_refill_ms: Int,
+};
+
+pub type MeshRateLimiter = struct {
+    descriptors: List[RateLimitDescriptor],
+    total_checked: Int,
+    limited_count: Int,
+};
+
+pub fn mesh_rate_limiter_new() -> MeshRateLimiter {
+    let empty_desc: List[RateLimitDescriptor] = list_new();
+    return MeshRateLimiter {
+        descriptors: empty_desc,
+        total_checked: 0,
+        limited_count: 0,
+    };
+}
+
+pub fn mesh_rate_limiter_add_descriptor(
+    limiter: &mut MeshRateLimiter,
+    key: String,
+    capacity: Int,
+    rate_per_sec: Int,
+    now_ms: Int
+) {
+    let d = RateLimitDescriptor {
+        descriptor_key: key,
+        max_tokens: capacity,
+        refill_rate_per_sec: rate_per_sec,
+        current_tokens: capacity,
+        last_refill_ms: now_ms,
+    };
+    (limiter).descriptors = list_push((limiter).descriptors, d);
+}
+
+pub fn mesh_rate_limiter_acquire(
+    limiter: &mut MeshRateLimiter,
+    key: String,
+    tokens_requested: Int,
+    now_ms: Int
+) -> Bool {
+    (limiter).total_checked = (limiter).total_checked + 1;
+    let n: Int = list_len((limiter).descriptors);
+    let mut updated: List[RateLimitDescriptor] = list_new();
+    let mut allowed: Bool = true;
+    let mut found: Bool = false;
+    let mut i: Int = 0;
+
+    while i < n {
+        let d: RateLimitDescriptor = list_get((limiter).descriptors, i);
+        if (d).descriptor_key == key {
+            found = true;
+            let elapsed_ms: Int = now_ms - (d).last_refill_ms;
+            let new_tokens: Int = (elapsed_ms * (d).refill_rate_per_sec) / 1000;
+            let mut total_avail: Int = (d).current_tokens + new_tokens;
+            if total_avail > (d).max_tokens {
+                total_avail = (d).max_tokens;
+            }
+
+            if total_avail >= tokens_requested {
+                total_avail = total_avail - tokens_requested;
+                allowed = true;
+            } else {
+                allowed = false;
+                (limiter).limited_count = (limiter).limited_count + 1;
+            }
+
+            let mod_d = RateLimitDescriptor {
+                descriptor_key: (d).descriptor_key,
+                max_tokens: (d).max_tokens,
+                refill_rate_per_sec: (d).refill_rate_per_sec,
+                current_tokens: total_avail,
+                last_refill_ms: now_ms,
+            };
+            updated = list_push(updated, mod_d);
+        } else {
+            updated = list_push(updated, d);
+        }
+        i = i + 1;
+    }
+
+    (limiter).descriptors = updated;
+    if !found {
+        return true; // No rate limit on unspecified descriptor
+    }
+    return allowed;
+}

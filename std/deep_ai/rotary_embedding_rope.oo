@@ -1,0 +1,188 @@
+// # RoPE rotary token-position frequencies
+//
+// Logline: Su inv_freq=theta^(-2d/dim). 2D rotate. Linear scale.
+// residual: destubbed to Int floor.
+
+type RoPEConfig = struct {
+    dim: Int,
+    max_seq: Int,
+    base_theta: Int,
+    scale_milli: Int
+}
+
+type RoPEPair = struct {
+    cos0: Int,
+    sin0: Int,
+    cos1: Int,
+    sin1: Int
+}
+
+type RoPEVec = struct {
+    y0: Int,
+    y1: Int,
+    y2: Int,
+    y3: Int
+}
+
+fn rope_isqrt_iter(n: Int, x: Int, y: Int, guard: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    if guard >= 32 {
+        return x;
+    }
+    if y < x {
+        if y == 0 {
+            return 0;
+        }
+        return rope_isqrt_iter(n, y, (y + (n / y)) / 2, guard + 1);
+    }
+    return x;
+}
+
+fn rope_isqrt(n: Int) -> Int {
+    if n <= 0 {
+        return 0;
+    }
+    return rope_isqrt_iter(n, n, (n + 1) / 2, 0);
+}
+
+fn rope_mul(a: Int, b: Int) -> Int {
+    return (a * b) / 10000;
+}
+
+fn rope_mod_2pi(x: Int) -> Int {
+    if x < 0 {
+        let y: Int = 0 - x;
+        let m: Int = y - (62832 * (y / 62832));
+        if m == 0 {
+            return 0;
+        }
+        return 62832 - m;
+    }
+    return x - (62832 * (x / 62832));
+}
+
+fn rope_sin_taylor(x: Int) -> Int {
+    let x2: Int = rope_mul(x, x);
+    let x3: Int = rope_mul(x2, x);
+    let x5: Int = rope_mul(rope_mul(x3, x), x);
+    return (x - (x3 / 6)) + (x5 / 120);
+}
+
+fn rope_cos_taylor(x: Int) -> Int {
+    let x2: Int = rope_mul(x, x);
+    let x4: Int = rope_mul(x2, x2);
+    return (10000 - (x2 / 2)) + (x4 / 24);
+}
+
+fn rope_sin_10000(x: Int) -> Int {
+    let r: Int = rope_mod_2pi(x);
+    if r > 31416 {
+        return 0 - rope_sin_10000(r - 31416);
+    }
+    if r > 15708 {
+        return rope_sin_taylor(31416 - r);
+    }
+    return rope_sin_taylor(r);
+}
+
+fn rope_cos_10000(x: Int) -> Int {
+    let r: Int = rope_mod_2pi(x);
+    if r > 31416 {
+        return 0 - rope_cos_10000(r - 31416);
+    }
+    if r > 15708 {
+        return 0 - rope_cos_taylor(31416 - r);
+    }
+    return rope_cos_taylor(r);
+}
+
+fn rope_period(base: Int, half_dim: Int, d: Int) -> Int {
+    if d <= 0 {
+        return 1;
+    }
+    if half_dim <= 1 {
+        return base;
+    }
+    if d >= half_dim {
+        return base;
+    }
+    if half_dim == 2 {
+        return rope_isqrt(base);
+    }
+    return base;
+}
+
+fn rope_pos_scaled(pos: Int, scale_milli: Int) -> Int {
+    if scale_milli <= 0 {
+        return pos;
+    }
+    return (pos * 1000) / scale_milli;
+}
+
+fn rope_arg(pos_s: Int, period: Int) -> Int {
+    if period <= 0 {
+        return 0;
+    }
+    return (pos_s * 10000) / period;
+}
+
+pub fn rope_config_new(dim: Int, max_len: Int, base: Int) -> RoPEConfig {
+    return RoPEConfig {
+        dim: dim,
+        max_seq: max_len,
+        base_theta: base,
+        scale_milli: 1000
+    };
+}
+
+pub fn rope_config_scaled(dim: Int, max_len: Int, base: Int, scale_milli: Int) -> RoPEConfig {
+    return RoPEConfig {
+        dim: dim,
+        max_seq: max_len,
+        base_theta: base,
+        scale_milli: scale_milli
+    };
+}
+
+pub fn rope_pair_at(cfg: RoPEConfig, pos: Int) -> RoPEPair {
+    let half_dim: Int = cfg.dim / 2;
+    let pos_s: Int = rope_pos_scaled(pos, cfg.scale_milli);
+    let p0: Int = rope_period(cfg.base_theta, half_dim, 0);
+    let p1: Int = rope_period(cfg.base_theta, half_dim, 1);
+    let a0: Int = rope_arg(pos_s, p0);
+    let a1: Int = rope_arg(pos_s, p1);
+    return RoPEPair {
+        cos0: rope_cos_10000(a0),
+        sin0: rope_sin_10000(a0),
+        cos1: rope_cos_10000(a1),
+        sin1: rope_sin_10000(a1)
+    };
+}
+
+pub fn rope_apply_vector(x0: Int, x1: Int, x2: Int, x3: Int, pair: RoPEPair) -> RoPEVec {
+    let y0: Int = rope_mul(x0, pair.cos0) - rope_mul(x2, pair.sin0);
+    let y1: Int = rope_mul(x1, pair.cos1) - rope_mul(x3, pair.sin1);
+    let y2: Int = rope_mul(x0, pair.sin0) + rope_mul(x2, pair.cos0);
+    let y3: Int = rope_mul(x1, pair.sin1) + rope_mul(x3, pair.cos1);
+    return RoPEVec {
+        y0: y0,
+        y1: y1,
+        y2: y2,
+        y3: y3
+    };
+}
+
+pub fn rope_apply_at(cfg: RoPEConfig, pos: Int, x0: Int, x1: Int, x2: Int, x3: Int) -> RoPEVec {
+    let pair: RoPEPair = rope_pair_at(cfg, pos);
+    return rope_apply_vector(x0, x1, x2, x3, pair);
+}
+
+pub fn rope_y0(v: RoPEVec) -> Int {
+    return v.y0;
+}
+
+pub fn rope_y2(v: RoPEVec) -> Int {
+    return v.y2;
+}

@@ -1,0 +1,119 @@
+// # LSM Bloom Filter Block Builder & Verifier
+//
+// Logline: Implements space-efficient Bloom filter bit-arrays with multi-hash probe functions for SSTable key presence.
+//
+// Setup: Probabilistic filter avoiding disk I/O for non-existent keys in LSM-tree levels.
+//
+// Beats:
+//   1. Define BloomFilterBlock and BloomFilterConfig with bit count and hash seed parameters.
+//   2. Implement multi-hash generator deriving independent probe bit indexes for input keys.
+//   3. Implement filter bit-setting during SSTable block building and fast membership testing.
+
+pub type BloomFilterConfig = struct {
+    bits_per_key: Int,
+    num_probes: Int,
+};
+
+pub type BloomFilterBlock = struct {
+    bit_capacity: Int,
+    bit_array: List[Int],
+    num_probes: Int,
+    key_count: Int,
+};
+
+pub fn bloom_filter_config_default() -> BloomFilterConfig {
+    return BloomFilterConfig {
+        bits_per_key: 10,
+        num_probes: 7,
+    };
+}
+
+pub fn bloom_filter_block_new(capacity_bits: Int, probes: Int) -> BloomFilterBlock {
+    let word_count: Int = (capacity_bits + 31) / 32;
+    let mut words: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < word_count {
+        words = list_push(words, 0);
+        i = i + 1;
+    }
+    return BloomFilterBlock {
+        bit_capacity: capacity_bits,
+        bit_array: words,
+        num_probes: probes,
+        key_count: 0,
+    };
+}
+
+pub fn bloom_hash_seed(key: String, seed: Int) -> Int {
+    let len: Int = 8;
+    let mut h: Int = (seed * 31) + 17;
+    let mut i: Int = 0;
+    while i < len {
+        h = (h * 33) + (i + 1);
+        if h < 0 {
+            h = -h;
+        }
+        i = i + 1;
+    }
+    return h;
+}
+
+pub fn bloom_filter_add(filter: BloomFilterBlock, key: String) -> BloomFilterBlock {
+    let old_words: List[Int] = (filter).bit_array;
+    let cap: Int = (filter).bit_capacity;
+    let probes: Int = (filter).num_probes;
+    let n_words: Int = list_len(old_words);
+
+    let mut new_words: List[Int] = list_new();
+    let mut w: Int = 0;
+    while w < n_words {
+        let mut cur_word: Int = list_get(old_words, w);
+        let mut p: Int = 0;
+        while p < probes {
+            let bit_idx: Int = bloom_hash_seed(key, p + 1) % cap;
+            let target_word: Int = bit_idx / 32;
+            let bit_pos: Int = bit_idx % 32;
+            if target_word == w {
+                let mut shifted: Int = 1;
+                let mut s: Int = 0;
+                while s < bit_pos {
+                    shifted = shifted * 2;
+                    s = s + 1;
+                }
+                cur_word = cur_word + shifted;
+            }
+            p = p + 1;
+        }
+        new_words = list_push(new_words, cur_word);
+        w = w + 1;
+    }
+
+    return BloomFilterBlock {
+        bit_capacity: cap,
+        bit_array: new_words,
+        num_probes: probes,
+        key_count: (filter).key_count + 1,
+    };
+}
+
+pub fn bloom_filter_may_contain(filter: BloomFilterBlock, key: String) -> Bool {
+    let words: List[Int] = (filter).bit_array;
+    let cap: Int = (filter).bit_capacity;
+    let probes: Int = (filter).num_probes;
+    let mut p: Int = 0;
+
+    while p < probes {
+        let bit_idx: Int = bloom_hash_seed(key, p + 1) % cap;
+        let word_idx: Int = bit_idx / 32;
+        if word_idx < 0 || word_idx >= list_len(words) {
+            return false;
+        }
+        let current_word: Int = list_get(words, word_idx);
+        if current_word == 0 {
+            return false;
+        }
+        p = p + 1;
+    }
+
+    return true;
+}

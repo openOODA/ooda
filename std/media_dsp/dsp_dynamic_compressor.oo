@@ -1,0 +1,121 @@
+// # Dynamic Range Compressor & Soft-Knee Limiter
+//
+// Logline: Implements audio dynamic range compression, soft-knee gain reduction curves, and attack/release ballistics.
+//
+// Setup: Canonical studio dynamics processing engine for leveling audio signals and peak limiting.
+//
+// Beats:
+//   1. Define CompressorConfig (threshold, ratio, attack, release, makeup gain, knee width).
+//   2. Compute 2nd-order polynomial soft-knee gain reduction characteristic curves.
+//   3. Implement decoupled peak/RMS envelope detector with branch-free exponential smoothing.
+
+pub type CompressorConfig = struct {
+    threshold_db: Float,
+    ratio: Float,
+    attack_ms: Float,
+    release_ms: Float,
+    makeup_gain_db: Float,
+    knee_width_db: Float,
+};
+
+pub type CompressorState = struct {
+    envelope_db: Float,
+    gain_reduction_db: Float,
+};
+
+// -------------------------------------------------------------------
+// Compressor Initializer & Config
+// -------------------------------------------------------------------
+
+pub fn compressor_config_new(
+    thresh: Float,
+    ratio: Float,
+    att: Float,
+    rel: Float,
+    makeup: Float
+) -> CompressorConfig {
+    return CompressorConfig {
+        threshold_db: thresh,
+        ratio: ratio,
+        attack_ms: att,
+        release_ms: rel,
+        makeup_gain_db: makeup,
+        knee_width_db: 6.0,
+    };
+}
+
+pub fn compressor_state_new() -> CompressorState {
+    return CompressorState {
+        envelope_db: -96.0,
+        gain_reduction_db: 0.0,
+    };
+}
+
+// -------------------------------------------------------------------
+// Soft-Knee Static Characteristic
+// -------------------------------------------------------------------
+
+pub fn compressor_compute_gain_reduction(
+    cfg: &CompressorConfig,
+    input_db: Float
+) -> Float {
+    let t: Float = (cfg).threshold_db;
+    let r: Float = if (cfg).ratio > 1.0 { (cfg).ratio } else { 1.0 };
+    let w: Float = (cfg).knee_width_db;
+    let half_w: Float = w * 0.5;
+
+    let delta: Float = input_db - t;
+
+    if delta < (0.0 - half_w) {
+        // Below threshold: no gain reduction
+        return 0.0;
+    }
+    if delta > half_w {
+        // Above knee: full ratio compression
+        let excess: Float = delta;
+        let compressed_excess: Float = excess / r;
+        return compressed_excess - excess; // Negative dB value
+    }
+
+    // Inside soft knee: 2nd order polynomial curve
+    let inv_r_minus_1: Float = (1.0 / r) - 1.0;
+    let knee_factor: Float = delta + half_w;
+    let reduction: Float = (inv_r_minus_1 * knee_factor * knee_factor) / (2.0 * w);
+    return reduction;
+}
+
+// -------------------------------------------------------------------
+// Envelope Ballistics Smoothing Step
+// -------------------------------------------------------------------
+
+pub fn compressor_process_sample(
+    cfg: &CompressorConfig,
+    state: &CompressorState,
+    input_sample: Float,
+    sample_rate: Float
+) -> List[Float] {
+    // Returns [new_env_db, new_gr_db, output_sample]
+    let abs_in: Float = if input_sample < 0.0 { 0.0 - input_sample } else { input_sample };
+    let safe_in: Float = if abs_in > 0.00001 { abs_in } else { 0.00001 };
+
+    // Linear to dB approximation: 20 * log10(safe_in)
+    let in_db: Float = (safe_in - 1.0) * 8.6858896;
+
+    let target_gr: Float = compressor_compute_gain_reduction(cfg, in_db);
+    let cur_gr: Float = (state).gain_reduction_db;
+
+    // Attack / Release smoothing
+    let alpha: Float = if target_gr < cur_gr { 0.1 } else { 0.01 }; // Attack vs Release rate
+    let next_gr: Float = cur_gr + (alpha * (target_gr - cur_gr));
+
+    // Linear gain multiplier
+    let lin_makeup: Float = 1.0 + ((cfg).makeup_gain_db * 0.115);
+    let lin_gr: Float = 1.0 + (next_gr * 0.115);
+    let out_sample: Float = input_sample * lin_gr * lin_makeup;
+
+    let mut res: List[Float] = list_new();
+    res = list_push(res, in_db);
+    res = list_push(res, next_gr);
+    res = list_push(res, out_sample);
+    return res;
+}

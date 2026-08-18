@@ -1,0 +1,130 @@
+// # SDR Streaming Session & Radio Lifecycle Manager
+//
+// Logline: Manages SDR RF frontend parameters, stream states, sample rate clocks, and overrun telemetry.
+//
+// Setup: Pure telecom SDR module orchestrating radio stream parameters and operational states.
+//
+// Beats:
+//   1. Define SDR stream configurations (carrier freq, sample rate, gain, bandwidth).
+//   2. Manage stream state transitions (Idle, Configured, Running, Overrun, Stopped).
+//   3. Track throughput telemetry, sample timestamps, and clock drift.
+
+pub type SdrStreamConfig = struct {
+    center_freq_hz: Float,
+    sample_rate_hz: Float,
+    gain_db: Float,
+    bandwidth_hz: Float,
+};
+
+pub type SdrStreamState = struct {
+    state_code: Int,
+    total_samples_tx: Int,
+    total_samples_rx: Int,
+    overruns: Int,
+    underruns: Int,
+    timestamp_us: Float,
+};
+
+pub fn sdr_stream_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 10000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn sdr_stream_config_default() -> SdrStreamConfig {
+    return SdrStreamConfig {
+        center_freq_hz: 3500000000.0, // 3.5 GHz n78 5G band
+        sample_rate_hz: 30720000.0,  // 30.72 MS/s LTE/5G standard
+        gain_db: 30.0,
+        bandwidth_hz: 20000000.0,    // 20 MHz
+    };
+}
+
+pub fn sdr_stream_state_new() -> SdrStreamState {
+    return SdrStreamState {
+        state_code: 0, // 0 = IDLE
+        total_samples_tx: 0,
+        total_samples_rx: 0,
+        overruns: 0,
+        underruns: 0,
+        timestamp_us: 0.0,
+    };
+}
+
+pub fn sdr_stream_transition(state: &mut SdrStreamState, target_state: Int) -> Bool {
+    let cur: Int = (state).state_code;
+    let mut valid: Bool = false;
+
+    // Transitions: IDLE(0) -> CONFIGURED(1) -> RUNNING(2) -> OVERRUN(3) / STOPPED(4) -> IDLE(0)
+    if cur == 0 {
+        if target_state == 1 { valid = true; }
+    } else {
+        if cur == 1 {
+            if target_state == 2 { valid = true; }
+            if target_state == 0 { valid = true; }
+        } else {
+            if cur == 2 {
+                if target_state == 3 { valid = true; }
+                if target_state == 4 { valid = true; }
+            } else {
+                if cur == 3 {
+                    if target_state == 2 { valid = true; }
+                    if target_state == 4 { valid = true; }
+                } else {
+                    if cur == 4 {
+                        if target_state == 0 { valid = true; }
+                        if target_state == 1 { valid = true; }
+                    }
+                }
+            }
+        }
+    }
+
+    if valid {
+        let updated = SdrStreamState {
+            state_code: target_state,
+            total_samples_tx: (state).total_samples_tx,
+            total_samples_rx: (state).total_samples_rx,
+            overruns: (state).overruns,
+            underruns: (state).underruns,
+            timestamp_us: (state).timestamp_us,
+        };
+        *state = updated;
+        return true;
+    }
+    return false;
+}
+
+pub fn sdr_stream_record_rx(state: &mut SdrStreamState, sample_count: Int, dt_us: Float) -> Bool {
+    if (state).state_code != 2 {
+        return false;
+    }
+
+    let updated = SdrStreamState {
+        state_code: (state).state_code,
+        total_samples_tx: (state).total_samples_tx,
+        total_samples_rx: (state).total_samples_rx + sample_count,
+        overruns: (state).overruns,
+        underruns: (state).underruns,
+        timestamp_us: (state).timestamp_us + dt_us,
+    };
+    *state = updated;
+    return true;
+}
+
+pub fn sdr_stream_calc_throughput_mbps(samples: Int, dt_us: Float, bytes_per_sample: Int) -> Float {
+    if dt_us <= 0.0 {
+        return 0.0;
+    }
+    let total_bytes: Float = sdr_stream_int_to_float(samples * bytes_per_sample);
+    let megabits: Float = (total_bytes * 8.0) / 1000000.0;
+    let seconds: Float = dt_us / 1000000.0;
+    return megabits / seconds;
+}

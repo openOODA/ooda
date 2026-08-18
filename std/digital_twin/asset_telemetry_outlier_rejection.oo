@@ -1,0 +1,73 @@
+// # Telemetry Outlier Rejection & Mahalanobis Gating
+//
+// Logline: Chi-square innovation gating, Mahalanobis distance thresholds, and slew-rate limits for corrupt telemetry rejection.
+//
+// Setup: Protects digital twin state estimators from sensor spikes, dropped frames, and frozen telemetry values.
+//
+// Beats:
+//   1. Define GatingThresholds, OutlierRejectionResult, and SlewRateChecker structures.
+//   2. Compute normalized innovation squared (NIS) and compare against chi-square confidence bounds.
+//   3. Check maximum permissible slew rates (dy/dt) and flag frozen/stuck sensor channels.
+
+pub type OutlierConfig = struct {
+    chi_square_gate_threshold: Float, // e.g., 3.84 for 1-DOF 95% confidence
+    max_slew_rate_per_sec: Float,
+    max_stuck_samples: Int,
+};
+
+pub type OutlierResult = struct {
+    is_valid: Bool,
+    rejected_reason: Int, // 0=None, 1=GateExceeded, 2=SlewExceeded, 3=StuckSensor
+    normalized_innovation_sq: Float,
+};
+
+pub fn outlier_check_sample(
+    measured_val: Float,
+    predicted_val: Float,
+    innovation_variance: Float,
+    last_val: Float,
+    dt_sec: Float,
+    consecutive_identical: Int,
+    cfg: &OutlierConfig
+) -> OutlierResult {
+    // 1. Stuck sensor check
+    if consecutive_identical >= (cfg).max_stuck_samples {
+        return OutlierResult {
+            is_valid: false,
+            rejected_reason: 3,
+            normalized_innovation_sq: 0.0,
+        };
+    }
+
+    // 2. Slew rate check: |y - y_last| / dt
+    if dt_sec > 0.0 {
+        let mut delta: Float = measured_val - last_val;
+        if delta < 0.0 { delta = 0.0 - delta; }
+        let rate: Float = delta / dt_sec;
+        if rate > (cfg).max_slew_rate_per_sec {
+            return OutlierResult {
+                is_valid: false,
+                rejected_reason: 2,
+                normalized_innovation_sq: 0.0,
+            };
+        }
+    }
+
+    // 3. Chi-square normalized innovation squared: NIS = (y - y_hat)^2 / S
+    let err: Float = measured_val - predicted_val;
+    let nis: Float = if innovation_variance > 0.0 { (err * err) / innovation_variance } else { 0.0 };
+
+    if nis > (cfg).chi_square_gate_threshold {
+        return OutlierResult {
+            is_valid: false,
+            rejected_reason: 1,
+            normalized_innovation_sq: nis,
+        };
+    }
+
+    return OutlierResult {
+        is_valid: true,
+        rejected_reason: 0,
+        normalized_innovation_sq: nis,
+    };
+}

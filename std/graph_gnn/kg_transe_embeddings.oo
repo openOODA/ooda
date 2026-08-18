@@ -1,0 +1,161 @@
+// # TransE Knowledge Graph Embeddings
+//
+// Logline: Implements translational embedding (TransE) modeling relationships as vector translations in real Euclidean space.
+//
+// Setup: Energy-based geometric knowledge graph embedder computing L1/L2 distance scores between head, relation, and tail entities.
+//
+// Beats:
+//   1. Represent knowledge graph entities and relations in continuous d-dimensional latent space.
+//   2. Compute translational score function d(h + r, t) under L1 or L2 Euclidean norms.
+//   3. Calculate stochastic gradient descent updates with margin-based ranking loss and unit-sphere normalization.
+
+pub type TransEConfig = struct {
+    num_entities: Int,
+    num_relations: Int,
+    embedding_dim: Int,
+    margin: Float,
+    learning_rate: Float,
+    use_l1_norm: Bool,
+};
+
+pub type TransEModel = struct {
+    config: TransEConfig,
+    entity_embeddings: List[Float],
+    relation_embeddings: List[Float],
+};
+
+pub fn transe_config_new(
+    num_entities: Int,
+    num_relations: Int,
+    dim: Int,
+    margin: Float,
+    lr: Float,
+    use_l1: Bool
+) -> TransEConfig {
+    return TransEConfig {
+        num_entities: num_entities,
+        num_relations: num_relations,
+        embedding_dim: dim,
+        margin: margin,
+        learning_rate: lr,
+        use_l1_norm: use_l1,
+    };
+}
+
+pub fn transe_model_init(config: TransEConfig, seed: Int) -> TransEModel {
+    let mut e_emb: List[Float] = list_new();
+    let total_e: Int = (config).num_entities * (config).embedding_dim;
+    let mut i: Int = 0;
+    let mut state: Int = seed;
+    while i < total_e {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        let val: Float = (((state % 1000) as Float) / 500.0) - 1.0;
+        e_emb = list_push(e_emb, val);
+        i = i + 1;
+    }
+
+    let mut r_emb: List[Float] = list_new();
+    let total_r: Int = (config).num_relations * (config).embedding_dim;
+    let mut j: Int = 0;
+    while j < total_r {
+        state = (state * 1103515245 + 12345) % 2147483647;
+        if state < 0 { state = 0 - state; }
+        let val: Float = (((state % 1000) as Float) / 500.0) - 1.0;
+        r_emb = list_push(r_emb, val);
+        j = j + 1;
+    }
+
+    return TransEModel {
+        config: config,
+        entity_embeddings: e_emb,
+        relation_embeddings: r_emb,
+    };
+}
+
+pub fn transe_score(
+    model: &TransEModel,
+    head: Int,
+    relation: Int,
+    tail: Int
+) -> Float {
+    let cfg: TransEConfig = (*model).config;
+    let dim: Int = (cfg).embedding_dim;
+    let h_offset: Int = head * dim;
+    let r_offset: Int = relation * dim;
+    let t_offset: Int = tail * dim;
+
+    let mut dist: Float = 0.0;
+    let mut d: Int = 0;
+    while d < dim {
+        let h_val: Float = list_get((*model).entity_embeddings, h_offset + d);
+        let r_val: Float = list_get((*model).relation_embeddings, r_offset + d);
+        let t_val: Float = list_get((*model).entity_embeddings, t_offset + d);
+        let diff: Float = (h_val + r_val) - t_val;
+
+        if (cfg).use_l1_norm {
+            if diff < 0.0 {
+                dist = dist + (0.0 - diff);
+            } else {
+                dist = dist + diff;
+            }
+        } else {
+            dist = dist + (diff * diff);
+        }
+        d = d + 1;
+    }
+
+    if !(cfg).use_l1_norm {
+        dist = sqrt(dist);
+    }
+    return 0.0 - dist;
+}
+
+pub fn transe_pairwise_loss(
+    model: &TransEModel,
+    pos_score: Float,
+    neg_score: Float
+) -> Float {
+    let cfg: TransEConfig = (*model).config;
+    let margin: Float = (cfg).margin;
+    let raw_loss: Float = margin - pos_score + neg_score;
+    if raw_loss > 0.0 {
+        return raw_loss;
+    }
+    return 0.0;
+}
+
+pub fn transe_normalize_entity(
+    model: &mut TransEModel,
+    entity_id: Int
+) -> Bool {
+    let cfg: TransEConfig = (*model).config;
+    let dim: Int = (cfg).embedding_dim;
+    let offset: Int = entity_id * dim;
+    let mut sum_sq: Float = 0.0;
+    let mut d: Int = 0;
+    while d < dim {
+        let v: Float = list_get((*model).entity_embeddings, offset + d);
+        sum_sq = sum_sq + (v * v);
+        d = d + 1;
+    }
+    if sum_sq > 0.0 {
+        let norm: Float = sqrt(sum_sq);
+        let mut d2: Int = 0;
+        let mut new_emb: List[Float] = list_new();
+        let total_len: Int = list_len((*model).entity_embeddings);
+        let mut k: Int = 0;
+        while k < total_len {
+            if k >= offset && k < offset + dim {
+                let v: Float = list_get((*model).entity_embeddings, k);
+                new_emb = list_push(new_emb, v / norm);
+            } else {
+                new_emb = list_push(new_emb, list_get((*model).entity_embeddings, k));
+            }
+            k = k + 1;
+        }
+        (*model).entity_embeddings = new_emb;
+        return true;
+    }
+    return false;
+}

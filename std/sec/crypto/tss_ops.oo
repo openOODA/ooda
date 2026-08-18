@@ -1,0 +1,239 @@
+// # Threshold Signature and FROST Operations
+//
+// Logline: Implements parameter constructors, key share wiping, nonce commitments, and FROST serialization.
+//
+// Setup: Imports tss_types.oo for data structure definitions.
+//
+// Beats:
+//   1. Import TSS and FROST data types.
+//   2. Construct and validate threshold parameters and key shares.
+//   3. Manage secret key share wiping and nonce commitment generation.
+//   4. Construct, validate, serialize, and deserialize FROST threshold signatures.
+
+import "./tss_types.oo";
+
+pub fn tss_params_create(
+    threshold: Int,
+    total_shares: Int,
+    curve_id: Int,
+    ciphersuite: String
+) -> Result[ThresholdParams, String] {
+    if threshold <= 0 {
+        return Err("INVALID_THRESHOLD: Threshold t must be greater than 0");
+    }
+    if total_shares < threshold {
+        return Err("INVALID_PARAMS: Total shares n must be >= threshold t");
+    }
+    if curve_id <= 0 {
+        return Err("INVALID_CURVE_ID: Supported curve IDs are 1..4");
+    }
+    if ciphersuite.len() == 0 {
+        return Err("INVALID_CIPHERSUITE: Ciphersuite string cannot be empty");
+    }
+    return Ok(ThresholdParams {
+        threshold: threshold,
+        total_shares: total_shares,
+        curve_id: curve_id,
+        ciphersuite: ciphersuite,
+        is_valid: true,
+    });
+}
+
+pub fn tss_params_validate(params_val: ThresholdParams) -> Bool {
+    let tparams_obj: ThresholdParams = params_val;
+    if tparams_obj.is_valid == false {
+        return false;
+    }
+    if tparams_obj.threshold <= 0 || tparams_obj.total_shares < tparams_obj.threshold {
+        return false;
+    }
+    return tparams_obj.curve_id > 0;
+}
+
+pub fn tss_keyshare_create(
+    share_id: String,
+    participant_index: Int,
+    secret_share: String,
+    public_share: String,
+    group_public_key: String,
+    params_val: ThresholdParams
+) -> Result[ThresholdKeyShare, String] {
+    let tparams_obj: ThresholdParams = params_val;
+    if tss_params_validate(tparams_obj) == false {
+        return Err("INVALID_KEYSHARE: Invalid threshold params");
+    }
+    if participant_index <= 0 || participant_index > tparams_obj.total_shares {
+        return Err("INVALID_PARTICIPANT_INDEX: Participant index out of bounds");
+    }
+    if secret_share.len() == 0 || public_share.len() == 0 || group_public_key.len() == 0 {
+        return Err("INVALID_KEYSHARE_DATA: Key material cannot be empty");
+    }
+    let combined_str: String = secret_share + public_share + group_public_key;
+    return Ok(ThresholdKeyShare {
+        share_id: share_id,
+        participant_index: participant_index,
+        secret_share: secret_share,
+        public_share: public_share,
+        group_public_key: group_public_key,
+        params: tparams_obj,
+        checksum: tss_checksum(combined_str),
+        is_wiped: false,
+        is_valid: true,
+    });
+}
+
+pub fn tss_keyshare_validate(share_val: ThresholdKeyShare) -> Bool {
+    let share_obj: ThresholdKeyShare = share_val;
+    if share_obj.is_valid == false || share_obj.is_wiped {
+        return false;
+    }
+    let tparams_obj: ThresholdParams = share_obj.params;
+    if tss_params_validate(tparams_obj) == false {
+        return false;
+    }
+    if share_obj.participant_index <= 0 || share_obj.participant_index > tparams_obj.total_shares {
+        return false;
+    }
+    let combined_str: String = share_obj.secret_share + share_obj.public_share + share_obj.group_public_key;
+    return share_obj.checksum == tss_checksum(combined_str);
+}
+
+pub fn tss_keyshare_wipe(share_ref: &mut ThresholdKeyShare) {
+    (share_ref).secret_share = "";
+    (share_ref).public_share = "";
+    (share_ref).group_public_key = "";
+    (share_ref).checksum = 0;
+    (share_ref).is_wiped = true;
+    (share_ref).is_valid = false;
+}
+
+pub fn frost_nonce_commitment_create(
+    commitment_id: String,
+    participant_index: Int,
+    hiding_nonce_commitment: String,
+    binding_nonce_commitment: String
+) -> Result[FrostNonceCommitment, String] {
+    if participant_index <= 0 {
+        return Err("INVALID_PARTICIPANT_INDEX: Must be positive");
+    }
+    if hiding_nonce_commitment.len() == 0 || binding_nonce_commitment.len() == 0 {
+        return Err("INVALID_NONCE: Commitments cannot be empty");
+    }
+    return Ok(FrostNonceCommitment {
+        commitment_id: commitment_id,
+        participant_index: participant_index,
+        hiding_nonce_commitment: hiding_nonce_commitment,
+        binding_nonce_commitment: binding_nonce_commitment,
+        is_valid: true,
+    });
+}
+
+pub fn frost_signing_package_create(
+    package_id: String,
+    message: String,
+    commitments: List[FrostNonceCommitment],
+    params_val: ThresholdParams
+) -> Result[FrostSigningPackage, String] {
+    let tparams_obj: ThresholdParams = params_val;
+    if tss_params_validate(tparams_obj) == false {
+        return Err("INVALID_PACKAGE: Invalid threshold params");
+    }
+    if list_len(commitments) < tparams_obj.threshold {
+        return Err("INSUFFICIENT_COMMITMENTS: Commitment count is below threshold t");
+    }
+    return Ok(FrostSigningPackage {
+        package_id: package_id,
+        message: message,
+        commitments: commitments,
+        params: tparams_obj,
+        is_valid: true,
+    });
+}
+
+pub fn frost_partial_signature_create(
+    share_id: String,
+    participant_index: Int,
+    z_i: String,
+    commitment_val: FrostNonceCommitment
+) -> Result[FrostPartialSignature, String] {
+    let comm_obj: FrostNonceCommitment = commitment_val;
+    if participant_index <= 0 || z_i.len() == 0 || comm_obj.is_valid == false {
+        return Err("INVALID_PARTIAL_SIG: Validation failed");
+    }
+    return Ok(FrostPartialSignature {
+        share_id: share_id,
+        participant_index: participant_index,
+        z_i: z_i,
+        commitment: comm_obj,
+        is_valid: true,
+    });
+}
+
+pub fn frost_signature_create(
+    sig_id: String,
+    group_public_key: String,
+    r_bytes: String,
+    z_bytes: String,
+    participant_indices: List[Int],
+    message_digest: String,
+    created_at: Int
+) -> Result[FrostSignature, String] {
+    if r_bytes.len() == 0 || z_bytes.len() == 0 {
+        return Err("INVALID_FROST_SIG: Signature components cannot be empty");
+    }
+    let combined_raw: String = r_bytes + z_bytes;
+    return Ok(FrostSignature {
+        sig_id: sig_id,
+        group_public_key: group_public_key,
+        r_bytes: r_bytes,
+        z_bytes: z_bytes,
+        raw_bytes: combined_raw,
+        participant_indices: participant_indices,
+        message_digest: message_digest,
+        checksum: tss_checksum(combined_raw + message_digest),
+        created_at: created_at,
+        is_valid: true,
+    });
+}
+
+pub fn frost_signature_validate(target_sig: FrostSignature) -> Bool {
+    let frost_sig_obj: FrostSignature = target_sig;
+    if frost_sig_obj.is_valid == false {
+        return false;
+    }
+    let r_str: String = frost_sig_obj.r_bytes;
+    let z_str: String = frost_sig_obj.z_bytes;
+    if r_str.len() == 0 || z_str.len() == 0 {
+        return false;
+    }
+    let combined_raw: String = r_str + z_str;
+    return frost_sig_obj.checksum == tss_checksum(combined_raw + frost_sig_obj.message_digest);
+}
+
+pub fn frost_signature_serialize(target_sig: FrostSignature) -> String {
+    let frost_sig_obj: FrostSignature = target_sig;
+    let sid: String = frost_sig_obj.sig_id;
+    let gpk: String = frost_sig_obj.group_public_key;
+    return "FROST-SIG:" + sid + ":" + gpk + ":" + tss_hex_encode(frost_sig_obj.raw_bytes);
+}
+
+pub fn frost_signature_deserialize(raw_bytes: String) -> Result[FrostSignature, String] {
+    let raw_len: Int = raw_bytes.len();
+    if raw_len < 64 {
+        return Err("INVALID_DESERIALIZE_SIZE: FROST signature raw bytes must be at least 64 bytes");
+    }
+    let half_len: Int = raw_len / 2;
+    let mut r_buf: List[Int] = bytes_new();
+    let mut z_buf: List[Int] = bytes_new();
+    let mut idx: Int = 0;
+    while idx < half_len {
+        r_buf = bytes_push(r_buf, byte_at(raw_bytes, idx));
+        idx = idx + 1;
+    }
+    while idx < raw_len {
+        z_buf = bytes_push(z_buf, byte_at(raw_bytes, idx));
+        idx = idx + 1;
+    }
+    let empty_indices: List[Int] = list_new();
+    return frost_signature_create("deserialized", "unknown_gpk", bytes_to_str(r_buf), bytes_to_str(z_buf), empty_indices, "deserialized_digest", 0);
+}

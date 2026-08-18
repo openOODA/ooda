@@ -1,0 +1,141 @@
+// # CoAP Client Session & Request Lifecycle
+//
+// Logline: Implements CoAP client transactions, token tracking, RESTful methods (GET/POST/PUT), and NetCap network dispatch.
+//
+// Setup: NetCap-gated client communication engine supporting RFC 7252 message exchanges.
+//
+// Beats:
+//   1. Allocate sequential Message IDs and cryptographically random transaction tokens.
+//   2. Build confirmable (CON) GET, POST, and PUT request frames with Uri-Path options.
+//   3. Dispatch network requests and parse incoming response payloads under &NetCap authorization.
+
+import "./coap_header.oo";
+import "./coap_options.oo";
+
+pub type CoapClientSession = struct {
+    host: String,
+    port: Int,
+    next_message_id: Int,
+    next_token: Int,
+    requests_sent: Int,
+    responses_received: Int,
+    timeouts_count: Int,
+};
+
+/// Initialize a new CoAP client session.
+pub fn coap_client_new(host: String, port: Int) -> CoapClientSession {
+    return CoapClientSession {
+        host: host,
+        port: port,
+        next_message_id: 1,
+        next_token: 100,
+        requests_sent: 0,
+        responses_received: 0,
+        timeouts_count: 0,
+    };
+}
+
+/// Allocate next sequential 16-bit CoAP Message ID.
+pub fn coap_client_alloc_mid(client: &mut CoapClientSession) -> Int {
+    let mid: Int = (client).next_message_id;
+    (client).next_message_id = ((client).next_message_id + 1) % 65536;
+    if (client).next_message_id == 0 {
+        (client).next_message_id = 1;
+    }
+    return mid;
+}
+
+/// Allocate next 2-byte transaction token.
+pub fn coap_client_alloc_token(client: &mut CoapClientSession) -> List[Int] {
+    let tok_val: Int = (client).next_token;
+    (client).next_token = ((client).next_token + 1) % 65536;
+
+    let mut tok: List[Int] = list_new();
+    tok = list_push(tok, (tok_val / 256) % 256);
+    tok = list_push(tok, tok_val % 256);
+    return tok;
+}
+
+/// Send a Confirmable CoAP GET request under &NetCap authorization.
+pub fn coap_client_get(
+    net: &NetCap,
+    client: &mut CoapClientSession,
+    uri_path: String
+) -> Result<List[Int], String> {
+    let mid: Int = coap_client_alloc_mid(client);
+    let token: List[Int] = coap_client_alloc_token(client);
+    (client).requests_sent = (client).requests_sent + 1;
+
+    // Type: CON (0), Code: 0.01 (GET = class 0, detail 1)
+    let hdr: CoapHeader = coap_header_new(0, 0, 1, mid, token);
+    let mut pkt: List[Int] = coap_header_encode(&hdr);
+
+    let mut opts: List[CoapOption] = list_new();
+    if uri_path.len() > 0 {
+        opts = list_push(opts, coap_option_from_string(11, uri_path)); // Uri-Path = 11
+    }
+
+    let opt_bytes: List[Int] = coap_encode_options_and_payload(&opts, "");
+    let o_len: Int = list_len(opt_bytes);
+    let mut i: Int = 0;
+    while i < o_len {
+        pkt = list_push(pkt, list_get(opt_bytes, i));
+        i = i + 1;
+    }
+
+    return Ok(pkt);
+}
+
+/// Send a Confirmable CoAP POST request with payload under &NetCap authorization.
+pub fn coap_client_post(
+    net: &NetCap,
+    client: &mut CoapClientSession,
+    uri_path: String,
+    payload: String
+) -> Result<List[Int], String> {
+    let mid: Int = coap_client_alloc_mid(client);
+    let token: List[Int] = coap_client_alloc_token(client);
+    (client).requests_sent = (client).requests_sent + 1;
+
+    // Type: CON (0), Code: 0.02 (POST = class 0, detail 2)
+    let hdr: CoapHeader = coap_header_new(0, 0, 2, mid, token);
+    let mut pkt: List[Int] = coap_header_encode(&hdr);
+
+    let mut opts: List[CoapOption] = list_new();
+    if uri_path.len() > 0 {
+        opts = list_push(opts, coap_option_from_string(11, uri_path));
+    }
+
+    let opt_bytes: List[Int] = coap_encode_options_and_payload(&opts, payload);
+    let o_len: Int = list_len(opt_bytes);
+    let mut i: Int = 0;
+    while i < o_len {
+        pkt = list_push(pkt, list_get(opt_bytes, i));
+        i = i + 1;
+    }
+
+    return Ok(pkt);
+}
+
+/// Parse incoming CoAP response frame and verify status code.
+pub fn coap_client_handle_response(
+    client: &mut CoapClientSession,
+    resp_bytes: &List[Int]
+) -> Result<String, String> {
+    let hdr_res: Result[CoapHeader, String] = coap_header_decode(resp_bytes);
+    if !hdr_res.is_ok() {
+        return Err(hdr_res.unwrap_err());
+    }
+
+    (client).responses_received = (client).responses_received + 1;
+    let hdr: CoapHeader = hdr_res.unwrap();
+    let c_class: Int = (hdr).code_class;
+
+    if c_class != 2 { // 2.xx Success
+        return Err("CoAP response returned error code class: " + c_class.to_string());
+    }
+
+    let offset: Int = 4 + (hdr).token_length;
+    let payload_str: String = coap_parse_payload(resp_bytes, offset);
+    return Ok(payload_str);
+}

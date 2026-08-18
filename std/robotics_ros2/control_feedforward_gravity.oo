@@ -1,0 +1,80 @@
+// # Feedforward Acceleration & Friction Compensation Controller
+//
+// Logline: Combines PD feedback with model-based acceleration feedforward, gravity compensation, and Stribeck friction cancellation.
+//
+// Setup: High-bandwidth tracking controller improving trajectory tracking fidelity on friction-dominated robotic joints.
+//
+// Beats:
+//   1. Define Stribeck non-linear friction model parameters (Coulomb, Static, Viscous, Stribeck velocity).
+//   2. Evaluate instantaneous friction torque resisting joint motion.
+//   3. Compute feedforward acceleration torque tau_ff = J_rotor * ddq_d.
+//   4. Superimpose feedforward effort with feedback PD correction and gravity feedthrough.
+
+pub type FrictionModel = struct {
+    coulomb_torque: Float,
+    static_torque: Float,
+    viscous_coeff: Float,
+    stribeck_vel: Float,
+};
+
+pub type FeedforwardPDConfig = struct {
+    kp: Float,
+    kd: Float,
+    effective_inertia: Float,
+};
+
+pub fn friction_model_new(
+    coulomb: Float,
+    static_t: Float,
+    viscous: Float,
+    v_stribeck: Float
+) -> FrictionModel {
+    return FrictionModel {
+        coulomb_torque: coulomb,
+        static_torque: static_t,
+        viscous_coeff: viscous,
+        stribeck_vel: if v_stribeck < 0.001 { 0.001 } else { v_stribeck },
+    };
+}
+
+pub fn friction_evaluate(model: &FrictionModel, velocity: Float) -> Float {
+    let v_ratio: Float = velocity / (model).stribeck_vel;
+    let exp_term: Float = exp(0.0 - (v_ratio * v_ratio));
+    let stribeck_diff: Float = (model).static_torque - (model).coulomb_torque;
+
+    let sgn: Float = if velocity > 0.001 {
+        1.0
+    } else if velocity < (0.0 - 0.001) {
+        -1.0
+    } else {
+        velocity / 0.001 // Smooth sign transition near zero
+    };
+
+    let friction_mag: Float = (model).coulomb_torque + (stribeck_diff * exp_term);
+    let coulomb_stribeck: Float = friction_mag * sgn;
+    let viscous: Float = (model).viscous_coeff * velocity;
+
+    return coulomb_stribeck + viscous;
+}
+
+pub fn feedforward_pd_compute(
+    cfg: &FeedforwardPDConfig,
+    fric: &FrictionModel,
+    q_des: Float, dq_des: Float, ddq_des: Float,
+    q_curr: Float, dq_curr: Float,
+    gravity_torque: Float
+) -> Float {
+    let e: Float = q_des - q_curr;
+    let de: Float = dq_des - dq_curr;
+
+    // Feedback PD
+    let u_fb: Float = ((cfg).kp * e) + ((cfg).kd * de);
+
+    // Feedforward acceleration
+    let u_ff_acc: Float = (cfg).effective_inertia * ddq_des;
+
+    // Model friction compensation
+    let u_fric: Float = friction_evaluate(fric, dq_des);
+
+    return u_fb + u_ff_acc + u_fric + gravity_torque;
+}

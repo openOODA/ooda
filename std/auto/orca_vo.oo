@@ -1,0 +1,245 @@
+// # ORCA Velocity Obstacle & Avoidance Planes
+//
+// Logline: Constructs truncated velocity obstacle cones, collision cutoff spheres, and avoidance half-planes.
+//
+// Setup: Velocity obstacle geometric algorithms importing orca_ops.oo.
+//
+// Beats:
+//   1. Construct truncated VelocityObstacle cones for agent-agent and agent-obstacle pairs.
+//   2. Determine velocity containment within cutoff spheres and geometric cones.
+//   3. Construct AvoidancePlane and ORCA half-plane linear constraints.
+
+import "./orca_ops.oo";
+
+pub fn velocity_obstacle_new(vo_apex: Vec3, vo_rpos: Vec3, vo_rvel: Vec3, vo_rad: Float, vo_tau: Float, vo_oid: Int, vo_isag: Bool) -> VelocityObstacle {
+    let mut vo_t = vo_tau;
+    if vo_t <= 0.0 {
+        vo_t = 1.0;
+    }
+    let vo_cutoff_c = vec3_scale(vo_rpos, 1.0 / vo_t);
+    let vo_cutoff_r = vo_rad / vo_t;
+
+    return VelocityObstacle {
+        apex: vo_apex,
+        relative_position: vo_rpos,
+        relative_velocity: vo_rvel,
+        combined_radius: vo_rad,
+        time_horizon: vo_t,
+        cutoff_center: vo_cutoff_c,
+        cutoff_radius: vo_cutoff_r,
+        is_agent: vo_isag,
+        other_id: vo_oid,
+    };
+}
+
+/// Checks if a test relative velocity lies inside the cutoff sphere of the Velocity Obstacle.
+pub fn velocity_obstacle_cutoff_sphere_contains(vo_c: &VelocityObstacle, vo_tv: Vec3) -> Bool {
+    let vo_c_dist = vec3_dist(vo_tv, (vo_c).cutoff_center);
+    return vo_c_dist <= (vo_c).cutoff_radius;
+}
+
+/// Checks if a test relative velocity lies inside the Velocity Obstacle cone/cylinder.
+pub fn velocity_obstacle_contains_velocity(vo_v: &VelocityObstacle, vo_cv: Vec3) -> Bool {
+    if velocity_obstacle_cutoff_sphere_contains(vo_v, vo_cv) {
+        return true;
+    }
+    let vo_v_w = vec3_sub(vo_cv, (vo_v).cutoff_center);
+    let vo_v_w_len_sq = vec3_length_sq(vo_v_w);
+    let vo_v_dot = vec3_dot(vo_v_w, (vo_v).relative_position);
+
+    if vo_v_dot > 0.0 {
+        let vo_v_leg_dist_sq = vo_v_w_len_sq - (math_sqr(vo_v_dot) / vec3_length_sq((vo_v).relative_position));
+        if vo_v_leg_dist_sq <= math_sqr((vo_v).cutoff_radius) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// -------------------------------------------------------------------
+// 5. AvoidancePlane Functions (3D ORCA Half-Space Constraints)
+// -------------------------------------------------------------------
+
+/// Constructs a new AvoidancePlane linear constraint.
+pub fn avoidance_plane_new(ap_pt: Vec3, ap_norm: Vec3, ap_dist: Float, ap_aid: Int, ap_isobs: Bool) -> AvoidancePlane {
+    return AvoidancePlane {
+        point: ap_pt,
+        normal: vec3_normalize(ap_norm),
+        distance: ap_dist,
+        agent_id: ap_aid,
+        is_obstacle: ap_isobs,
+    };
+}
+
+/// Computes signed distance from a velocity vector to the avoidance plane boundary.
+pub fn avoidance_plane_distance_to_point(ap_dp: &AvoidancePlane, ap_tp: Vec3) -> Float {
+    let ap_diff = vec3_sub(ap_tp, (ap_dp).point);
+    return vec3_dot(ap_diff, (ap_dp).normal);
+}
+
+/// Checks if a velocity vector satisfies the avoidance plane constraint (lies in permissible half-space).
+pub fn avoidance_plane_contains_velocity(ap_cv: &AvoidancePlane, ap_v: Vec3) -> Bool {
+    return avoidance_plane_distance_to_point(ap_cv, ap_v) >= 0.0;
+}
+
+/// Projects a velocity vector onto the boundary of the avoidance plane.
+pub fn avoidance_plane_project_velocity(ap_pv: &AvoidancePlane, ap_pv_v: Vec3) -> Vec3 {
+    let ap_proj_dist = avoidance_plane_distance_to_point(ap_pv, ap_pv_v);
+    if ap_proj_dist >= 0.0 {
+        return ap_pv_v;
+    }
+    return vec3_sub(ap_pv_v, vec3_scale((ap_pv).normal, ap_proj_dist));
+}
+
+// -------------------------------------------------------------------
+// 6. OrcaLine2D & ObstacleSegment Helpers
+// -------------------------------------------------------------------
+
+/// Constructs a new 2D ORCA constraint line.
+pub fn orca_line_2d_new(ol_pt: Vec2, ol_dir: Vec2, ol_norm: Vec2, ol_oid: Int, ol_isobs: Bool) -> OrcaLine2D {
+    return OrcaLine2D {
+        point: ol_pt,
+        direction: vec2_normalize(ol_dir),
+        normal: vec2_normalize(ol_norm),
+        obstacle_id: ol_oid,
+        is_obstacle: ol_isobs,
+    };
+}
+
+/// Constructs a static obstacle segment.
+pub fn obstacle_segment_new(obs_id: Int, obs_p1: Vec3, obs_p2: Vec3, obs_norm: Vec3) -> ObstacleSegment {
+    let obs_dir = vec3_normalize(vec3_sub(obs_p2, obs_p1));
+    return ObstacleSegment {
+        id: obs_id,
+        point1: obs_p1,
+        point2: obs_p2,
+        normal: vec3_normalize(obs_norm),
+        unit_dir: obs_dir,
+        is_convex: true,
+        next_obstacle_id: 0 - 1,
+        prev_obstacle_id: 0 - 1,
+    };
+}
+
+// -------------------------------------------------------------------
+// 7. ORCA Geometric Constraint Computation
+// -------------------------------------------------------------------
+
+/// Computes the Velocity Obstacle struct for agent relative to neighbor.
+pub fn compute_velocity_obstacle(cvo_agent: &OrcaAgent, cvo_neigh: &OrcaAgent) -> VelocityObstacle {
+    let cvo_rel_pos = vec3_sub((cvo_neigh).position, (cvo_agent).position);
+    let cvo_rel_vel = vec3_sub((cvo_agent).velocity, (cvo_neigh).velocity);
+    let cvo_comb_radius = (cvo_agent).radius + (cvo_neigh).radius;
+
+    return velocity_obstacle_new((cvo_agent).position, cvo_rel_pos, cvo_rel_vel, cvo_comb_radius, (cvo_agent).time_horizon, (cvo_neigh).id, true);
+}
+
+/// Computes 3D AvoidancePlane between two agents for optimal reciprocal collision avoidance.
+pub fn compute_orca_plane_between_agents(cop_agent: &OrcaAgent, cop_neigh: &OrcaAgent, cop_dt: Float) -> AvoidancePlane {
+    let cop_rel_pos = vec3_sub((cop_neigh).position, (cop_agent).position);
+    let cop_rel_vel = vec3_sub((cop_agent).velocity, (cop_neigh).velocity);
+    let cop_dist_sq = vec3_length_sq(cop_rel_pos);
+    let cop_comb_radius = (cop_agent).radius + (cop_neigh).radius;
+    let cop_comb_radius_sq = math_sqr(cop_comb_radius);
+
+    let mut cop_u: Vec3 = vec3_zero();
+    let mut cop_normal: Vec3 = vec3_zero();
+
+    if cop_dist_sq > cop_comb_radius_sq {
+        // Agents are not colliding: cutoff sphere / cone calculation
+        let cop_inv_tau = 1.0 / (cop_agent).time_horizon;
+        let cop_w = vec3_sub(cop_rel_vel, vec3_scale(cop_rel_pos, cop_inv_tau));
+        let cop_w_len_sq = vec3_length_sq(cop_w);
+        let cop_dot_w_rel = vec3_dot(cop_w, cop_rel_pos);
+
+        if (cop_dot_w_rel < 0.0) && (math_sqr(cop_dot_w_rel) > (cop_comb_radius_sq * cop_w_len_sq)) {
+            // Cutoff sphere arc
+            let cop_w_len = sqrt(cop_w_len_sq);
+            let cop_unit_w = vec3_normalize(cop_w);
+            cop_normal = cop_unit_w;
+            cop_u = vec3_scale(cop_unit_w, (cop_comb_radius * cop_inv_tau) - cop_w_len);
+        } else {
+            // Legs of velocity obstacle cone
+            let cop_leg = sqrt(cop_dist_sq - cop_comb_radius_sq);
+            if (vec3_cross(cop_rel_pos, cop_w)).z > 0.0 {
+                // Left leg
+                let cop_dir_x = (((cop_rel_pos).x * cop_leg) - ((cop_rel_pos).y * cop_comb_radius)) / cop_dist_sq;
+                let cop_dir_y = (((cop_rel_pos).x * cop_comb_radius) + ((cop_rel_pos).y * cop_leg)) / cop_dist_sq;
+                cop_normal = vec3_new(0.0 - cop_dir_y, cop_dir_x, 0.0);
+            } else {
+                // Right leg
+                let cop_dir_x = (((cop_rel_pos).x * cop_leg) + ((cop_rel_pos).y * cop_comb_radius)) / cop_dist_sq;
+                let cop_dir_y = ((0.0 - ((cop_rel_pos).x * cop_comb_radius)) + ((cop_rel_pos).y * cop_leg)) / cop_dist_sq;
+                cop_normal = vec3_new(cop_dir_y, 0.0 - cop_dir_x, 0.0);
+            }
+            cop_u = vec3_sub(vec3_scale(cop_normal, vec3_dot(cop_rel_vel, cop_normal)), cop_rel_vel);
+        }
+    } else {
+        // Agents are currently overlapping / colliding
+        let cop_inv_dt = 1.0 / cop_dt;
+        let cop_w = vec3_sub(cop_rel_vel, vec3_scale(cop_rel_pos, cop_inv_dt));
+        let cop_w_len = vec3_length(cop_w);
+        let cop_unit_w = vec3_normalize(cop_w);
+
+        cop_normal = cop_unit_w;
+        cop_u = vec3_scale(cop_unit_w, (cop_comb_radius * cop_inv_dt) - cop_w_len);
+    }
+
+    let cop_plane_pt = vec3_add((cop_agent).velocity, vec3_scale(cop_u, (cop_agent).responsibility_factor));
+    return avoidance_plane_new(cop_plane_pt, cop_normal, vec3_length(cop_u), (cop_neigh).id, false);
+}
+
+/// Computes 2D OrcaLine2D constraint between two agents in 2D velocity space.
+pub fn compute_orca_line_2d(col_agent: &OrcaAgent, col_neigh: &OrcaAgent, col_dt: Float) -> OrcaLine2D {
+    let col_pos_a = vec2_new(((col_agent).position).x, ((col_agent).position).y);
+    let col_pos_b = vec2_new(((col_neigh).position).x, ((col_neigh).position).y);
+    let col_vel_a = vec2_new(((col_agent).velocity).x, ((col_agent).velocity).y);
+    let col_vel_b = vec2_new(((col_neigh).velocity).x, ((col_neigh).velocity).y);
+
+    let col_rel_pos = vec2_sub(col_pos_b, col_pos_a);
+    let col_rel_vel = vec2_sub(col_vel_a, col_vel_b);
+    let col_dist_sq = vec2_length_sq(col_rel_pos);
+    let col_comb_radius = (col_agent).radius + (col_neigh).radius;
+    let col_comb_radius_sq = math_sqr(col_comb_radius);
+
+    let mut col_u: Vec2 = vec2_zero();
+    let mut col_normal: Vec2 = vec2_zero();
+
+    if col_dist_sq > col_comb_radius_sq {
+        let col_inv_tau = 1.0 / (col_agent).time_horizon;
+        let col_w = vec2_sub(col_rel_vel, vec2_scale(col_rel_pos, col_inv_tau));
+        let col_w_len_sq = vec2_length_sq(col_w);
+        let col_dot_w_rel = vec2_dot(col_w, col_rel_pos);
+
+        if (col_dot_w_rel < 0.0) && (math_sqr(col_dot_w_rel) > (col_comb_radius_sq * col_w_len_sq)) {
+            let col_w_len = sqrt(col_w_len_sq);
+            let col_unit_w = vec2_normalize(col_w);
+            col_normal = col_unit_w;
+            col_u = vec2_scale(col_unit_w, (col_comb_radius * col_inv_tau) - col_w_len);
+        } else {
+            let col_leg = sqrt(col_dist_sq - col_comb_radius_sq);
+            if vec2_det(col_rel_pos, col_w) > 0.0 {
+                let col_dir_x = (((col_rel_pos).x * col_leg) - ((col_rel_pos).y * col_comb_radius)) / col_dist_sq;
+                let col_dir_y = (((col_rel_pos).x * col_comb_radius) + ((col_rel_pos).y * col_leg)) / col_dist_sq;
+                col_normal = vec2_new(0.0 - col_dir_y, col_dir_x);
+            } else {
+                let col_dir_x = (((col_rel_pos).x * col_leg) + ((col_rel_pos).y * col_comb_radius)) / col_dist_sq;
+                let col_dir_y = ((0.0 - ((col_rel_pos).x * col_comb_radius)) + ((col_rel_pos).y * col_leg)) / col_dist_sq;
+                col_normal = vec2_new(col_dir_y, 0.0 - col_dir_x);
+            }
+            col_u = vec2_sub(vec2_scale(col_normal, vec2_dot(col_rel_vel, col_normal)), col_rel_vel);
+        }
+    } else {
+        let col_inv_dt = 1.0 / col_dt;
+        let col_w = vec2_sub(col_rel_vel, vec2_scale(col_rel_pos, col_inv_dt));
+        let col_w_len = vec2_length(col_w);
+        let col_unit_w = vec2_normalize(col_w);
+        col_normal = col_unit_w;
+        col_u = vec2_scale(col_unit_w, (col_comb_radius * col_inv_dt) - col_w_len);
+    }
+
+    let col_line_pt = vec2_add(col_vel_a, vec2_scale(col_u, (col_agent).responsibility_factor));
+    let col_direction = vec2_new(0.0 - (col_normal).y, (col_normal).x);
+
+    return orca_line_2d_new(col_line_pt, col_direction, col_normal, (col_neigh).id, false);
+}

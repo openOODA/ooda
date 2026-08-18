@@ -1,0 +1,200 @@
+// # FIX Protocol Session State Machine
+//
+// Logline: Manages bidirectional FIX session lifecycles, sequence numbers, heartbeats, and resend requests.
+//
+// Setup: Imports fix_message.oo for session administrative messaging.
+//
+// Beats:
+//   1. Maintain session states spanning Disconnected, Connected, LogonSent, Active, and LogoutSent.
+//   2. Process inbound sequence numbers, detect sequence gaps, and generate ResendRequest messages.
+//   3. Manage heartbeat intervals, test requests, and graceful session termination.
+
+import "./fix_message.oo";
+
+pub type FixSessionConfig = struct {
+    sender_comp_id: String,
+    target_comp_id: String,
+    heartbeat_interval_sec: Int,
+    fix_version: String,
+};
+
+pub type FixSession = struct {
+    config: FixSessionConfig,
+    state: Int,
+    in_seq_num: Int,
+    out_seq_num: Int,
+    last_received_time: Int,
+    last_sent_time: Int,
+    is_resending: Bool,
+    resend_end_seq: Int,
+};
+
+pub fn fix_session_config_new(
+    sender: String,
+    target: String,
+    hb_interval: Int,
+    version: String
+) -> FixSessionConfig {
+    return FixSessionConfig {
+        sender_comp_id: sender,
+        target_comp_id: target,
+        heartbeat_interval_sec: hb_interval,
+        fix_version: version,
+    };
+}
+
+pub fn fix_session_new(config: FixSessionConfig) -> FixSession {
+    return FixSession {
+        config: config,
+        state: 0, // 0 = DISCONNECTED
+        in_seq_num: 1,
+        out_seq_num: 1,
+        last_received_time: 0,
+        last_sent_time: 0,
+        is_resending: false,
+        resend_end_seq: 0,
+    };
+}
+
+pub fn fix_session_create_logon(session: &mut FixSession, timestamp: Int) -> FixMessage {
+    let hdr = fix_header_new(
+        (session).config.fix_version,
+        "A", // MsgType A = Logon
+        (session).config.sender_comp_id,
+        (session).config.target_comp_id,
+        (session).out_seq_num,
+        timestamp
+    );
+    let mut msg = fix_message_new(hdr);
+    fix_message_add_field(&mut msg, 98, "0"); // EncryptMethod = None
+    fix_message_add_field(&mut msg, 108, "30"); // HeartBtInt = 30s
+    (session).out_seq_num = (session).out_seq_num + 1;
+    (session).last_sent_time = timestamp;
+    (session).state = 2; // 2 = LOGON_SENT
+    return msg;
+}
+
+pub fn fix_session_create_heartbeat(
+    session: &mut FixSession,
+    test_req_id: String,
+    timestamp: Int
+) -> FixMessage {
+    let hdr = fix_header_new(
+        (session).config.fix_version,
+        "0", // MsgType 0 = Heartbeat
+        (session).config.sender_comp_id,
+        (session).config.target_comp_id,
+        (session).out_seq_num,
+        timestamp
+    );
+    let mut msg = fix_message_new(hdr);
+    if test_req_id.len() > 0 {
+        fix_message_add_field(&mut msg, 112, test_req_id); // TestReqID
+    }
+    (session).out_seq_num = (session).out_seq_num + 1;
+    (session).last_sent_time = timestamp;
+    return msg;
+}
+
+pub fn fix_session_create_test_request(
+    session: &mut FixSession,
+    test_req_id: String,
+    timestamp: Int
+) -> FixMessage {
+    let hdr = fix_header_new(
+        (session).config.fix_version,
+        "1", // MsgType 1 = TestRequest
+        (session).config.sender_comp_id,
+        (session).config.target_comp_id,
+        (session).out_seq_num,
+        timestamp
+    );
+    let mut msg = fix_message_new(hdr);
+    fix_message_add_field(&mut msg, 112, test_req_id);
+    (session).out_seq_num = (session).out_seq_num + 1;
+    (session).last_sent_time = timestamp;
+    return msg;
+}
+
+pub fn fix_session_create_resend_request(
+    session: &mut FixSession,
+    begin_seq: Int,
+    end_seq: Int,
+    timestamp: Int
+) -> FixMessage {
+    let hdr = fix_header_new(
+        (session).config.fix_version,
+        "2", // MsgType 2 = ResendRequest
+        (session).config.sender_comp_id,
+        (session).config.target_comp_id,
+        (session).out_seq_num,
+        timestamp
+    );
+    let mut msg = fix_message_new(hdr);
+    fix_message_add_field(&mut msg, 7, "1"); // BeginSeqNo
+    fix_message_add_field(&mut msg, 16, "0"); // EndSeqNo (0 = all)
+    (session).out_seq_num = (session).out_seq_num + 1;
+    (session).last_sent_time = timestamp;
+    return msg;
+}
+
+pub fn fix_session_create_logout(session: &mut FixSession, text: String, timestamp: Int) -> FixMessage {
+    let hdr = fix_header_new(
+        (session).config.fix_version,
+        "5", // MsgType 5 = Logout
+        (session).config.sender_comp_id,
+        (session).config.target_comp_id,
+        (session).out_seq_num,
+        timestamp
+    );
+    let mut msg = fix_message_new(hdr);
+    if text.len() > 0 {
+        fix_message_add_field(&mut msg, 58, text);
+    }
+    (session).out_seq_num = (session).out_seq_num + 1;
+    (session).last_sent_time = timestamp;
+    (session).state = 5; // LOGOUT_SENT
+    return msg;
+}
+
+pub fn fix_session_process_inbound(
+    session: &mut FixSession,
+    msg: &FixMessage,
+    current_time: Int
+) -> Result[Int, String] {
+    let expected_seq = (session).in_seq_num;
+    let actual_seq = (msg).header.msg_seq_num;
+    (session).last_received_time = current_time;
+    
+    if actual_seq < expected_seq {
+        return Err("SEQ_NUM_TOO_LOW: Message sequence number lower than expected");
+    }
+    if actual_seq > expected_seq {
+        (session).is_resending = true;
+        (session).resend_end_seq = actual_seq;
+        return Err("SEQ_GAP_DETECTED: Sequence gap detected");
+    }
+    
+    (session).in_seq_num = (session).in_seq_num + 1;
+    let m_type = (msg).header.msg_type;
+    
+    if m_type == "A" { // Logon
+        (session).state = 4; // ACTIVE
+    } else if m_type == "5" { // Logout
+        (session).state = 0; // DISCONNECTED
+    }
+    
+    return Ok((session).in_seq_num);
+}
+
+pub fn fix_session_is_heartbeat_due(session: &FixSession, current_time: Int) -> Bool {
+    let interval = (session).config.heartbeat_interval_sec;
+    let elapsed = current_time - (session).last_sent_time;
+    return elapsed >= interval;
+}
+
+pub fn fix_session_is_test_request_due(session: &FixSession, current_time: Int) -> Bool {
+    let interval = (session).config.heartbeat_interval_sec * 2;
+    let elapsed = current_time - (session).last_received_time;
+    return elapsed >= interval;
+}

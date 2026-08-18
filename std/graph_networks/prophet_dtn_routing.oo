@@ -1,0 +1,146 @@
+// # PRoPHET Probabilistic Routing Protocol (RFC 6693)
+//
+// Logline: Implements PRoPHET delay-tolerant routing based on delivery predictabilities and transitive contact history.
+//
+// Setup: History-based opportunistic DTN routing updating delivery probabilities on direct encounters and transitive neighbor links.
+//
+// Beats:
+//   1. Update direct delivery predictability P(a,b) upon physical contact encounter.
+//   2. Apply exponential aging metric decay to predictabilities over elapsed idle intervals.
+//   3. Propagate transitive predictability P(a,c) = P(a,c) + (1 - P(a,c)) * P(a,b) * P(b,c) * beta.
+
+pub type ProphetPredictability = struct {
+    dest_id: Int,
+    prob_scaled: Int, // Scaled probability (0..10000 representing 0.0000 .. 1.0000)
+};
+
+pub type ProphetRouter = struct {
+    local_id: Int,
+    p_init: Int,   // e.g. 7500 for 0.75
+    gamma_age: Int,// e.g. 9800 for 0.98
+    beta_trans: Int,// e.g. 2500 for 0.25
+    predictabilities: List[ProphetPredictability],
+};
+
+pub fn prophet_create(local_id: Int) -> ProphetRouter {
+    let empty: List[ProphetPredictability] = list_new();
+    return ProphetRouter {
+        local_id: local_id,
+        p_init: 7500,
+        gamma_age: 9800,
+        beta_trans: 2500,
+        predictabilities: empty,
+    };
+}
+
+pub fn prophet_find_prob_idx(router: &ProphetRouter, dest_id: Int) -> Int {
+    let n: Int = list_len((router).predictabilities);
+    let mut i: Int = 0;
+    while i < n {
+        let p: ProphetPredictability = list_get((router).predictabilities, i);
+        if (p).dest_id == dest_id {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+pub fn prophet_get_prob(router: &ProphetRouter, dest_id: Int) -> Int {
+    let idx: Int = prophet_find_prob_idx(router, dest_id);
+    if idx >= 0 {
+        let p: ProphetPredictability = list_get((router).predictabilities, idx);
+        return (p).prob_scaled;
+    }
+    return 0;
+}
+
+pub fn prophet_set_prob(router: &mut ProphetRouter, dest_id: Int, new_prob: Int) -> Bool {
+    let bounded: Int = if new_prob > 10000 { 10000 } else if new_prob < 0 { 0 } else { new_prob };
+    let idx: Int = prophet_find_prob_idx(router, dest_id);
+    let new_entry: ProphetPredictability = ProphetPredictability {
+        dest_id: dest_id,
+        prob_scaled: bounded,
+    };
+
+    if idx >= 0 {
+        let mut updated: List[ProphetPredictability] = list_new();
+        let n: Int = list_len((router).predictabilities);
+        let mut i: Int = 0;
+        while i < n {
+            if i == idx {
+                updated = list_push(updated, new_entry);
+            } else {
+                updated = list_push(updated, list_get((router).predictabilities, i));
+            }
+            i = i + 1;
+        }
+        (router).predictabilities = updated;
+        return true;
+    }
+
+    (router).predictabilities = list_push((router).predictabilities, new_entry);
+    return true;
+}
+
+pub fn prophet_encounter(router: &mut ProphetRouter, encountered_node: Int) -> Bool {
+    // Direct encounter: P(a,b) = P(a,b)_old + (1 - P(a,b)_old) * P_init
+    let p_old: Int = prophet_get_prob(router, encountered_node);
+    let scale: Int = 10000;
+    let delta: Int = ((scale - p_old) * (router).p_init) / scale;
+    let p_new: Int = p_old + delta;
+    return prophet_set_prob(router, encountered_node, p_new);
+}
+
+pub fn prophet_age(router: &mut ProphetRouter, time_units: Int) -> Bool {
+    // Aging: P(a,b) = P(a,b)_old * (gamma ^ k)
+    let n: Int = list_len((router).predictabilities);
+    let mut updated: List[ProphetPredictability] = list_new();
+    let scale: Int = 10000;
+
+    let mut i: Int = 0;
+    while i < n {
+        let p: ProphetPredictability = list_get((router).predictabilities, i);
+        let mut aged_val: Int = (p).prob_scaled;
+        let mut step: Int = 0;
+        while step < time_units {
+            aged_val = (aged_val * (router).gamma_age) / scale;
+            step = step + 1;
+        }
+        let aged_entry: ProphetPredictability = ProphetPredictability {
+            dest_id: (p).dest_id,
+            prob_scaled: aged_val,
+        };
+        updated = list_push(updated, aged_entry);
+        i = i + 1;
+    }
+
+    (router).predictabilities = updated;
+    return true;
+}
+
+pub fn prophet_update_transitive(
+    router: &mut ProphetRouter,
+    contact_node: Int,
+    contact_probs: List[ProphetPredictability]
+) -> Bool {
+    let p_ab: Int = prophet_get_prob(router, contact_node);
+    let scale: Int = 10000;
+    let n_remote: Int = list_len(contact_probs);
+
+    let mut i: Int = 0;
+    while i < n_remote {
+        let remote_p: ProphetPredictability = list_get(contact_probs, i);
+        let dest_c: Int = (remote_p).dest_id;
+        if dest_c != (router).local_id && dest_c != contact_node {
+            let p_bc: Int = (remote_p).prob_scaled;
+            let p_ac_old: Int = prophet_get_prob(router, dest_c);
+            let trans_factor: Int = (((p_ab * p_bc) / scale) * (router).beta_trans) / scale;
+            let trans_delta: Int = ((scale - p_ac_old) * trans_factor) / scale;
+            let p_ac_new: Int = p_ac_old + trans_delta;
+            prophet_set_prob(router, dest_c, p_ac_new);
+        }
+        i = i + 1;
+    }
+    return true;
+}

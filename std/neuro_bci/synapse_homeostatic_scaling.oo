@@ -1,0 +1,95 @@
+// # Homeostatic Synaptic Scaling & BCM Sliding Threshold
+//
+// Logline: Regulates network stability via multiplicative homeostatic synaptic scaling and sliding BCM threshold dynamics.
+//
+// Setup: Long-term homeostatic plasticity engine maintaining stable firing setpoints against runaway Hebbian potentiation.
+//
+// Beats:
+//   1. Define HomeostaticParams (target_rate_hz, tau_scaling_sec, eta_scaling) and BCMParams (tau_theta_sec, p_exponent).
+//   2. Scale synaptic weights multiplicatively to minimize deviation from target firing rate.
+//   3. Compute BCM sliding threshold theta_m and direction of plasticity (LTP vs LTD).
+
+pub type HomeostaticParams = struct {
+    target_rate_hz: Float,   // Desired homeostatic setpoint firing rate (Hz, default 5.0)
+    tau_scaling_sec: Float,  // Slow scaling time constant (seconds, default 3600.0)
+    eta_rate: Float,         // Scaling rate parameter (default 0.001)
+};
+
+pub type BCMParams = struct {
+    tau_theta_sec: Float,    // Sliding threshold integration time constant (seconds, default 10.0)
+    theta_0: Float,          // Initial modification threshold (default 1.0)
+    p_exponent: Float,       // Non-linear power scaling (default 2.0)
+};
+
+pub type BCMState = struct {
+    theta_m: Float,          // Current sliding modification threshold
+    avg_postsynaptic_rate: Float,
+};
+
+pub fn homeostatic_params_default() -> HomeostaticParams {
+    return HomeostaticParams {
+        target_rate_hz: 5.0,
+        tau_scaling_sec: 3600.0,
+        eta_rate: 0.001,
+    };
+}
+
+pub fn bcm_params_default() -> BCMParams {
+    return BCMParams {
+        tau_theta_sec: 10.0,
+        theta_0: 1.0,
+        p_exponent: 2.0,
+    };
+}
+
+pub fn bcm_state_initial(params: &BCMParams) -> BCMState {
+    return BCMState {
+        theta_m: (params).theta_0,
+        avg_postsynaptic_rate: 1.0,
+    };
+}
+
+pub fn homeostatic_multiplicative_scale(
+    current_weight: Float,
+    actual_rate_hz: Float,
+    dt_sec: Float,
+    params: &HomeostaticParams
+) -> Float {
+    // dw/dt = eta * (r_target - r_actual) * w
+    let error = (params).target_rate_hz - actual_rate_hz;
+    let factor = 1.0 + (((params).eta_rate * error * dt_sec) / (params).tau_scaling_sec);
+    let mut new_w = current_weight * factor;
+    if new_w < 0.0 { new_w = 0.0; }
+    return new_w;
+}
+
+pub fn bcm_update_threshold(
+    state: &BCMState,
+    current_post_rate: Float,
+    dt_sec: Float,
+    params: &BCMParams
+) -> BCMState {
+    // d(avg_y)/dt = (y - avg_y) / tau_theta
+    let tau = (params).tau_theta_sec;
+    let avg_y = (state).avg_postsynaptic_rate + (((current_post_rate - (state).avg_postsynaptic_rate) / tau) * dt_sec);
+
+    // theta_m = (avg_y / y_0)^p * theta_0
+    let normalized = avg_y / 1.0;
+    let theta_val = (normalized * normalized) * (params).theta_0;
+
+    return BCMState {
+        theta_m: if theta_val < 0.01 { 0.01 } else { theta_val },
+        avg_postsynaptic_rate: avg_y,
+    };
+}
+
+pub fn bcm_compute_weight_delta(
+    pre_rate: Float,
+    post_rate: Float,
+    state: &BCMState,
+    learning_rate: Float
+) -> Float {
+    // dw = eta * pre * post * (post - theta_m)
+    let phi = post_rate * (post_rate - (state).theta_m);
+    return learning_rate * pre_rate * phi;
+}

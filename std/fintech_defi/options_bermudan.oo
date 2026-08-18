@@ -1,0 +1,180 @@
+// # Bermudan Option Lattice Pricer
+//
+// Logline: Prices Bermudan options allowing early exercise at discrete predetermined calendar exercise dates using dynamic programming.
+//
+// Setup: Pure quantitative module with schedule-constrained backward induction.
+//
+// Beats:
+//   1. Define BermudanExerciseSchedule, BermudanOptionParams, and BermudanPriceResult structures.
+//   2. Match lattice time steps against discrete allowable exercise dates.
+//   3. Perform dynamic programming rollback applying early exercise boundary checks only on active schedule dates.
+
+pub type BermudanOptionParams = struct {
+    spot: Float,
+    strike: Float,
+    time_to_expiry: Float,
+    risk_free_rate: Float,
+    volatility: Float,
+    steps: Int,
+    exercise_step_intervals: List[Int],
+    is_call: Bool,
+};
+
+pub type BermudanPriceResult = struct {
+    option_price: Float,
+    european_price: Float,
+    bermudan_premium: Float,
+    exercise_dates_count: Int,
+};
+
+pub fn bermudan_params_new(
+    spot: Float,
+    strike: Float,
+    t: Float,
+    r: Float,
+    vol: Float,
+    steps: Int,
+    is_call: Bool
+) -> BermudanOptionParams {
+    let empty_sched: List[Int] = list_new();
+    return BermudanOptionParams {
+        spot: spot,
+        strike: strike,
+        time_to_expiry: t,
+        risk_free_rate: r,
+        volatility: vol,
+        steps: steps,
+        exercise_step_intervals: empty_sched,
+        is_call: is_call,
+    };
+}
+
+pub fn bermudan_is_exercise_step(
+    schedule: List[Int],
+    current_step: Int
+) -> Bool {
+    let n: Int = list_len(schedule);
+    let mut i: Int = 0;
+    while i < n {
+        if list_get(schedule, i) == current_step {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn bermudan_price(params: &BermudanOptionParams) -> BermudanPriceResult {
+    let s0: Float = (params).spot;
+    let k: Float = (params).strike;
+    let t: Float = (params).time_to_expiry;
+    let r: Float = (params).risk_free_rate;
+    let vol: Float = (params).volatility;
+    let n: Int = (params).steps;
+
+    if n <= 0 || t <= 0.0 || s0 <= 0.0 {
+        return BermudanPriceResult {
+            option_price: 0.0,
+            european_price: 0.0,
+            bermudan_premium: 0.0,
+            exercise_dates_count: list_len((params).exercise_step_intervals),
+        };
+    }
+
+    let dt: Float = t / (1.0 * (n + 0));
+    let u: Float = exp(vol * sqrt(dt));
+    let d: Float = 1.0 / u;
+    let discount: Float = exp((0.0 - r) * dt);
+    let p: Float = (exp(r * dt) - d) / (u - d);
+    let q: Float = 1.0 - p;
+
+    let mut values_berm: List[Float] = list_new();
+    let mut values_euro: List[Float] = list_new();
+    let mut i: Int = 0;
+
+    while i <= n {
+        let up_count: Int = n - i;
+        let mut spot_term: Float = s0;
+        let mut u_i: Int = 0;
+        while u_i < up_count {
+            spot_term = spot_term * u;
+            u_i = u_i + 1;
+        }
+        let mut d_i: Int = 0;
+        while d_i < i {
+            spot_term = spot_term * d;
+            d_i = d_i + 1;
+        }
+
+        let mut payoff: Float = 0.0;
+        if (params).is_call {
+            if spot_term > k { payoff = spot_term - k; }
+        } else {
+            if k > spot_term { payoff = k - spot_term; }
+        }
+        values_berm = list_push(values_berm, payoff);
+        values_euro = list_push(values_euro, payoff);
+        i = i + 1;
+    }
+
+    let mut step: Int = n - 1;
+    while step >= 0 {
+        let is_ex: Bool = bermudan_is_exercise_step((params).exercise_step_intervals, step);
+        let mut next_berm: List[Float] = list_new();
+        let mut next_euro: List[Float] = list_new();
+        let mut j: Int = 0;
+
+        while j <= step {
+            let vb_u: Float = list_get(values_berm, j);
+            let vb_d: Float = list_get(values_berm, j + 1);
+            let cont_b: Float = discount * ((p * vb_u) + (q * vb_d));
+
+            let ve_u: Float = list_get(values_euro, j);
+            let ve_d: Float = list_get(values_euro, j + 1);
+            let cont_e: Float = discount * ((p * ve_u) + (q * ve_d));
+
+            let mut node_spot: Float = s0;
+            let up_c: Int = step - j;
+            let mut u_k: Int = 0;
+            while u_k < up_c {
+                node_spot = node_spot * u;
+                u_k = u_k + 1;
+            }
+            let mut d_k: Int = 0;
+            while d_k < j {
+                node_spot = node_spot * d;
+                d_k = d_k + 1;
+            }
+
+            let mut final_b: Float = cont_b;
+            if is_ex {
+                let mut intr_node: Float = 0.0;
+                if (params).is_call {
+                    if node_spot > k { intr_node = node_spot - k; }
+                } else {
+                    if k > node_spot { intr_node = k - node_spot; }
+                }
+                if intr_node > cont_b {
+                    final_b = intr_node;
+                }
+            }
+
+            next_berm = list_push(next_berm, final_b);
+            next_euro = list_push(next_euro, cont_e);
+            j = j + 1;
+        }
+        values_berm = next_berm;
+        values_euro = next_euro;
+        step = step - 1;
+    }
+
+    let berm_price: Float = list_get(values_berm, 0);
+    let euro_price: Float = list_get(values_euro, 0);
+
+    return BermudanPriceResult {
+        option_price: berm_price,
+        european_price: euro_price,
+        bermudan_premium: berm_price - euro_price,
+        exercise_dates_count: list_len((params).exercise_step_intervals),
+    };
+}

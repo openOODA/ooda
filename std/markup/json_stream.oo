@@ -1,0 +1,174 @@
+// # Streaming JSON Tokenizer Module
+//
+// Logline: Streaming token-by-token JSON event tokenizer for sequential document scanning.
+//
+// Setup: Pure tokenizer module. Scans JSON strings and produces typed event tokens without heap allocation overhead.
+//
+// Beats:
+//   1. Define streaming JsonToken and JsonStream state structures.
+//   2. Skip whitespace and identify JSON delimiters ({}, [], :, ,).
+//   3. Scan string literals with escape sequence handling.
+//   4. Scan numeric, boolean, and null value tokens.
+// RULES.oot 1.4: Pure data format parser, zero ambient effects.
+// RULES.oot 1.7: Under 256 lines.
+// residual: Full JSON schema validation and multi-byte unicode escapes are not handled.
+
+type JsonToken = struct {
+    kind: String,
+    text: String,
+    pos: Int
+};
+
+type JsonStream = struct {
+    src: String,
+    pos: Int,
+    total_len: Int
+};
+
+fn json_is_space(ch: String) -> Bool {
+    if ch == " " || ch == "\t" || ch == "\n" || ch == "\r" {
+        return true;
+    }
+    return false;
+}
+
+pub fn json_stream_new(src: String) -> JsonStream {
+    return JsonStream {
+        src: src,
+        pos: 0,
+        total_len: chars_len(src)
+    };
+}
+
+pub fn json_stream_has_next(s: JsonStream) -> Bool {
+    let mut p: Int = s.pos;
+    let n: Int = s.total_len;
+    while p < n {
+        let ch: String = char_at(s.src, p);
+        if !json_is_space(ch) {
+            return true;
+        }
+        p = p + 1;
+    }
+    return false;
+}
+
+fn json_stream_skip_ws(src: String, mut pos: Int, n: Int) -> Int {
+    while pos < n {
+        let ch: String = char_at(src, pos);
+        if !json_is_space(ch) {
+            return pos;
+        }
+        pos = pos + 1;
+    }
+    return pos;
+}
+
+pub fn json_stream_next(mut s: JsonStream) -> JsonToken {
+    let n: Int = s.total_len;
+    let p: Int = json_stream_skip_ws(s.src, s.pos, n);
+    if p >= n {
+        s.pos = n;
+        return JsonToken {
+            kind: "EOF",
+            text: "",
+            pos: p
+        };
+    }
+
+    let ch: String = char_at(s.src, p);
+    if ch == "{" {
+        s.pos = p + 1;
+        return JsonToken { kind: "START_OBJ", text: "{", pos: p };
+    }
+    if ch == "}" {
+        s.pos = p + 1;
+        return JsonToken { kind: "END_OBJ", text: "}", pos: p };
+    }
+    if ch == "[" {
+        s.pos = p + 1;
+        return JsonToken { kind: "START_ARR", text: "[", pos: p };
+    }
+    if ch == "]" {
+        s.pos = p + 1;
+        return JsonToken { kind: "END_ARR", text: "]", pos: p };
+    }
+    if ch == ":" {
+        s.pos = p + 1;
+        return JsonToken { kind: "COLON", text: ":", pos: p };
+    }
+    if ch == "," {
+        s.pos = p + 1;
+        return JsonToken { kind: "COMMA", text: ",", pos: p };
+    }
+
+    if ch == "\"" {
+        let mut end_p: Int = p + 1;
+        let mut is_esc: Bool = false;
+        let mut closed: Bool = false;
+        while end_p < n {
+            let cur: String = char_at(s.src, end_p);
+            if is_esc {
+                is_esc = false;
+            } else if cur == "\\" {
+                is_esc = true;
+            } else if cur == "\"" {
+                closed = true;
+                end_p = end_p + 1;
+                break;
+            }
+            end_p = end_p + 1;
+        }
+        if !closed {
+            s.pos = n;
+            return JsonToken { kind: "ERROR", text: "UNTERMINATED_STRING", pos: p };
+        }
+        let raw: String = str_slice(s.src, p + 1, end_p - 1);
+        s.pos = end_p;
+        return JsonToken { kind: "STRING", text: raw, pos: p };
+    }
+
+    if ch == "t" {
+        if p + 4 <= n {
+            if str_slice(s.src, p, p + 4) == "true" {
+                s.pos = p + 4;
+                return JsonToken { kind: "BOOL", text: "true", pos: p };
+            }
+        }
+    }
+    if ch == "f" {
+        if p + 5 <= n {
+            if str_slice(s.src, p, p + 5) == "false" {
+                s.pos = p + 5;
+                return JsonToken { kind: "BOOL", text: "false", pos: p };
+            }
+        }
+    }
+
+    if ch == "n" {
+        if p + 4 <= n {
+            if str_slice(s.src, p, p + 4) == "null" {
+                s.pos = p + 4;
+                return JsonToken { kind: "NULL", text: "null", pos: p };
+            }
+        }
+    }
+
+    if ch == "-" || char_is_digit(ch) {
+        let mut end_num: Int = p + 1;
+        while end_num < n {
+            let nc: String = char_at(s.src, end_num);
+            if char_is_digit(nc) || nc == "." || nc == "e" || nc == "E" || nc == "+" || nc == "-" {
+                end_num = end_num + 1;
+            } else {
+                break;
+            }
+        }
+        let num_str: String = str_slice(s.src, p, end_num);
+        s.pos = end_num;
+        return JsonToken { kind: "NUMBER", text: num_str, pos: p };
+    }
+
+    s.pos = p + 1;
+    return JsonToken { kind: "ERROR", text: ch, pos: p };
+}
