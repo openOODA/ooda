@@ -56,6 +56,41 @@ void oo_child_filter_env(void) {
   setenv("PATH", "/usr/bin:/bin", 1);
 }
 
+/* Shared by write_file (chs_rt_fs.c) in this TU. Untrusted blob is OODA_UNTRUSTED. */
+int oo_blob_has(const char *data, size_t n, const char *u, size_t ul) {
+  size_t i;
+  if (!data || !u || ul == 0 || ul > n) return 0;
+  for (i = 0; i + ul <= n; i++) {
+    if (memcmp(data + i, u, ul) == 0) return 1;
+  }
+  return 0;
+}
+
+int oo_untrusted_hit(const char *data, size_t n) {
+  const char *u = oo_process_policy_getenv("OODA_UNTRUSTED");
+  if (!u || !u[0] || !data) return 0;
+  return oo_blob_has(data, n, u, strlen(u));
+}
+
+int oo_policy_write_on(void) {
+  const char *v = oo_process_policy_getenv("OODA_POLICY_WRITE");
+  return v && v[0] == '1' && v[1] == '\0';
+}
+
+int oo_is_policy_path(const char *p) {
+  const char *b;
+  size_t n;
+  if (!p || !p[0]) return 0;
+  if (strstr(p, "/.config/ooda/")) return 1;
+  b = strrchr(p, '/');
+  b = b ? b + 1 : p;
+  if (strcmp(b, "SOUL.md") == 0 || strcmp(b, "soul.md") == 0) return 1;
+  if (strcmp(b, ".bashrc") == 0 || strcmp(b, "ooda.lock") == 0) return 1;
+  n = strlen(b);
+  if (n >= 10 && strcmp(b + (n - 10), ".agent.pin") == 0) return 1;
+  return 0;
+}
+
 /* R2/R3: fork + execvp with full argv (no system(3) shell). */
 OoResS oo_sys_exec(long long cap, int argc, OoStr *argv) {
   OoResS r;
@@ -80,6 +115,11 @@ OoResS oo_sys_exec(long long cap, int argc, OoStr *argv) {
         free(av);
         return r;
       }
+    }
+    if (oo_untrusted_hit(argv[i].data, (size_t)argv[i].len)) {
+      free(av);
+      r.val = oo_str_lit("process_exec denied: untrusted");
+      return r;
     }
     av[i] = argv[i].data;
   }
