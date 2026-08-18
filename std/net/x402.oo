@@ -1,0 +1,182 @@
+// # x402 payment-required handshake (HTTP 402)
+//
+// Logline: Parse and format x402 quotes so a program can see a 402 and name the price.
+//
+// Setup: Pure strings. No fetch, no wallet, no chain. Callers import this file.
+//
+// Beats:
+//   1. Status 402 is payment required.
+//   2. x402_parse_quote reads first accepts[] object fields from a JSON body.
+//   3. x402_required_json builds a seller 402 body. Header name is X-PAYMENT.
+//
+// residual: no wallet, no facilitator, no auto-spend, no chain client
+
+import "std/str.oo";
+
+type X402Quote = struct {
+    version: Int,
+    scheme: String,
+    network: String,
+    max_amount: String,
+    pay_to: String,
+    asset: String,
+    resource: String,
+    error: String
+};
+
+fn skip_ws(s: String, i: Int) -> Int {
+    let n: Int = chars_len(s);
+    let mut p: Int = i;
+    while p < n {
+        let c: String = char_at(s, p);
+        if c == " " || c == "\n" || c == "\t" || c == "\r" {
+            p = p + 1;
+        } else {
+            return p;
+        }
+    }
+    return p;
+}
+
+fn json_after_key(body: String, key: String) -> Int {
+    let needle: String = "\"" + key + "\"";
+    let k: Int = str_index_of(body, needle);
+    if k < 0 {
+        return -1;
+    }
+    let n: Int = chars_len(body);
+    let mut p: Int = skip_ws(body, k + chars_len(needle));
+    if p >= n {
+        return -1;
+    }
+    if char_at(body, p) != ":" {
+        return -1;
+    }
+    return skip_ws(body, p + 1);
+}
+
+fn json_string_field(body: String, key: String) -> String {
+    let p: Int = json_after_key(body, key);
+    if p < 0 {
+        return "";
+    }
+    let n: Int = chars_len(body);
+    if p >= n {
+        return "";
+    }
+    if char_at(body, p) != "\"" {
+        return "";
+    }
+    let mut i: Int = p + 1;
+    while i < n {
+        if char_at(body, i) == "\"" {
+            return str_slice(body, p + 1, i);
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn json_int_field(body: String, key: String) -> Int {
+    let p: Int = json_after_key(body, key);
+    if p < 0 {
+        return 0;
+    }
+    let n: Int = chars_len(body);
+    let mut i: Int = p;
+    let mut acc: String = "";
+    while i < n {
+        let c: String = char_at(body, i);
+        if c == "0" || c == "1" || c == "2" || c == "3" || c == "4" {
+            acc = acc + c;
+        } else if c == "5" || c == "6" || c == "7" || c == "8" || c == "9" {
+            acc = acc + c;
+        } else {
+            break;
+        }
+        i = i + 1;
+    }
+    if acc == "" {
+        return 0;
+    }
+    return parse_int(acc);
+}
+
+fn first_accept_object(body: String) -> String {
+    let p: Int = json_after_key(body, "accepts");
+    if p < 0 {
+        return "";
+    }
+    let n: Int = chars_len(body);
+    let mut i: Int = p;
+    while i < n {
+        if char_at(body, i) == "{" {
+            let mut depth: Int = 0;
+            let mut j: Int = i;
+            while j < n {
+                let c: String = char_at(body, j);
+                if c == "{" {
+                    depth = depth + 1;
+                }
+                if c == "}" {
+                    depth = depth - 1;
+                    if depth == 0 {
+                        return str_slice(body, i, j + 1);
+                    }
+                }
+                j = j + 1;
+            }
+            return "";
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+pub fn x402_is_payment_required(status: Int) -> Bool {
+    return status == 402;
+}
+
+pub fn x402_payment_header_name() -> String {
+    return "X-PAYMENT";
+}
+
+pub fn x402_parse_quote(body: String) -> X402Quote {
+    let acc: String = first_accept_object(body);
+    let mut src: String = acc;
+    if src == "" {
+        src = body;
+    }
+    return X402Quote {
+        version: json_int_field(body, "x402Version"),
+        scheme: json_string_field(src, "scheme"),
+        network: json_string_field(src, "network"),
+        max_amount: json_string_field(src, "maxAmountRequired"),
+        pay_to: json_string_field(src, "payTo"),
+        asset: json_string_field(src, "asset"),
+        resource: json_string_field(src, "resource"),
+        error: json_string_field(body, "error")
+    };
+}
+
+pub fn x402_quote_ready(q: X402Quote) -> Bool {
+    if q.pay_to == "" {
+        return false;
+    }
+    if q.max_amount == "" {
+        return false;
+    }
+    return true;
+}
+
+pub fn x402_format_quote(q: X402Quote) -> String {
+    return "x402 pay " + q.max_amount + " on " + q.network + " to " + q.pay_to;
+}
+
+pub fn x402_required_json(pay_to: String, amount: String, network: String, asset: String, resource: String) -> String {
+    return "{\"x402Version\":1,\"accepts\":[{\"scheme\":\"exact\",\"network\":\"" + network + "\",\"maxAmountRequired\":\"" + amount + "\",\"resource\":\"" + resource + "\",\"payTo\":\"" + pay_to + "\",\"asset\":\"" + asset + "\"}]}";
+}
+
+pub fn x402_payment_header_line(proof: String) -> String {
+    return "X-PAYMENT: " + proof;
+}
