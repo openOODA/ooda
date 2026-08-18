@@ -1,0 +1,53 @@
+// # emit-aarch64 unary-minus int lock
+//
+// Logline: Side emit-aarch64 writes -3 and -7 and refuses println(-foo()) without a silent _start.
+//
+// Setup: cwd is ooda/. Drive oodac/oodac.aarch64 only.
+//
+// Beats:
+//   1. Rebuild the side ELF when aarch64_*.oo is newer.
+//   2. aarch64_neg.oo writes _start, -3, and -7; clang assembles ARM aarch64.
+//   3. aarch64_neg_call.oo prints ERR and has no _start.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+import "aarch64_side.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let prod = root + "/oodac/oodac";
+    let side = root + "/oodac/oodac.aarch64";
+    let src = root + "/fixtures/aarch64_neg.oo";
+    let bad = root + "/fixtures/aarch64_neg_call.oo";
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
+    if scenario(p, fs, "aarch64 unary minus").is_err() { fail("scenario"); }
+    if expect_present(fs, src).is_err() { fail("no neg fixture"); }
+    if expect_present(fs, bad).is_err() { fail("no neg_call fixture"); }
+    if expect_quiet(p, "test -x /usr/bin/clang").is_err() { fail("no clang"); }
+    ensure_aarch64_side(p, root, prod, side);
+    let sfile = tmpd + "/aarch64_neg.s";
+    let serr = tmpd + "/aarch64_neg.err";
+    if check(p, side + " emit-aarch64 " + src + " > " + sfile + " 2>" + serr, 30).is_err() { fail("emit"); }
+    if expect_clean(p, "! grep -qE '^ERR' " + sfile + " " + serr).is_err() { fail("ERR"); }
+    if expect_substring(fs, sfile, "_start").is_err() { fail("no _start"); }
+    if expect_substring(fs, sfile, "svc #0").is_err() { fail("no svc"); }
+    if expect_substring(fs, sfile, "-3").is_err() { fail("no -3"); }
+    if expect_substring(fs, sfile, "-7").is_err() { fail("no -7"); }
+    if expect_clean(p, "! grep -qE '#include|chs_rt|syscall|%rax' " + sfile).is_err() { fail("wrong backend"); }
+    if check(p, "clang -target aarch64-linux-gnu -c " + sfile + " -o " + tmpd + "/aarch64_neg.o", 15).is_err() { fail("assemble"); }
+    if expect_clean(p, "file " + tmpd + "/aarch64_neg.o | grep -q 'ARM aarch64'").is_err() { fail("not ARM"); }
+    let bfile = tmpd + "/aarch64_neg_call.s";
+    let berr = tmpd + "/aarch64_neg_call.err";
+    if process_exec(p, side + " emit-aarch64 " + bad + " > " + bfile + " 2>" + berr).is_ok() {
+        if expect_clean(p, "grep -q _start " + bfile).is_ok() { fail("neg_call wrote _start"); }
+    }
+    if expect_clean(p, "grep -qE 'ERR' " + bfile + " " + berr).is_err() { fail("neg_call no ERR"); }
+    if expect_clean(p, "! grep -q _start " + bfile).is_err() { fail("neg_call silent omit"); }
+    println("aarch64_neg_smoke: PASSED");
+}

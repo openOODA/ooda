@@ -15,105 +15,8 @@ import "token_fmt.oo";
 import "aarch64_emit_sys.oo";
 import "aarch64_emit_fold.oo";
 import "aarch64_emit_harv.oo";
-
-fn a64_record_let(toks: List[String], n: Int, i: Int, bnames: List[String], bvals: List[String], inames: List[String], ivals: List[String]) -> List[String] {
-    let empty: List[String] = list_new();
-    if i + 3 >= n {
-        return empty;
-    }
-    if a64_tok_k(toks, i + 1) != "IDENT" || a64_tok_k(toks, i + 2) != "EQ" {
-        return empty;
-    }
-    let nm: String = a64_tok_t(toks, i + 1);
-    if a64_tok_k(toks, i + 3) == "STRING" {
-        let after = a64_str_after(toks, n, i + 3);
-        let mut mixed = false;
-        if after < n && a64_tok_k(toks, after) == "PLUS" {
-            mixed = true;
-        }
-        if !mixed {
-            let mut out: List[String] = list_new();
-            out = list_push(out, "s");
-            out = list_push(out, nm);
-            out = list_push(out, a64_str_fold(toks, n, i + 3));
-            return out;
-        }
-    } else if a64_tok_k(toks, i + 3) == "INT" {
-        let mut plus = false;
-        if i + 4 < n && a64_tok_k(toks, i + 4) == "PLUS" {
-            plus = true;
-        }
-        if !plus {
-            let mut out: List[String] = list_new();
-            out = list_push(out, "i");
-            out = list_push(out, nm);
-            out = list_push(out, a64_tok_t(toks, i + 3));
-            return out;
-        }
-    } else if a64_tok_k(toks, i + 3) == "MINUS" {
-        if i + 4 < n && a64_tok_k(toks, i + 4) == "INT" {
-            let mut plus = false;
-            if i + 5 < n && a64_tok_k(toks, i + 5) == "PLUS" {
-                plus = true;
-            }
-            if !plus {
-                let mut out: List[String] = list_new();
-                out = list_push(out, "i");
-                out = list_push(out, nm);
-                out = list_push(out, "-" + a64_tok_t(toks, i + 4));
-                return out;
-            }
-        }
-    }
-    return empty;
-}
-
-fn a64_take_println(toks: List[String], n: Int, i: Int, bnames: List[String], bvals: List[String], inames: List[String], ivals: List[String]) -> List[String] {
-    let empty: List[String] = list_new();
-    if i > 0 && a64_tok_k(toks, i - 1) == "DOT" {
-        return empty;
-    }
-    let mut j = i + 1;
-    if j < n && a64_tok_k(toks, j) == "LPAREN" {
-        j = j + 1;
-    }
-    if j < n && a64_tok_k(toks, j) == "INT" {
-        if j + 1 < n && a64_tok_k(toks, j + 1) == "RPAREN" {
-            let mut one: List[String] = list_new();
-            one = list_push(one, a64_tok_t(toks, j));
-            return one;
-        }
-        return empty;
-    }
-    if j < n && a64_tok_k(toks, j) == "MINUS" {
-        if j + 1 < n && a64_tok_k(toks, j + 1) == "INT" {
-            if j + 2 < n && a64_tok_k(toks, j + 2) == "RPAREN" {
-                let mut one: List[String] = list_new();
-                one = list_push(one, "-" + a64_tok_t(toks, j + 1));
-                return one;
-            }
-        }
-        return empty;
-    }
-    if j < n && (a64_tok_k(toks, j) == "STRING" || a64_tok_k(toks, j) == "IDENT") {
-        let got: List[String] = a64_mix_try(toks, n, j, bnames, bvals, inames, ivals);
-        if list_len(got) >= 1 {
-            return got;
-        }
-        if a64_tok_k(toks, j) == "IDENT" {
-            if j + 1 < n && a64_tok_k(toks, j + 1) == "RPAREN" {
-                let idx = a64_bind_idx(inames, a64_tok_t(toks, j));
-                if idx >= 0 {
-                    let mut one: List[String] = list_new();
-                    one = list_push(one, list_get(ivals, idx));
-                    return one;
-                }
-            }
-        }
-        return empty;
-    }
-    return empty;
-}
+import "aarch64_emit_if.oo";
+import "aarch64_emit_take.oo";
 
 fn a64_collect_prints(toks: List[String]) -> List[String] {
     let n = list_len(toks);
@@ -127,6 +30,8 @@ fn a64_collect_prints(toks: List[String]) -> List[String] {
     let mut await_main_brace = false;
     let mut in_main = false;
     let mut depth = 0;
+    let mut skip_else = false;
+    let mut skip_at = 0;
     let mut i = 0;
     while i < n {
         let k: String = a64_tok_k(toks, i);
@@ -142,18 +47,40 @@ fn a64_collect_prints(toks: List[String]) -> List[String] {
                 }
             }
         }
-        if await_main_brace && k == "LBRACE" {
+        if in_main && k == "KW_IF" {
+            let cond: String = a64_if_cond(toks, n, i);
+            if cond == "other" {
+                leftover = true;
+                i = a64_skip_if(toks, n, i);
+            } else if cond == "false" {
+                i = a64_after_false_then(toks, n, i);
+            } else {
+                skip_else = true;
+                skip_at = depth;
+                i = a64_after_if_head(toks, n, i);
+            }
+        } else if await_main_brace && k == "LBRACE" {
             in_main = true;
             depth = 1;
             await_main_brace = false;
             i = i + 1;
         } else {
+            let mut hop = false;
             if in_main {
                 if k == "LBRACE" {
                     depth = depth + 1;
                 }
                 if k == "RBRACE" {
                     depth = depth - 1;
+                    if skip_else {
+                        if depth == skip_at {
+                            skip_else = false;
+                            if i + 1 < n && a64_tok_k(toks, i + 1) == "KW_ELSE" {
+                                i = a64_skip_else(toks, n, i + 1);
+                                hop = true;
+                            }
+                        }
+                    }
                     if depth <= 0 {
                         in_main = false;
                         depth = 0;
@@ -184,7 +111,9 @@ fn a64_collect_prints(toks: List[String]) -> List[String] {
                     leftover = true;
                 }
             }
-            i = i + 1;
+            if !hop {
+                i = i + 1;
+            }
         }
     }
     if !saw_main {
