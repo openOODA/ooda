@@ -62,6 +62,9 @@ return r;
 int oo_untrusted_hit(const char *data, size_t n);
 int oo_is_policy_path(const char *p);
 int oo_policy_write_on(void);
+static int policy_locked(const char *p) {
+return oo_is_policy_path(p) && !oo_policy_write_on();
+}
 OoResV oo_write_file(long long cap, OoStr path, OoStr content) {
 oo_cap_require_fswrite(cap, "write_file"); OoResV r={0, oo_str_lit("write_file failed")};
 char cpath[PATH_MAX];
@@ -69,6 +72,7 @@ if (!to_cpath(path, cpath, PATH_MAX)) return r;
 const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
 r.err = oo_str_lit("write_file denied: path not under OODA_FS_WRITEDIR"); return r; }
+if (content.len < 0) return r;
 if (oo_untrusted_hit(content.data, content.data ? (size_t)content.len : 0)) {
 r.err = oo_str_lit("write_file denied: untrusted content"); return r; }
 if (oo_is_policy_path(cpath) && !oo_policy_write_on()) {
@@ -150,6 +154,8 @@ OoResV r={0, oo_str_lit("fs_remove_file failed")};
 const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
 r.err = oo_str_lit("fs_remove_file denied: path not under OODA_FS_WRITEDIR"); return r; }
+if (policy_locked(cpath)) {
+r.err = oo_str_lit("fs_remove_file denied: policy path"); return r; }
 if (unlink(cpath) == 0) { r.ok = 1; r.err = oo_str_lit(""); }
 return r;
 }
@@ -161,6 +167,8 @@ OoResV r={0, oo_str_lit("fs_rmdir failed")};
 const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
 r.err = oo_str_lit("fs_rmdir denied: path not under OODA_FS_WRITEDIR"); return r; }
+if (policy_locked(cpath)) {
+r.err = oo_str_lit("fs_rmdir denied: policy path"); return r; }
 if (rmdir(cpath) == 0) { r.ok = 1; r.err = oo_str_lit(""); }
 return r;
 }
@@ -172,6 +180,8 @@ OoResV r={0, oo_str_lit("fs_mkdir failed")};
 const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
 r.err = oo_str_lit("fs_mkdir denied: path not under OODA_FS_WRITEDIR"); return r; }
+if (policy_locked(cpath)) {
+r.err = oo_str_lit("fs_mkdir denied: policy path"); return r; }
 if (mkdir(cpath, 0777) == 0) { r.ok = 1; r.err = oo_str_lit(""); }
 return r;
 }
@@ -183,6 +193,8 @@ OoResV bad={0,oo_str_lit("fs_hardlink failed")}; return bad;
 }
 OoResV r={0,oo_str_lit("fs_hardlink failed")}; const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cnew, dir) || !path_under_writedir(cold, dir)) { r.err=oo_str_lit("fs_hardlink denied"); return r; }
+if (policy_locked(cold) || policy_locked(cnew)) {
+r.err = oo_str_lit("fs_hardlink denied: policy path"); return r; }
 if (link(cold, cnew) == 0) { r.ok = 1; r.err = oo_str_lit(""); }
 return r;
 }
@@ -194,6 +206,8 @@ OoResV bad={0,oo_str_lit("fs_symlink failed")}; return bad;
 }
 OoResV r={0,oo_str_lit("fs_symlink failed")}; const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(clink, dir) || !path_under_writedir(ctarget, dir)) { r.err=oo_str_lit("fs_symlink denied"); return r; }
+if (policy_locked(ctarget) || policy_locked(clink)) {
+r.err = oo_str_lit("fs_symlink denied: policy path"); return r; }
 if (symlink(ctarget, clink) == 0) { r.ok = 1; r.err = oo_str_lit(""); }
 return r;
 }
