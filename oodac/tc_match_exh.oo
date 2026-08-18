@@ -1,13 +1,128 @@
 // # Exhaustive match and try postfix
 //
-// Logline: Refuse Option or Result match that drops an arm, and accept call?.
+// Logline: Refuse Option, Result, or user-sum match that drops a variant, and accept call?.
 //
-// Setup: toks are the program. tc_err_at prints and exits. Some/None and Ok/Err are the floor.
+// Setup: toks are the program. tc_err_at prints and exits. User-sum T/E is the `|` set.
 //
 // Beats:
-//   1. On KW_MATCH, collect arm names until the match RBRACE.
-//   2. If Some or None appears, both must appear. If Ok or Err appears, both must appear.
+//   1. On KW_MATCH, collect pattern names (before `=>`) until the match RBRACE.
+//   2. Option/Result floor; user sum uses the annotated let or param type.
 //   3. QUESTION after RPAREN is the try postfix. A stray QUESTION fails closed.
+
+fn tc_sum_ctors(toks: List[String], n: Int, tname: String) -> String {
+    let mut i: Int = 0;
+    while i + 3 < n {
+        if field_at(list_get(toks, i), 0) == "KW_TYPE" {
+            if field_at(list_get(toks, i + 1), 0) == "IDENT" {
+                if field_at(list_get(toks, i + 1), 3) == tname {
+                    if field_at(list_get(toks, i + 2), 0) == "EQ" {
+                        if field_at(list_get(toks, i + 3), 3) == "struct" {
+                            return "";
+                        }
+                        let mut p: Int = i + 3;
+                        let mut out: String = "\t";
+                        let mut pipes: Int = 0;
+                        let mut pd: Int = 0;
+                        while p < n {
+                            let pk: String = field_at(list_get(toks, p), 0);
+                            if pk == "SEMI" {
+                                break;
+                            }
+                            if pk == "LBRACE" {
+                                return "";
+                            }
+                            if pk == "LPAREN" {
+                                pd = pd + 1;
+                            }
+                            if pk == "RPAREN" {
+                                if pd > 0 {
+                                    pd = pd - 1;
+                                }
+                            }
+                            if pk == "PIPE" && pd == 0 {
+                                pipes = pipes + 1;
+                            }
+                            if pk == "IDENT" && pd == 0 {
+                                out = out + field_at(list_get(toks, p), 3) + "\t";
+                            }
+                            p = p + 1;
+                        }
+                        if pipes > 0 {
+                            return out;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn tc_sum_exhaust(toks: List[String], mi: Int, n: Int, lbrace: Int, ann: String) {
+    let ctors: String = tc_sum_ctors(toks, n, ann);
+    if ctors == "" {
+        return;
+    }
+    let mut p: Int = lbrace;
+    let mut depth: Int = 0;
+    let mut pd: Int = 0;
+    let mut in_pat: Bool = true;
+    let mut arms: String = "\t";
+    while p < n {
+        let pk: String = field_at(list_get(toks, p), 0);
+        if pk == "LBRACE" {
+            depth = depth + 1;
+        }
+        if pk == "RBRACE" {
+            depth = depth - 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        if pk == "LPAREN" {
+            pd = pd + 1;
+        }
+        if pk == "RPAREN" {
+            if pd > 0 {
+                pd = pd - 1;
+            }
+        }
+        if pk == "FATARROW" && depth == 1 {
+            in_pat = false;
+        }
+        if pk == "COMMA" && depth == 1 && pd == 0 {
+            in_pat = true;
+        }
+        if pk == "IDENT" && depth == 1 && in_pat && pd == 0 {
+            let nm: String = field_at(list_get(toks, p), 3);
+            if nm == "_" {
+                return;
+            }
+            if ctors.contains("\t" + nm + "\t") {
+                arms = arms + nm + "\t";
+            }
+        }
+        p = p + 1;
+    }
+    let mut ci: Int = 1;
+    let cl: Int = chars_len(ctors);
+    let mut cur: String = "";
+    while ci < cl {
+        let ch: String = char_at(ctors, ci);
+        if ch == "\t" {
+            if cur != "" {
+                if !arms.contains("\t" + cur + "\t") {
+                    tc_err_at(toks, mi, "non-exhaustive match: " + ann + " needs " + cur);
+                }
+            }
+            cur = "";
+        } else {
+            cur = cur + ch;
+        }
+        ci = ci + 1;
+    }
+}
 
 pub fn typecheck_match_exhaustive(toks: List[String]) {
     let n: Int = list_len(toks);
@@ -40,6 +155,24 @@ pub fn typecheck_match_exhaustive(toks: List[String]) {
                             }
                         }
                         t = t + 1;
+                    }
+                    if ann == "" {
+                        t = 0;
+                        while t + 2 < n {
+                            if field_at(list_get(toks, t), 0) == "IDENT" {
+                                if field_at(list_get(toks, t), 3) == scn {
+                                    if t > 0 {
+                                        let pk: String = field_at(list_get(toks, t - 1), 0);
+                                        if pk == "LPAREN" || pk == "COMMA" || pk == "KW_MUT" {
+                                            if field_at(list_get(toks, t + 1), 0) == "COLON" {
+                                                ann = field_at(list_get(toks, t + 2), 3);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            t = t + 1;
+                        }
                     }
                 }
             }
@@ -87,25 +220,18 @@ pub fn typecheck_match_exhaustive(toks: List[String]) {
                     }
                     p = p + 1;
                 }
-                if ann == "Option" {
+                if ann == "Option" || (ann == "" && (saw_some || saw_none)) {
                     if !(saw_some && saw_none) {
                         tc_err_at(toks, i, "non-exhaustive match: Option needs Some and None");
                     }
                 }
-                if ann == "Result" {
+                if ann == "Result" || (ann == "" && (saw_ok || saw_err)) {
                     if !(saw_ok && saw_err) {
                         tc_err_at(toks, i, "non-exhaustive match: Result needs Ok and Err");
                     }
                 }
-                if saw_some || saw_none {
-                    if !(saw_some && saw_none) {
-                        tc_err_at(toks, i, "non-exhaustive match: Option needs Some and None");
-                    }
-                }
-                if saw_ok || saw_err {
-                    if !(saw_ok && saw_err) {
-                        tc_err_at(toks, i, "non-exhaustive match: Result needs Ok and Err");
-                    }
+                if ann != "" && ann != "Option" && ann != "Result" {
+                    tc_sum_exhaust(toks, i, n, j, ann);
                 }
             }
         }
