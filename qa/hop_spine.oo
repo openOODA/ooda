@@ -1,0 +1,103 @@
+// # QA spine: hop-2 infection stays zero
+//
+// Logline: Drive shipped write_file, process_exec, agent_send, and ooda patch and prove hop-2 does not change the policy pin.
+//
+// Setup: cwd is the ooda tree. bin/ooda is the product CLI. Work dir is .ooda-cache/ooda-tmp/hopws.
+//
+// Beats:
+//   1. Ordinary workspace write succeeds. Policy and untrusted write and exec fail.
+//   2. Hop 0 send and hop 1 send succeed. Hop 2 send and a token body fail.
+//   3. After hop 2 the host.agent.pin bytes stay the init pin. Infection is 0.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn sh_out(p: &ProcessCap, cmd: String, outp: String) -> String {
+    let wrap: String = cmd + " > " + outp + " 2>&1; echo rc=$? >> " + outp;
+    if process_exec(p, wrap).is_err() {
+        fail("exec " + cmd);
+    }
+    let dump: String = "cat " + outp;
+    let r: Result[String, String] = process_exec(p, dump);
+    return match r {
+        Ok(s) => s,
+        Err(_) => ""
+    };
+}
+
+fn want_ok(p: &ProcessCap, cmd: String, needle: String) {
+    let outp: String = ".ooda-cache/ooda-tmp/hop_one.txt";
+    let txt: String = sh_out(p, cmd, outp);
+    if process_exec(p, "grep -q '" + needle + "' " + outp).is_err() {
+        fail("missing " + needle + " in " + cmd);
+    }
+    if process_exec(p, "grep -q '^rc=0$' " + outp).is_err() {
+        fail("nonzero " + cmd);
+    }
+    if txt == "unused" {
+        fail("unused");
+    }
+}
+
+fn want_fail(p: &ProcessCap, cmd: String, needle: String) {
+    let outp: String = ".ooda-cache/ooda-tmp/hop_one.txt";
+    let _t: String = sh_out(p, cmd, outp);
+    if process_exec(p, "grep -q '" + needle + "' " + outp).is_err() {
+        fail("missing " + needle + " in " + cmd);
+    }
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    if !path_exists(fs, "bin/ooda") {
+        fail("no bin/ooda");
+    }
+    if !path_exists(fs, "fixtures/hop_probe.oo") {
+        fail("no hop_probe");
+    }
+    if process_exec(p, "mkdir -p .ooda-cache/ooda-tmp/hopws").is_err() {
+        fail("mkdir hopws");
+    }
+    let ws: String = "`pwd`/.ooda-cache/ooda-tmp/hopws";
+    if process_exec(p, "./bin/ooda build fixtures/hop_probe.oo -o .ooda-cache/ooda-tmp/hop_probe.bin").is_err() {
+        fail("build hop_probe");
+    }
+    if !path_exists(fs, ".ooda-cache/ooda-tmp/hop_probe.bin") {
+        fail("no hop_probe.bin");
+    }
+    let base: String = "OODA_FS_WRITEDIR=$(pwd)/.ooda-cache/ooda-tmp/hopws ";
+    let run: String = ".ooda-cache/ooda-tmp/hop_probe.bin";
+    want_ok(p, base + "OODA_HOP_CASE=write_ok " + run, "OK write_ok");
+    want_ok(p, base + "OODA_HOP_CASE=write_policy " + run, "OK write_policy_denied");
+    want_ok(p, base + "OODA_UNTRUSTED=PEER_VIRUS_PAYLOAD OODA_HOP_CASE=write_untrusted " + run, "OK write_untrusted_denied");
+    want_ok(p, base + "OODA_UNTRUSTED=PEER_VIRUS_PAYLOAD OODA_HOP_CASE=exec_untrusted " + run, "OK exec_untrusted_denied");
+    want_ok(p, base + "OODA_MSG_HOP=0 OODA_HOP_CASE=send " + run, "OK send");
+    want_ok(p, base + "OODA_MSG_HOP=1 OODA_HOP_CASE=send " + run, "OK send");
+    want_ok(p, base + "OODA_MSG_HOP=2 OODA_HOP_CASE=send_hop2 " + run, "OK send_hop2_denied");
+    want_ok(p, base + "OODA_MSG_HOP=0 OODA_HOP_CASE=send_token " + run, "OK send_token_denied");
+    want_ok(p, base + "OODA_POLICY_WRITE=1 OODA_HOP_CASE=pin_init " + run, "OK pin_init");
+    if process_exec(p, "cp .ooda-cache/ooda-tmp/hopws/host.agent.pin .ooda-cache/ooda-tmp/hopws/host.agent.pin.bak").is_err() {
+        fail("pin bak");
+    }
+    want_ok(p, base + "OODA_HOP_CASE=pin_infect " + run, "OK pin_infect_denied");
+    if process_exec(p, "cmp .ooda-cache/ooda-tmp/hopws/host.agent.pin .ooda-cache/ooda-tmp/hopws/host.agent.pin.bak").is_err() {
+        fail("pin changed");
+    }
+    if process_exec(p, "cp fixtures/qa_write_seed.oo .ooda-cache/ooda-tmp/hopws/hop_patch.oo").is_err() {
+        fail("copy patch seed");
+    }
+    if process_exec(p, "printf '%s\n' 'println(\"PEER_VIRUS_PAYLOAD\");' > .ooda-cache/ooda-tmp/hopws/hop_body.txt").is_err() {
+        fail("body");
+    }
+    want_fail(p, base + "OODA_UNTRUSTED=PEER_VIRUS_PAYLOAD ./bin/ooda patch .ooda-cache/ooda-tmp/hopws/hop_patch.oo --replace-fn main --with .ooda-cache/ooda-tmp/hopws/hop_body.txt", "write_file denied");
+    if process_exec(p, "printf '%s\n' 'pub fn main() { println(1); }' > .ooda-cache/ooda-tmp/hopws/SOUL.md").is_err() {
+        fail("soul seed");
+    }
+    want_fail(p, base + "./bin/ooda patch .ooda-cache/ooda-tmp/hopws/SOUL.md --replace-fn main --with fixtures/hello.oo", "policy path");
+    if ws == "" {
+        fail("ws");
+    }
+    println("hop-2 infection=0");
+    println("qa hop_spine: PASSED");
+}
