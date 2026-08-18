@@ -291,6 +291,7 @@ int ffi_verify_signature(const char *path);
 void oo_wasm_write_empty_module(void);
 void oo_wasm_write_source_module(long long fn_count);
 void oo_wasm_note_fn(OoStr name);
+void oo_wasm_set_fn_print(OoStr s);
 OoResS oo_rlimit_set_mem_mb(long long cap, long long megabytes);
 OoResS oo_rlimit_set_nofile(long long cap, long long max_fds);
 OoResS oo_rlimit_set_cpu_sec(long long cap, long long seconds);

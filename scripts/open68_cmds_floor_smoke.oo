@@ -1,0 +1,98 @@
+// # OPEN-68 LLVM command floor
+//
+// Logline: A side LLVM-linked oodac runs tokens, outline, emit-c, emit-llvm, and check on hello twice with the same marks.
+//
+// Setup: cwd is ooda/. Proof ELF is .ooda-cache/ooda-tmp/oodac_llvm or oodac_stamp. Wipe g_* before check. Do not plant a listing.
+//
+// Beats:
+//   1. Pick the LLVM ELF. Refuse a product CLI, product oodac bytes, listing_fresh, ret i32 1, and llvm_emit_expr zeroinitializer.
+//   2. Drive tokens, outline, emit-c, emit-llvm, and check. Require KW_PUB, greet, C marks, define/@greet/@main, and ^OK.
+//   3. Drive the same five commands again and require the same marks and the same stdout.
+// residual: C emit plus gcc remains the product path.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn pick_elf(p: &ProcessCap) -> String {
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let mut elf = tmpd + "/oodac_llvm";
+    if process_exec(p, "test -x " + elf).is_err() {
+        elf = tmpd + "/oodac_stamp";
+    }
+    if process_exec(p, "test -x " + elf).is_err() { fail("no LLVM ELF"); }
+    if process_exec(p, "grep -a -q 'pure .oo product CLI' " + elf).is_ok() { fail("ELF is product CLI"); }
+    if process_exec(p, "grep -a -q 'oodac: usage:' " + elf).is_err() { fail("ELF missing oodac: usage:"); }
+    if process_exec(p, "test -x oodac/oodac && cmp -s " + elf + " oodac/oodac").is_ok() {
+        fail("ELF is product oodac");
+    }
+    return elf;
+}
+
+fn refuse_stubs(p: &ProcessCap) {
+    if process_exec(p, "grep -q llvm_emit_listing_fresh_stub oodac/llvm_emit_fn.oo").is_ok() {
+        fail("listing_fresh stub in llvm_emit_fn");
+    }
+    if process_exec(p, "grep -q 'ret i32 1' oodac/llvm_link_shim.oo").is_ok() {
+        fail("ret i32 1 shim");
+    }
+    if process_exec(p, "grep -q zeroinitializer oodac/llvm_emit_expr.oo").is_ok() {
+        fail("match-expr zeroinitializer stub in llvm_emit_expr");
+    }
+}
+
+fn wipe_g(p: &ProcessCap) {
+    if process_exec(p, "mkdir -p .ooda-cache/check").is_err() { fail("mkdir check"); }
+    if process_exec(p, "rm -f .ooda-cache/check/g_*").is_err() { fail("wipe g_"); }
+    if process_exec(p, "ls .ooda-cache/check/g_* >/dev/null 2>&1").is_ok() {
+        fail("g_ listing still present after wipe");
+    }
+}
+
+fn drive_once(p: &ProcessCap, elf: String, d: String, tag: String) {
+    let hello = "fixtures/hello.oo";
+    if process_exec(p, "timeout 60 " + elf + " tokens " + hello + " > " + d + "/tokens." + tag + " 2>" + d + "/tokens." + tag + ".err").is_err() {
+        fail("tokens " + tag);
+    }
+    if process_exec(p, "grep -q KW_PUB " + d + "/tokens." + tag).is_err() { fail("tokens KW_PUB " + tag); }
+    if process_exec(p, "timeout 60 " + elf + " outline " + hello + " > " + d + "/outline." + tag + " 2>" + d + "/outline." + tag + ".err").is_err() {
+        fail("outline " + tag);
+    }
+    if process_exec(p, "grep -q greet " + d + "/outline." + tag).is_err() { fail("outline greet " + tag); }
+    let _ec = process_exec(p, "timeout 60 " + elf + " emit-c " + hello + " > " + d + "/c." + tag + " 2>" + d + "/c." + tag + ".err");
+    if process_exec(p, "grep -qE '^ERR' " + d + "/c." + tag + " " + d + "/c." + tag + ".err").is_ok() { fail("emit-c ERR " + tag); }
+    if process_exec(p, "grep -qE 'int main|OoStr|chs_rt' " + d + "/c." + tag).is_err() { fail("emit-c body " + tag); }
+    if process_exec(p, "timeout 60 " + elf + " emit-llvm " + hello + " > " + d + "/ll." + tag + " 2>" + d + "/ll." + tag + ".err").is_err() {
+        fail("emit-llvm " + tag);
+    }
+    if process_exec(p, "grep -qE '^ERR' " + d + "/ll." + tag + " " + d + "/ll." + tag + ".err").is_ok() { fail("emit-llvm ERR " + tag); }
+    if process_exec(p, "grep -q 'define ' " + d + "/ll." + tag).is_err() { fail("emit-llvm define " + tag); }
+    if process_exec(p, "grep -q '@greet' " + d + "/ll." + tag).is_err() { fail("emit-llvm @greet " + tag); }
+    if process_exec(p, "grep -q '@main' " + d + "/ll." + tag).is_err() { fail("emit-llvm @main " + tag); }
+    wipe_g(p);
+    if process_exec(p, "timeout 60 " + elf + " check " + hello + " > " + d + "/check." + tag + " 2>" + d + "/check." + tag + ".err").is_err() {
+        fail("check " + tag);
+    }
+    if process_exec(p, "grep -qE '^OK' " + d + "/check." + tag).is_err() { fail("check OK " + tag); }
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let elf = pick_elf(p);
+    if !path_exists(fs, "fixtures/hello.oo") { fail("no hello"); }
+    refuse_stubs(p);
+    wipe_g(p);
+    let d = tmpd + "/open68_cmds";
+    if process_exec(p, "mkdir -p " + d).is_err() { fail("mkdir"); }
+    drive_once(p, elf, d, "a");
+    drive_once(p, elf, d, "b");
+    if process_exec(p, "cmp -s " + d + "/tokens.a " + d + "/tokens.b").is_err() { fail("tokens a/b differ"); }
+    if process_exec(p, "cmp -s " + d + "/outline.a " + d + "/outline.b").is_err() { fail("outline a/b differ"); }
+    if process_exec(p, "cmp -s " + d + "/c.a " + d + "/c.b").is_err() { fail("emit-c a/b differ"); }
+    if process_exec(p, "cmp -s " + d + "/ll.a " + d + "/ll.b").is_err() { fail("emit-llvm a/b differ"); }
+    if process_exec(p, "cmp -s " + d + "/check.a " + d + "/check.b").is_err() { fail("check a/b differ"); }
+    println("open68_cmds_floor_smoke: five commands twice");
+    println("open68_cmds_floor_smoke: C emit plus gcc remains product");
+    println("open68_cmds_floor_smoke: PASSED");
+}

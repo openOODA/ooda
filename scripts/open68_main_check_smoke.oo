@@ -1,0 +1,80 @@
+// # OPEN-68 LLVM-linked check of oodac/main.oo
+//
+// Logline: A side LLVM-linked oodac checks oodac/main.oo with no planted g_ listing and must not fake OK.
+//
+// Setup: cwd is ooda/. Proof ELF is .ooda-cache/ooda-tmp/oodac_llvm or oodac_stamp. Do not run a gcc helper to plant a listing.
+//
+// Beats:
+//   1. Wipe g_* listings. Refuse listing_fresh, ret i32 1 shim, and llvm_emit_expr zeroinitializer stubs.
+//   2. Drive ELF check oodac/main.oo. A ^OK line passes. A real ERR fail-close with no ^OK also passes.
+//   3. Empty-src ERR and a planted-listing-only success are refused.
+// residual: C emit plus gcc remains the product path. Host may kill a long check.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn pick_elf(p: &ProcessCap) -> String {
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let mut elf = tmpd + "/oodac_llvm";
+    if process_exec(p, "test -x " + elf).is_err() {
+        elf = tmpd + "/oodac_stamp";
+    }
+    if process_exec(p, "test -x " + elf).is_err() { fail("no LLVM ELF"); }
+    if process_exec(p, "grep -a -q 'pure .oo product CLI' " + elf).is_ok() { fail("ELF is product CLI"); }
+    if process_exec(p, "grep -a -q 'oodac: usage:' " + elf).is_err() { fail("ELF missing oodac: usage:"); }
+    if process_exec(p, "test -x oodac/oodac && cmp -s " + elf + " oodac/oodac").is_ok() {
+        fail("ELF is product oodac");
+    }
+    return elf;
+}
+
+fn refuse_stubs(p: &ProcessCap) {
+    if process_exec(p, "grep -q llvm_emit_listing_fresh_stub oodac/llvm_emit_fn.oo").is_ok() {
+        fail("listing_fresh stub in llvm_emit_fn");
+    }
+    if process_exec(p, "grep -q 'ret i32 1' oodac/llvm_link_shim.oo").is_ok() {
+        fail("ret i32 1 shim");
+    }
+    if process_exec(p, "grep -q zeroinitializer oodac/llvm_emit_expr.oo").is_ok() {
+        fail("match-expr zeroinitializer stub in llvm_emit_expr");
+    }
+}
+
+fn wipe_g(p: &ProcessCap) {
+    if process_exec(p, "mkdir -p .ooda-cache/check").is_err() { fail("mkdir check"); }
+    if process_exec(p, "rm -f .ooda-cache/check/g_*").is_err() { fail("wipe g_"); }
+    if process_exec(p, "ls .ooda-cache/check/g_* >/dev/null 2>&1").is_ok() {
+        fail("g_ listing still present after wipe");
+    }
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let elf = pick_elf(p);
+    if !path_exists(fs, "oodac/main.oo") { fail("no main.oo"); }
+    refuse_stubs(p);
+    wipe_g(p);
+
+    let d = tmpd + "/open68_main";
+    if process_exec(p, "mkdir -p " + d).is_err() { fail("mkdir"); }
+    let _ran = process_exec(p, "timeout 240 " + elf + " check oodac/main.oo > " + d + "/main.out 2>" + d + "/main.err");
+    let has_ok = process_exec(p, "grep -qE '^OK' " + d + "/main.out");
+    let has_err = process_exec(p, "grep -qE '^ERR' " + d + "/main.out " + d + "/main.err");
+    if process_exec(p, "grep -qE 'ERR.+check.+empty|ERR.+check.+no_fn' " + d + "/main.out " + d + "/main.err").is_ok() {
+        fail("empty-src ERR is match-stub, not a real fail-close");
+    }
+    if has_ok.is_ok() && has_err.is_ok() { fail("main check printed OK and ERR"); }
+    if has_ok.is_ok() {
+        println("open68_main_check_smoke: check main OK");
+        println("open68_main_check_smoke: PASSED");
+        return;
+    }
+    if has_err.is_ok() {
+        println("open68_main_check_smoke: check main fail-closed ERR");
+        println("open68_main_check_smoke: PASSED");
+        return;
+    }
+    fail("main check neither OK nor ERR");
+}

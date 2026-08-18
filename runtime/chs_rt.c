@@ -34,6 +34,7 @@
 #include "chs_rt_host.c"
 #include "chs_rt_rlimit.c"
 #include "chs_rt_wasm.c"
+#include "chs_rt_wasm_print.c"
 #include "chs_rt_landlock.c"
 #include "chs_rt_dns.c"
 #include "chs_rt_vision.c"

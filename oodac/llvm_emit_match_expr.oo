@@ -1,0 +1,256 @@
+// # Lower a Result match expression to LLVM
+//
+// Logline: Lowers `match name { Ok(x) => e1, Err(e) => e2 }` to a branch, payload binds, arm values, and a phi.
+//
+// Setup: toks sit on KW_MATCH. The scrutinee must be an IDENT. Arms are IDENT or STRING. No import of llvm_emit_expr (cycle).
+//
+// Beats:
+//   1. Load an IDENT Result scrutinee and parse Ok then Err arms.
+//   2. Alloca unique payload slots, extract ok, icmp, and branch.
+//   3. Store each payload, emit IDENT or STRING arms, and phi-merge.
+// residual: Call, block, or leftover arm tokens print ERR llvm_emit.
+import "token_fmt.oo";
+import "llvm_emit_env.oo";
+import "llvm_emit_ty.oo";
+import "llvm_emit_match_expr_arc.oo";
+
+fn llvm_mex_fail(msg: String) {
+    println("ERR\tllvm_emit\tmatch expr: " + msg);
+    process_exit(1);
+}
+
+fn llvm_mex_env5(src: List[String], base: Int) -> List[String] {
+    let mut e: List[String] = list_new();
+    e = list_push(e, list_get(src, base));
+    e = list_push(e, list_get(src, base + 1));
+    e = list_push(e, list_get(src, base + 2));
+    e = list_push(e, list_get(src, base + 3));
+    e = list_push(e, list_get(src, base + 4));
+    return e;
+}
+
+fn llvm_mex_parse_arm(toks: List[String], pos: Int, n: Int, ctor: String) -> List[String] {
+    let mut p = pos;
+    if p >= n || field_at(list_get(toks, p), 0) != "IDENT" || field_at(list_get(toks, p), 3) != ctor {
+        llvm_mex_fail("expected " + ctor + "(...) arm");
+    }
+    p = p + 1;
+    if p >= n || field_at(list_get(toks, p), 0) != "LPAREN" {
+        llvm_mex_fail("expected " + ctor + "(bind)");
+    }
+    p = p + 1;
+    let mut bind = "_" + ctor;
+    if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+        bind = field_at(list_get(toks, p), 3);
+        p = p + 1;
+    }
+    if bind == "_" { bind = "_" + ctor; }
+    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
+    if p >= n || field_at(list_get(toks, p), 0) != "FATARROW" {
+        llvm_mex_fail("expected => after " + ctor + "(...)");
+    }
+    p = p + 1;
+    let mut out: List[String] = list_new();
+    out = list_push(out, p.to_string());
+    out = list_push(out, bind);
+    return out;
+}
+
+fn llvm_mex_skip_arm_expr(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos;
+    let mut depth = 0;
+    while p < n {
+        let k: String = field_at(list_get(toks, p), 0);
+        if k == "LPAREN" || k == "LBRACE" || k == "LBRACKET" { depth = depth + 1; }
+        if k == "RPAREN" || k == "RBRACE" || k == "RBRACKET" { depth = depth - 1; }
+        if depth <= 0 {
+            if k == "COMMA" || k == "RBRACE" { return p; }
+            if k == "IDENT" {
+                let t: String = field_at(list_get(toks, p), 3);
+                if t == "Err" || t == "Ok" { return p; }
+            }
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+fn llvm_mex_closed(toks: List[String], pos: Int, n: Int) {
+    if pos >= n { llvm_mex_fail("arm not closed"); }
+    let k: String = field_at(list_get(toks, pos), 0);
+    if k == "COMMA" || k == "RBRACE" { return; }
+    if k == "IDENT" {
+        let t: String = field_at(list_get(toks, pos), 3);
+        if t == "Ok" || t == "Err" { return; }
+    }
+    llvm_mex_fail("arm residual");
+}
+
+fn llvm_mex_out(val: String, ty: String, p: Int, env: List[String]) -> List[String] {
+    let mut out: List[String] = list_new();
+    out = list_push(out, val);
+    out = list_push(out, ty);
+    out = list_push(out, p.to_string());
+    out = list_push(out, list_get(env, 0));
+    out = list_push(out, list_get(env, 1));
+    out = list_push(out, list_get(env, 2));
+    out = list_push(out, list_get(env, 3));
+    out = list_push(out, list_get(env, 4));
+    return out;
+}
+
+fn llvm_mex_arm_val(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    let mut cur_env: List[String] = env;
+    if pos >= n { llvm_mex_fail("empty arm"); }
+    let k: String = field_at(list_get(toks, pos), 0);
+    let txt: String = field_at(list_get(toks, pos), 3);
+    if k == "STRING" {
+        let str_res: List[String] = llvm_add_str_lit(txt, cur_env);
+        let sconst: String = list_get(str_res, 0);
+        let slen: String = list_get(str_res, 1);
+        cur_env = llvm_mex_env5(str_res, 2);
+        let reg_res: List[String] = llvm_gen_reg(cur_env);
+        let treg: String = list_get(reg_res, 0);
+        cur_env = llvm_mex_env5(reg_res, 1);
+        println("  " + treg + " = call %OoStr @oo_str_lit(i8* getelementptr inbounds ([" + slen + " x i8], [" + slen + " x i8]* " + sconst + ", i64 0, i64 0))");
+        llvm_mex_closed(toks, pos + 1, n);
+        return llvm_mex_out(treg, "%OoStr", pos + 1, cur_env);
+    }
+    if k != "IDENT" {
+        llvm_mex_fail("arm residual (need IDENT or STRING)");
+    }
+    let vty: String = llvm_env_get_var_ty(cur_env, txt);
+    if vty == "" {
+        llvm_mex_fail("arm ident unbound");
+    }
+    let lty: String = llvm_ty_map(vty);
+    if lty == "void" || lty == "" {
+        llvm_mex_fail("arm type residual");
+    }
+    let reg_res: List[String] = llvm_gen_reg(cur_env);
+    let treg: String = list_get(reg_res, 0);
+    cur_env = llvm_mex_env5(reg_res, 1);
+    let eslot: String = llvm_env_slot(cur_env, txt);
+    println("  " + treg + " = load " + lty + ", " + lty + "* %" + eslot + ".slot, align 8");
+    llvm_mex_closed(toks, pos + 1, n);
+    return llvm_mex_out(treg, lty, pos + 1, cur_env);
+}
+
+pub fn llvm_emit_match_expr(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    let mut p = pos + 1;
+    let mut cur_env: List[String] = env;
+    if p >= n || field_at(list_get(toks, p), 0) != "IDENT" {
+        llvm_mex_fail("scrutinee residual (need IDENT)");
+    }
+    let sname: String = field_at(list_get(toks, p), 3);
+    p = p + 1;
+    if p < n && field_at(list_get(toks, p), 0) == "LPAREN" { llvm_mex_fail("scrutinee residual (need IDENT)"); }
+    let mut raw_ty: String = llvm_env_get_var_ty(cur_env, "__rt__" + sname);
+    if raw_ty == "" {
+        raw_ty = llvm_env_get_var_ty(cur_env, sname);
+    }
+    if !llvm_mex_is_str_result(raw_ty) {
+        llvm_mex_fail("need Result[String]");
+    }
+    let rty: String = llvm_ty_map(raw_ty);
+    if rty != "%OoResS" && rty != "%OoResV" {
+        llvm_mex_fail("scrutinee residual (need Result)");
+    }
+    let ld: List[String] = llvm_gen_reg(cur_env);
+    let scrut: String = list_get(ld, 0);
+    cur_env = llvm_mex_env5(ld, 1);
+    let sslot: String = llvm_env_slot(cur_env, sname);
+    println("  " + scrut + " = load " + rty + ", " + rty + "* %" + sslot + ".slot, align 8");
+    if p >= n || field_at(list_get(toks, p), 0) != "LBRACE" {
+        llvm_mex_fail("expected { after scrutinee");
+    }
+    p = p + 1;
+    let ok_arm: List[String] = llvm_mex_parse_arm(toks, p, n, "Ok");
+    let p_ok: Int = parse_int(list_get(ok_arm, 0));
+    let ok_bind: String = list_get(ok_arm, 1);
+    let p_err_hd: Int = llvm_mex_skip_arm_expr(toks, p_ok, n);
+    if p_err_hd < n && field_at(list_get(toks, p_err_hd), 0) == "COMMA" { p = p_err_hd + 1; } else { p = p_err_hd; }
+    let err_arm: List[String] = llvm_mex_parse_arm(toks, p, n, "Err");
+    let p_err: Int = parse_int(list_get(err_arm, 0));
+    let err_bind: String = list_get(err_arm, 1);
+
+    let ok_lr: List[String] = llvm_gen_label("bb_mexpr_ok", cur_env);
+    let lbl_ok: String = list_get(ok_lr, 0);
+    cur_env = llvm_mex_env5(ok_lr, 1);
+    let err_lr: List[String] = llvm_gen_label("bb_mexpr_err", cur_env);
+    let lbl_err: String = list_get(err_lr, 0);
+    cur_env = llvm_mex_env5(err_lr, 1);
+    let end_lr: List[String] = llvm_gen_label("bb_mexpr_end", cur_env);
+    let lbl_end: String = list_get(end_lr, 0);
+    cur_env = llvm_mex_env5(end_lr, 1);
+
+    let rc: Int = parse_int(list_get(cur_env, 0));
+    let ok_slot: String = ok_bind + "." + rc.to_string();
+    let err_slot: String = err_bind + "." + (rc + 1).to_string();
+    let mut bumped: List[String] = list_new();
+    bumped = list_push(bumped, (rc + 2).to_string());
+    bumped = list_push(bumped, list_get(cur_env, 1));
+    bumped = list_push(bumped, list_get(cur_env, 2));
+    bumped = list_push(bumped, list_get(cur_env, 3));
+    bumped = list_push(bumped, list_get(cur_env, 4));
+    cur_env = llvm_env_add_var(bumped, "__slot__" + ok_bind, ok_slot);
+    cur_env = llvm_env_add_var(cur_env, ok_bind, "%OoStr");
+    cur_env = llvm_env_add_var(cur_env, "__slot__" + err_bind, err_slot);
+    cur_env = llvm_env_add_var(cur_env, err_bind, "%OoStr");
+    println("  %" + ok_slot + ".slot = alloca %OoStr, align 8");
+    println("  %" + err_slot + ".slot = alloca %OoStr, align 8");
+    llvm_mex_zero_slots(ok_slot, err_slot);
+
+    let bit_r: List[String] = llvm_gen_reg(cur_env);
+    let ok_bit: String = list_get(bit_r, 0);
+    cur_env = llvm_mex_env5(bit_r, 1);
+    let i1_r: List[String] = llvm_gen_reg(cur_env);
+    let ok_i1: String = list_get(i1_r, 0);
+    cur_env = llvm_mex_env5(i1_r, 1);
+    println("  " + ok_bit + " = extractvalue " + rty + " " + scrut + ", 0");
+    println("  " + ok_i1 + " = icmp ne i32 " + ok_bit + ", 0");
+    println("  br i1 " + ok_i1 + ", label %" + lbl_ok + ", label %" + lbl_err);
+
+    println(lbl_ok + ":");
+    let pay_ok_r: List[String] = llvm_gen_reg(cur_env);
+    let pay_ok: String = list_get(pay_ok_r, 0);
+    cur_env = llvm_mex_env5(pay_ok_r, 1);
+    println("  " + pay_ok + " = extractvalue " + rty + " " + scrut + ", 1");
+    println("  store %OoStr " + pay_ok + ", %OoStr* %" + llvm_env_slot(cur_env, ok_bind) + ".slot, align 8");
+    let ok_ex: List[String] = llvm_mex_arm_val(toks, p_ok, n, cur_env);
+    let ok_val: String = list_get(ok_ex, 0);
+    let ok_ty: String = list_get(ok_ex, 1);
+    cur_env = llvm_mex_env5(ok_ex, 3);
+    llvm_mex_move_if_bind(toks, p_ok, ok_bind, cur_env);
+    println("  br label %" + lbl_end);
+
+    println(lbl_err + ":");
+    let pay_err_r: List[String] = llvm_gen_reg(cur_env);
+    let pay_err: String = list_get(pay_err_r, 0);
+    cur_env = llvm_mex_env5(pay_err_r, 1);
+    println("  " + pay_err + " = extractvalue " + rty + " " + scrut + ", 1");
+    println("  store %OoStr " + pay_err + ", %OoStr* %" + llvm_env_slot(cur_env, err_bind) + ".slot, align 8");
+    let err_ex: List[String] = llvm_mex_arm_val(toks, p_err, n, cur_env);
+    let err_val: String = list_get(err_ex, 0);
+    let err_ty: String = list_get(err_ex, 1);
+    p = parse_int(list_get(err_ex, 2));
+    cur_env = llvm_mex_env5(err_ex, 3);
+    llvm_mex_move_if_bind(toks, p_err, err_bind, cur_env);
+    println("  br label %" + lbl_end);
+
+    if p < n && field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
+    if p < n && field_at(list_get(toks, p), 0) == "RBRACE" { p = p + 1; }
+
+    if ok_ty == "" || ok_ty == "void" || err_ty == "" || err_ty == "void" {
+        llvm_mex_fail("arm type residual");
+    }
+    if err_ty != ok_ty {
+        llvm_mex_fail("arm types differ");
+    }
+    println(lbl_end + ":");
+    let phi_r: List[String] = llvm_gen_reg(cur_env);
+    let phi: String = list_get(phi_r, 0);
+    cur_env = llvm_mex_env5(phi_r, 1);
+    println("  " + phi + " = phi " + ok_ty + " [ " + ok_val + ", %" + lbl_ok + " ], [ " + err_val + ", %" + lbl_err + " ]");
+    return llvm_mex_out(phi, ok_ty, p, cur_env);
+}

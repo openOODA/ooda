@@ -1,0 +1,85 @@
+// # OPEN-68 cold hello check lock
+//
+// Logline: A side LLVM-linked oodac checks fixtures/hello.oo twice with no planted g_ listing and refuses OK after a mutate.
+//
+// Setup: cwd is ooda/. Proof ELF is .ooda-cache/ooda-tmp/oodac_llvm or oodac_stamp. Do not run a gcc helper to plant a listing.
+//
+// Beats:
+//   1. Wipe .ooda-cache/check/g_* and refuse listing_fresh, ret i32 1 shim, and llvm_emit_expr zeroinitializer stubs.
+//   2. Drive the LLVM ELF check fixtures/hello.oo twice and require a line matching ^OK.
+//   3. Append invalid source, require no ^OK, and restore hello.
+// residual: C emit plus gcc remains the product path.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn pick_elf(p: &ProcessCap) -> String {
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let mut elf = tmpd + "/oodac_llvm";
+    if process_exec(p, "test -x " + elf).is_err() {
+        elf = tmpd + "/oodac_stamp";
+    }
+    if process_exec(p, "test -x " + elf).is_err() { fail("no LLVM ELF oodac_llvm or oodac_stamp"); }
+    if process_exec(p, "grep -a -q 'pure .oo product CLI' " + elf).is_ok() { fail("ELF is product CLI"); }
+    if process_exec(p, "grep -a -q 'oodac: usage:' " + elf).is_err() { fail("ELF missing oodac: usage:"); }
+    if process_exec(p, "test -x oodac/oodac && cmp -s " + elf + " oodac/oodac").is_ok() {
+        fail("ELF is product oodac");
+    }
+    return elf;
+}
+
+fn refuse_stubs(p: &ProcessCap) {
+    if process_exec(p, "grep -q llvm_emit_listing_fresh_stub oodac/llvm_emit_fn.oo").is_ok() {
+        fail("listing_fresh stub in llvm_emit_fn");
+    }
+    if process_exec(p, "grep -q 'ret i32 1' oodac/llvm_link_shim.oo").is_ok() {
+        fail("ret i32 1 shim");
+    }
+    if process_exec(p, "grep -q zeroinitializer oodac/llvm_emit_expr.oo").is_ok() {
+        fail("match-expr zeroinitializer stub in llvm_emit_expr");
+    }
+}
+
+fn wipe_g(p: &ProcessCap) {
+    if process_exec(p, "mkdir -p .ooda-cache/check").is_err() { fail("mkdir check"); }
+    if process_exec(p, "rm -f .ooda-cache/check/g_*").is_err() { fail("wipe g_"); }
+    if process_exec(p, "ls .ooda-cache/check/g_* >/dev/null 2>&1").is_ok() {
+        fail("g_ listing still present after wipe");
+    }
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let elf = pick_elf(p);
+    if !path_exists(fs, "fixtures/hello.oo") { fail("no hello"); }
+    refuse_stubs(p);
+    wipe_g(p);
+
+    let d = tmpd + "/open68_cold";
+    if process_exec(p, "mkdir -p " + d).is_err() { fail("mkdir"); }
+    if process_exec(p, "timeout 60 " + elf + " check fixtures/hello.oo > " + d + "/c1.out 2>" + d + "/c1.err").is_err() {
+        fail("check hello 1");
+    }
+    if process_exec(p, "grep -qE '^OK' " + d + "/c1.out").is_err() { fail("hello 1 not OK"); }
+    if process_exec(p, "timeout 60 " + elf + " check fixtures/hello.oo > " + d + "/c2.out 2>" + d + "/c2.err").is_err() {
+        fail("check hello 2");
+    }
+    if process_exec(p, "grep -qE '^OK' " + d + "/c2.out").is_err() { fail("hello 2 not OK"); }
+
+    let bak = d + "/hello.bak";
+    if process_exec(p, "cp fixtures/hello.oo " + bak).is_err() { fail("bak"); }
+    let mut_cmd = "printf '\\nfn bad() { let x: Int = \"no\"; }\\n' >> fixtures/hello.oo"
+        + " && timeout 60 " + elf + " check fixtures/hello.oo > " + d + "/bad.out 2>" + d + "/bad.err"
+        + "; rc=$?; cp " + bak + " fixtures/hello.oo || exit 2; exit $rc";
+    let _stale = process_exec(p, mut_cmd);
+    if process_exec(p, "cmp -s " + bak + " fixtures/hello.oo").is_err() { fail("restore hello"); }
+    if process_exec(p, "grep -qE '^OK' " + d + "/bad.out " + d + "/bad.err").is_ok() {
+        fail("changed hello still OK");
+    }
+
+    println("open68_cold_hello_smoke: cold check hello OK twice");
+    println("open68_cold_hello_smoke: C emit plus gcc remains product");
+    println("open68_cold_hello_smoke: PASSED");
+}

@@ -1,61 +1,222 @@
 // # Emit Linux x86_64 AT&T assembly
 //
-// Logline: Walks tokens and writes a freestanding x86_64 .s whose _start/main prints each println string via write(1).
+// Logline: Folds the hello.oo greet shape or harvests println literals, N-string const concat, same-fn binds, bound mixed concat, and const-int prints, then writes freestanding x86_64 .s.
 //
-// Setup: tokenize_lines and check_secret_println_sinks exist. Product floor is println("...") plus main.
+// Setup: tokenize_lines, check_secret_println_sinks, x86_fold_hello, and x86_emit_linux64 exist.
 //
 // Beats:
-//   1. Tokenize, refuse secret sinks, and require a main plus at least one println string.
-//   2. Write .rodata bytes for each string plus a newline.
-//   3. Write _start/main that issues SYS_write then SYS_exit.
+//   1. Tokenize and refuse secret sinks.
+//   2. If x86_fold_hello matches, emit that one string.
+//   3. Else harvest println literals, STRING+STRING+..., same-fn binds, STRING+bound-IDENT, const INT, and unary-minus INT.
+//   4. Empty harvest with leftover println(ident) prints ERR x86_emit.
 //
-// residual: concat, calls, and AArch64 are not lowered. Use as+ld, not emit-c.
+// residual: const-int print is decimal text; int PLUS is leftover, not digit-strcat. ALU, greet calls, SysV, and AArch64 stay later. Use as+ld, not emit-c.
 
 import "token_fmt.oo";
 import "c_emit_secret_check.oo";
+import "x86_emit_fold.oo";
+import "x86_emit_sys.oo";
 
-fn x86_ascii_esc(s: String) -> String {
-    let n = chars_len(s);
-    let mut o = "";
+fn x86_bind_idx(names: List[String], name: String) -> Int {
+    let n = list_len(names);
+    let mut found = -1;
     let mut i = 0;
     while i < n {
-        let c: String = char_at(s, i);
-        if c == "\\" {
-            o = o + "\\\\";
-        } else if c == "\"" {
-            o = o + "\\\"";
-        } else if c == "\n" {
-            o = o + "\\n";
-        } else if c == "\t" {
-            o = o + "\\t";
-        } else {
-            o = o + c;
+        if list_get(names, i) == name {
+            found = i;
         }
         i = i + 1;
     }
+    return found;
+}
+
+fn x86_tok_k(toks: List[String], i: Int) -> String {
+    return field_at(list_get(toks, i), 0);
+}
+
+fn x86_tok_t(toks: List[String], i: Int) -> String {
+    return field_at(list_get(toks, i), 3);
+}
+
+fn x86_str_after(toks: List[String], n: Int, j: Int) -> Int {
+    let mut p = j + 1;
+    while p + 1 < n {
+        if x86_tok_k(toks, p) != "PLUS" {
+            return p;
+        }
+        if x86_tok_k(toks, p + 1) != "STRING" {
+            return p;
+        }
+        p = p + 2;
+    }
+    return p;
+}
+
+fn x86_str_fold(toks: List[String], n: Int, j: Int) -> String {
+    let mut o: String = x86_tok_t(toks, j);
+    let mut p = j + 1;
+    while p + 1 < n {
+        if x86_tok_k(toks, p) != "PLUS" {
+            return o;
+        }
+        if x86_tok_k(toks, p + 1) != "STRING" {
+            return o;
+        }
+        o = o + x86_tok_t(toks, p + 1);
+        p = p + 2;
+    }
     return o;
+}
+
+fn x86_mix_try(toks: List[String], n: Int, j: Int, names: List[String], vals: List[String]) -> List[String] {
+    let empty: List[String] = list_new();
+    let mut out = "";
+    let mut p = j;
+    let mut any = false;
+    while p < n {
+        let k: String = x86_tok_k(toks, p);
+        if k == "STRING" {
+            out = out + x86_tok_t(toks, p);
+            any = true;
+            p = p + 1;
+        } else if k == "IDENT" {
+            if p + 1 < n && x86_tok_k(toks, p + 1) == "LPAREN" {
+                return empty;
+            }
+            let idx = x86_bind_idx(names, x86_tok_t(toks, p));
+            if idx < 0 {
+                return empty;
+            }
+            out = out + list_get(vals, idx);
+            any = true;
+            p = p + 1;
+        } else {
+            return empty;
+        }
+        if p < n && x86_tok_k(toks, p) == "PLUS" {
+            p = p + 1;
+        } else if p < n && x86_tok_k(toks, p) == "RPAREN" {
+            if any {
+                let mut one: List[String] = list_new();
+                one = list_push(one, out);
+                return one;
+            }
+            return empty;
+        } else {
+            return empty;
+        }
+    }
+    return empty;
 }
 
 fn x86_collect_prints(toks: List[String]) -> List[String] {
     let n = list_len(toks);
     let mut msgs: List[String] = list_new();
+    let mut bind_names: List[String] = list_new();
+    let mut bind_vals: List[String] = list_new();
+    let mut int_names: List[String] = list_new();
+    let mut int_vals: List[String] = list_new();
     let mut saw_main = false;
+    let mut leftover_unresolved = false;
     let mut i = 0;
     while i < n {
-        let k: String = field_at(list_get(toks, i), 0);
-        let t: String = field_at(list_get(toks, i), 3);
-        if k == "IDENT" && t == "main" {
-            if i > 0 && field_at(list_get(toks, i - 1), 0) == "KW_FN" {
-                saw_main = true;
+        let k: String = x86_tok_k(toks, i);
+        let t: String = x86_tok_t(toks, i);
+        if k == "KW_FN" {
+            if i + 1 < n && x86_tok_k(toks, i + 1) == "IDENT" {
+                bind_names = list_new();
+                bind_vals = list_new();
+                int_names = list_new();
+                int_vals = list_new();
+                if x86_tok_t(toks, i + 1) == "main" {
+                    saw_main = true;
+                }
+            }
+        }
+        if k == "KW_LET" && i + 3 < n {
+            if x86_tok_k(toks, i + 1) == "IDENT" {
+                if x86_tok_k(toks, i + 2) == "EQ" {
+                    if x86_tok_k(toks, i + 3) == "STRING" {
+                        let after = x86_str_after(toks, n, i + 3);
+                        let mut mixed = false;
+                        if after < n {
+                            if x86_tok_k(toks, after) == "PLUS" {
+                                mixed = true;
+                            }
+                        }
+                        if !mixed {
+                            bind_names = list_push(bind_names, x86_tok_t(toks, i + 1));
+                            bind_vals = list_push(bind_vals, x86_str_fold(toks, n, i + 3));
+                        }
+                    } else if x86_tok_k(toks, i + 3) == "INT" {
+                        let mut plus = false;
+                        if i + 4 < n {
+                            if x86_tok_k(toks, i + 4) == "PLUS" {
+                                plus = true;
+                            }
+                        }
+                        if !plus {
+                            int_names = list_push(int_names, x86_tok_t(toks, i + 1));
+                            int_vals = list_push(int_vals, x86_tok_t(toks, i + 3));
+                        }
+                    } else if x86_tok_k(toks, i + 3) == "MINUS" {
+                        if i + 4 < n && x86_tok_k(toks, i + 4) == "INT" {
+                            let mut plus = false;
+                            if i + 5 < n {
+                                if x86_tok_k(toks, i + 5) == "PLUS" {
+                                    plus = true;
+                                }
+                            }
+                            if !plus {
+                                int_names = list_push(int_names, x86_tok_t(toks, i + 1));
+                                int_vals = list_push(int_vals, "-" + x86_tok_t(toks, i + 4));
+                            }
+                        }
+                    }
+                }
             }
         }
         if k == "IDENT" && t == "println" {
             let mut j = i + 1;
-            if j < n && field_at(list_get(toks, j), 0) == "LPAREN" {
+            if j < n && x86_tok_k(toks, j) == "LPAREN" {
                 j = j + 1;
             }
-            if j < n && field_at(list_get(toks, j), 0) == "STRING" {
-                msgs = list_push(msgs, field_at(list_get(toks, j), 3));
+            if j < n && x86_tok_k(toks, j) == "INT" {
+                if j + 1 < n && x86_tok_k(toks, j + 1) == "RPAREN" {
+                    msgs = list_push(msgs, x86_tok_t(toks, j));
+                } else {
+                    leftover_unresolved = true;
+                }
+            } else if j < n && x86_tok_k(toks, j) == "MINUS" {
+                if j + 2 < n && x86_tok_k(toks, j + 1) == "INT" {
+                    if x86_tok_k(toks, j + 2) == "RPAREN" {
+                        msgs = list_push(msgs, "-" + x86_tok_t(toks, j + 1));
+                    } else {
+                        leftover_unresolved = true;
+                    }
+                } else {
+                    leftover_unresolved = true;
+                }
+            } else if j < n {
+                if x86_tok_k(toks, j) == "STRING" || x86_tok_k(toks, j) == "IDENT" {
+                    let got: List[String] = x86_mix_try(toks, n, j, bind_names, bind_vals);
+                    if list_len(got) >= 1 {
+                        msgs = list_push(msgs, list_get(got, 0));
+                    } else if x86_tok_k(toks, j) == "IDENT" {
+                        if j + 1 < n && x86_tok_k(toks, j + 1) == "RPAREN" {
+                            let idx = x86_bind_idx(int_names, x86_tok_t(toks, j));
+                            if idx >= 0 {
+                                msgs = list_push(msgs, list_get(int_vals, idx));
+                            } else {
+                                leftover_unresolved = true;
+                            }
+                        } else {
+                            leftover_unresolved = true;
+                        }
+                    } else {
+                        leftover_unresolved = true;
+                    }
+                }
             }
         }
         i = i + 1;
@@ -65,44 +226,14 @@ fn x86_collect_prints(toks: List[String]) -> List[String] {
         process_exit(1);
     }
     if list_len(msgs) < 1 {
+        if leftover_unresolved {
+            println("ERR\tx86_emit\tleftover println(ident)");
+            process_exit(1);
+        }
         println("ERR\tx86_emit\tresidual: need println(\"...\") (not emit-c)");
         process_exit(1);
     }
     return msgs;
-}
-
-fn x86_emit_linux64(msgs: List[String]) {
-    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
-    println("    .section .rodata");
-    let n = list_len(msgs);
-    let mut i = 0;
-    while i < n {
-        let s: String = list_get(msgs, i);
-        println(".Lstr" + i.to_string() + ":");
-        println("    .ascii \"" + x86_ascii_esc(s) + "\\n\"");
-        i = i + 1;
-    }
-    println("    .section .text");
-    println("    .globl _start");
-    println("    .globl main");
-    println("    .p2align 4");
-    println("main:");
-    println("_start:");
-    i = 0;
-    while i < n {
-        let s: String = list_get(msgs, i);
-        let ln = chars_len(s) + 1;
-        let tag: String = i.to_string();
-        println("    mov $1, %rax");
-        println("    mov $1, %rdi");
-        println("    lea .Lstr" + tag + "(%rip), %rsi");
-        println("    mov $" + ln.to_string() + ", %rdx");
-        println("    syscall");
-        i = i + 1;
-    }
-    println("    mov $60, %rax");
-    println("    xor %rdi, %rdi");
-    println("    syscall");
 }
 
 pub fn x86_emit_stream(src: String) {
@@ -112,6 +243,13 @@ pub fn x86_emit_stream(src: String) {
     }
     let toks: List[String] = tokenize_lines(src);
     check_secret_println_sinks(src, toks);
+    let fold: String = x86_fold_hello(src);
+    if chars_len(fold) > 0 {
+        let mut one: List[String] = list_new();
+        one = list_push(one, fold);
+        x86_emit_linux64(one);
+        return;
+    }
     let msgs: List[String] = x86_collect_prints(toks);
     x86_emit_linux64(msgs);
 }

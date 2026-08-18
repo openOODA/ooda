@@ -1,13 +1,13 @@
 // # Lower a method call to LLVM
 //
-// Logline: Load a named receiver or reuse a call value, then lower to_string, is_ok, is_err, unwrap, or len.
+// Logline: Load a named receiver or reuse a call value, then lower to_string, is_ok, is_err, unwrap, or byval list len.
 //
-// Setup: pos is the DOT; env is the five-slot LLVM emit env.
+// Setup: pos is the DOT; env is the five-slot LLVM emit env. List len matches preamble byval.
 //
 // Beats:
 //   1. Parse the method name and empty ().
 //   2. Named recv loads from its slot; call recv uses the value register.
-//   3. Result methods extract the %OoResS tag or payload.
+//   3. Result methods extract the %OoResS tag or payload; unknown methods fail closed.
 
 import "token_fmt.oo";
 import "llvm_emit_ty.oo";
@@ -65,11 +65,11 @@ pub fn llvm_apply_method(mname: String, recv: String, rty: String, p: Int, env: 
         return llvm_method_out(t2, "%OoStr", p, cur_env);
     }
     if mname == "is_ok" {
-        println("  " + t2 + " = extractvalue %OoResS " + recv + ", 0");
+        println("  " + t2 + " = extractvalue " + rty + " " + recv + ", 0");
         return llvm_method_out(t2, "i32", p, cur_env);
     }
     if mname == "is_err" {
-        println("  " + t2 + " = extractvalue %OoResS " + recv + ", 0");
+        println("  " + t2 + " = extractvalue " + rty + " " + recv + ", 0");
         let g3: List[String] = llvm_gen_reg(cur_env);
         let t3: String = list_get(g3, 0);
         cur_env = list_new();
@@ -91,19 +91,51 @@ pub fn llvm_apply_method(mname: String, recv: String, rty: String, p: Int, env: 
         return llvm_method_out(t4, "i32", p, cur_env);
     }
     if mname == "unwrap" {
-        println("  " + t2 + " = extractvalue %OoResS " + recv + ", 1");
+        if rty == "%OoResI" {
+            println("  " + t2 + " = extractvalue %OoResI " + recv + ", 1");
+            return llvm_method_out(t2, "i64", p, cur_env);
+        }
+        if rty == "%OoResB" {
+            println("  " + t2 + " = extractvalue %OoResB " + recv + ", 1");
+            return llvm_method_out(t2, "i32", p, cur_env);
+        }
+        if rty == "%OoResF" {
+            println("  " + t2 + " = extractvalue %OoResF " + recv + ", 1");
+            return llvm_method_out(t2, "double", p, cur_env);
+        }
+        println("  " + t2 + " = extractvalue " + rty + " " + recv + ", 1");
         return llvm_method_out(t2, "%OoStr", p, cur_env);
     }
     if mname == "len" {
-        if rty == "%OoSList" {
-            println("  " + t2 + " = call i64 @oo_slist_len(%OoSList " + recv + ")");
-        } else if rty == "%OoIList" {
-            println("  " + t2 + " = call i64 @oo_ilist_len(%OoIList " + recv + ")");
-        } else {
-            println("  " + t2 + " = call i64 @oo_chars_len(%OoStr " + recv + ")");
+        if rty == "%OoSList" || rty == "%OoIList" {
+            let in_slot: String = t2 + ".byv";
+            println("  " + in_slot + " = alloca " + rty + ", align 8");
+            println("  store " + rty + " " + recv + ", " + rty + "* " + in_slot + ", align 8");
+            let glen: List[String] = llvm_gen_reg(cur_env);
+            let tlen: String = list_get(glen, 0);
+            cur_env = list_new();
+            cur_env = list_push(cur_env, list_get(glen, 1));
+            cur_env = list_push(cur_env, list_get(glen, 2));
+            cur_env = list_push(cur_env, list_get(glen, 3));
+            cur_env = list_push(cur_env, list_get(glen, 4));
+            cur_env = list_push(cur_env, list_get(glen, 5));
+            let mut lfn: String = "oo_ilist_len";
+            if rty == "%OoSList" {
+                lfn = "oo_slist_len";
+            }
+            println("  " + tlen + " = call i64 @" + lfn + "(" + rty + "* byval(" + rty + ") " + in_slot + ")");
+            return llvm_method_out(tlen, "i64", p, cur_env);
         }
-        return llvm_method_out(t2, "i64", p, cur_env);
+        if rty == "%OoStr" {
+            println("  " + t2 + " = call i64 @oo_chars_len(%OoStr " + recv + ")");
+            return llvm_method_out(t2, "i64", p, cur_env);
+        }
+        println("ERR\tllvm_emit\t.len() needs String or List");
+        process_exit(1);
+        return llvm_method_out("0", "i64", p, cur_env);
     }
+    println("ERR\tllvm_emit\tunknown method " + mname);
+    process_exit(1);
     return llvm_method_out("0", "i64", p, cur_env);
 }
 

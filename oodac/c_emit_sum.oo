@@ -1,53 +1,15 @@
 // # Emit user sum types
 //
-// Logline: Lowers type Name = A(T) | B(T) to a tagged C struct and matches variant arms.
+// Logline: Lowers type Name = A(T) | B to a tagged C struct and matches arms.
 //
-// Setup: toks hold KW_TYPE sums. c_env_put, c_emit_expr_c, and c_pack_pos_env exist.
+// Setup: toks hold KW_TYPE sums. Spec helpers live in c_emit_sum_spec.oo.
 //
 // Beats:
-//   1. Record each ctor as Name:tag in env.
-//   2. Emit typedef struct { int tag; long long v0; } Name.
-//   3. Match arms bind v0 when the tag matches.
-// residual: one Int payload per variant; no String payload; no three-field variants.
+//   1. Record each ctor as Name:tag:I|S|U in env.
+//   2. Emit typedef struct { int tag; long long v0; OoStr s0; } Name.
+//   3. Match binds v0, s0, or no payload from the kind.
 
-pub fn c_sum_ty_of(spec: String) -> String {
-    let n: Int = chars_len(spec);
-    let mut i: Int = 0;
-    while i < n {
-        if char_at(spec, i) == ":" {
-            return str_slice(spec, 0, i);
-        }
-        i = i + 1;
-    }
-    return spec;
-}
-
-pub fn c_sum_tag_of(spec: String) -> String {
-    let n: Int = chars_len(spec);
-    let mut i: Int = 0;
-    while i < n {
-        if char_at(spec, i) == ":" {
-            return str_slice(spec, i + 1, n);
-        }
-        i = i + 1;
-    }
-    return "0";
-}
-
-pub fn c_sum_has_pipe(toks: List[String], pos: Int, n: Int) -> Bool {
-    let mut p: Int = pos;
-    while p < n {
-        let k: String = field_at(list_get(toks, p), 0);
-        if k == "SEMI" || k == "LBRACE" || k == "KW_FN" || k == "KW_TYPE" {
-            return false;
-        }
-        if k == "PIPE" {
-            return true;
-        }
-        p = p + 1;
-    }
-    return false;
-}
+import "c_emit_sum_spec.oo";
 
 pub fn c_sum_env_from_toks(toks: List[String], env0: String) -> String {
     let n: Int = list_len(toks);
@@ -80,9 +42,17 @@ pub fn c_sum_env_from_toks(toks: List[String], env0: String) -> String {
                         if sk == "IDENT" {
                             let ctor: String = field_at(list_get(toks, p), 3);
                             p = p + 1;
+                            let mut kind: String = "U";
                             if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
-                                let mut d: Int = 1;
+                                kind = "I";
                                 p = p + 1;
+                                if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                                    let pt: String = field_at(list_get(toks, p), 3);
+                                    if pt == "String" {
+                                        kind = "S";
+                                    }
+                                }
+                                let mut d: Int = 1;
                                 while p < n && d > 0 {
                                     let ik: String = field_at(list_get(toks, p), 0);
                                     if ik == "LPAREN" {
@@ -94,7 +64,7 @@ pub fn c_sum_env_from_toks(toks: List[String], env0: String) -> String {
                                     p = p + 1;
                                 }
                             }
-                            e = c_env_put(e, "__ctor__" + ctor, ty + ":" + tag.to_string());
+                            e = c_env_put(e, "__ctor__" + ctor, ty + ":" + tag.to_string() + ":" + kind);
                             tag = tag + 1;
                         } else {
                             p = p + 1;
@@ -118,7 +88,7 @@ pub fn c_try_emit_sum_alias(toks: List[String], pos: Int, n: Int, name: String) 
     if !c_sum_has_pipe(toks, pos, n) {
         return pos;
     }
-    println("typedef struct { int tag; long long v0; } " + name + ";");
+    println("typedef struct { int tag; long long v0; OoStr s0; } " + name + ";");
     let mut p: Int = pos;
     while p < n {
         if field_at(list_get(toks, p), 0) == "SEMI" {
@@ -136,11 +106,29 @@ pub fn c_lower_sum_ctor(name: String, args: String, env: String) -> String {
     }
     let ty: String = c_sum_ty_of(spec);
     let tag: String = c_sum_tag_of(spec);
+    let payk: String = c_sum_pay_of(spec);
+    if payk == "S" {
+        return "((" + ty + "){" + tag + ", 0, " + args + "})";
+    }
+    if payk == "U" {
+        return "((" + ty + "){" + tag + ", 0, oo_str_lit(\"\")})";
+    }
     let mut pay: String = args;
     if pay == "" {
         pay = "0";
     }
-    return "((" + ty + "){" + tag + ", " + pay + "})";
+    return "((" + ty + "){" + tag + ", " + pay + ", oo_str_lit(\"\")})";
+}
+
+pub fn c_bare_ctor_or_name(t: String, env: String) -> String {
+    if t == "None" {
+        return c_lower_ok_err("None", "", env);
+    }
+    let s: String = c_lower_sum_ctor(t, "", env);
+    if s != "" {
+        return s;
+    }
+    return t;
 }
 
 pub fn c_emit_sum_match_let(
@@ -159,12 +147,17 @@ pub fn c_emit_sum_match_let(
     if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
         p = p + 1;
     }
-    if decl == 1 {
-        println("  long long " + name + ";");
-    }
     let arm0: String = field_at(list_get(toks, p), 3);
     let spec0: String = c_env_get(e, "__ctor__" + arm0);
     let sty: String = c_sum_ty_of(spec0);
+    let pay0: String = c_sum_pay_of(spec0);
+    if decl == 1 {
+        if pay0 == "S" {
+            println("  OoStr " + name + ";");
+        } else {
+            println("  long long " + name + ";");
+        }
+    }
     println("  {");
     println("  " + sty + " __ml = " + scrut + ";");
     let mut first: Bool = true;
@@ -176,6 +169,7 @@ pub fn c_emit_sum_match_let(
             p = p + 1;
             let spec: String = c_env_get(e, "__ctor__" + ctor);
             let tag: String = c_sum_tag_of(spec);
+            let payk: String = c_sum_pay_of(spec);
             let mut bind: String = "_v";
             if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
                 p = p + 1;
@@ -196,7 +190,11 @@ pub fn c_emit_sum_match_let(
             } else {
                 println("  } else if (__ml.tag == " + tag + ") {");
             }
-            println("    long long " + bind + " = __ml.v0;");
+            if payk == "S" {
+                println("    OoStr " + bind + " = __ml.s0;");
+            } else if payk != "U" {
+                println("    long long " + bind + " = __ml.v0;");
+            }
             let pra: List[String] = c_emit_expr_c(toks, p, n, e);
             p = parse_int(list_get(pra, 0));
             println("    " + name + " = " + list_get(pra, 1) + ";");

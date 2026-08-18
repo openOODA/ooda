@@ -1,0 +1,163 @@
+// # LLVM Result[Int] product emit lock
+//
+// Logline: Product oodac emit-llvm IR clang-runs Result locks with chs_rt only, no declare-dedup and no exit shim.
+//
+// Setup: cwd is ooda/. Uses ./oodac/oodac, not a side ELF. Host clang links chs_rt.
+//
+// Beats:
+//   1. emit-llvm ok7 and result_int. Require %OoResI, i64, and 7. Refuse oo_int_to_str.
+//   2. clang -O0 and run. Require the fixture PASSED line.
+//   3. Ok(7) into String Result and Ok("x") into Int Result print ERR llvm_emit.
+// residual: C emit plus gcc remains the product path.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn refuse_mismatch(p: &ProcessCap, src: String, ll: String, err: String) {
+    if process_exec(p, "./oodac/oodac --backend llvm emit-llvm " + src + " > " + ll + " 2>" + err).is_ok() {
+        if process_exec(p, "grep -qE '^ERR' " + ll + " " + err).is_err() {
+            fail(src + " did not fail-close");
+        }
+    }
+    if process_exec(p, "grep -qE 'ERR.+llvm_emit' " + ll + " " + err).is_err() {
+        fail(src + " missing ERR llvm_emit");
+    }
+    if process_exec(p, "grep -qE 'insertvalue %OoResS .*, %OoStr 7,' " + ll).is_ok() {
+        fail(src + " inserted %OoStr 7");
+    }
+    if process_exec(p, "grep -q 'call %OoStr @oo_int_to_str' " + ll).is_ok() {
+        fail(src + " used oo_int_to_str");
+    }
+}
+
+fn emit_ll(p: &ProcessCap, src: String, ll: String, err: String) -> Bool {
+    if process_exec(p, "./oodac/oodac --backend llvm emit-llvm " + src + " > " + ll + " 2>" + err).is_err() {
+        return false;
+    }
+    if process_exec(p, "grep -qE '^ERR' " + ll + " " + err).is_ok() {
+        return false;
+    }
+    return true;
+}
+
+fn clang_run(p: &ProcessCap, ll: String, bin: String, mark: String) {
+    if process_exec(p, "awk '/^declare / { if (seen[$0]++) exit 1 }' " + ll).is_err() {
+        fail("duplicate declare " + ll);
+    }
+    if process_exec(p, "grep -q 'define linkonce_odr void @oo_process_exit' " + ll).is_err() {
+        fail("no oo_process_exit define " + ll);
+    }
+    if process_exec(p, "clang -O0 -Wno-override-module -Iruntime " + ll + " runtime/chs_rt.c -lm -o " + bin + " 2>" + bin + ".clang").is_err() {
+        fail("clang " + ll);
+    }
+    if process_exec(p, bin + " > " + bin + ".out 2>" + bin + ".err").is_err() {
+        fail("run " + ll);
+    }
+    if process_exec(p, "grep -qF '" + mark + "' " + bin + ".out").is_err() {
+        fail("no " + mark);
+    }
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    if process_exec(p, "test -x ./oodac/oodac").is_err() { fail("no product oodac"); }
+    if process_exec(p, "grep -a -q 'oodac: usage:' ./oodac/oodac").is_err() { fail("not compiler"); }
+    if !path_exists(fs, "fixtures/ok7_untyped_smoke.oo") { fail("no ok7"); }
+    if !path_exists(fs, "fixtures/result_int_smoke.oo") { fail("no result_int"); }
+    if process_exec(p, "grep -q '%OoResI = type { i32, i64, %OoStr }' oodac/llvm_emit_preamble.oo").is_err() {
+        fail("preamble missing OoResI");
+    }
+    let d = ".ooda-cache/ooda-tmp/llvm_resi";
+    if process_exec(p, "mkdir -p " + d).is_err() { fail("mkdir"); }
+
+    if !emit_ll(p, "fixtures/ok7_untyped_smoke.oo", d + "/ok7.ll", d + "/ok7.err") { fail("emit ok7"); }
+    if process_exec(p, "grep -q '%OoResI' " + d + "/ok7.ll").is_err() { fail("ok7 no OoResI"); }
+    if process_exec(p, "grep -q i64 " + d + "/ok7.ll").is_err() { fail("ok7 no i64"); }
+    if process_exec(p, "grep -q 'insertvalue %OoResI' " + d + "/ok7.ll").is_err() { fail("ok7 no insert"); }
+    if process_exec(p, "grep -q 'call %OoStr @oo_int_to_str' " + d + "/ok7.ll").is_ok() { fail("ok7 used oo_int_to_str"); }
+    clang_run(p, d + "/ok7.ll", d + "/ok7.bin", "ok7_untyped_smoke: PASSED");
+
+    if !emit_ll(p, "fixtures/result_int_smoke.oo", d + "/ri.ll", d + "/ri.err") { fail("emit result_int"); }
+    if process_exec(p, "grep -q '%OoResI' " + d + "/ri.ll").is_err() { fail("ri no OoResI"); }
+    if process_exec(p, "grep -q 'call %OoStr @oo_int_to_str' " + d + "/ri.ll").is_ok() { fail("ri used oo_int_to_str"); }
+    clang_run(p, d + "/ri.ll", d + "/ri.bin", "result_int_smoke: PASSED");
+
+    if !emit_ll(p, "fixtures/open68_match_expr.oo", d + "/sm.ll", d + "/sm.err") { fail("emit string match"); }
+    if process_exec(p, "grep -q extractvalue " + d + "/sm.ll").is_err() { fail("string match no extract"); }
+    if process_exec(p, "grep -q 'phi ' " + d + "/sm.ll").is_err() { fail("string match no phi"); }
+    clang_run(p, d + "/sm.ll", d + "/sm.bin", "hello");
+    if process_exec(p, "grep -q bad " + d + "/sm.bin.out").is_err() { fail("string match no bad"); }
+
+    if process_exec(p, "./oodac/oodac --backend llvm emit-llvm fixtures/open68_match_int.oo > " + d + "/mi.ll 2>" + d + "/mi.err").is_ok() {
+        if process_exec(p, "grep -qE '^ERR' " + d + "/mi.ll " + d + "/mi.err").is_err() {
+            fail("match-int did not fail-close");
+        }
+    }
+    if process_exec(p, "grep -q 'need Result\\[String\\]' " + d + "/mi.ll " + d + "/mi.err").is_err() {
+        fail("match-int missing String gate");
+    }
+
+    if process_exec(p, "./oodac/oodac --backend llvm emit-llvm fixtures/open68_match_call.oo > " + d + "/mc.ll 2>" + d + "/mc.err").is_ok() {
+        if process_exec(p, "grep -qE '^ERR' " + d + "/mc.ll " + d + "/mc.err").is_err() {
+            fail("match-call did not fail-close");
+        }
+    }
+    if process_exec(p, "grep -qE 'ERR.+llvm_emit' " + d + "/mc.ll " + d + "/mc.err").is_err() {
+        fail("match-call missing ERR llvm_emit");
+    }
+
+    if !emit_ll(p, "fixtures/open68_stmt_resi.oo", d + "/st.ll", d + "/st.err") { fail("emit stmt"); }
+    clang_run(p, d + "/st.ll", d + "/st.bin", "open68_stmt_resi: PASSED");
+
+    refuse_mismatch(p, "fixtures/llvm_ok7_into_str.oo", d + "/ms.ll", d + "/ms.err");
+    refuse_mismatch(p, "fixtures/llvm_okstr_into_int.oo", d + "/mi2.ll", d + "/mi2.err");
+    refuse_mismatch(p, "fixtures/llvm_ok7_ret_str.oo", d + "/mr.ll", d + "/mr.err");
+
+    if process_exec(p, "grep -q '%OoResB = type { i32, i32, %OoStr }' oodac/llvm_emit_preamble.oo").is_err() {
+        fail("preamble missing OoResB");
+    }
+    if process_exec(p, "grep -q '%OoResF = type { i32, double, %OoStr }' oodac/llvm_emit_preamble.oo").is_err() {
+        fail("preamble missing OoResF");
+    }
+    if !emit_ll(p, "fixtures/result_bool_smoke.oo", d + "/rb.ll", d + "/rb.err") { fail("emit bool"); }
+    if process_exec(p, "grep -q '%OoResB' " + d + "/rb.ll").is_err() { fail("bool no OoResB"); }
+    if process_exec(p, "grep -q 'insertvalue %OoResB' " + d + "/rb.ll").is_err() { fail("bool no insert"); }
+    if process_exec(p, "grep -q 'call %OoStr @oo_int_to_str' " + d + "/rb.ll").is_ok() { fail("bool used oo_int_to_str"); }
+    clang_run(p, d + "/rb.ll", d + "/rb.bin", "result_bool_smoke: PASSED");
+
+    if !emit_ll(p, "fixtures/result_float_smoke.oo", d + "/rf.ll", d + "/rf.err") { fail("emit float"); }
+    if process_exec(p, "grep -q '%OoResF' " + d + "/rf.ll").is_err() { fail("float no OoResF"); }
+    if process_exec(p, "grep -q 'insertvalue %OoResF' " + d + "/rf.ll").is_err() { fail("float no insert"); }
+    if process_exec(p, "grep -q 'call %OoStr @oo_int_to_str' " + d + "/rf.ll").is_ok() { fail("float used oo_int_to_str"); }
+    clang_run(p, d + "/rf.ll", d + "/rf.bin", "result_float_smoke: PASSED");
+
+    if !emit_ll(p, "fixtures/llvm_two_match.oo", d + "/tm.ll", d + "/tm.err") { fail("emit two-match"); }
+    if process_exec(p, "grep -q '%v\\.' " + d + "/tm.ll").is_err() { fail("two-match no unique v slot"); }
+    if process_exec(p, "awk '/alloca/ && /%v\\.[0-9]+\\.slot/ { n++ } END { exit (n>=2)?0:1 }' " + d + "/tm.ll").is_err() {
+        fail("two-match reused %v.slot");
+    }
+    clang_run(p, d + "/tm.ll", d + "/tm.bin", "llvm_two_match: PASSED");
+
+    refuse_mismatch(p, "fixtures/result_err_int_smoke.oo", d + "/ii.ll", d + "/ii.err");
+    refuse_mismatch(p, "fixtures/result_e_bool_fail.oo", d + "/eb.ll", d + "/eb.err");
+    refuse_mismatch(p, "fixtures/result_ll_name_fail.oo", d + "/ln.ll", d + "/ln.err");
+    refuse_mismatch(p, "fixtures/llvm_option_bool.oo", d + "/ob.ll", d + "/ob.err");
+
+    if !emit_ll(p, "fixtures/option_int_smoke.oo", d + "/oi.ll", d + "/oi.err") { fail("emit option_int"); }
+    if process_exec(p, "grep -q 'insertvalue %OoResI' " + d + "/oi.ll").is_err() { fail("option_int no OoResI"); }
+    if process_exec(p, "grep -q 'insertvalue %OoResI .*, i32 1, 0' " + d + "/oi.ll").is_err() { fail("option_int Some tag not 1"); }
+    if process_exec(p, "grep -q 'insertvalue %OoResI .*, i64 0, 1' " + d + "/oi.ll").is_err() { fail("option_int Some(0) missing"); }
+    clang_run(p, d + "/oi.ll", d + "/oi.bin", "option_int_smoke: PASSED");
+
+    if !emit_ll(p, "fixtures/option_str_smoke.oo", d + "/os.ll", d + "/os.err") { fail("emit option_str"); }
+    if process_exec(p, "grep -q 'insertvalue %OoResS' " + d + "/os.ll").is_err() { fail("option_str no OoResS"); }
+    clang_run(p, d + "/os.ll", d + "/os.bin", "option_str_smoke: PASSED");
+
+    if !emit_ll(p, "fixtures/result_try_eq_smoke.oo", d + "/te.ll", d + "/te.err") { fail("emit try_eq"); }
+    if process_exec(p, "grep -q 'extractvalue %OoResI' " + d + "/te.ll").is_err() { fail("try_eq no Int extract"); }
+    if process_exec(p, "grep -q 'call i32 @oo_res_eq(' " + d + "/te.ll").is_ok() { fail("try_eq used String eq helper"); }
+    clang_run(p, d + "/te.ll", d + "/te.bin", "result_try_eq_smoke: PASSED");
+
+    println("llvm_resi_smoke: PASSED");
+}

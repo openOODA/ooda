@@ -5,12 +5,25 @@
 static int oo_wasm_calls, oo_wasm_armed, oo_wasm_wrote;
 static unsigned int oo_wasm_name_n;
 static char oo_wasm_names[OO_WASM_FN_CAP][OO_WASM_NAME_MAX];
+static unsigned int oo_wasm_lim = 28000u;
+static int oo_wasm_ovf;
 static void oo_wasm_flush(void);
+static void oo_wasm_emit_n(unsigned int n);
+static void oo_wasm_print_on_note(void);
 static int oo_wasm_is_ident(int c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
          (c >= '0' && c <= '9') || c == '_';
 }
 static void oo_wasm_leb(unsigned char *d, unsigned int *n, unsigned int v) {
+  unsigned int t = v, need = 1;
+  while (t >= 128u) {
+    need++;
+    t >>= 7;
+  }
+  if (oo_wasm_ovf || *n > oo_wasm_lim || need > oo_wasm_lim - *n) {
+    oo_wasm_ovf = 1;
+    return;
+  }
   while (v >= 128u) {
     d[(*n)++] = (unsigned char)((v & 127u) | 128u);
     v >>= 7;
@@ -21,11 +34,22 @@ static void oo_wasm_raw(unsigned char *d, unsigned int *n, const void *p,
                         unsigned int k) {
   const unsigned char *s = (const unsigned char *)p;
   unsigned int i;
+  if (oo_wasm_ovf || k > oo_wasm_lim || *n > oo_wasm_lim - k) {
+    oo_wasm_ovf = 1;
+    return;
+  }
   for (i = 0; i < k; i++) d[(*n)++] = s[i];
+}
+static void oo_wasm_u8(unsigned char *d, unsigned int *n, unsigned int b) {
+  if (oo_wasm_ovf || *n >= oo_wasm_lim) {
+    oo_wasm_ovf = 1;
+    return;
+  }
+  d[(*n)++] = (unsigned char)b;
 }
 static void oo_wasm_sec(unsigned char *out, unsigned int *on, unsigned char id,
                         const unsigned char *pay, unsigned int psz) {
-  out[(*on)++] = id;
+  oo_wasm_u8(out, on, id);
   oo_wasm_leb(out, on, psz);
   oo_wasm_raw(out, on, pay, psz);
 }
@@ -62,72 +86,6 @@ static void oo_wasm_arm(void) {
     oo_wasm_armed = 1;
     if (atexit(oo_wasm_flush) != 0) oo_wasm_flush();
   }
-}
-static void oo_wasm_emit_n(unsigned int n) {
-  static unsigned char pay[24000], mod[28000];
-  unsigned int i, psz, mlen, nlen, main_i = 0;
-  const char *nm;
-  static const unsigned char hv[8] = {0x00, 0x61, 0x73, 0x6d,
-                                      0x01, 0x00, 0x00, 0x00};
-  static const unsigned char ty[4] = {0x01, 0x60, 0x00, 0x00};
-  static const unsigned char mem[3] = {0x01, 0x00, 0x01};
-  if (n < 1) n = 1;
-  if (n > OO_WASM_FN_CAP) n = OO_WASM_FN_CAP;
-  for (i = 0; i < n; i++) {
-    nm = oo_wasm_name_at(i);
-    if (nm[0] == 'm' && nm[1] == 'a' && nm[2] == 'i' && nm[3] == 'n' && !nm[4])
-      main_i = i;
-  }
-  mlen = 0;
-  oo_wasm_raw(mod, &mlen, hv, 8);
-  /* custom "ooda-fns": count + len-prefixed source names */
-  psz = 0;
-  pay[psz++] = 8;
-  oo_wasm_raw(pay, &psz, "ooda-fns", 8);
-  oo_wasm_leb(pay, &psz, n);
-  for (i = 0; i < n; i++) {
-    nm = oo_wasm_name_at(i);
-    nlen = oo_wasm_slen(nm);
-    oo_wasm_leb(pay, &psz, nlen);
-    oo_wasm_raw(pay, &psz, nm, nlen);
-  }
-  oo_wasm_sec(mod, &mlen, 0, pay, psz);
-  oo_wasm_sec(mod, &mlen, 1, ty, 4);
-  psz = 0;
-  oo_wasm_leb(pay, &psz, n);
-  for (i = 0; i < n; i++) pay[psz++] = 0;
-  oo_wasm_sec(mod, &mlen, 3, pay, psz);
-  oo_wasm_sec(mod, &mlen, 5, mem, 3);
-  /* exports: each source name + _start + memory */
-  psz = 0;
-  oo_wasm_leb(pay, &psz, n + 2u);
-  for (i = 0; i < n; i++) {
-    nm = oo_wasm_name_at(i);
-    nlen = oo_wasm_slen(nm);
-    oo_wasm_leb(pay, &psz, nlen);
-    oo_wasm_raw(pay, &psz, nm, nlen);
-    pay[psz++] = 0;
-    oo_wasm_leb(pay, &psz, i);
-  }
-  pay[psz++] = 6;
-  oo_wasm_raw(pay, &psz, "_start", 6);
-  pay[psz++] = 0;
-  oo_wasm_leb(pay, &psz, main_i);
-  pay[psz++] = 6;
-  oo_wasm_raw(pay, &psz, "memory", 6);
-  pay[psz++] = 2;
-  pay[psz++] = 0;
-  oo_wasm_sec(mod, &mlen, 7, pay, psz);
-  psz = 0;
-  oo_wasm_leb(pay, &psz, n);
-  for (i = 0; i < n; i++) {
-    pay[psz++] = 2;
-    pay[psz++] = 0;
-    pay[psz++] = 0x0b;
-  }
-  oo_wasm_sec(mod, &mlen, 10, pay, psz);
-  fwrite(mod, 1, mlen, stdout);
-  fflush(stdout);
 }
 static int oo_wasm_scan_path(const char *path, int fill) {
   FILE *f;
@@ -247,6 +205,7 @@ void oo_wasm_note_fn(OoStr name) {
     while (name.data[len] && len < OO_WASM_NAME_MAX - 1u) len++;
     oo_wasm_push_name(name.data, len);
   }
+  oo_wasm_print_on_note();
   oo_wasm_arm();
 }
 void oo_wasm_write_empty_module(void) { oo_wasm_arm(); }

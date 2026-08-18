@@ -1,0 +1,67 @@
+// # Wasm println-literal WASI lock
+//
+// Logline: emit-wasm of wasm_print_hi.oo is a \0asm module whose main prints Hello, openOODA!.
+//
+// Setup: cwd is ooda/. oodac/oodac exists. wasmtime is optional; WASI names are required if it is missing.
+//
+// Beats:
+//   1. emit-wasm fixtures/wasm_print_hi.oo to a tmp wasm.
+//   2. First eight bytes are 00 61 73 6d 01 00 00 00 and the file is not WAT.
+//   3. If wasmtime exists, run the module and require stdout to contain Hello, openOODA!.
+//   4. If wasmtime is missing, require a wasi_snapshot_preview1 or fd_write name in the bytes.
+// residual: dummy 02 00 0b bodies must fail this lock.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let oodac = root + "/oodac/oodac";
+    if sh_mkdir_p(fw, tmpd).is_err() {
+        if expect_present(fs, tmpd).is_err() { println("FAIL mkdir"); process_exit(1); }
+    }
+    if scenario(p, fs, "wasm print lit").is_err() { println("FAIL scenario"); process_exit(1); }
+    let src = root + "/fixtures/wasm_print_hi.oo";
+    let wasm = tmpd + "/wasm_print_hi.wasm";
+    let out = tmpd + "/wasm_print_hi.out";
+    if expect_present(fs, src).is_err() { println("FAIL no fixture"); process_exit(1); }
+    if expect_quiet(p, "test -x " + oodac).is_err() { println("FAIL no oodac"); process_exit(1); }
+    if process_exec(p, oodac + " emit-wasm " + src + " > " + wasm + " 2>" + tmpd + "/wasm_print_hi.err").is_err() {
+        println("FAIL emit-wasm");
+        process_exit(1);
+    }
+    if expect_present(fs, wasm).is_err() { println("FAIL no wasm"); process_exit(1); }
+    if check(p, "test -s " + wasm, 5).is_err() { println("FAIL empty"); process_exit(1); }
+    if expect_quiet(p, "od -An -tx1 -N8 " + wasm + " | tr -d ' \\n' | grep -q 0061736d01000000").is_err() {
+        println("FAIL magic");
+        process_exit(1);
+    }
+    if expect_quiet(p, "! grep -q '(module' " + wasm).is_err() {
+        println("FAIL still wat");
+        process_exit(1);
+    }
+    let home_wt = "/home/jeryd/.wasmtime/bin/wasmtime";
+    if expect_quiet(p, "test -x " + home_wt).is_ok() {
+        require_hello_stdout(p, home_wt, wasm, out);
+    } else if sh_which(p, "wasmtime").is_ok() {
+        require_hello_stdout(p, "wasmtime", wasm, out);
+    } else if expect_quiet(p, "grep -a -q wasi_snapshot_preview1 " + wasm).is_err() {
+        if expect_quiet(p, "grep -a -q fd_write " + wasm).is_err() {
+            println("FAIL no wasi print");
+            process_exit(1);
+        }
+    }
+    println("wasm_print_lit_smoke: PASSED");
+}
+
+fn require_hello_stdout(p: &ProcessCap, wt: String, wasm: String, out: String) {
+    if check(p, wt + " " + wasm + " > " + out, 15).is_err() {
+        println("FAIL wasmtime");
+        process_exit(1);
+    }
+    if expect_quiet(p, "grep -q 'Hello, openOODA!' " + out).is_err() {
+        println("FAIL no print");
+        process_exit(1);
+    }
+}

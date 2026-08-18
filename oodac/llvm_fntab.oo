@@ -7,7 +7,7 @@
 // Beats:
 //   1. Walk pub/fn tokens.
 //   2. After the arrow, keep List[T] text when brackets follow.
-//   3. Store name=llvm_ty| rows. Builtin Result calls are %OoResS.
+//   3. Store name=ret#params| rows. Check/load builtins match the C ABI.
 
 import "token_fmt.oo";
 import "llvm_emit_ty.oo";
@@ -71,12 +71,10 @@ pub fn llvm_scan_fn_rets(toks: List[String], n: Int) -> String {
                     if p < n {
                         rty = field_at(list_get(toks, p), 3);
                         p = p + 1;
-                        if rty == "List" && p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
-                            p = p + 1;
-                            if p < n {
-                                rty = "List[" + field_at(list_get(toks, p), 3) + "]";
-                                p = p + 1;
-                            }
+                        if (rty == "List" || rty == "Result" || rty == "Option") && p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
+                            let eaten: List[String] = llvm_ty_eat_generic(rty, toks, p, n);
+                            p = parse_int(list_get(eaten, 0));
+                            rty = list_get(eaten, 1);
                         }
                     }
                 }
@@ -143,7 +141,11 @@ pub fn llvm_fntab_used(tab: String, toks: List[String], n: Int) -> String {
 }
 
 pub fn llvm_builtin_fntab() -> String {
-    return "sys_exec=%OoResS#i64, %OoStr, %OoStr, %OoStr|process_exec=%OoResS#i64, %OoStr|read_file=%OoResS#i64, %OoStr|write_file=%OoResS#i64, %OoStr, %OoStr|process_exit=void#i64|byte_at=i64#%OoStr, i64|bytes_len=i64#%OoStr|path_exists=i32#i64, %OoStr|str_index_of=i64#%OoStr, %OoStr|oo_str_index_of=i64#%OoStr, %OoStr|file_size=i64#%OoStr|oo_file_size=i64#%OoStr|str_starts_with=i32#%OoStr, %OoStr|oo_str_starts_with=i32#%OoStr, %OoStr|str_ends_with=i32#%OoStr, %OoStr|oo_str_ends_with=i32#%OoStr, %OoStr|crypto_sha256_internal=%OoStr#%OoStr|oo_file_stamp=%OoStr#%OoStr|oo_wasm_write_empty_module=void#|oo_emit_tmp_reset=void#|oo_emit_tmp_enter=void#|oo_emit_tmp_leave=void#|oo_emit_tmp_release_print=void#|oo_emit_tmp_own=void#%OoStr|oo_emit_tmp_release_all_print=void#|oo_emit_tmp_bind=%OoStr#%OoStr|";
+    return "sys_exec=%OoResS#i64, %OoStr, %OoStr, %OoStr|process_exec=%OoResS#i64, %OoStr|read_file=%OoResS#i64, %OoStr|write_file=%OoResS#i64, %OoStr, %OoStr|process_exit=void#i64|byte_at=i64#%OoStr, i64|bytes_len=i64#%OoStr|path_exists=i32#i64, %OoStr|str_index_of=i64#%OoStr, %OoStr|oo_str_index_of=i64#%OoStr, %OoStr|file_size=i64#i64, %OoStr|oo_file_size=i64#i64, %OoStr|str_starts_with=i32#%OoStr, %OoStr|oo_str_starts_with=i32#%OoStr, %OoStr|str_ends_with=i32#%OoStr, %OoStr|oo_str_ends_with=i32#%OoStr, %OoStr|crypto_sha256_internal=%OoStr#%OoStr|oo_file_stamp=%OoStr#%OoStr|oo_wasm_write_empty_module=void#|oo_emit_tmp_reset=void#|oo_emit_tmp_enter=void#|oo_emit_tmp_leave=void#|oo_emit_tmp_release_print=void#|oo_emit_tmp_own=void#%OoStr|oo_emit_tmp_release_all_print=void#|oo_emit_tmp_bind=%OoStr#%OoStr|oo_wasm_note_fn=void#%OoStr|oo_wasm_set_fn_print=void#%OoStr|";
+}
+
+fn llvm_fntab_preamble_seen() -> String {
+    return "|main|process_exit|oo_process_exit|exit|oo_byte_at|oo_bytes_len|oo_chars_len|oo_char_at|oo_str_lit|oo_str_concat|oo_wasm_note_fn|oo_wasm_set_fn_print|oo_str_retain|oo_str_release|oo_ilist_retain|oo_ilist_release|oo_slist_retain|oo_slist_release|oo_str_byte_len|oo_str_slice|oo_str_contains|oo_str_eq|oo_str_trim|oo_str_to_lowercase|oo_str_to_uppercase|oo_char_is_alpha|oo_char_is_digit|oo_char_is_space|oo_int_to_str|oo_str_to_int|oo_ilist_new|oo_ilist_push|oo_ilist_get|oo_ilist_len|oo_slist_new|oo_slist_push|oo_slist_get|oo_slist_len|oo_print_str|oo_eprint_str|oo_print_int|oo_print_bool|oo_print_double|oo_println|oo_eprintln|oo_sin|oo_cos|oo_ln|oo_exp|oo_sqrt|oo_pow|oo_cap_grant_fs|oo_cap_grant_sys|oo_cap_grant_env|oo_cap_grant_net|oo_cap_require|llvm.trap|";
 }
 
 fn llvm_fntab_mark(tab: String, seen0: String) -> String {
@@ -182,7 +184,7 @@ fn llvm_fntab_mark(tab: String, seen0: String) -> String {
 }
 
 pub fn llvm_emit_fntab_declares(tab: String, skip: String) {
-    let mut seen: String = llvm_fntab_mark(skip, "|main|");
+    let mut seen: String = llvm_fntab_mark(skip, llvm_fntab_preamble_seen());
     let mut ent: String = "";
     let n: Int = chars_len(tab);
     let mut i: Int = 0;

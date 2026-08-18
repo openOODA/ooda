@@ -1,19 +1,19 @@
 // # Lower let and assign to LLVM
 //
-// Logline: Allocates a named stack slot for let or let mut, stores the RHS or if-expression, and on assign stores through that slot with retain/release for ARC types.
+// Logline: Stores a let RHS or if/match into a named slot, and writes assigns with ARC retain/release.
 //
-// Setup: field_at, list_get, list_push, list_new, parse_int, and println exist; llvm_ty_map, llvm_env_add_var, llvm_env_get_var_ty, llvm_gen_reg, llvm_emit_expr, and llvm_emit_if_stmt live in sibling emit files; env is the five-slot LLVM emit env.
+// Setup: llvm_ty_map, llvm_env_add_var, llvm_emit_expr, llvm_emit_if_stmt, and llvm_emit_let_match exist.
 //
 // Beats:
-//   1. On KW_LET, skip optional KW_MUT, read the name, optional colon type, and EQ.
-//   2. If the RHS is KW_IF, alloca the slot, bind __asgn__, emit llvm_emit_if_stmt, then clear __asgn__.
-//   3. Else emit the RHS and alloca/store (retain strings/lists); on assign, load the old ARC value, store the new, retain new, release old.
-
+//   1. Parse let name, optional type, and EQ.
+//   2. KW_MATCH and KW_IF write through a named slot.
+//   3. Else store the RHS; assign retain/releases ARC.
 import "token_fmt.oo";
 import "llvm_emit_ty.oo";
 import "llvm_emit_env.oo";
 import "llvm_emit_expr.oo";
 import "llvm_emit_control.oo";
+import "llvm_emit_let_match.oo";
 
 pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
     let mut p = pos;
@@ -42,6 +42,11 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
             if p + 1 < n && ann_ty == "List" {
                 ann_ty = "List[" + field_at(list_get(toks, p + 1), 3) + "]";
             }
+            if p + 1 < n && (ann_ty == "Result" || ann_ty == "Option") {
+                if field_at(list_get(toks, p + 1), 0) == "IDENT" {
+                    ann_ty = ann_ty + "[" + field_at(list_get(toks, p + 1), 3) + "]";
+                }
+            }
             let mut depth = 0;
             while p < n {
                 let kk: String = field_at(list_get(toks, p), 0);
@@ -59,6 +64,9 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
 
     if p < n && field_at(list_get(toks, p), 0) == "EQ" {
         p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "KW_MATCH" {
+        return llvm_emit_let_match(name, ann_ty, toks, p, n, env);
     }
 
     // if-expression: let y = if c { a } else …
@@ -152,6 +160,11 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
     }
 
     cur_env = llvm_env_add_var(cur_env, name, final_ty);
+    if chars_len(ann_ty) >= 6 {
+        if str_slice(ann_ty, 0, 6) == "Result" || str_slice(ann_ty, 0, 6) == "Option" {
+            cur_env = llvm_env_add_var(cur_env, "__rt__" + name, ann_ty);
+        }
+    }
 
     if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
         p = p + 1;

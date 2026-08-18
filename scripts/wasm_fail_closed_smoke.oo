@@ -1,0 +1,104 @@
+// # Wasm Emit Stays Fail Closed
+//
+// Logline: emit-wasm still calls run_check_core before it writes a module; write_file without a cap exits nonzero; the wasm runtime does not fopen a user path except the cmdline name scan.
+//
+// Setup: cwd is ooda/. oodac/oodac or OODAC_BIN exists. Fixture bootstrap/corpus/check/fail/no_cap_write_file.oo exists.
+//
+// Beats:
+//   1. Grep the emit-wasm arm in oodac/main.oo and require run_check_core before wasm_emit_stream.
+//   2. oodac check and emit-wasm refuse no_cap_write_file with a nonzero status and no \0asm magic.
+//   3. chs_rt_wasm.c fopen set is path rb plus /proc/self/cmdline; no host fs/net/process import names.
+//
+// residual: cmdline .oo scan stays a MED finding.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmp_in = match sh_env_get_or(p, "TMPDIR", ".ooda-cache/ooda-tmp") { Ok(s) => s, Err(_) => "" };
+    let mut tmpd = ".ooda-cache/ooda-tmp";
+    if chars_len(tmp_in) > 0 { tmpd = tmp_in; }
+    let bin_in = match sh_env_get_or(p, "OODAC_BIN", root + "/oodac/oodac") { Ok(s) => s, Err(_) => "" };
+    let mut oodac = root + "/oodac/oodac";
+    if chars_len(bin_in) > 0 { oodac = bin_in; }
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { println("FAIL mkdir"); process_exit(1); }
+    if scenario(p, fs, "wasm fail closed").is_err() { println("FAIL scenario"); process_exit(1); }
+    if expect_quiet(p, "test -x " + oodac).is_err() { println("FAIL no oodac"); process_exit(1); }
+
+    if expect_quiet(p, "grep -A6 'if cmd == \"emit-wasm\"' " + root + "/oodac/main.oo | awk '/run_check_core/{c=NR} /wasm_emit_stream/{e=NR} END{exit (c>0 && e>0 && c<e)?0:1}'").is_err() {
+        println("FAIL emit-wasm skips or reorders run_check_core");
+        process_exit(1);
+    }
+
+    let fix = root + "/bootstrap/corpus/check/fail/no_cap_write_file.oo";
+    if expect_present(fs, fix).is_err() { println("FAIL no fixture"); process_exit(1); }
+    if process_exec(p, oodac + " check " + fix + " > " + tmpd + "/wfc_chk.out 2>" + tmpd + "/wfc_chk.err; echo $? > " + tmpd + "/wfc_chk.rc").is_err() {
+        println("FAIL check spawn");
+        process_exit(1);
+    }
+    if expect_quiet(p, "! grep -qx 0 " + tmpd + "/wfc_chk.rc").is_err() {
+        println("FAIL check allowed write_file without cap");
+        process_exit(1);
+    }
+    if expect_quiet(p, "grep -qE 'ERR|capabilit' " + tmpd + "/wfc_chk.out " + tmpd + "/wfc_chk.err").is_err() {
+        println("FAIL check missing cap err");
+        process_exit(1);
+    }
+    if process_exec(p, oodac + " emit-wasm " + fix + " > " + tmpd + "/wfc_emit.wasm 2>" + tmpd + "/wfc_emit.err; echo $? > " + tmpd + "/wfc_emit.rc").is_err() {
+        println("FAIL emit spawn");
+        process_exit(1);
+    }
+    if expect_quiet(p, "! grep -qx 0 " + tmpd + "/wfc_emit.rc").is_err() {
+        println("FAIL emit-wasm allowed write_file without cap");
+        process_exit(1);
+    }
+    if expect_quiet(p, "grep -qE 'ERR|capabilit' " + tmpd + "/wfc_emit.wasm " + tmpd + "/wfc_emit.err").is_err() {
+        println("FAIL emit-wasm missing cap err");
+        process_exit(1);
+    }
+    if expect_quiet(p, "! od -An -tx1 -N4 " + tmpd + "/wfc_emit.wasm 2>/dev/null | grep -q '00 61 73 6d'").is_err() {
+        println("FAIL emit-wasm wrote module after cap fail");
+        process_exit(1);
+    }
+
+    let hello = root + "/fixtures/hello.oo";
+    let hwasm = tmpd + "/wfc_hello.wasm";
+    if expect_present(fs, hello).is_ok() {
+        if process_exec(p, oodac + " emit-wasm " + hello + " > " + hwasm + " 2>" + tmpd + "/wfc_hello.err").is_err() {
+            println("FAIL hello emit");
+            process_exit(1);
+        }
+        if expect_quiet(p, "od -An -tx1 -N4 " + hwasm + " | grep -q '00 61 73 6d'").is_err() {
+            println("FAIL hello magic");
+            process_exit(1);
+        }
+        if expect_quiet(p, "! grep -a -qE 'path_open|path_unlink|fd_readdir|sock_open|proc_exit' " + hwasm).is_err() {
+            println("FAIL hello host import");
+            process_exit(1);
+        }
+    }
+
+    let wasmc = root + "/runtime/chs_rt_wasm.c";
+    if expect_present(fs, wasmc).is_err() { println("FAIL no chs_rt_wasm.c"); process_exit(1); }
+    if expect_quiet(p, "! grep fopen " + wasmc + " | grep -qvE 'fopen\\(path, \"rb\"\\)|/proc/self/cmdline'").is_err() {
+        println("FAIL extra fopen");
+        process_exit(1);
+    }
+    if expect_quiet(p, "! grep -qE 'path_open|path_unlink|fd_readdir|sock_open|proc_exit' " + wasmc).is_err() {
+        println("FAIL host import in wasm runtime");
+        process_exit(1);
+    }
+    let printc = root + "/runtime/chs_rt_wasm_print.c";
+    if expect_quiet(p, "test -f " + printc).is_ok() {
+        if expect_quiet(p, "! grep fopen " + printc + " | grep -qvE 'fopen\\(path, \"rb\"\\)|/proc/self/cmdline'").is_err() {
+            println("FAIL print.c extra fopen");
+            process_exit(1);
+        }
+        if expect_quiet(p, "! grep -qE 'path_open|path_unlink|fd_readdir|sock_open|proc_exit' " + printc).is_err() {
+            println("FAIL print.c host import");
+            process_exit(1);
+        }
+    }
+    println("wasm_fail_closed_smoke: PASSED");
+}

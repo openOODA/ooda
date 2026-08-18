@@ -1,0 +1,90 @@
+// # OPEN-68 match-expression emit lock
+//
+// Logline: A side LLVM-linked oodac emit-llvm of fixtures/open68_match_expr.oo writes extractvalue and phi, not an empty-string stub, and clang-run prints hello then bad.
+//
+// Setup: cwd is ooda/. Proof ELF is .ooda-cache/ooda-tmp/oodac_llvm or oodac_stamp. Wipe g_*. Do not plant a listing. Host clang links chs_rt.
+//
+// Beats:
+//   1. Refuse listing_fresh, ret i32 1 shim, and llvm_emit_expr still returning zeroinitializer for KW_MATCH.
+//   2. ELF emit-llvm the fixture. Require extractvalue, phi, and define @take_ok. Refuse ret %OoStr zeroinitializer.
+//   3. clang-link and run. Require hello and bad on stdout.
+// residual: C emit plus gcc remains the product path.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn pick_elf(p: &ProcessCap) -> String {
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let mut elf = tmpd + "/oodac_llvm";
+    if process_exec(p, "test -x " + elf).is_err() {
+        elf = tmpd + "/oodac_stamp";
+    }
+    if process_exec(p, "test -x " + elf).is_err() { fail("no LLVM ELF oodac_llvm or oodac_stamp"); }
+    if process_exec(p, "grep -a -q 'pure .oo product CLI' " + elf).is_ok() { fail("ELF is product CLI"); }
+    if process_exec(p, "grep -a -q 'oodac: usage:' " + elf).is_err() { fail("ELF missing oodac: usage:"); }
+    if process_exec(p, "test -x oodac/oodac && cmp -s " + elf + " oodac/oodac").is_ok() {
+        fail("ELF is product oodac");
+    }
+    return elf;
+}
+
+fn refuse_stubs(p: &ProcessCap) {
+    if process_exec(p, "grep -q llvm_emit_listing_fresh_stub oodac/llvm_emit_fn.oo").is_ok() {
+        fail("listing_fresh stub in llvm_emit_fn");
+    }
+    if process_exec(p, "grep -q 'ret i32 1' oodac/llvm_link_shim.oo").is_ok() {
+        fail("ret i32 1 shim");
+    }
+    if process_exec(p, "grep -q zeroinitializer oodac/llvm_emit_expr.oo").is_ok() {
+        fail("match-expr zeroinitializer stub in llvm_emit_expr");
+    }
+    if process_exec(p, "grep -q 'return llvm_emit_match_expr' oodac/llvm_emit_expr.oo").is_err() {
+        fail("expr does not call match expr");
+    }
+}
+
+fn wipe_g(p: &ProcessCap) {
+    if process_exec(p, "mkdir -p .ooda-cache/check").is_err() { fail("mkdir check"); }
+    if process_exec(p, "rm -f .ooda-cache/check/g_*").is_err() { fail("wipe g_"); }
+    if process_exec(p, "ls .ooda-cache/check/g_* >/dev/null 2>&1").is_ok() {
+        fail("g_ listing still present after wipe");
+    }
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let elf = pick_elf(p);
+    if !path_exists(fs, "fixtures/open68_match_expr.oo") { fail("no fixture"); }
+    if !path_exists(fs, "oodac/llvm_emit_match_expr.oo") { fail("no match expr emit"); }
+    refuse_stubs(p);
+    wipe_g(p);
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let d = tmpd + "/open68_mexpr";
+    if process_exec(p, "mkdir -p " + d).is_err() { fail("mkdir"); }
+    let ll = d + "/m.ll";
+    if process_exec(p, "timeout 60 " + elf + " emit-llvm fixtures/open68_match_expr.oo > " + ll + " 2>" + d + "/em.err").is_err() {
+        fail("emit-llvm");
+    }
+    if process_exec(p, "grep -qE '^ERR' " + ll + " " + d + "/em.err").is_ok() { fail("emit-llvm ERR"); }
+    if process_exec(p, "grep -q extractvalue " + ll).is_err() { fail("no extractvalue"); }
+    if process_exec(p, "grep -q 'phi ' " + ll).is_err() { fail("no phi"); }
+    if process_exec(p, "grep -q '@take_ok' " + ll).is_err() { fail("no take_ok"); }
+    if process_exec(p, "grep -q 'ret %OoStr zeroinitializer' " + ll).is_ok() {
+        fail("still returns empty string stub");
+    }
+    let bin = d + "/m.bin";
+    let lld = d + "/m.dedup.ll";
+    if process_exec(p, "awk '/^declare / { if (seen[$0]++) next } { print }' " + ll + " > " + lld).is_err() {
+        fail("dedup ir");
+    }
+    if process_exec(p, "clang -O0 -Wno-override-module -Iruntime " + lld + " runtime/chs_rt.c -lm -ldl -lpthread -o " + bin + " 2>" + d + "/clang.err").is_err() {
+        fail("clang link");
+    }
+    if process_exec(p, bin + " > " + d + "/run.out 2>" + d + "/run.err").is_err() { fail("run"); }
+    if process_exec(p, "grep -qx hello " + d + "/run.out").is_err() { fail("no hello"); }
+    if process_exec(p, "grep -qx bad " + d + "/run.out").is_err() { fail("no bad"); }
+    println("open68_match_expr_smoke: emit has phi");
+    println("open68_match_expr_smoke: run hello/bad");
+    println("open68_match_expr_smoke: PASSED");
+}

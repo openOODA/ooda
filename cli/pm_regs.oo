@@ -1,0 +1,181 @@
+// # Configured HTTPS stores
+//
+// Logline: Keep the stock store plus extra HTTPS origins the user added.
+//
+// Setup: Stock is always first. Extras live in $HOME/.config/ooda/registries.
+//
+// Beats:
+//   1. Read HOME and the extra URL list.
+//   2. Refuse to drop the stock store.
+//   3. Write extras with write_file under OODA_FS_WRITEDIR.
+
+import "cmd_pm_io.oo";
+import "host_run.oo";
+import "pm_reg.oo";
+
+pub fn pm_regs_home(fs: &FsCap, sys: &SysCap) -> String {
+    let outp: String = ".ooda-cache/ooda-tmp/pm-home.txt";
+    let cmd: String = "mkdir -p .ooda-cache/ooda-tmp; printf %s \"$HOME/.config/ooda\" > .ooda-cache/ooda-tmp/pm-home.txt";
+    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    if r.is_err() {
+        return "";
+    }
+    return pm_slurp(fs, outp);
+}
+
+fn pm_regs_file(fs: &FsCap, sys: &SysCap) -> String {
+    let home: String = pm_regs_home(fs, sys);
+    if home == "" {
+        return "";
+    }
+    return home + "/registries";
+}
+
+pub fn pm_regs_key_path(fs: &FsCap, sys: &SysCap, url: String) -> String {
+    let home: String = pm_regs_home(fs, sys);
+    if home == "" {
+        return "";
+    }
+    let host: String = pm_reg_host(url);
+    if host == "" {
+        return "";
+    }
+    let n: Int = chars_len(host);
+    let mut safe: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(host, i);
+        if c == ":" {
+            safe = safe + "_";
+        } else {
+            safe = safe + c;
+        }
+        i = i + 1;
+    }
+    return home + "/keys/" + safe + ".pub";
+}
+
+fn pm_regs_extras(fs: &FsCap, sys: &SysCap) -> String {
+    return pm_slurp(fs, pm_regs_file(fs, sys));
+}
+
+pub fn pm_regs_has(fs: &FsCap, sys: &SysCap, url: String) -> Bool {
+    if pm_reg_origin_ok(url) {
+        return true;
+    }
+    let base: String = pm_reg_base(url);
+    if base == "" {
+        if !pm_reg_https_ok(url) {
+            return false;
+        }
+    }
+    let extra: String = pm_regs_extras(fs, sys);
+    let n: Int = chars_len(extra);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(extra, i) == "\n" {
+            if i > start {
+                let one: String = str_slice(extra, start, i);
+                if pm_same(one, url) {
+                    return true;
+                }
+                if pm_reg_https_ok(one) {
+                    if pm_same(pm_reg_host(one), pm_reg_host(url)) {
+                        return true;
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn pm_regs_urls(fs: &FsCap, sys: &SysCap) -> String {
+    let mut out: String = pm_reg_default() + "\n";
+    let extra: String = pm_regs_extras(fs, sys);
+    let n: Int = chars_len(extra);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(extra, i) == "\n" {
+            if i > start {
+                let one: String = str_slice(extra, start, i);
+                if pm_reg_https_ok(one) {
+                    if !pm_reg_origin_ok(one) {
+                        out = out + one + "\n";
+                    }
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn pm_regs_save(fs: &FsCap, sys: &SysCap, body: String) -> Bool {
+    let home: String = pm_regs_home(fs, sys);
+    if home == "" {
+        return false;
+    }
+    if !path_exists(fs, home) {
+        let mk: Result[Void, String] = oo_fs_mkdir(fs, home);
+        if mk.is_err() {
+            return false;
+        }
+    }
+    return write_file(fs, home + "/registries", body).is_ok();
+}
+
+pub fn pm_regs_put(fs: &FsCap, sys: &SysCap, url: String) -> String {
+    if pm_reg_origin_ok(url) {
+        return "ok stock";
+    }
+    if !pm_reg_https_ok(url) {
+        return "err allow";
+    }
+    if pm_regs_has(fs, sys, url) {
+        return "ok listed";
+    }
+    let prev: String = pm_regs_extras(fs, sys);
+    if !pm_regs_save(fs, sys, prev + url + "\n") {
+        return "err write";
+    }
+    return "ok";
+}
+
+pub fn pm_regs_drop(fs: &FsCap, sys: &SysCap, url: String) -> String {
+    if pm_reg_origin_ok(url) {
+        return "err stock";
+    }
+    let extra: String = pm_regs_extras(fs, sys);
+    let n: Int = chars_len(extra);
+    let mut out: String = "";
+    let mut hit: Bool = false;
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(extra, i) == "\n" {
+            if i > start {
+                let one: String = str_slice(extra, start, i);
+                if pm_same(one, url) {
+                    hit = true;
+                } else {
+                    out = out + one + "\n";
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if hit == false {
+        return "err missing";
+    }
+    if !pm_regs_save(fs, sys, out) {
+        return "err write";
+    }
+    return "ok";
+}
