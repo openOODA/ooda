@@ -1,0 +1,82 @@
+// # Side emit-aarch64 hello lock
+//
+// Logline: Side oodac.aarch64 writes Linux AArch64 GAS for aarch64_hello.oo and clang assembles it.
+//
+// Setup: cwd is ooda/. Product oodac/oodac builds the side ELF only. clang can target aarch64-linux-gnu. Host may be x86_64.
+//
+// Beats:
+//   1. Build oodac/oodac.aarch64 from aarch64_main.oo if it is missing. Do not overwrite oodac/oodac.
+//   2. emit-aarch64 writes _start, svc, Hello, and is not C or x86_64.
+//   3. clang -target aarch64-linux-gnu -c produces an ARM aarch64 object.
+//
+// residual: greet fold, aarch64 link, qemu run, and product emit-aarch64 dispatch stay later.
+
+import "std/scenario.oo";
+import "std/sh.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn ensure_side(p: &ProcessCap, root: String, prod: String, side: String) {
+    if expect_quiet(p, "test -x " + side).is_ok() {
+        return;
+    }
+    let tmpc = side + ".tmp.c";
+    if check(p, prod + " build " + root + "/oodac/aarch64_main.oo " + side, 180).is_err() {
+        fail("build side oodac.aarch64");
+    }
+    if expect_quiet(p, "test -x " + side).is_err() {
+        fail("no side oodac.aarch64");
+    }
+    if process_exec(p, "rm -f " + tmpc).is_err() {
+        fail("rm side tmp.c");
+    }
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = match sh_realpath(p, ".") { Ok(s) => s, Err(_) => "." };
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let prod = root + "/oodac/oodac";
+    let side = root + "/oodac/oodac.aarch64";
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
+    if scenario(p, fs, "aarch64 hello emit").is_err() { fail("scenario"); }
+    if expect_quiet(p, "test -x " + prod).is_err() { fail("no tree oodac"); }
+    if expect_present(fs, root + "/oodac/aarch64_emit.oo").is_err() { fail("no aarch64_emit.oo"); }
+    if expect_present(fs, root + "/fixtures/aarch64_hello.oo").is_err() { fail("no aarch64_hello.oo"); }
+    if expect_quiet(p, "test -x /usr/bin/clang").is_err() { fail("no clang"); }
+
+    ensure_side(p, root, prod, side);
+    if expect_quiet(p, "grep -a -q 'pure .oo product CLI' " + side).is_ok() {
+        fail("side ELF is the product CLI");
+    }
+    if expect_quiet(p, "grep -a -q 'oodac: usage: emit-aarch64' " + side).is_err() {
+        fail("side ELF is not emit-aarch64");
+    }
+
+    let sfile = tmpd + "/aarch64_hello.s";
+    let serr = tmpd + "/aarch64_hello.err";
+    if check(p, side + " emit-aarch64 " + root + "/fixtures/aarch64_hello.oo > " + sfile + " 2>" + serr, 30).is_err() {
+        fail("emit-aarch64");
+    }
+    if expect_clean(p, "! grep -qE '^ERR' " + sfile + " " + serr).is_err() { fail("ERR in .s"); }
+    if expect_substring(fs, sfile, "_start").is_err() { fail(".s missing _start"); }
+    if expect_substring(fs, sfile, "main:").is_err() { fail(".s missing main"); }
+    if expect_substring(fs, sfile, "Hello").is_err() { fail(".s missing Hello"); }
+    if expect_substring(fs, sfile, "svc #0").is_err() { fail(".s missing svc"); }
+    if expect_substring(fs, sfile, "mov x8, #64").is_err() { fail(".s missing SYS_write"); }
+    if expect_substring(fs, sfile, "mov x8, #93").is_err() { fail(".s missing SYS_exit"); }
+    if expect_clean(p, "! grep -qE '#include|int main\\(|chs_rt|OoStr ' " + sfile).is_err() { fail(".s looks like emit-c"); }
+    if expect_clean(p, "! grep -qE 'syscall|%rax|as --64' " + sfile).is_err() { fail(".s looks like x86_64"); }
+
+    let obj = tmpd + "/aarch64_hello.o";
+    if check(p, "clang -target aarch64-linux-gnu -c " + sfile + " -o " + obj, 15).is_err() {
+        fail("clang aarch64 assemble");
+    }
+    if expect_clean(p, "file " + obj + " | grep -q 'ARM aarch64'").is_err() {
+        fail("object is not ARM aarch64");
+    }
+
+    println("aarch64_hello_smoke: PASSED");
+}
