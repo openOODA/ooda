@@ -59,6 +59,9 @@ buf[n] = 0; fclose(f);
 r.ok = 1; r.val.data = buf; r.val.len = (long long)n;
 return r;
 }
+int oo_untrusted_hit(const char *data, size_t n);
+int oo_is_policy_path(const char *p);
+int oo_policy_write_on(void);
 OoResV oo_write_file(long long cap, OoStr path, OoStr content) {
 oo_cap_require_fswrite(cap, "write_file"); OoResV r={0, oo_str_lit("write_file failed")};
 char cpath[PATH_MAX];
@@ -66,6 +69,10 @@ if (!to_cpath(path, cpath, PATH_MAX)) return r;
 const char *dir = oo_process_policy_getenv("OODA_FS_WRITEDIR");
 if (!dir || !dir[0] || !path_under_writedir(cpath, dir)) {
 r.err = oo_str_lit("write_file denied: path not under OODA_FS_WRITEDIR"); return r; }
+if (oo_untrusted_hit(content.data, content.data ? (size_t)content.len : 0)) {
+r.err = oo_str_lit("write_file denied: untrusted content"); return r; }
+if (oo_is_policy_path(cpath) && !oo_policy_write_on()) {
+r.err = oo_str_lit("write_file denied: policy path"); return r; }
 int fd = writedir_open_trunc(cpath); if (fd < 0) return r;
 FILE *f = fdopen(fd, "wb"); if (!f) { close(fd); return r; }
 size_t want = content.data ? (size_t)content.len : 0;
