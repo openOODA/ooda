@@ -6,8 +6,40 @@
 //
 // Beats:
 //   1. c_emit_call_args walks arguments until RPAREN and returns pos, joined args, a0, a1, and a2.
-//   2. c_emit_method reads the method name and optional args, runs c_secret_emit_guard, and lowers to_string, contains, len, is_ok, is_err, and unwrap.
+//   2. c_emit_method uses -> when c_recv_is_ptr (paren-stripped __ptr__ base), else .; lowers to_string, contains, len, is_ok, is_err, unwrap.
 //   3. c_emit_index_get emits list_get(base, idx) and may chain a following method.
+
+// Strip wrapping parens so __ptr__cap_ref matches recv "(cap_ref)".
+fn c_recv_base(recv: String) -> String {
+    let mut s: String = recv;
+    let mut guard: Int = 0;
+    while guard < 8 {
+        let n: Int = chars_len(s);
+        if n < 3 {
+            return s;
+        }
+        if char_at(s, 0) != "(" {
+            return s;
+        }
+        if char_at(s, n - 1) != ")" {
+            return s;
+        }
+        s = str_slice(s, 1, n - 1);
+        guard = guard + 1;
+    }
+    return s;
+}
+
+fn c_recv_is_ptr(env: String, recv: String) -> Bool {
+    let b: String = c_recv_base(recv);
+    if chars_len(b) < 1 {
+        return false;
+    }
+    if char_at(b, 0) == "*" {
+        return false;
+    }
+    return c_env_get(env, "__ptr__" + b) == "1";
+}
 
 pub fn c_emit_call_args(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
     let mut p = pos;
@@ -73,10 +105,11 @@ pub fn c_emit_method(toks: List[String], pos: Int, n: Int, env: String, recv: St
     let mut a0 = "";
     let mut a1 = "";
     let mut a2 = "";
-    let mut call = recv + "." + mname;
-    if c_env_get(env, "__ptr__" + recv) == "1" {
-        call = recv + "->" + mname;
+    let mut acc: String = ".";
+    if c_recv_is_ptr(env, recv) {
+        acc = "->";
     }
+    let mut call = recv + acc + mname;
     if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
         p = p + 1;
         let ap: List[String] = c_emit_call_args(toks, p, n, env);
@@ -85,7 +118,7 @@ pub fn c_emit_method(toks: List[String], pos: Int, n: Int, env: String, recv: St
         a0 = list_get(ap, 2);
         a1 = list_get(ap, 3);
         a2 = list_get(ap, 4);
-        call = recv + "." + mname + "(" + margs + ")";
+        call = recv + acc + mname + "(" + margs + ")";
     }
     // CRIT 2.2: method sinks must run the same secret guard as free calls
     c_secret_emit_guard(env, mname, a0, a1, a2, margs);
@@ -104,18 +137,18 @@ pub fn c_emit_method(toks: List[String], pos: Int, n: Int, env: String, recv: St
         }
     }
     if mname == "is_ok" {
-        call = "(" + recv + ".ok)";
+        call = "(" + recv + acc + "ok)";
     }
     if mname == "is_err" {
-        call = "(!" + recv + ".ok)";
+        call = "(!" + recv + acc + "ok)";
     }
     if mname == "unwrap" {
         // OoResS (.val) vs OoResV (no payload on Ok — empty str; Err via .err message)
         let rk: String = c_env_get(env, recv);
         if rk == "V" {
-            call = "((" + recv + ".ok) ? (oo_str_lit(\"\")) : (oo_print_str(oo_str_lit(\"ERR\\tunwrap\")), oo_println(), oo_process_exit(1), oo_str_lit(\"\")))";
+            call = "((" + recv + acc + "ok) ? (oo_str_lit(\"\")) : (oo_print_str(oo_str_lit(\"ERR\\tunwrap\")), oo_println(), oo_process_exit(1), oo_str_lit(\"\")))";
         } else {
-            call = "((" + recv + ".ok) ? (" + recv + ".val) : (oo_print_str(oo_str_lit(\"ERR\\tunwrap\")), oo_println(), oo_process_exit(1), " + recv + ".val))";
+            call = "((" + recv + acc + "ok) ? (" + recv + acc + "val) : (oo_print_str(oo_str_lit(\"ERR\\tunwrap\")), oo_println(), oo_process_exit(1), " + recv + acc + "val))";
         }
     }
     // OPEN-83: monomorphize trait method to the impl free function.
