@@ -1,0 +1,134 @@
+// # Cap, work, offer, 425, and Privacy Pass scrape
+//
+// Logline: Parse the five neighbor handshakes. Refuse attach without a pin.
+//
+// Setup: cwd is ooda/. Hashcash mint uses sha256. No network.
+//
+// Beats:
+//   1. Cap quote wants FsRead. Empty pin denies CAP-PROOF.
+//   2. Work quote of 4 bits verifies a minted stamp and rejects a bad one.
+//   3. Offer quote is inverted pay. 425 is too early. PrivateToken needs both fields.
+
+import "std/net/http_response.oo";
+import "std/net/pay_cap.oo";
+import "std/net/pay_early.oo";
+import "std/net/pay_offer.oo";
+import "std/net/pay_pass.oo";
+import "std/net/pay_work.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn slurp(fs: &FsReadCap, path: String) -> String {
+    if !path_exists(fs, path) {
+        fail("no " + path);
+    }
+    let raw: Result[String, String] = read_file(fs, path);
+    if raw.is_err() {
+        fail("read " + path);
+    }
+    return match raw { Ok(s) => s, Err(m) => m };
+}
+
+fn mint_work(resource: String, bits: Int) -> String {
+    let mut n: Int = 0;
+    while n < 200000 {
+        let stamp: String = "1:" + bits.to_string() + ":260818:" + resource + "::oo:" + n.to_string();
+        if pay_work_stamp_ok(stamp, bits, resource) {
+            return stamp;
+        }
+        n = n + 1;
+    }
+    return "";
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    if http_response_reason(425) != "Too Early" {
+        fail("425 reason");
+    }
+    if !pay_early_is_too_early(425) {
+        fail("425");
+    }
+    if pay_early_is_too_early(402) {
+        fail("402 is not 425");
+    }
+    let capb: String = slurp(fs, "fixtures/pay_cap.json");
+    let cq: PayCapQuote = pay_cap_parse(capb);
+    if !pay_cap_ready(cq) {
+        fail("cap ready");
+    }
+    if cq.cap != "FsRead" {
+        fail("cap name");
+    }
+    let cden: Result[Bool, String] = pay_cap_attach_or_deny("", "tok");
+    if cden.is_ok() {
+        fail("cap pin");
+    }
+    if pay_cap_proof_line("tok") != "CAP-PROOF: tok" {
+        fail("cap hdr");
+    }
+    let built: String = pay_cap_required_json("FsRead", "hello/hello.oo", "https://registry.example/hello");
+    if !pay_cap_ready(pay_cap_parse(built)) {
+        fail("cap roundtrip");
+    }
+    let wq: PayWorkQuote = pay_work_parse(pay_work_required_json(4, "tip"));
+    if !pay_work_ready(wq) {
+        fail("work ready");
+    }
+    if wq.bits != 4 {
+        fail("work bits");
+    }
+    let stamp: String = mint_work("tip", 4);
+    if stamp == "" {
+        fail("mint");
+    }
+    if !pay_work_stamp_ok(stamp, 4, "tip") {
+        fail("stamp");
+    }
+    if pay_work_stamp_ok("1:4:260818:nope::oo:1", 4, "tip") {
+        fail("wrong resource");
+    }
+    let wden: Result[Bool, String] = pay_work_attach_or_deny("", stamp);
+    if wden.is_ok() {
+        fail("work pin");
+    }
+    let offb: String = slurp(fs, "fixtures/pay_offer.json");
+    let off: PayOffer = pay_offer_parse(offb);
+    if !pay_offer_ready(off) {
+        fail("offer ready");
+    }
+    if off.pay_to != "0xworker" {
+        fail("offer payTo");
+    }
+    let oden: Result[Bool, String] = pay_offer_claim_or_deny("", "claim");
+    if oden.is_ok() {
+        fail("offer pin");
+    }
+    let eb: String = slurp(fs, "fixtures/pay_early.json");
+    let early: PayEarly = pay_early_parse(eb);
+    if !pay_early_ready(early) {
+        fail("early ready");
+    }
+    if early.valid_after != "1740672089" {
+        fail("validAfter");
+    }
+    let hdr: String = pay_pass_www_authenticate("ch", "tk");
+    let pp: PayPass = pay_pass_parse(hdr);
+    if !pay_pass_ready(pp) {
+        fail("pass ready");
+    }
+    if pp.challenge != "ch" {
+        fail("challenge");
+    }
+    let pden: Result[Bool, String] = pay_pass_attach_or_deny("", "tok");
+    if pden.is_ok() {
+        fail("pass pin");
+    }
+    let pok: Result[Bool, String] = pay_pass_attach_or_deny("1", "tok");
+    if pok.is_err() {
+        fail("pass pin on");
+    }
+    println("pay_handshakes_smoke: PASSED");
+}
