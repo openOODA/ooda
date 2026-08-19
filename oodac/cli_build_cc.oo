@@ -1,0 +1,63 @@
+// # Per-module gcc -c cache and native link
+//
+// Logline: Compiles each stamp_sha.pb.c with the host preamble to stamp_sha.o and links the .o files with chs_rt.
+//
+// Setup: pbs are emit-cache paths; matching .o skips gcc -c; pre is preamble_<stamp>.c; repro is gcc_repro_flags.
+//
+// Beats:
+//   1. Bundle proto prefixes so each TU sees cross-module decls under -Werror=implicit-function-declaration.
+//   2. gcc -c preamble+protos+pb.c unless the .o exists (cc hit).
+//   3. Link all .o files + chs_rt.c with the product warning, repro, and ssl flags.
+
+import "diag_json.oo";
+
+pub fn run_native_cc(fs: &FsCap, sys: &SysCap, pbs: List[String], pre: String, out: String, repro: String, quiet: Bool) {
+    let n: Int = list_len(pbs);
+    let pf: String = out + ".protos.c";
+    let tu: String = out + ".tu.c";
+    let mut acmd = ": > " + shell_sq(pf);
+    if n > 0 {
+        acmd = "awk '/^#line /{nextfile} {print}'";
+        let mut a = 0;
+        while a < n {
+            acmd = acmd + " " + shell_sq(list_get(pbs, a));
+            a = a + 1;
+        }
+        acmd = acmd + " > " + shell_sq(pf);
+    }
+    let rp: Result[String, String] = sys_exec(sys, "sh", "-c", acmd);
+    if !rp.is_ok() { println("ERR\tbuild\tproto bundle failed"); process_exit(1); }
+
+    let mut skipc: Int = 0;
+    let mut objs: String = "";
+    let mut i = 0;
+    while i < n {
+        let cf = list_get(pbs, i);
+        // key.pb.c -> key.o
+        let ofile = str_slice(cf, 0, chars_len(cf) - 5) + ".o";
+        objs = objs + " " + shell_sq(ofile);
+        let mut hit: Bool = false;
+        if path_exists(fs, ofile) {
+            hit = true;
+        }
+        if hit {
+            skipc = skipc + 1;
+        } else {
+            let cc = "OODA_SRC_ROOT=\"${OODA_SRC_ROOT:-.}\"; cat " + shell_sq(pre) + " " + shell_sq(pf) + " " + shell_sq(cf) + " > " + shell_sq(tu) + " && gcc -c -O2 -g -Werror=implicit-function-declaration -Werror=return-type -Werror=uninitialized -I\"$OODA_SRC_ROOT/runtime\" " + shell_sq(tu) + " -o " + shell_sq(ofile);
+            let rc: Result[String, String] = sys_exec(sys, "sh", "-c", cc);
+            if !rc.is_ok() { println("ERR\tbuild\tgcc -c failed on " + cf); process_exit(1); }
+        }
+        i = i + 1;
+    }
+    if !quiet {
+        println("cc_cache skip=" + skipc.to_string() + " of " + n.to_string());
+    }
+
+    let gcc_cmd = "OO_SSL_C=\"\"; OO_SSL_L=\"\"; if [ \"${OO_HAVE_OPENSSL:-}\" = \"0\" ]; then true; elif [ -e /usr/lib64/libssl.so.3 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"/usr/lib64/libssl.so.3 /usr/lib64/libcrypto.so.3\"; elif [ -e /lib64/libssl.so.3 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"/lib64/libssl.so.3 /lib64/libcrypto.so.3\"; elif [ -e /usr/lib/x86_64-linux-gnu/libssl.so.3 ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"/usr/lib/x86_64-linux-gnu/libssl.so.3 /usr/lib/x86_64-linux-gnu/libcrypto.so.3\"; elif [ \"${OO_HAVE_OPENSSL:-}\" = \"1\" ]; then OO_SSL_C=\"-DOO_HAVE_OPENSSL\"; OO_SSL_L=\"-lssl -lcrypto\"; fi; OODA_SRC_ROOT=\"${OODA_SRC_ROOT:-.}\"; SOURCE_DATE_EPOCH=\"${SOURCE_DATE_EPOCH:-0}\" gcc -O2 -g -Werror=implicit-function-declaration -Werror=return-type -Werror=uninitialized " + repro + " -I\"$OODA_SRC_ROOT/runtime\" $OO_SSL_C " + objs + " \"$OODA_SRC_ROOT/runtime/chs_rt.c\" -lm -ldl -lpthread $OO_SSL_L -o " + shell_sq(out);
+    let r_gcc: Result[String, String] = sys_exec(sys, "sh", "-c", gcc_cmd);
+    if r_gcc.is_ok() {
+        return;
+    }
+    println("ERR\tbuild\tgcc linking failed");
+    process_exit(1);
+}
