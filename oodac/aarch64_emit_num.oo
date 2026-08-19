@@ -1,0 +1,217 @@
+// # Parse ints and ALU for AArch64 if-conds
+//
+// Logline: Reads signed INT, minus, and same-fn binds and folds ALU plus overflow ranks.
+//
+// Setup: a64_tok_k and a64_int_digits exist in aarch64_emit_harv.oo.
+//
+// Beats:
+//   1. Parse a decimal including lead0; overflow is ovf not wrap.
+//   2. Read INT, minus INT, or a bound IDENT.
+//   3. Fold + - * / % and compare ranks.
+
+import "aarch64_emit_harv.oo";
+
+pub fn a64_is_cmp(k: String) -> Bool {
+    if k == "EQEQ" || k == "EQ" || k == "NEQ" || k == "LT" || k == "GT" || k == "LTE" || k == "GTE" {
+        return true;
+    }
+    return false;
+}
+
+pub fn a64_is_alu(k: String) -> Bool {
+    if k == "PLUS" || k == "MINUS" || k == "STAR" || k == "SLASH" || k == "PERCENT" {
+        return true;
+    }
+    return false;
+}
+
+fn a64_all_digits(s: String) -> Bool {
+    let n = bytes_len(s);
+    if n < 1 {
+        return false;
+    }
+    let mut i = 0;
+    while i < n {
+        let d = byte_at(s, i) - 48;
+        if d < 0 || d > 9 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn a64_parse_i(s: String) -> List[String] {
+    let mut kind = "bad";
+    let mut val = "0";
+    let n = bytes_len(s);
+    if n >= 1 {
+        let mut rest = s;
+        let mut neg = false;
+        if byte_at(s, 0) == 45 {
+            neg = true;
+            rest = byte_slice(s, 1, n);
+        }
+        if a64_all_digits(rest) {
+            let v = a64_int_digits(rest);
+            if v < 0 {
+                kind = "ovf";
+            } else {
+                kind = "ok";
+                if neg {
+                    val = (0 - v).to_string();
+                } else {
+                    val = v.to_string();
+                }
+            }
+        }
+    }
+    let mut out: List[String] = list_new();
+    out = list_push(out, kind);
+    out = list_push(out, val);
+    return out;
+}
+
+pub fn a64_i(s: String) -> Int {
+    let p: List[String] = a64_parse_i(s);
+    if list_get(p, 0) != "ok" {
+        return 0;
+    }
+    let t: String = list_get(p, 1);
+    if bytes_len(t) >= 1 && byte_at(t, 0) == 45 {
+        return 0 - a64_int_digits(byte_slice(t, 1, bytes_len(t)));
+    }
+    return a64_int_digits(t);
+}
+
+fn a64_lookup(names: List[String], vals: List[String], name: String) -> String {
+    let idx = a64_bind_idx(names, name);
+    if idx < 0 {
+        return "";
+    }
+    return list_get(vals, idx);
+}
+
+pub fn a64_read_int(toks: List[String], n: Int, p: Int, inames: List[String], ivals: List[String]) -> List[String] {
+    let mut out: List[String] = list_new();
+    if p >= n {
+        out = list_push(out, p.to_string());
+        out = list_push(out, "bad");
+        out = list_push(out, "0");
+        return out;
+    }
+    let mut q = p;
+    let mut neg = false;
+    if a64_tok_k(toks, q) == "MINUS" {
+        neg = true;
+        q = q + 1;
+        if q >= n {
+            out = list_push(out, p.to_string());
+            out = list_push(out, "bad");
+            out = list_push(out, "0");
+            return out;
+        }
+    }
+    let k: String = a64_tok_k(toks, q);
+    let mut raw = "";
+    if k == "INT" {
+        raw = a64_tok_t(toks, q);
+        q = q + 1;
+    } else if k == "IDENT" {
+        raw = a64_lookup(inames, ivals, a64_tok_t(toks, q));
+        if raw == "" {
+            out = list_push(out, p.to_string());
+            out = list_push(out, "bad");
+            out = list_push(out, "0");
+            return out;
+        }
+        q = q + 1;
+    } else {
+        out = list_push(out, p.to_string());
+        out = list_push(out, "bad");
+        out = list_push(out, "0");
+        return out;
+    }
+    if neg {
+        raw = "-" + raw;
+    }
+    let pr: List[String] = a64_parse_i(raw);
+    out = list_push(out, q.to_string());
+    out = list_push(out, list_get(pr, 0));
+    out = list_push(out, list_get(pr, 1));
+    return out;
+}
+
+pub fn a64_cmp_num(op: String, ak: String, av: String, bk: String, bv: String) -> String {
+    if ak == "bad" || bk == "bad" {
+        return "other";
+    }
+    if ak == "ovf" || bk == "ovf" {
+        let mut a = 0;
+        let mut b = 0;
+        if ak == "ovf" {
+            a = 1;
+        }
+        if bk == "ovf" {
+            b = 1;
+        }
+        return a64_cmp_fold(op, a, b);
+    }
+    return a64_cmp_fold(op, a64_i(av), a64_i(bv));
+}
+
+pub fn a64_alu_i(op: String, a: Int, b: Int) -> String {
+    if op == "PLUS" {
+        return (a + b).to_string();
+    }
+    if op == "MINUS" {
+        return (a - b).to_string();
+    }
+    if op == "STAR" {
+        return (a * b).to_string();
+    }
+    if op == "SLASH" {
+        if b == 0 {
+            return "";
+        }
+        return (a / b).to_string();
+    }
+    if op == "PERCENT" {
+        if b == 0 {
+            return "";
+        }
+        return (a % b).to_string();
+    }
+    return "";
+}
+
+pub fn a64_read_bool(toks: List[String], n: Int, p: Int, bnames: List[String], bvals: List[String]) -> List[String] {
+    let mut out: List[String] = list_new();
+    if p >= n {
+        out = list_push(out, p.to_string());
+        out = list_push(out, "other");
+        return out;
+    }
+    let k: String = a64_tok_k(toks, p);
+    if k == "KW_TRUE" {
+        out = list_push(out, (p + 1).to_string());
+        out = list_push(out, "true");
+        return out;
+    }
+    if k == "KW_FALSE" {
+        out = list_push(out, (p + 1).to_string());
+        out = list_push(out, "false");
+        return out;
+    }
+    if k == "IDENT" {
+        let b: String = a64_lookup(bnames, bvals, a64_tok_t(toks, p));
+        if b == "true" || b == "false" {
+            out = list_push(out, (p + 1).to_string());
+            out = list_push(out, b);
+            return out;
+        }
+    }
+    out = list_push(out, p.to_string());
+    out = list_push(out, "other");
+    return out;
+}

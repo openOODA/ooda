@@ -1,0 +1,176 @@
+// # Fold if-conds for AArch64 harvest
+//
+// Logline: Classifies if-conds including binds, parens, &&, ALU, and lead0 as true/false/other.
+//
+// Setup: a64_read_int and a64_alu_i exist in aarch64_emit_num.oo.
+//
+// Beats:
+//   1. Fold one clause: bang, bool, compare, or ALU-then-compare.
+//   2. Join && clauses and optional parens.
+//   3. Require LBRACE; leftover shapes stay other.
+
+import "aarch64_emit_harv.oo";
+import "aarch64_emit_num.oo";
+
+fn a64_clause(toks: List[String], n: Int, p0: Int, inames: List[String], ivals: List[String], bnames: List[String], bvals: List[String]) -> List[String] {
+    let mut out: List[String] = list_new();
+    if p0 >= n {
+        out = list_push(out, p0.to_string());
+        out = list_push(out, "other");
+        return out;
+    }
+    let k0: String = a64_tok_k(toks, p0);
+    if k0 == "BANG" {
+        let b: List[String] = a64_read_bool(toks, n, p0 + 1, bnames, bvals);
+        let bv: String = list_get(b, 1);
+        if bv == "true" {
+            out = list_push(out, list_get(b, 0));
+            out = list_push(out, "false");
+            return out;
+        }
+        if bv == "false" {
+            out = list_push(out, list_get(b, 0));
+            out = list_push(out, "true");
+            return out;
+        }
+        out = list_push(out, p0.to_string());
+        out = list_push(out, "other");
+        return out;
+    }
+    if k0 == "IDENT" {
+        let mut nxtk = "";
+        if p0 + 1 < n {
+            nxtk = a64_tok_k(toks, p0 + 1);
+        }
+        if !a64_is_cmp(nxtk) && !a64_is_alu(nxtk) {
+            let b: List[String] = a64_read_bool(toks, n, p0, bnames, bvals);
+            if list_get(b, 1) != "other" {
+                return b;
+            }
+        }
+    } else if k0 == "KW_TRUE" || k0 == "KW_FALSE" {
+        let b0: List[String] = a64_read_bool(toks, n, p0, bnames, bvals);
+        let mut p = parse_int(list_get(b0, 0));
+        let left: String = list_get(b0, 1);
+        if p < n && (a64_tok_k(toks, p) == "EQEQ" || a64_tok_k(toks, p) == "NEQ") {
+            let op: String = a64_tok_k(toks, p);
+            let b1: List[String] = a64_read_bool(toks, n, p + 1, bnames, bvals);
+            let right: String = list_get(b1, 1);
+            if right == "other" {
+                out = list_push(out, p0.to_string());
+                out = list_push(out, "other");
+                return out;
+            }
+            let mut r = "false";
+            if op == "EQEQ" || op == "EQ" {
+                if left == right {
+                    r = "true";
+                }
+            } else {
+                if left != right {
+                    r = "true";
+                }
+            }
+            out = list_push(out, list_get(b1, 0));
+            out = list_push(out, r);
+            return out;
+        }
+        return b0;
+    }
+    let a: List[String] = a64_read_int(toks, n, p0, inames, ivals);
+    if list_get(a, 1) == "bad" {
+        out = list_push(out, p0.to_string());
+        out = list_push(out, "other");
+        return out;
+    }
+    let mut p = parse_int(list_get(a, 0));
+    let mut ak: String = list_get(a, 1);
+    let mut av: String = list_get(a, 2);
+    if p < n && a64_is_alu(a64_tok_k(toks, p)) {
+        let op: String = a64_tok_k(toks, p);
+        let b: List[String] = a64_read_int(toks, n, p + 1, inames, ivals);
+        if list_get(b, 1) != "ok" || ak != "ok" {
+            out = list_push(out, p0.to_string());
+            out = list_push(out, "other");
+            return out;
+        }
+        let folded: String = a64_alu_i(op, a64_i(av), a64_i(list_get(b, 2)));
+        if folded == "" {
+            out = list_push(out, p0.to_string());
+            out = list_push(out, "other");
+            return out;
+        }
+        p = parse_int(list_get(b, 0));
+        ak = "ok";
+        av = folded;
+    }
+    if p >= n || !a64_is_cmp(a64_tok_k(toks, p)) {
+        out = list_push(out, p0.to_string());
+        out = list_push(out, "other");
+        return out;
+    }
+    let cop: String = a64_tok_k(toks, p);
+    let b2: List[String] = a64_read_int(toks, n, p + 1, inames, ivals);
+    let r1: String = a64_cmp_num(cop, ak, av, list_get(b2, 1), list_get(b2, 2));
+    if r1 == "other" {
+        out = list_push(out, p0.to_string());
+        out = list_push(out, "other");
+        return out;
+    }
+    p = parse_int(list_get(b2, 0));
+    if p < n && a64_is_cmp(a64_tok_k(toks, p)) {
+        let cop2: String = a64_tok_k(toks, p);
+        let b3: List[String] = a64_read_int(toks, n, p + 1, inames, ivals);
+        let mut lv = 0;
+        if r1 == "true" {
+            lv = 1;
+        }
+        let r2: String = a64_cmp_num(cop2, "ok", lv.to_string(), list_get(b3, 1), list_get(b3, 2));
+        out = list_push(out, list_get(b3, 0));
+        out = list_push(out, r2);
+        return out;
+    }
+    out = list_push(out, p.to_string());
+    out = list_push(out, r1);
+    return out;
+}
+
+pub fn a64_if_cond(toks: List[String], n: Int, i: Int, inames: List[String], ivals: List[String], bnames: List[String], bvals: List[String]) -> String {
+    if i + 1 >= n {
+        return "other";
+    }
+    let mut p = i + 1;
+    let mut par = false;
+    if a64_tok_k(toks, p) == "LPAREN" {
+        par = true;
+        p = p + 1;
+    }
+    let c1: List[String] = a64_clause(toks, n, p, inames, ivals, bnames, bvals);
+    let mut v: String = list_get(c1, 1);
+    if v != "true" && v != "false" {
+        return "other";
+    }
+    p = parse_int(list_get(c1, 0));
+    while p < n && a64_tok_k(toks, p) == "ANDAND" {
+        p = p + 1;
+        let c2: List[String] = a64_clause(toks, n, p, inames, ivals, bnames, bvals);
+        let v2: String = list_get(c2, 1);
+        if v2 != "true" && v2 != "false" {
+            return "other";
+        }
+        if v != "true" || v2 != "true" {
+            v = "false";
+        }
+        p = parse_int(list_get(c2, 0));
+    }
+    if par {
+        if p >= n || a64_tok_k(toks, p) != "RPAREN" {
+            return "other";
+        }
+        p = p + 1;
+    }
+    if p >= n || a64_tok_k(toks, p) != "LBRACE" {
+        return "other";
+    }
+    return v;
+}

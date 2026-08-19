@@ -1,13 +1,13 @@
-// # emit-aarch64 if-cond boundary leftover lock
+// # emit-aarch64 if-cond boundary lock
 //
-// Logline: Side emit-aarch64 fail-closes lead0 INT compare, overflowing INT compare, and IDENT LT with no _start.
+// Logline: Side emit-aarch64 folds lead0 INT, overflowing INT, and IDENT LT and clang assembles ARM aarch64.
 //
 // Setup: cwd is ooda/. Drive oodac/oodac.aarch64 only.
 //
 // Beats:
 //   1. Rebuild the side ELF when sources are newer.
-//   2. Each boundary fixture prints ERR aarch64_emit.
-//   3. Refuse a successful _start that omitted or mis-folded the cond.
+//   2. 00==0 writes EQ, 10<=010 writes LE, overflow writes GE, x<2 writes YES.
+//   3. clang -target aarch64-linux-gnu -c is ARM aarch64.
 
 import "std/scenario.oo";
 import "std/sh.oo";
@@ -18,15 +18,13 @@ fn fail(msg: String) {
     process_exit(1);
 }
 
-fn refuse(p: &ProcessCap, side: String, src: String, sfile: String, serr: String, tag: String) {
-    if process_exec(p, side + " emit-aarch64 " + src + " > " + sfile + " 2>" + serr).is_ok() {
-        if expect_clean(p, "grep -q _start " + sfile).is_ok() {
-            fail(tag + " wrote _start");
-        }
-    }
-    if expect_clean(p, "grep -qE 'ERR' " + sfile + " " + serr).is_err() { fail(tag + " no ERR"); }
-    if expect_clean(p, "grep -q aarch64_emit " + sfile + " " + serr).is_err() { fail(tag + " no aarch64_emit"); }
-    if expect_clean(p, "! grep -q _start " + sfile).is_err() { fail(tag + " silent omit"); }
+fn emit_has(p: &ProcessCap, fs: &FsReadCap, side: String, src: String, sfile: String, serr: String, needle: String, tag: String) {
+    if check(p, side + " emit-aarch64 " + src + " > " + sfile + " 2>" + serr, 30).is_err() { fail(tag + " emit"); }
+    if expect_clean(p, "! grep -qE '^ERR' " + sfile + " " + serr).is_err() { fail(tag + " ERR"); }
+    if expect_substring(fs, sfile, "_start").is_err() { fail(tag + " no _start"); }
+    if expect_substring(fs, sfile, needle).is_err() { fail(tag + " no " + needle); }
+    if check(p, "clang -target aarch64-linux-gnu -c " + sfile + " -o " + sfile + ".o", 15).is_err() { fail(tag + " assemble"); }
+    if expect_clean(p, "file " + sfile + ".o | grep -q 'ARM aarch64'").is_err() { fail(tag + " not ARM"); }
 }
 
 pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
@@ -35,16 +33,15 @@ pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
     let prod = root + "/oodac/oodac";
     let side = root + "/oodac/oodac.aarch64";
     let fx = root + "/fixtures/";
+    let aarch64_side_src = fx + "aarch64_if_eq00.oo";
     if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
-    if scenario(p, fs, "aarch64 if-cond boundary leftover").is_err() { fail("scenario"); }
-    if expect_present(fs, fx + "aarch64_if_eq00.oo").is_err() { fail("no eq00"); }
-    if expect_present(fs, fx + "aarch64_if_lte010.oo").is_err() { fail("no lte010"); }
-    if expect_present(fs, fx + "aarch64_if_ovf.oo").is_err() { fail("no ovf"); }
-    if expect_present(fs, fx + "aarch64_iflt_ident.oo").is_err() { fail("no iflt_ident"); }
+    if scenario(p, fs, "aarch64 if-cond boundary").is_err() { fail("scenario"); }
+    if expect_quiet(p, "test -x /usr/bin/clang").is_err() { fail("no clang"); }
     ensure_aarch64_side(p, root, prod, side);
-    refuse(p, side, fx + "aarch64_if_eq00.oo", tmpd + "/a64_eq00.s", tmpd + "/a64_eq00.err", "eq00");
-    refuse(p, side, fx + "aarch64_if_lte010.oo", tmpd + "/a64_lte010.s", tmpd + "/a64_lte010.err", "lte010");
-    refuse(p, side, fx + "aarch64_if_ovf.oo", tmpd + "/a64_ovf.s", tmpd + "/a64_ovf.err", "ovf");
-    refuse(p, side, fx + "aarch64_iflt_ident.oo", tmpd + "/a64_iflti.s", tmpd + "/a64_iflti.err", "iflt_ident");
+    emit_has(p, fs, side, fx + "aarch64_if_eq00.oo", tmpd + "/a64_eq00.s", tmpd + "/a64_eq00.err", "EQ", "eq00");
+    emit_has(p, fs, side, fx + "aarch64_if_lte010.oo", tmpd + "/a64_lte010.s", tmpd + "/a64_lte010.err", "LE", "lte010");
+    emit_has(p, fs, side, fx + "aarch64_if_ovf.oo", tmpd + "/a64_ovf.s", tmpd + "/a64_ovf.err", "GE", "ovf");
+    if expect_clean(p, "! grep -qF 'BAD' " + tmpd + "/a64_ovf.s").is_err() { fail("ovf emitted BAD"); }
+    emit_has(p, fs, side, fx + "aarch64_iflt_ident.oo", tmpd + "/a64_iflti.s", tmpd + "/a64_iflti.err", "YES", "iflt_ident");
     println("aarch64_if_bound_smoke: PASSED");
 }
