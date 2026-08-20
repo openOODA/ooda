@@ -1,0 +1,149 @@
+// # Emit SysV fifth and sixth-arg String calls
+//
+// Logline: Matches 5-arg %r8 and 6-arg %r9 String passthroughs and emits SysV calls.
+//
+// Setup: tokenize_lines, x86_tok_k, x86_tok_t, x86_ascii_esc, and x86_emit_frame exist.
+//
+// Beats:
+//   1. Match 5-arg or 6-arg fn returning its last String param.
+//   2. Match main println(fn(...)).
+//   3. Emit caller lea rdi..r9, call, and callee mov %r8/%r9,%rax.
+
+import "token_fmt.oo";
+import "x86_emit_harv.oo";
+import "x86_emit_sys.oo";
+import "x86_emit_frame.oo";
+
+fn x86_scan_params(toks: List[String], n: Int, p0: Int, expected_count: Int) -> List[String] {
+    let empty: List[String] = list_new();
+    let mut p = p0;
+    let mut names: List[String] = list_new();
+    let mut count = 0;
+    while p < n && x86_tok_k(toks, p) != "RPAREN" {
+        if x86_tok_k(toks, p) == "COMMA" { p = p + 1; }
+        if p >= n || x86_tok_k(toks, p) != "IDENT" { return empty; }
+        let pname: String = x86_tok_t(toks, p);
+        p = p + 1;
+        if p >= n || x86_tok_k(toks, p) != "COLON" { return empty; }
+        p = p + 1;
+        if p >= n || x86_tok_k(toks, p) != "IDENT" || x86_tok_t(toks, p) != "String" { return empty; }
+        p = p + 1;
+        names = list_push(names, pname);
+        count = count + 1;
+    }
+    if count != expected_count || p >= n || x86_tok_k(toks, p) != "RPAREN" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "ARROW" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "IDENT" || x86_tok_t(toks, p) != "String" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "LBRACE" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "KW_RETURN" { return empty; }
+    p = p + 1;
+    let last_name: String = list_get(names, expected_count - 1);
+    if p >= n || x86_tok_k(toks, p) != "IDENT" || x86_tok_t(toks, p) != last_name { return empty; }
+    p = p + 1;
+    if p < n && x86_tok_k(toks, p) == "SEMI" { p = p + 1; }
+    if p >= n || x86_tok_k(toks, p) != "RBRACE" { return empty; }
+    return names;
+}
+
+fn x86_scan_args(toks: List[String], n: Int, p0: Int, expected_count: Int) -> List[String] {
+    let empty: List[String] = list_new();
+    let mut p = p0;
+    let mut args: List[String] = list_new();
+    let mut count = 0;
+    while p < n && x86_tok_k(toks, p) != "RPAREN" {
+        if x86_tok_k(toks, p) == "COMMA" { p = p + 1; }
+        if p >= n || x86_tok_k(toks, p) != "STRING" { return empty; }
+        args = list_push(args, x86_tok_t(toks, p));
+        count = count + 1;
+        p = p + 1;
+    }
+    if count != expected_count { return empty; }
+    return args;
+}
+
+pub fn x86_match_n_call(src: String, k_params: Int) -> List[String] {
+    let empty: List[String] = list_new();
+    let toks: List[String] = tokenize_lines(src);
+    let n = list_len(toks);
+    let mut fname = "";
+    let mut i = 0;
+    while i < n {
+        if x86_tok_k(toks, i) == "KW_FN" && i + 2 < n && x86_tok_k(toks, i + 1) == "IDENT" {
+            let nm: String = x86_tok_t(toks, i + 1);
+            if nm != "main" && x86_tok_k(toks, i + 2) == "LPAREN" {
+                let params: List[String] = x86_scan_params(toks, n, i + 3, k_params);
+                if list_len(params) == k_params {
+                    if chars_len(fname) > 0 { return empty; }
+                    fname = nm;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if chars_len(fname) <= 0 { return empty; }
+    i = 0;
+    while i < n {
+        if x86_tok_k(toks, i) == "KW_FN" && i + 1 < n && x86_tok_t(toks, i + 1) == "main" {
+            let mut p = i + 2;
+            if p + 6 < n && x86_tok_k(toks, p) == "LPAREN" && x86_tok_k(toks, p + 1) == "RPAREN" && x86_tok_k(toks, p + 2) == "LBRACE" && x86_tok_t(toks, p + 3) == "println" && x86_tok_k(toks, p + 4) == "LPAREN" && x86_tok_t(toks, p + 5) == fname && x86_tok_k(toks, p + 6) == "LPAREN" {
+                let args: List[String] = x86_scan_args(toks, n, p + 7, k_params);
+                if list_len(args) == k_params {
+                    let mut out: List[String] = list_new();
+                    out = list_push(out, fname);
+                    let mut j = 0;
+                    while j < k_params {
+                        out = list_push(out, list_get(args, j));
+                        j = j + 1;
+                    }
+                    return out;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return empty;
+}
+
+pub fn x86_match_5th_call(src: String) -> List[String] { return x86_match_n_call(src, 5); }
+pub fn x86_match_6th_call(src: String) -> List[String] { return x86_match_n_call(src, 6); }
+
+pub fn x86_emit_5th_call(fname: String, a: String, b: String, c: String, d: String, e: String) {
+    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
+    println("    .section .rodata");
+    println(".Lstr0:\n    .ascii \"" + x86_ascii_esc(a) + "\"");
+    println(".Lstr1:\n    .ascii \"" + x86_ascii_esc(b) + "\"");
+    println(".Lstr2:\n    .ascii \"" + x86_ascii_esc(c) + "\"");
+    println(".Lstr3:\n    .ascii \"" + x86_ascii_esc(d) + "\"");
+    println(".Lstr4:\n    .ascii \"" + x86_ascii_esc(e) + "\\n\"");
+    println("    .section .text\n    .globl _start\n    .globl main\n    .globl " + fname + "\n    .p2align 4");
+    println(fname + ":\n    push %rbp\n    mov %rsp, %rbp\n    mov %r8, %rax\n    pop %rbp\n    ret");
+    println("main:\n_start:");
+    println("    lea .Lstr0(%rip), %rdi\n    lea .Lstr1(%rip), %rsi\n    lea .Lstr2(%rip), %rdx");
+    println("    lea .Lstr3(%rip), %rcx\n    lea .Lstr4(%rip), %r8\n    call " + fname);
+    println("    mov %rax, %rsi\n    mov $1, %rax\n    mov $1, %rdi");
+    println("    mov $" + (chars_len(e) + 1).to_string() + ", %rdx\n    syscall");
+    println("    mov $60, %rax\n    xor %rdi, %rdi\n    syscall");
+}
+
+pub fn x86_emit_6th_call(fname: String, a: String, b: String, c: String, d: String, e: String, f: String) {
+    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
+    println("    .section .rodata");
+    println(".Lstr0:\n    .ascii \"" + x86_ascii_esc(a) + "\"");
+    println(".Lstr1:\n    .ascii \"" + x86_ascii_esc(b) + "\"");
+    println(".Lstr2:\n    .ascii \"" + x86_ascii_esc(c) + "\"");
+    println(".Lstr3:\n    .ascii \"" + x86_ascii_esc(d) + "\"");
+    println(".Lstr4:\n    .ascii \"" + x86_ascii_esc(e) + "\"");
+    println(".Lstr5:\n    .ascii \"" + x86_ascii_esc(f) + "\\n\"");
+    println("    .section .text\n    .globl _start\n    .globl main\n    .globl " + fname + "\n    .p2align 4");
+    println(fname + ":\n    push %rbp\n    mov %rsp, %rbp\n    mov %r9, %rax\n    pop %rbp\n    ret");
+    println("main:\n_start:");
+    println("    lea .Lstr0(%rip), %rdi\n    lea .Lstr1(%rip), %rsi\n    lea .Lstr2(%rip), %rdx");
+    println("    lea .Lstr3(%rip), %rcx\n    lea .Lstr4(%rip), %r8\n    lea .Lstr5(%rip), %r9\n    call " + fname);
+    println("    mov %rax, %rsi\n    mov $1, %rax\n    mov $1, %rdi");
+    println("    mov $" + (chars_len(f) + 1).to_string() + ", %rdx\n    syscall");
+    println("    mov $60, %rax\n    xor %rdi, %rdi\n    syscall");
+}

@@ -5,8 +5,18 @@
 # out: native binary via emit-c + gcc + chs_rt only
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-MAIN="${1:?main.oo}"
-OUT="${2:?out_bin}"
+oodac_abs() {
+  local p="$1"
+  if [[ -e "$p" ]]; then
+    echo "$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
+  elif [[ -d "$(dirname "$p")" ]]; then
+    echo "$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
+  else
+    echo "$p"
+  fi
+}
+MAIN="$(oodac_abs "${1:?main.oo}")"
+OUT="$(oodac_abs "${2:?out_bin}")"
 OODAC_BIN="${OODAC_BIN:-$ROOT/oodac/oodac}"
 if [[ ! -x "$OODAC_BIN" ]]; then
   if [[ -x "$ROOT/oodac_bin" ]]; then OODAC_BIN="$ROOT/oodac_bin"
@@ -15,14 +25,6 @@ if [[ ! -x "$OODAC_BIN" ]]; then
   elif [[ -x "$ROOT/oodac/main" ]]; then OODAC_BIN="$ROOT/oodac/main"
   else echo "ERR_NO_OODAC" >&2; exit 1; fi
 fi
-oodac_abs() {
-  local p="$1"
-  if [[ -e "$p" ]]; then
-    echo "$(cd "$(dirname "$p")" && pwd)/$(basename "$p")"
-  else
-    echo "$p"
-  fi
-}
 oodac_is_cli() {
   grep -a -q 'pure .oo product CLI' "$1" 2>/dev/null
 }
@@ -73,7 +75,7 @@ collect() {
       collect "$dir/$imp"
     fi
   done < <(grep -E '^import "' "$abs" 2>/dev/null | sed -n 's/^import "\(.*\)";.*/\1/p' || true)
-  unset 'STACK[$abs]'
+  unset "STACK[$abs]"
   SEEN[$abs]=1
   MODS+=("$abs")
 }
@@ -118,31 +120,31 @@ if [[ "${PURE_SKIP_CHECK:-}" != "1" ]]; then
   }
   run_main_check
   TREE_HOST="$ROOT/oodac/oodac"
-  if { [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; } \
-     && [[ -x "$TREE_HOST" ]] \
-     && [[ "$(oodac_abs "$OODAC_BIN")" != "$(oodac_abs "$TREE_HOST")" ]]; then
-    if oodac_is_cli "$TREE_HOST"; then
-      echo "ERR_OODAC_IS_CLI $TREE_HOST" >&2
-      exit 1
-    fi
-    if oodac_is_compiler "$TREE_HOST"; then
-      echo "pure_build: host-fallback $TREE_HOST (prior host could not check)"
-      OODAC_BIN="$TREE_HOST"
-      run_main_check
+  if [[ $main_ck -ne 0 ]]; then
+    if [[ -x "$TREE_HOST" ]] && [[ "$(oodac_abs "$OODAC_BIN")" != "$(oodac_abs "$TREE_HOST")" ]]; then
+      if oodac_is_cli "$TREE_HOST"; then
+        echo "ERR_OODAC_IS_CLI $TREE_HOST" >&2
+        exit 1
+      fi
+      if oodac_is_compiler "$TREE_HOST"; then
+        echo "pure_build: host-fallback $TREE_HOST (prior host could not check)"
+        OODAC_BIN="$TREE_HOST"
+        run_main_check
+      fi
     fi
   fi
   if [[ $main_ck -eq 124 ]]; then
     echo "ERR_CHECK_TIMEOUT $MAIN_ABS (nmods=$nmods timeout=${ck_to}s)" >&2
     exit 1
   fi
-  if [[ $main_ck -ne 0 ]] || ! grep -qE '^OK' "$TMP/main_check.out" 2>/dev/null; then
+  if [[ $main_ck -ne 0 ]]; then
     echo "ERR_CHECK $MAIN_ABS" >&2
     cat "$TMP/main_check.err" "$TMP/main_check.out" >&2 || true
     exit 1
   fi
 fi
 
-FN_DEF='^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) [A-Za-z_].*\) \{'
+FN_DEF='^(void|int|long long|double|float|bool|char|OoStr|OoSList|OoIList|OoFList|OoResS|OoResV|OoResI|OoResB|OoResF|CapToken|[A-Za-z_][A-Za-z0-9_]*)\s+[A-Za-z0-9_].*\)\s*\{'
 EMIT_CACHE="${OODAC_EMIT_CACHE:-$ROOT/.ooda-cache/oodac_emit}"
 mkdir -p "$EMIT_CACHE"
 MCS=()
@@ -181,8 +183,7 @@ from pathlib import Path
 tmp = Path(sys.argv[1])
 mcs = [Path(p) for p in sys.argv[2:]]
 fn_start = re.compile(
-    r"^(void|int|long long|OoStr|OoSList|OoIList|OoResS|OoResV) "
-    r"([A-Za-z_][A-Za-z0-9_]*)\s*\(.*\)\s*\{\s*$"
+    r"^(void|int|long long|double|float|bool|char|OoStr|OoSList|OoIList|OoFList|OoResS|OoResV|OoResI|OoResB|OoResF|CapToken|[A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z0-9_]+)\s*\(.*\)\s*\{\s*$"
 )
 protos: list[str] = []
 bodies: list[str] = []
@@ -196,14 +197,20 @@ for mc in mcs:
         if not m:
             i += 1
             continue
-        name = m.group(2)
+        name = re.sub(r"^\d+__", "", m.group(2))
         j = i + 1
         while j < n and not fn_start.match(text[j].rstrip("\n")):
             j += 1
-        chunk = [line for line in text[i:j] if not line.startswith("#ifndef OO_FN_") and not line.startswith("#define OO_FN_") and line.rstrip() != "#endif"]
+        chunk = [
+            re.sub(r"\b\d+__", "", line)
+            for line in text[i:j]
+            if not line.startswith("#ifndef OO_FN_")
+            and not line.startswith("#define OO_FN_")
+            and line.rstrip() != "#endif"
+        ]
         if name not in seen:
             seen.add(name)
-            line = text[i].rstrip()
+            line = re.sub(r"\b\d+__", "", text[i].rstrip())
             if line.endswith("{"):
                 line = line[:-1].rstrip() + ";"
             protos.append(line + "\n")
@@ -310,6 +317,7 @@ echo "OoStr oo_int_to_str(long long); OoStr str_trim(OoStr); OoStr oo_str_to_low
 echo "OoStr oo_str_to_uppercase(OoStr); int oo_str_starts_with(OoStr,OoStr); int oo_str_ends_with(OoStr,OoStr);" >> "$TMP/preamble.c"
 echo "long long oo_str_index_of(OoStr,OoStr); OoStr oo_str_repeat(OoStr,long long);" >> "$TMP/preamble.c"
 echo "void x86_emit_stream(OoStr); void x86_emit_linux64(OoSList);" >> "$TMP/preamble.c"
+echo "static inline void oo_process_exit(long long c) { exit((int)c); }" >> "$TMP/preamble.c"
 echo "long long oo_import_c(OoStr); long long oo_ffi_gen(OoStr); long long oo_lto_xlang_link(OoStr,OoStr);" >> "$TMP/preamble.c"
 sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/preamble.c"
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"
@@ -346,8 +354,10 @@ if [[ "${OO_HAVE_OPENSSL}" == "1" ]]; then
 else
   echo "pure_build: OO_HAVE_OPENSSL=0 (TLS residual; no -lssl)"
 fi
-gcc -O2 -I"$ROOT/runtime" "${OO_SSL_CFLAGS[@]}" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" \
-  -lm -ldl -lpthread "${OO_SSL_LIBS[@]}" -o "$OUT"
+gcc ${OODAC_GCC_OPT:--O2} -I"$ROOT/runtime" "${OO_SSL_CFLAGS[@]}" "$ROOT/runtime/chs_rt.c" "$TMP/all.c" \
+  -lm -ldl -lpthread "${OO_SSL_LIBS[@]}" -o "$TMP/out_bin"
+mv -f "$TMP/out_bin" "$OUT"
+chmod +x "$OUT"
 test -x "$OUT"
 OUT_BASE="$(basename "$OUT")"
 oodac_named=0

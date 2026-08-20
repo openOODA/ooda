@@ -1,0 +1,204 @@
+// # Edge Mesh Node State, Metrics, and Peer Count
+//
+// Logline: Set status, update battery/CPU metrics, add/remove peers, leadership and heartbeat gating, send/process packet accounting.
+//
+// Setup: Imports mesh_types.oo and mesh_ops_packet for the decrement_ttl helper.
+//
+// Beats:
+//   1. mesh_node_set_status, mesh_node_get_status.
+//   2. mesh_node_update_metrics: mark status=3 when battery < 10.
+//   3. mesh_node_add_peer / remove_peer: bounded by config.max_peers, set last_action.
+//   4. mesh_node_is_leader, mesh_node_should_heartbeat.
+//   5. mesh_node_send_packet: bump sequence_number, total_sent.
+//   6. mesh_node_process_packet: route recv / forward / drop with TTL guard.
+//
+// residual: &mut destubbed to by-value.
+
+import "./mesh_ops_types.oo";
+import "./mesh_ops_packet.oo";
+
+pub fn mesh_node_set_status(node: MeshNode, status: Int) -> MeshNode {
+    return MeshNode {
+        config: (node).config,
+        status: status,
+        battery_level_pct: (node).battery_level_pct,
+        cpu_load_pct: (node).cpu_load_pct,
+        active_peer_count: (node).active_peer_count,
+        sequence_number: (node).sequence_number,
+        total_sent: (node).total_sent,
+        total_recv: (node).total_recv,
+        total_forwarded: (node).total_forwarded,
+        total_dropped: (node).total_dropped,
+        last_action: (node).last_action
+    };
+}
+
+pub fn mesh_node_get_status(node: MeshNode) -> Int {
+    return (node).status;
+}
+
+pub fn mesh_node_update_metrics(node: MeshNode, battery_pct: Int, cpu_pct: Int) -> MeshNode {
+    let mut st: Int = (node).status;
+    if battery_pct < 10 {
+        st = 3;
+    }
+    return MeshNode {
+        config: (node).config,
+        status: st,
+        battery_level_pct: battery_pct,
+        cpu_load_pct: cpu_pct,
+        active_peer_count: (node).active_peer_count,
+        sequence_number: (node).sequence_number,
+        total_sent: (node).total_sent,
+        total_recv: (node).total_recv,
+        total_forwarded: (node).total_forwarded,
+        total_dropped: (node).total_dropped,
+        last_action: (node).last_action
+    };
+}
+
+pub fn mesh_node_add_peer(node: MeshNode) -> MeshNode {
+    let max_p: Int = (node).config.max_peers;
+    let curr_p: Int = (node).active_peer_count;
+    let mut next_p: Int = curr_p;
+    let mut action: Int = 0;
+    if curr_p < max_p {
+        next_p = curr_p + 1;
+        action = 1;
+    }
+    return MeshNode {
+        config: (node).config,
+        status: (node).status,
+        battery_level_pct: (node).battery_level_pct,
+        cpu_load_pct: (node).cpu_load_pct,
+        active_peer_count: next_p,
+        sequence_number: (node).sequence_number,
+        total_sent: (node).total_sent,
+        total_recv: (node).total_recv,
+        total_forwarded: (node).total_forwarded,
+        total_dropped: (node).total_dropped,
+        last_action: action
+    };
+}
+
+pub fn mesh_node_remove_peer(node: MeshNode) -> MeshNode {
+    let curr_p: Int = (node).active_peer_count;
+    let mut next_p: Int = curr_p;
+    let mut action: Int = 0;
+    if curr_p > 0 {
+        next_p = curr_p - 1;
+        action = 1;
+    }
+    return MeshNode {
+        config: (node).config,
+        status: (node).status,
+        battery_level_pct: (node).battery_level_pct,
+        cpu_load_pct: (node).cpu_load_pct,
+        active_peer_count: next_p,
+        sequence_number: (node).sequence_number,
+        total_sent: (node).total_sent,
+        total_recv: (node).total_recv,
+        total_forwarded: (node).total_forwarded,
+        total_dropped: (node).total_dropped,
+        last_action: action
+    };
+}
+
+pub fn mesh_node_is_leader(node: MeshNode) -> Bool {
+    if (node).config.role == 1 {
+        return true;
+    }
+    return false;
+}
+
+pub fn mesh_node_should_heartbeat(node: MeshNode, current_time_ms: Int, last_heartbeat_ms: Int) -> Bool {
+    if (node).status == 0 {
+        return false;
+    }
+    let interval: Int = (node).config.heartbeat_interval_ms;
+    let elapsed: Int = current_time_ms - last_heartbeat_ms;
+    if elapsed >= interval {
+        return true;
+    }
+    return false;
+}
+
+pub fn mesh_node_send_packet(node: MeshNode, dst_node: Int, payload_type: Int, payload_val: Int) -> MeshNode {
+    let new_seq: Int = (node).sequence_number + 1;
+    return MeshNode {
+        config: (node).config,
+        status: (node).status,
+        battery_level_pct: (node).battery_level_pct,
+        cpu_load_pct: (node).cpu_load_pct,
+        active_peer_count: (node).active_peer_count,
+        sequence_number: new_seq,
+        total_sent: (node).total_sent + 1,
+        total_recv: (node).total_recv,
+        total_forwarded: (node).total_forwarded,
+        total_dropped: (node).total_dropped,
+        last_action: new_seq
+    };
+}
+
+pub fn mesh_node_process_packet(node: MeshNode, pkt: MeshPacket) -> MeshNode {
+    if (node).status == 0 {
+        return MeshNode {
+            config: (node).config,
+            status: (node).status,
+            battery_level_pct: (node).battery_level_pct,
+            cpu_load_pct: (node).cpu_load_pct,
+            active_peer_count: (node).active_peer_count,
+            sequence_number: (node).sequence_number,
+            total_sent: (node).total_sent,
+            total_recv: (node).total_recv,
+            total_forwarded: (node).total_forwarded,
+            total_dropped: (node).total_dropped + 1,
+            last_action: 0 - 1
+        };
+    }
+    let recv_n: Int = (node).total_recv + 1;
+    if (pkt).dst_node == (node).config.node_id {
+        return MeshNode {
+            config: (node).config,
+            status: (node).status,
+            battery_level_pct: (node).battery_level_pct,
+            cpu_load_pct: (node).cpu_load_pct,
+            active_peer_count: (node).active_peer_count,
+            sequence_number: (node).sequence_number,
+            total_sent: (node).total_sent,
+            total_recv: recv_n,
+            total_forwarded: (node).total_forwarded,
+            total_dropped: (node).total_dropped,
+            last_action: 1
+        };
+    }
+    let dec: MeshPacket = mesh_packet_decrement_ttl(pkt);
+    if (dec).ttl <= 0 {
+        return MeshNode {
+            config: (node).config,
+            status: (node).status,
+            battery_level_pct: (node).battery_level_pct,
+            cpu_load_pct: (node).cpu_load_pct,
+            active_peer_count: (node).active_peer_count,
+            sequence_number: (node).sequence_number,
+            total_sent: (node).total_sent,
+            total_recv: recv_n,
+            total_forwarded: (node).total_forwarded,
+            total_dropped: (node).total_dropped + 1,
+            last_action: 0
+        };
+    }
+    return MeshNode {
+        config: (node).config,
+        status: (node).status,
+        battery_level_pct: (node).battery_level_pct,
+        cpu_load_pct: (node).cpu_load_pct,
+        active_peer_count: (node).active_peer_count,
+        sequence_number: (node).sequence_number,
+        total_sent: (node).total_sent,
+        total_recv: recv_n,
+        total_forwarded: (node).total_forwarded + 1,
+        total_dropped: (node).total_dropped,
+        last_action: 2
+    };
+}

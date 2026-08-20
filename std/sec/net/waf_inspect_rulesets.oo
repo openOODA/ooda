@@ -1,0 +1,79 @@
+// # WAF Ruleset Walker & Telemetry Builder
+//
+// Logline: Walk enabled ruleset stacks, match rules, and emit inspection telemetry records.
+//
+// Setup: Imports waf_types, waf_http, waf_rule, and waf_engine.
+//
+// Beats:
+//   1. waf_engine_inspect_rulesets: walk enabled rulesets and emit on rule match.
+//   2. waf_telemetry_create: build WafTelemetry from a request and inspection result.
+//
+// residual: TLS decrypt-and-inspect is process_exit in waf_stubs.
+
+import "./waf_types.oo";
+import "./waf_http.oo";
+import "./waf_rule.oo";
+import "./waf_engine.oo";
+
+pub fn waf_engine_inspect_rulesets(
+    engine: &WafEngine,
+    req: &HttpRequest,
+    is_enforce: Bool
+) -> Result[WafInspectionResult, String] {
+    let sets: List[WafRuleSet] = engine.rule_sets;
+    let num_sets: Int = list_len(sets);
+    let mut s_idx: Int = 0;
+    while s_idx < num_sets {
+        let set_item: WafRuleSet = list_get(sets, s_idx);
+        let x_active: Bool = set_item.enabled;
+        if x_active == false {
+            s_idx = s_idx + 1;
+        } else {
+            let rules_field: List[WafRule] = set_item.rules;
+            let r_list: List[WafRule] = rules_field;
+            let num_r: Int = list_len(r_list);
+            let mut r_idx: Int = 0;
+            while r_idx < num_r {
+                let rule_obj: WafRule = list_get(r_list, r_idx);
+                if waf_rule_matches_request(&rule_obj, req) {
+                    let mut act = waf_action_block(engine.config.block_status_code, rule_obj.name);
+                    let is_log_mode: Bool = is_enforce == false;
+                    if is_log_mode {
+                        act = waf_action_log(rule_obj.name);
+                    }
+                    let is_allowed_v: Bool = is_log_mode;
+                    let res = WafInspectionResult {
+                        is_allowed: is_allowed_v,
+                        action: act,
+                        matched_rule_id: rule_obj.rule_id,
+                        matched_rule_name: rule_obj.name,
+                        threat_category: rule_obj.category,
+                        risk_score: rule_obj.severity,
+                        inspection_time_ms: 3,
+                    };
+                    return Ok(res);
+                }
+                r_idx = r_idx + 1;
+            }
+        }
+        s_idx = s_idx + 1;
+    }
+    return Err("NO_RULESET_MATCH");
+}
+
+pub fn waf_telemetry_create(
+    req: &HttpRequest,
+    result: &WafInspectionResult,
+    current_time_ms: Int
+) -> WafTelemetry {
+    let result_action: WafAction = result.action;
+    let result_at: String = result_action.action_type;
+    return WafTelemetry {
+        request_uri: req.uri,
+        client_ip: req.client_ip,
+        action_taken: result_at,
+        rule_triggered: result.matched_rule_id,
+        risk_score: result.risk_score,
+        timestamp: current_time_ms,
+    };
+}

@@ -1,0 +1,193 @@
+// # LLVM JIT Execution Engine
+//
+// Logline: Dynamically lower, compile, and execute in-memory .oo expressions and scripts via LLVM IR JIT / lli runner.
+//
+// Setup: FsCap writes temp JIT compilation units; SysCap invokes LLVM compiler, lli, or clang backend.
+//
+// Beats:
+//   1. Wrap raw expressions or snippet statements into complete pub fn main units.
+//   2. Lower source to LLVM IR and dispatch to lli JIT or clang fast runtime.
+//   3. Capture execution stdout and status into a unified result buffer.
+//   4. Expose interactive REPL engine with command dispatch and line evaluation.
+
+pub fn llvm_jit_engine_sq(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut i = 0;
+    let mut out: String = "'";
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "'" {
+            out = out + "'\\''";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out + "'";
+}
+
+pub fn llvm_jit_sq(s: String) -> String {
+    return llvm_jit_engine_sq(s);
+}
+
+pub fn llvm_jit_engine_has_substr(s: String, sub: String) -> Bool {
+    return str_index_of(s, sub) >= 0;
+}
+
+pub fn llvm_jit_has_substr(s: String, sub: String) -> Bool {
+    return llvm_jit_engine_has_substr(s, sub);
+}
+
+pub fn llvm_jit_engine_is_complete(src: String) -> Bool {
+    if llvm_jit_engine_has_substr(src, "pub fn main(") || llvm_jit_engine_has_substr(src, "fn main(") {
+        return true;
+    }
+    return false;
+}
+
+pub fn llvm_jit_is_complete(src: String) -> Bool {
+    return llvm_jit_engine_is_complete(src);
+}
+
+pub fn llvm_jit_engine_wrap_source(expr: String) -> String {
+    let trimmed: String = str_trim(expr);
+    if llvm_jit_engine_is_complete(trimmed) {
+        return trimmed + "\n";
+    }
+    let is_stmt: Bool = llvm_jit_engine_has_substr(trimmed, "println(") ||
+                        llvm_jit_engine_has_substr(trimmed, "let ") ||
+                        llvm_jit_engine_has_substr(trimmed, "while ") ||
+                        llvm_jit_engine_has_substr(trimmed, "for ") ||
+                        llvm_jit_engine_has_substr(trimmed, "import ") ||
+                        llvm_jit_engine_has_substr(trimmed, "match ") ||
+                        llvm_jit_engine_has_substr(trimmed, ";");
+    if is_stmt {
+        let n: Int = chars_len(trimmed);
+        let mut body: String = trimmed;
+        if n > 0 && char_at(trimmed, n - 1) != ";" && char_at(trimmed, n - 1) != "}" {
+            body = body + ";";
+        }
+        return "pub fn main() {\n    " + body + "\n}\n";
+    }
+    return "pub fn main() {\n    println(" + trimmed + ");\n}\n";
+}
+
+pub fn llvm_jit_wrap_source(expr: String) -> String {
+    return llvm_jit_engine_wrap_source(expr);
+}
+
+pub fn llvm_jit_engine_eval_source(fs: &FsCap, sys: &SysCap, src: String) -> Result[String, String] {
+    let tmp_oo: String = ".ooda-cache/ooda-tmp/jit_eval.oo";
+    let tmp_ll: String = ".ooda-cache/ooda-tmp/jit_eval.ll";
+    let tmp_bin: String = ".ooda-cache/ooda-tmp/jit_eval.bin";
+    let tmp_out: String = ".ooda-cache/ooda-tmp/jit_eval.out";
+    let tmp_err: String = ".ooda-cache/ooda-tmp/jit_eval.err";
+    let write_cmd: String = "mkdir -p .ooda-cache/ooda-tmp && printf '%s' " + llvm_jit_engine_sq(src) + " > " + llvm_jit_engine_sq(tmp_oo);
+    let wr: Result[String, String] = sys_exec(sys, "sh", "-c", write_cmd);
+    if wr.is_err() {
+        return Err("failed to write jit temp source");
+    }
+    let host_probe: String = "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac/oodac}}\"";
+    let emit_cmd: String = host_probe + " && $OODAC_BIN emit-llvm " + llvm_jit_engine_sq(tmp_oo) + " > " + llvm_jit_engine_sq(tmp_ll) + " 2>" + llvm_jit_engine_sq(tmp_err);
+    let run_cmd: String = "if which lli >/dev/null 2>&1; then lli " + llvm_jit_engine_sq(tmp_ll) + " > " + llvm_jit_engine_sq(tmp_out) + " 2>" + llvm_jit_engine_sq(tmp_err) + "; else clang -Wno-override-module -Iruntime " + llvm_jit_engine_sq(tmp_ll) + " runtime/chs_rt.c -lm -lpthread -ldl -o " + llvm_jit_engine_sq(tmp_bin) + " 2>" + llvm_jit_engine_sq(tmp_err) + " && " + llvm_jit_engine_sq(tmp_bin) + " > " + llvm_jit_engine_sq(tmp_out) + " 2>" + llvm_jit_engine_sq(tmp_err) + "; fi";
+    let full_cmd: String = emit_cmd + " && " + run_cmd;
+    let r: Result[String, String] = sys_exec(sys, "sh", "-c", full_cmd);
+    if r.is_ok() {
+        let rd: Result[String, String] = read_file(fs, tmp_out);
+        if rd.is_ok() {
+            let out_str: String = match rd { Ok(s) => s, Err(e) => e };
+            return Ok(out_str);
+        }
+        return Ok("");
+    }
+    let er: Result[String, String] = read_file(fs, tmp_err);
+    if er.is_ok() {
+        let emsg: String = match er { Ok(s) => s, Err(e) => e };
+        if chars_len(emsg) > 0 {
+            return Err(emsg);
+        }
+    }
+    return Err("jit execution failed");
+}
+
+pub fn llvm_jit_eval_source(fs: &FsCap, sys: &SysCap, src: String) -> Result[String, String] {
+    return llvm_jit_engine_eval_source(fs, sys, src);
+}
+
+pub fn llvm_jit_engine_eval_expr(fs: &FsCap, sys: &SysCap, expr: String) -> Result[String, String] {
+    let code: String = llvm_jit_engine_wrap_source(expr);
+    return llvm_jit_engine_eval_source(fs, sys, code);
+}
+
+pub fn llvm_jit_eval_expr(fs: &FsCap, sys: &SysCap, expr: String) -> Result[String, String] {
+    return llvm_jit_engine_eval_expr(fs, sys, expr);
+}
+
+pub fn run_ooda_eval(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    if list_len(args) < 2 {
+        println("ooda eval: missing expression");
+        process_exit(2);
+    }
+    let mut expr: String = "";
+    let mut i = 1;
+    while i < list_len(args) {
+        let a: String = list_get(args, i);
+        if expr == "" {
+            expr = a;
+        } else {
+            expr = expr + " " + a;
+        }
+        i = i + 1;
+    }
+    let res: Result[String, String] = llvm_jit_engine_eval_expr(fs, sys, expr);
+    if res.is_ok() {
+        let out: String = match res { Ok(s) => s, Err(e) => e };
+        let trimmed_out: String = str_trim(out);
+        if chars_len(trimmed_out) > 0 {
+            println(trimmed_out);
+        }
+        process_exit(0);
+    }
+    let err: String = match res { Ok(s) => s, Err(e) => e };
+    println("ERR\teval\t" + err);
+    process_exit(1);
+}
+
+pub fn run_ooda_repl(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    println("ooda REPL 0.205.0-beta (LLVM JIT Engine)");
+    println("Type expressions or statements. Commands: :quit, :exit, :help");
+    let in_file: String = ".ooda-cache/ooda-tmp/repl_in.txt";
+    let mut running = true;
+    while running {
+        let rcmd: String = "printf '>>> ' >&2; IFS= read -r line || exit 99; printf '%s' \"$line\" > " + llvm_jit_engine_sq(in_file);
+        let rr: Result[String, String] = sys_exec(sys, "sh", "-c", rcmd);
+        if rr.is_err() {
+            println("");
+            return;
+        }
+        let rf: Result[String, String] = read_file(fs, in_file);
+        if rf.is_err() {
+            return;
+        }
+        let line: String = match rf { Ok(s) => s, Err(e) => e };
+        let trimmed: String = str_trim(line);
+        if trimmed == ":quit" || trimmed == ":exit" || trimmed == ":q" {
+            running = false;
+        } else if trimmed == ":help" || trimmed == ":h" {
+            println("Commands: :quit, :exit, :help");
+            println("Enter any .oo expression (e.g. 1 + 2) or statement to evaluate via LLVM JIT.");
+        } else if chars_len(trimmed) > 0 {
+            let res: Result[String, String] = llvm_jit_engine_eval_expr(fs, sys, trimmed);
+            if res.is_ok() {
+                let out: String = match res { Ok(s) => s, Err(e) => e };
+                let trimmed_out: String = str_trim(out);
+                if chars_len(trimmed_out) > 0 {
+                    println(trimmed_out);
+                }
+            } else {
+                let err: String = match res { Ok(s) => s, Err(e) => e };
+                println("ERR: " + err);
+            }
+        }
+    }
+}

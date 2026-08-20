@@ -1,0 +1,190 @@
+// # Type representation layer for c_emit Phase A
+//
+// Logline: Stable, type-checker-facing interface over the tagged String types in ast.oo, providing type equality, assignability, coercion, C mapping, literal inference, and unification. Used by tc_check (Phase A) and the planned Phase C template emit.
+//
+// Setup: 11 type constructors (TyInt, TyFloat, TyBool, TyStr, TyUnit, TyList, TyResult, TyName, TyCap, TyRef, TyRefMut) mirror ast.oo:58-68 mk_ty_*; helpers (ty_eq, ty_assignable, ty_coerce, ty_to_c, ty_infer_lit, ty_unify) compose. Each function is data-only — no c_emit_*.oo calls (Phase A rule, audit/green/c_emit_refactor_phase_a.oot:84). Source analogues: c_emit_call_ty.oo:5-101 hand-coded if-lists, c_emit_ty.oo:14-44 c_lower_call_name and c_emit_ty.oo:147-173 c_call_result_ty, c_emit_struct.oo:15-43 c_struct_field_c_ty.
+//
+// Beats:
+//   1. Constructors: ty_int, ty_float, ty_bool, ty_str, ty_unit, ty_list, ty_result, ty_name, ty_cap, ty_ref, ty_ref_mut (11 total).
+//   2. Tag accessors: ty_tag, ty_inner, ty_arg — structural access for tagged types.
+//   3. Equality: ty_eq on the tagged String.
+//   4. Assignability: ty_assignable — Int↔Float, ref-stripping, list covariance, Result unwrap.
+//   5. Coercion: ty_coerce — emit-time C cast (replaces c_emit_call_ty.oo:5-101 if-lists).
+//   6. C mapping: ty_to_c — TyInt→long long, TyFloat→double, TyBool→int, TyStr→OoStr, TyList→OoIList, TyResult→OoResS, TyName(n)→n, TyRef→long long.
+//   7. Inference: ty_infer_lit — bool/int/float/str from literal token.
+//   8. Unification: ty_unify — Float>Int subsumption; Result/Option unwrap; ref stripping.
+//
+// Notes: ≤ 256 lines; only `.oo`/`.oot`; ASD-STE100. All functions are data-only (no c_emit_*.oo calls per Phase A rule, audit/green/c_emit_refactor_phase_a.oot:84). Coercion defaults to long long when in doubt (matches c_emit default in c_emit_call_ty.oo:5-101 if-lists).
+
+// Type constructors (one per mk_ty_* in ast.oo:58-68) — thin wrappers that tag the type with a stable id so ty_eq works on the literal String.
+pub fn ty_int() -> String { return "TyInt"; }
+pub fn ty_float() -> String { return "TyFloat"; }
+pub fn ty_bool() -> String { return "TyBool"; }
+pub fn ty_str() -> String { return "TyStr"; }
+pub fn ty_unit() -> String { return "TyUnit"; }
+pub fn ty_list(elem: String) -> String { return "TyList(" + elem + ")"; }
+pub fn ty_result(ok: String, err: String) -> String { return "TyResult(" + ok + "," + err + ")"; }
+pub fn ty_name(n: String) -> String { return "TyName(" + n + ")"; }
+pub fn ty_cap(n: String) -> String { return "TyCap(" + n + ")"; }
+pub fn ty_ref(n: String) -> String { return "TyRef(" + n + ")"; }
+pub fn ty_ref_mut(n: String) -> String { return "TyRefMut(" + n + ")"; }
+
+// Extract the tag prefix (e.g. "TyList" from "TyList(TyInt)").
+pub fn ty_tag(ty: String) -> String {
+    let n: Int = chars_len(ty);
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(ty, i) == "(" {
+            return str_substring(ty, 0, i);
+        }
+        i = i + 1;
+    }
+    return ty;
+}
+
+// Extract content inside the outer parens (e.g. "TyInt" from "TyList(TyInt)"); "" if no parens.
+pub fn ty_inner(ty: String) -> String {
+    let n: Int = chars_len(ty);
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(ty, i) == "(" {
+            return str_substring(ty, i + 1, n - 1);
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// Extract the n-th top-level argument (0-indexed); e.g. ty_arg("TyResult(TyInt,TyStr)", 0) = "TyInt".
+pub fn ty_arg(ty: String, idx: Int) -> String {
+    let inner: String = ty_inner(ty);
+    if str_eq(inner, "") {
+        return "";
+    }
+    let n: Int = chars_len(inner);
+    let mut start: Int = 0;
+    let mut count: Int = 0;
+    let mut depth: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(inner, i);
+        if str_eq(c, "(") { depth = depth + 1; }
+        if str_eq(c, ")") { depth = depth - 1; }
+        if str_eq(c, ",") && depth == 0 {
+            if count == idx {
+                return str_substring(inner, start, i);
+            }
+            count = count + 1;
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    if count == idx {
+        return str_substring(inner, start, n);
+    }
+    return "";
+}
+
+// Structural equality on the tagged String representation.
+pub fn ty_eq(a: String, b: String) -> Bool {
+    return str_eq(a, b);
+}
+
+// Is `from` assignable to `to`? Identity + Int↔Float + ref-strip + list covariance + Result unwrap.
+pub fn ty_assignable(to: String, from: String) -> Bool {
+    if str_eq(to, from) { return true; }
+    // Int↔Float coercible (replaces c_emit_call_ty.oo:67-90 c_is_i64_call / c_is_f64_call hand-coded if-lists).
+    if str_eq(to, "TyInt") && str_eq(from, "TyFloat") { return true; }
+    if str_eq(to, "TyFloat") && str_eq(from, "TyInt") { return true; }
+    // Reference stripping: TyRef(T) / TyRefMut(T) assignable to T (mirrors c_emit_fn.oo:64-68 AMP → long long).
+    if str_eq(ty_tag(from), "TyRef") {
+        return ty_assignable(to, ty_arg(from, 0));
+    }
+    if str_eq(ty_tag(from), "TyRefMut") {
+        return ty_assignable(to, ty_arg(from, 0));
+    }
+    // List covariance: List[T1] <: List[T2] when T1 <: T2.
+    if str_eq(ty_tag(to), "TyList") && str_eq(ty_tag(from), "TyList") {
+        return ty_assignable(ty_arg(to, 0), ty_arg(from, 0));
+    }
+    // Result unwrap: TyResult(T, _) <: T (replaces c_emit_call.oo:192-205 hard-coded is_ok / unwrap ternary).
+    if str_eq(ty_tag(from), "TyResult") {
+        return ty_assignable(to, ty_arg(from, 0));
+    }
+    return false;
+}
+
+// Produce a C cast if coercion is needed; else return val unchanged. Replaces c_emit_call_ty.oo:5-101 hand-coded if-lists.
+pub fn ty_coerce(val: String, from: String, to: String) -> String {
+    if str_eq(from, to) { return val; }
+    if str_eq(from, "TyInt") && str_eq(to, "TyFloat") {
+        return "((double)(" + val + "))";
+    }
+    if str_eq(from, "TyFloat") && str_eq(to, "TyInt") {
+        return "((long long)(" + val + "))";
+    }
+    return "((long long)(" + val + "))";
+}
+
+// Map an oo type to its C type representation. Mirrors c_emit_ty.oo:147-173 c_call_result_ty and c_emit_struct.oo:15-43 c_struct_field_c_ty.
+pub fn ty_to_c(ty: String) -> String {
+    if str_eq(ty, "TyInt") { return "long long"; }
+    if str_eq(ty, "TyFloat") { return "double"; }
+    if str_eq(ty, "TyBool") { return "int"; }
+    if str_eq(ty, "TyStr") { return "OoStr"; }
+    if str_eq(ty, "TyUnit") { return "void"; }
+    if str_eq(ty_tag(ty), "TyList") { return "OoIList"; }
+    if str_eq(ty_tag(ty), "TyResult") { return "OoResS"; }
+    if str_eq(ty_tag(ty), "TyName") { return ty_arg(ty, 0); }
+    if str_eq(ty_tag(ty), "TyRef") { return "long long"; }
+    if str_eq(ty_tag(ty), "TyRefMut") { return "long long"; }
+    if str_eq(ty_tag(ty), "TyCap") { return "long long"; }
+    return "long long";
+}
+
+// Infer the type of a literal token: "true"/"false"→TyBool, quoted→TyStr, contains "."→TyFloat, else TyInt.
+pub fn ty_infer_lit(lit: String) -> String {
+    if str_eq(lit, "true") || str_eq(lit, "false") {
+        return "TyBool";
+    }
+    let n: Int = chars_len(lit);
+    if n == 0 {
+        return "TyInt";
+    }
+    if char_at(lit, 0) == "\"" {
+        return "TyStr";
+    }
+    let mut i: Int = 0;
+    while i < n {
+        if char_at(lit, i) == "." {
+            return "TyFloat";
+        }
+        i = i + 1;
+    }
+    return "TyInt";
+}
+
+// Return the more general of two types: Float>Int, Result→ok, TyRef→inner.
+pub fn ty_unify(a: String, b: String) -> String {
+    if str_eq(a, b) {
+        return a;
+    }
+    // Float subsumes Int (mirrors ty_assignable Int↔Float rule).
+    if str_eq(a, "TyFloat") && str_eq(b, "TyInt") { return "TyFloat"; }
+    if str_eq(a, "TyInt") && str_eq(b, "TyFloat") { return "TyFloat"; }
+    // Result unwrap: the ok side wins (used for `.unwrap` on TyResult).
+    if str_eq(ty_tag(a), "TyResult") {
+        return ty_unify(ty_arg(a, 0), b);
+    }
+    if str_eq(ty_tag(b), "TyResult") {
+        return ty_unify(a, ty_arg(b, 0));
+    }
+    // Ref stripping: prefer the inner type.
+    if str_eq(ty_tag(a), "TyRef") || str_eq(ty_tag(a), "TyRefMut") {
+        return ty_unify(ty_arg(a, 0), b);
+    }
+    if str_eq(ty_tag(b), "TyRef") || str_eq(ty_tag(b), "TyRefMut") {
+        return ty_unify(a, ty_arg(b, 0));
+    }
+    return a;
+}

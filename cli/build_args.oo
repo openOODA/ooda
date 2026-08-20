@@ -5,9 +5,10 @@
 // Setup: args[0] is the command; remaining tokens are flags and one file.
 //
 // Beats:
-//   1. Read --target, --emit-llvm, -o, --verbose, --backend, and --release.
-//   2. Reject missing file, bad target, --fuzz, and --release without llvm.
-//   3. Return [file, --target, target, optional -o/verbose/emit-llvm/release].
+//   1. Read --target, --emit-llvm, -o, --verbose, --backend, --release, and PGO flags.
+//   2. Read -fsanitize=address/thread/undefined/fuzzer and --sanitize=/--fuzz aliases.
+//   3. Reject missing file, bad target, conflicting PGO, and non-llvm flags.
+//   4. Return [file, --target, target, optional -o/verbose/emit-llvm/release/pgo/sanitizers].
 
 pub fn cli_build_args(args: List[String]) -> List[String] {
     let mut target: String = "native";
@@ -17,6 +18,11 @@ pub fn cli_build_args(args: List[String]) -> List[String] {
     let mut target_set = false;
     let mut verbose = false;
     let mut release = false;
+    let mut opt_level: String = "";
+    let mut lto = false;
+    let mut pgo_gen = false;
+    let mut pgo_use: String = "";
+    let mut san_flags: List[String] = list_new();
     let mut i = 1;
     while i < list_len(args) {
         let a = list_get(args, i);
@@ -50,11 +56,56 @@ pub fn cli_build_args(args: List[String]) -> List[String] {
             if i >= list_len(args) { println("ERR\tbackend\tmissing value"); process_exit(2); }
             let bv = list_get(args, i);
             if bv != "c" && bv != "llvm" && bv != "wasm" { println("ERR\tbackend\tresidual"); process_exit(2); }
+        } else if a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Oz" {
+            opt_level = a;
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "--lto" {
+            lto = true;
+            if !target_set { target = "llvm"; target_set = true; }
         } else if a == "--release" {
             release = true;
-        } else if a == "--fuzz" {
-            println("ERR\tcli\t--fuzz residual");
-            process_exit(2);
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fprofile-generate" || a == "--pgo-generate" {
+            pgo_gen = true;
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fprofile-use" || a == "--pgo-use" {
+            if i + 1 < list_len(args) {
+                let next_a = list_get(args, i + 1);
+                if str_slice(next_a, 0, 1) != "-" {
+                    pgo_use = next_a;
+                    i = i + 1;
+                } else {
+                    pgo_use = "default.profdata";
+                }
+            } else {
+                pgo_use = "default.profdata";
+            }
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if chars_len(a) >= 15 && str_slice(a, 0, 15) == "-fprofile-use=" {
+            pgo_use = str_slice(a, 15, chars_len(a));
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if chars_len(a) >= 10 && str_slice(a, 0, 10) == "--pgo-use=" {
+            pgo_use = str_slice(a, 10, chars_len(a));
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fsanitize=address" || a == "--sanitize=address" {
+            san_flags = list_push(san_flags, "-fsanitize=address");
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fsanitize=thread" || a == "--sanitize=thread" {
+            san_flags = list_push(san_flags, "-fsanitize=thread");
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fsanitize=undefined" || a == "--sanitize=undefined" {
+            san_flags = list_push(san_flags, "-fsanitize=undefined");
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fsanitize=fuzzer" || a == "--fuzz" || a == "--sanitize=fuzzer" {
+            san_flags = list_push(san_flags, "-fsanitize=fuzzer");
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if chars_len(a) >= 12 && str_slice(a, 0, 12) == "-fsanitize=" {
+            san_flags = list_push(san_flags, a);
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if chars_len(a) >= 11 && str_slice(a, 0, 11) == "--sanitize=" {
+            let sname = str_slice(a, 11, chars_len(a));
+            san_flags = list_push(san_flags, "-fsanitize=" + sname);
+            if !target_set { target = "llvm"; target_set = true; }
         } else if str_slice(a, 0, 1) != "-" {
             file = a;
         } else {
@@ -72,6 +123,30 @@ pub fn cli_build_args(args: List[String]) -> List[String] {
         println("ERR\tcli\t--release only with --target llvm (or --emit-llvm)");
         process_exit(2);
     }
+    if lto && target != "llvm" {
+        println("ERR\tcli\t--lto only with --target llvm");
+        process_exit(2);
+    }
+    if opt_level != "" && target != "llvm" {
+        println("ERR\tcli\toptimization flags only with --target llvm");
+        process_exit(2);
+    }
+    if pgo_gen && target != "llvm" {
+        println("ERR\tcli\tprofile generation only with --target llvm");
+        process_exit(2);
+    }
+    if pgo_use != "" && target != "llvm" {
+        println("ERR\tcli\tprofile use only with --target llvm");
+        process_exit(2);
+    }
+    if pgo_gen && pgo_use != "" {
+        println("ERR\tcli\tcannot both generate and use profile");
+        process_exit(2);
+    }
+    if list_len(san_flags) > 0 && target != "llvm" {
+        println("ERR\tcli\tsanitizer flags only with --target llvm");
+        process_exit(2);
+    }
     let mut bargs: List[String] = list_new();
     bargs = list_push(bargs, file);
     bargs = list_push(bargs, "--target");
@@ -83,5 +158,14 @@ pub fn cli_build_args(args: List[String]) -> List[String] {
     if verbose { bargs = list_push(bargs, "--verbose"); }
     if emit_llvm { bargs = list_push(bargs, "--emit-llvm"); }
     if release { bargs = list_push(bargs, "--release"); }
+    if opt_level != "" { bargs = list_push(bargs, opt_level); }
+    if lto { bargs = list_push(bargs, "--lto"); }
+    if pgo_gen { bargs = list_push(bargs, "--pgo-generate"); }
+    if pgo_use != "" { bargs = list_push(bargs, "--pgo-use=" + pgo_use); }
+    let mut si = 0;
+    while si < list_len(san_flags) {
+        bargs = list_push(bargs, list_get(san_flags, si));
+        si = si + 1;
+    }
     return bargs;
 }

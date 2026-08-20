@@ -1,27 +1,45 @@
 // # Detect const if (true)/(false) println fold
 //
-// Logline: Returns the taken-branch STRING when a function body is only if (KW_TRUE or KW_FALSE) with one println(STRING) per branch.
+// Logline: Returns the taken-branch STRING when a function body is only if (KW_TRUE|KW_FALSE|IDENT) with one println(STRING) per branch.
 //
 // Setup: tokenize_lines, field_at, and parse_int exist. fname is the user function name.
 //
 // Beats:
 //   1. Find KW_FN plus IDENT fname and skip to the body brace.
-//   2. Accept if LPAREN BOOL RPAREN then a println(STRING) branch and an else println(STRING) branch.
-//   3. Return then when KW_TRUE. IDENT inside parens misses.
+//   2. Accept if LPAREN BOOL|IDENT RPAREN then a println(STRING) branch and an else println(STRING) branch.
+//   3. Return then when true. IDENT resolved via let bool lookup.
 //
-// residual: if (IDENT) stays dummy end.
+// residual: runtime paren stays dummy end.
 
 import "token_fmt.oo";
 import "tc_parse_int.oo";
 
-fn wip_kind(toks: List[String], i: Int) -> String {
-    return field_at(list_get(toks, i), 0);
+fn wip_kind(toks: List[String], i: Int) -> String { return field_at(list_get(toks, i), 0); }
+fn wip_text(toks: List[String], i: Int) -> String { return field_at(list_get(toks, i), 3); }
+fn wip_bool_let(toks: List[String], lb: Int, lim: Int, name: String) -> String {
+    let mut p: Int = lb + 1;
+    while p + 3 < lim {
+        if wip_kind(toks, p) == "KW_LET" && wip_kind(toks, p + 1) == "IDENT" && wip_text(toks, p + 1) == name && wip_kind(toks, p + 2) == "EQ" {
+            let vk: String = wip_kind(toks, p + 3);
+            if vk == "KW_TRUE" || vk == "KW_FALSE" { return vk; }
+        }
+        p = p + 1;
+    }
+    return "";
 }
-
-fn wip_text(toks: List[String], i: Int) -> String {
-    return field_at(list_get(toks, i), 3);
+fn wip_bool_val(toks: List[String], pos: Int, n: Int) -> String {
+    if pos < 0 || pos >= n { return ""; }
+    let k: String = wip_kind(toks, pos);
+    if k == "KW_TRUE" || k == "KW_FALSE" { return k; }
+    if k == "IDENT" {
+        let name: String = wip_text(toks, pos);
+        let mut lb: Int = pos;
+        while lb >= 0 && wip_kind(toks, lb) != "LBRACE" { lb = lb - 1; }
+        if lb < 0 { return ""; }
+        return wip_bool_let(toks, lb, pos, name);
+    }
+    return "";
 }
-
 fn wip_one_str_println(toks: List[String], p0: Int, n: Int) -> List[String] {
     let empty: List[String] = list_new();
     let mut p = p0;
@@ -37,51 +55,56 @@ fn wip_one_str_println(toks: List[String], p0: Int, n: Int) -> List[String] {
     out = list_push(out, p.to_string());
     return out;
 }
+fn wip_find(toks: List[String], n: Int, fname: String) -> Int {
+    let mut i: Int = 0;
+    while i + 1 < n {
+        if wip_kind(toks, i) == "KW_FN" && wip_kind(toks, i + 1) == "IDENT" && wip_text(toks, i + 1) == fname { return i; }
+        i = i + 1;
+    }
+    return -1;
+}
+fn wip_p(toks: List[String], n: Int, start: Int) -> Int {
+    let mut p: Int = start;
+    while p < n && wip_kind(toks, p) != "LBRACE" { p = p + 1; }
+    if p >= n { return -1; }
+    p = p + 1;
+    while p + 3 < n && wip_kind(toks, p) == "KW_LET" {
+        while p < n && wip_kind(toks, p) != "SEMI" { p = p + 1; }
+        if p < n && wip_kind(toks, p) == "SEMI" { p = p + 1; }
+    }
+    return p;
+}
 
 pub fn wasm_fn_if_paren(src: String, fname: String) -> String {
     if chars_len(src) <= 0 || chars_len(fname) <= 0 { return ""; }
     let toks: List[String] = tokenize_lines(src);
     let n: Int = list_len(toks);
-    let mut i: Int = 0;
-    while i + 1 < n {
-        if wip_kind(toks, i) == "KW_FN" && wip_kind(toks, i + 1) == "IDENT" {
-            if wip_text(toks, i + 1) == fname {
-                let mut p: Int = i + 2;
-                while p < n && wip_kind(toks, p) != "LBRACE" { p = p + 1; }
-                if p >= n { return ""; }
-                p = p + 1;
-                if p + 4 >= n || wip_kind(toks, p) != "KW_IF" { return ""; }
-                p = p + 1;
-                if p >= n || wip_kind(toks, p) != "LPAREN" { return ""; }
-                p = p + 1;
-                let ck: String = wip_kind(toks, p);
-                if ck != "KW_TRUE" && ck != "KW_FALSE" { return ""; }
-                let take_then: Bool = ck == "KW_TRUE";
-                p = p + 1;
-                if p >= n || wip_kind(toks, p) != "RPAREN" { return ""; }
-                p = p + 1;
-                if p >= n || wip_kind(toks, p) != "LBRACE" { return ""; }
-                p = p + 1;
-                let th: List[String] = wip_one_str_println(toks, p, n);
-                if list_len(th) < 2 { return ""; }
-                p = parse_int(list_get(th, 1));
-                if p >= n || wip_kind(toks, p) != "RBRACE" { return ""; }
-                p = p + 1;
-                if p >= n || wip_kind(toks, p) != "KW_ELSE" { return ""; }
-                p = p + 1;
-                if p >= n || wip_kind(toks, p) != "LBRACE" { return ""; }
-                p = p + 1;
-                let el: List[String] = wip_one_str_println(toks, p, n);
-                if list_len(el) < 2 { return ""; }
-                p = parse_int(list_get(el, 1));
-                if p >= n || wip_kind(toks, p) != "RBRACE" { return ""; }
-                p = p + 1;
-                if p >= n || wip_kind(toks, p) != "RBRACE" { return ""; }
-                if take_then { return list_get(th, 0); }
-                return list_get(el, 0);
-            }
-        }
-        i = i + 1;
-    }
-    return "";
+    let f: Int = wip_find(toks, n, fname);
+    if f < 0 { return ""; }
+    let p0: Int = wip_p(toks, n, f + 2);
+    if p0 < 0 || p0 + 4 >= n { return ""; }
+    if wip_kind(toks, p0) != "KW_IF" { return ""; }
+    if wip_kind(toks, p0 + 1) != "LPAREN" { return ""; }
+    let ck: String = wip_bool_val(toks, p0 + 2, n);
+    if ck != "KW_TRUE" && ck != "KW_FALSE" { return ""; }
+    let take_then: Bool = ck == "KW_TRUE";
+    if wip_kind(toks, p0 + 3) != "RPAREN" { return ""; }
+    if wip_kind(toks, p0 + 4) != "LBRACE" { return ""; }
+    let th: List[String] = wip_one_str_println(toks, p0 + 5, n);
+    if list_len(th) < 2 { return ""; }
+    let mut p: Int = parse_int(list_get(th, 1));
+    if p >= n || wip_kind(toks, p) != "RBRACE" { return ""; }
+    p = p + 1;
+    if p >= n || wip_kind(toks, p) != "KW_ELSE" { return ""; }
+    p = p + 1;
+    if p >= n || wip_kind(toks, p) != "LBRACE" { return ""; }
+    p = p + 1;
+    let el: List[String] = wip_one_str_println(toks, p, n);
+    if list_len(el) < 2 { return ""; }
+    p = parse_int(list_get(el, 1));
+    if p >= n || wip_kind(toks, p) != "RBRACE" { return ""; }
+    p = p + 1;
+    if p >= n || wip_kind(toks, p) != "RBRACE" { return ""; }
+    if take_then { return list_get(th, 0); }
+    return list_get(el, 0);
 }

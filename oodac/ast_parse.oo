@@ -1,0 +1,255 @@
+// # AST parser and c_emit integration shim
+//
+// Logline: Walk tokens once into a typed AstFile, hand the AST to the type-checker, then call c_emit_stream_toks_at unchanged so C output is byte-identical on green std/ files.
+//
+// Setup: Token rows are kind|line|col|text (ooda/oodac/token_fmt.oo:14-23 tokenize_lines; ooda/oodac/token_fmt.oo:153-170 c_tokf/c_tokk/c_tokt). AST constructors at ooda/oodac/ast.oo:14-73 (mk_file..mk_resolved). Type constructors stubbed via ooda/oodac/ty.oo (parallel). Type-check entry stubbed via ooda/oodac/tc_drive.oo (tc_check). c_emit exit point unchanged at ooda/oodac/c_emit.oo:88. Migration spec: openOODA/audit/green/c_emit_refactor_phase_a.oot:71-86 §5. Source analogues: c_emit_fn.oo:51-95, c_emit_let.oo:46-90, c_emit_call.oo:33-228, c_emit_struct.oo:15-113, c_emit_ops.oo:14-36.
+//
+// Beats:
+//   1. ast_parse walks top-level items once and returns AstFile(items) (ast.oo:14).
+//   2. parse_item dispatches per kind; parse_fn_body, parse_stmt, parse_expr cover fn bodies.
+//   3. parse_expr is Pratt with an explicit precedence table; postfix ops attach left-assoc to a primary.
+//   4. ast_drive is the migration shim: ast_parse -> tc_check -> c_emit_stream_toks_at, c_emit unchanged.
+//
+// Notes: ≤ 256 lines; only `.oo`/`.oot`; ASD-STE100; stub imports for parallel ty.oo/tc_drive.oo; parser is read-only on toks; Pratt table mirrors c_emit_ops.oo:16-36 c_binop_prec (per risk 1 in Phase A spec §7). Parser returns (pos,ast) string with TAB separator; tab never appears in AST node text (ast.oo:14-73 uses comma+paren records). Rare constructs (KW_MATCH/PIPE in expr, KW_FOR in stmt, struct-lit) are parsed as best-effort stubs; c_emit is unchanged so byte-identity on green std/ holds.
+import "ast.oo";
+import "ty.oo";
+import "tc_drive.oo";
+import "c_emit.oo";
+import "token_fmt.oo";
+fn pa_pos(r: String) -> Int { return parse_int(str_substring(r, 0, str_index_of(r, "	"))); }
+fn pa_val(r: String) -> String { let i: Int = str_index_of(r, "	"); return str_substring(r, i + 1, str_len(r)); }
+fn pa_pack(p: Int, v: String) -> String { return p.to_string() + "	" + v; }
+fn binop_lbp(k: String) -> Int {
+    if k == "EQ" { return 1; } if k == "OROR" { return 2; } if k == "ANDAND" { return 3; }
+    if k == "EQEQ" || k == "NEQ" || k == "NE" { return 4; }
+    if k == "LT" || k == "GT" || k == "LTE" || k == "GTE" { return 5; }
+    if k == "PLUS" || k == "MINUS" { return 6; }
+    if k == "STAR" || k == "SLASH" || k == "PERCENT" { return 7; }
+    return 0;
+}
+fn op_name(k: String) -> String {
+    if k == "PLUS" { return "Add"; } if k == "MINUS" { return "Sub"; } if k == "STAR" { return "Mul"; }
+    if k == "SLASH" { return "Div"; } if k == "PERCENT" { return "Mod"; } if k == "EQEQ" { return "Eq"; }
+    if k == "NEQ" || k == "NE" { return "Neq"; } if k == "LT" { return "Lt"; } if k == "LTE" { return "Lte"; }
+    if k == "GT" { return "Gt"; } if k == "GTE" { return "Gte"; } if k == "ANDAND" { return "And"; }
+    if k == "OROR" { return "Or"; } if k == "EQ" { return "Assign"; }
+    return "Add";
+}
+fn parse_ty(p0: Int, n: Int, toks: List[String]) -> String {
+    let mut p: Int = p0;
+    let mut ty: String = mk_ty_name("_err_");
+    if p >= n { return pa_pack(p, ty); }
+    let k0: String = c_tokk(toks, p);
+    let t0: String = c_tokt(toks, p);
+    if k0 == "AMP" { p = p + 1; ty = mk_ty_ref(c_tokt(toks, p)); p = p + 1; }
+    else if k0 == "IDENT" {
+        if t0 == "Int" { ty = mk_ty_int(); p = p + 1; }
+        else if t0 == "Float" { ty = mk_ty_float(); p = p + 1; }
+        else if t0 == "Bool" { ty = mk_ty_bool(); p = p + 1; }
+        else if t0 == "String" { ty = mk_ty_str(); p = p + 1; }
+        else { ty = mk_ty_name(t0); p = p + 1; }
+    } else { p = p + 1; }
+    return pa_pack(p, ty);
+}
+pub fn ast_parse(toks: List[String]) -> String {
+    let n: Int = list_len(toks);
+    let mut p: Int = 0;
+    let mut items: String = "";
+    while p < n {
+        if c_tokk(toks, p) == "EOF" { p = n; }
+        else { let pr: String = parse_item(p, n, toks); p = pa_pos(pr); if items == "" { items = pa_val(pr); } else { items = items + "," + pa_val(pr); } }
+    }
+    return mk_file(items);
+}
+fn parse_item(p0: Int, n: Int, toks: List[String]) -> String {
+    let mut p: Int = p0;
+    let k: String = c_tokk(toks, p);
+    let mut item: String = "";
+    if k == "KW_IMPORT" {
+        item = mk_import(c_tokt(toks, p + 1)); p = p + 2; if c_tokk(toks, p) == "SEMI" { p = p + 1; }
+    } else if k == "KW_TYPE" {
+        p = p + 1;
+        let nm: String = c_tokt(toks, p); p = p + 1;
+        let mut fld: String = "";
+        if c_tokk(toks, p) == "LBRACE" {
+            p = p + 1;
+            while c_tokk(toks, p) != "RBRACE" {
+                if c_tokk(toks, p) == "COMMA" { p = p + 1; }
+                let fnm: String = c_tokt(toks, p); p = p + 1;
+                if c_tokk(toks, p) == "COLON" { p = p + 1; }
+                let pt: String = parse_ty(p, n, toks); p = pa_pos(pt);
+                let fe: String = mk_field(fnm, pa_val(pt));
+                if fld == "" { fld = fe; } else { fld = fld + "," + fe; }
+            }
+            p = p + 1;
+        } else { while c_tokk(toks, p) != "SEMI" { p = p + 1; } p = p + 1; }
+        item = mk_type(nm, fld);
+    } else if k == "KW_PUB" && c_tokk(toks, p + 1) == "KW_FN" {
+        p = p + 2; item = pa_val(parse_fn_item(p, n, toks));
+    } else if k == "KW_FN" {
+        p = p + 1; item = pa_val(parse_fn_item(p, n, toks));
+    } else if k == "KW_TRAIT" || k == "KW_IMPL" || k == "KW_VERIFY" {
+        p = p + 1; p = p + 1; p = p + 1;
+        while c_tokk(toks, p) != "LBRACE" { p = p + 1; }
+        p = c_emit_skip_braces(toks, p, n);
+        item = if k == "KW_TRAIT" { mk_trait("", "") } else if k == "KW_IMPL" { mk_impl("", "", "") } else { mk_verify("EVar(_)") };
+    } else { p = p + 1; }
+    return pa_pack(p, item);
+}
+fn parse_fn_item(p0: Int, n: Int, toks: List[String]) -> String {
+    let mut p: Int = p0;
+    let fnm: String = c_tokt(toks, p); p = p + 1;
+    if c_tokk(toks, p) == "LPAREN" { p = p + 1; }
+    let mut params: String = "";
+    while c_tokk(toks, p) != "RPAREN" {
+        if c_tokk(toks, p) == "COMMA" { p = p + 1; }
+        if c_tokk(toks, p) == "AMP" { p = p + 1; }
+        if c_tokk(toks, p) == "KW_MUT" { p = p + 1; }
+        let pname: String = c_tokt(toks, p); p = p + 1;
+        if c_tokk(toks, p) == "COLON" { p = p + 1; }
+        let pt: String = parse_ty(p, n, toks); p = pa_pos(pt);
+        let pe: String = mk_param(pname, pa_val(pt));
+        if params == "" { params = pe; } else { params = params + "," + pe; }
+    }
+    p = p + 1;
+    let mut ret: String = mk_ty_unit();
+    if c_tokk(toks, p) == "ARROW" { p = p + 1; let rt: String = parse_ty(p, n, toks); p = pa_pos(rt); ret = pa_val(rt); }
+    while c_tokk(toks, p) != "LBRACE" { p = p + 1; }
+    let pb: String = parse_fn_body(p, n, toks); p = pa_pos(pb);
+    return pa_pack(p, mk_fn(fnm, params, ret, "", pa_val(pb)));
+}
+fn parse_fn_body(p0: Int, n: Int, toks: List[String]) -> String {
+    let mut p: Int = p0;
+    if c_tokk(toks, p) != "LBRACE" { return pa_pack(p, mk_block("", mk_sempty())); }
+    p = p + 1;
+    let mut stmts: String = "";
+    while c_tokk(toks, p) != "RBRACE" {
+        let ps: String = parse_stmt(p, n, toks); p = pa_pos(ps);
+        if stmts == "" { stmts = pa_val(ps); } else { stmts = stmts + "," + pa_val(ps); }
+    }
+    p = p + 1;
+    return pa_pack(p, mk_block(stmts, mk_sempty()));
+}
+fn parse_stmt(p0: Int, n: Int, toks: List[String]) -> String {
+    let mut p: Int = p0;
+    let k: String = c_tokk(toks, p);
+    let mut s: String = mk_sempty();
+    if k == "KW_LET" {
+        p = p + 1;
+        let is_mut: Bool = c_tokk(toks, p) == "KW_MUT";
+        if is_mut { p = p + 1; }
+        let nm: String = c_tokt(toks, p); p = p + 1;
+        let mut ty: String = "";
+        if c_tokk(toks, p) == "COLON" { p = p + 1; let pt: String = parse_ty(p, n, toks); p = pa_pos(pt); ty = pa_val(pt); }
+        if c_tokk(toks, p) == "EQ" { p = p + 1; }
+        let pr: String = parse_expr(p, n, toks, 0); p = pa_pos(pr);
+        if c_tokk(toks, p) == "SEMI" { p = p + 1; }
+        s = if is_mut { mk_slet_mut(nm, ty, pa_val(pr)) } else { mk_slet(nm, ty, pa_val(pr)) };
+    } else if k == "KW_RETURN" {
+        p = p + 1;
+        if c_tokk(toks, p) == "SEMI" { p = p + 1; s = mk_sreturn(""); }
+        else { let pr2: String = parse_expr(p, n, toks, 0); p = pa_pos(pr2); if c_tokk(toks, p) == "SEMI" { p = p + 1; } s = mk_sreturn(pa_val(pr2)); }
+    } else if k == "KW_WHILE" {
+        p = p + 1;
+        let pc: String = parse_expr(p, n, toks, 0); p = pa_pos(pc);
+        let pb: String = parse_fn_body(p, n, toks); p = pa_pos(pb);
+        s = mk_swhile(pa_val(pc), pa_val(pb));
+    } else if k != "SEMI" {
+        let pe: String = parse_expr(p, n, toks, 0); p = pa_pos(pe);
+        if c_tokk(toks, p) == "SEMI" { p = p + 1; }
+        s = mk_sexpr(pa_val(pe));
+    } else { p = p + 1; }
+    return pa_pack(p, s);
+}
+fn parse_expr(p0: Int, n: Int, toks: List[String], min_bp: Int) -> String {
+    let mut p: Int = p0;
+    let mut lhs: String = "";
+    if p >= n { return pa_pack(p, mk_evar("_eof_")); }
+    let k0: String = c_tokk(toks, p);
+    if k0 == "BANG" || k0 == "MINUS" {
+        let op_s: String = if k0 == "BANG" { "Not" } else { "Neg" };
+        p = p + 1;
+        let pr: String = parse_expr(p, n, toks, 8); p = pa_pos(pr);
+        lhs = mk_eunop(op_s, pa_val(pr));
+    } else { let pp: String = parse_atom(p, n, toks); p = pa_pos(pp); lhs = pa_val(pp); }
+    let mut cont: Bool = true;
+    while cont {
+        let k: String = c_tokk(toks, p);
+        if k == "LPAREN" {
+            p = p + 1;
+            let ar: String = parse_expr_list(p, n, toks, "RPAREN"); p = pa_pos(ar);
+            if c_tokk(toks, p) == "RPAREN" { p = p + 1; }
+            lhs = mk_ecall(lhs, pa_val(ar));
+        } else if k == "DOT" {
+            p = p + 1;
+            let mn: String = c_tokt(toks, p); p = p + 1;
+            if c_tokk(toks, p) == "LPAREN" {
+                p = p + 1;
+                let mr: String = parse_expr_list(p, n, toks, "RPAREN"); p = pa_pos(mr);
+                if c_tokk(toks, p) == "RPAREN" { p = p + 1; }
+                lhs = mk_emethod(lhs, mn, pa_val(mr));
+            } else { lhs = mk_efield(lhs, mn); }
+        } else if k == "LBRACKET" {
+            p = p + 1;
+            let pi: String = parse_expr(p, n, toks, 0); p = pa_pos(pi);
+            if c_tokk(toks, p) == "RBRACKET" { p = p + 1; }
+            lhs = mk_eindex(lhs, pa_val(pi));
+        } else { cont = false; }
+    }
+    cont = true;
+    while cont {
+        let k: String = c_tokk(toks, p);
+        let lbp: Int = binop_lbp(k);
+        if lbp == 0 || lbp < min_bp { cont = false; }
+        else {
+            let mut rbp: Int = lbp + 1;
+            if k == "EQ" { rbp = lbp; }
+            p = p + 1;
+            let pr3: String = parse_expr(p, n, toks, rbp); p = pa_pos(pr3);
+            lhs = mk_ebinop(op_name(k), lhs, pa_val(pr3));
+        }
+    }
+    return pa_pack(p, lhs);
+}
+fn parse_atom(p0: Int, n: Int, toks: List[String]) -> String {
+    let mut p: Int = p0;
+    let k0: String = c_tokk(toks, p);
+    let t0: String = c_tokt(toks, p);
+    let mut expr: String = "";
+    if k0 == "INT" { expr = mk_eint(t0); p = p + 1; }
+    else if k0 == "FLOAT" { expr = mk_efloat(t0); p = p + 1; }
+    else if k0 == "STRING" { expr = mk_estr(t0); p = p + 1; }
+    else if k0 == "KW_TRUE" { expr = mk_ebool("true"); p = p + 1; }
+    else if k0 == "KW_FALSE" { expr = mk_ebool("false"); p = p + 1; }
+    else if k0 == "KW_IF" {
+        p = p + 1;
+        let pc: String = parse_expr(p, n, toks, 0); p = pa_pos(pc);
+        let pt: String = parse_fn_body(p, n, toks); p = pa_pos(pt);
+        let mut el: String = "";
+        if c_tokk(toks, p) == "KW_ELSE" { p = p + 1; let pe2: String = parse_expr(p, n, toks, 0); p = pa_pos(pe2); el = pa_val(pe2); }
+        expr = mk_eif(pa_val(pc), pa_val(pt), el);
+    } else if k0 == "LPAREN" {
+        p = p + 1;
+        let pg: String = parse_expr(p, n, toks, 0); p = pa_pos(pg);
+        if c_tokk(toks, p) == "RPAREN" { p = p + 1; }
+        expr = pa_val(pg);
+    } else if k0 == "IDENT" {
+        expr = mk_evar(t0); p = p + 1;
+    } else { expr = mk_evar("_err_"); p = p + 1; }
+    return pa_pack(p, expr);
+}
+fn parse_expr_list(p0: Int, n: Int, toks: List[String], stop_kind: String) -> String {
+    let mut p: Int = p0;
+    let mut s: String = "";
+    while c_tokk(toks, p) != stop_kind {
+        if c_tokk(toks, p) == "COMMA" { p = p + 1; }
+        let pe: String = parse_expr(p, n, toks, 0); p = pa_pos(pe);
+        if s == "" { s = pa_val(pe); } else { s = s + "," + pa_val(pe); }
+    }
+    return pa_pack(p, s);
+}
+pub fn ast_drive(src: String, toks: List[String], mode: String, path: String) {
+    let ast: String = ast_parse(toks);
+    tc_check(ast);
+    c_emit_stream_toks_at(src, toks, mode, path);
+}

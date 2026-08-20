@@ -1,38 +1,55 @@
 // # Lower let and assign to LLVM
-// Logline: Stores a let RHS or if/match into a named slot, and writes assigns with ARC retain/release.
+//
+// Logline: Stores a let RHS or if/match into a named slot, coerces concrete types to dynamic trait fat pointers, and writes assigns with ARC retain/release.
+//
 // Setup: llvm_ty_map, llvm_env_add_var, llvm_emit_expr, llvm_emit_if_stmt, and llvm_emit_let_match exist.
+//
 // Beats:
-//   1. Parse let name, optional type, and EQ.
+//   1. Parse let name, optional type (including dyn Trait), and EQ.
 //   2. KW_MATCH and KW_IF write through a named slot.
-//   3. Else store the RHS; assign retain/releases ARC.
+//   3. Coerce concrete struct values to dynamic trait fat pointers when type annotated.
+//   4. Store the RHS; assign retain/releases ARC.
+
 import "token_fmt.oo";
 import "llvm_emit_ty.oo";
 import "llvm_emit_env.oo";
 import "llvm_emit_expr.oo";
 import "llvm_emit_control.oo";
 import "llvm_emit_let_match.oo";
+import "llvm_emit_trait_call.oo";
+
+fn llvm_let_pack5(src: List[String], base: Int) -> List[String] {
+    let mut e: List[String] = list_new();
+    e = list_push(e, list_get(src, base));
+    e = list_push(e, list_get(src, base + 1));
+    e = list_push(e, list_get(src, base + 2));
+    e = list_push(e, list_get(src, base + 3));
+    e = list_push(e, list_get(src, base + 4));
+    return e;
+}
 
 pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
     let mut p = pos;
     let k0: String = field_at(list_get(toks, p), 0);
     if k0 == "KW_LET" {
         p = p + 1;
-        if p < n && field_at(list_get(toks, p), 0) == "KW_MUT" {
-            p = p + 1;
-        }
+        if p < n && field_at(list_get(toks, p), 0) == "KW_MUT" { p = p + 1; }
     }
-
     let name: String = field_at(list_get(toks, p), 3);
     p = p + 1;
-
     let mut ann_ty: String = "";
     if p < n && field_at(list_get(toks, p), 0) == "COLON" {
         p = p + 1;
+        if p < n && field_at(list_get(toks, p), 0) == "AMP" { p = p + 1; }
         if p < n {
             let tk: String = field_at(list_get(toks, p), 0);
             if tk == "IDENT" || tk == "KW_TYPE" {
                 ann_ty = field_at(list_get(toks, p), 3);
                 p = p + 1;
+                if ann_ty == "dyn" && p < n && (field_at(list_get(toks, p), 0) == "IDENT" || field_at(list_get(toks, p), 0) == "KW_TYPE") {
+                    ann_ty = "dyn " + field_at(list_get(toks, p), 3);
+                    p = p + 1;
+                }
             }
         }
         if p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
@@ -44,56 +61,37 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
             while p < n {
                 let kk: String = field_at(list_get(toks, p), 0);
                 if kk == "LBRACKET" { depth = depth + 1; }
-                if kk == "RBRACKET" {
-                    depth = depth - 1;
-                    p = p + 1;
-                    if depth == 0 { break; }
-                } else {
-                    p = p + 1;
-                }
+                if kk == "RBRACKET" { depth = depth - 1; p = p + 1; if depth == 0 { break; } }
+                else { p = p + 1; }
             }
         }
     }
-
-    if p < n && field_at(list_get(toks, p), 0) == "EQ" {
-        p = p + 1;
-    }
+    if p < n && field_at(list_get(toks, p), 0) == "EQ" { p = p + 1; }
     if p < n && field_at(list_get(toks, p), 0) == "KW_MATCH" {
         return llvm_emit_let_match(name, ann_ty, toks, p, n, env);
     }
-
-    // if-expression: let y = if c { a } else …
     if p < n && field_at(list_get(toks, p), 0) == "KW_IF" {
         let mut final_ty: String = "i64";
         if ann_ty != "" { final_ty = llvm_ty_map(ann_ty); }
         if final_ty == "void" || final_ty == "" { final_ty = "i64"; }
         let mut cur_env: List[String] = env;
         let irc: Int = parse_int(list_get(cur_env, 0));
-        let inrc: Int = irc + 1;
         let ifslot: String = name + "." + irc.to_string();
         let mut ibump: List[String] = list_new();
-        ibump = list_push(ibump, inrc.to_string());
+        ibump = list_push(ibump, (irc + 1).to_string());
         ibump = list_push(ibump, list_get(cur_env, 1));
         ibump = list_push(ibump, list_get(cur_env, 2));
         ibump = list_push(ibump, list_get(cur_env, 3));
         ibump = list_push(ibump, list_get(cur_env, 4));
         cur_env = llvm_env_add_var(ibump, "__slot__" + name, ifslot);
         println("  %" + ifslot + ".slot = alloca " + final_ty + ", align 8");
-        if final_ty == "i64" {
-            println("  store i64 0, i64* %" + ifslot + ".slot, align 8");
-        } else if final_ty == "i32" {
-            println("  store i32 0, i32* %" + ifslot + ".slot, align 8");
-        }
+        if final_ty == "i64" { println("  store i64 0, i64* %" + ifslot + ".slot, align 8"); }
+        else if final_ty == "i32" { println("  store i32 0, i32* %" + ifslot + ".slot, align 8"); }
         cur_env = llvm_env_add_var(cur_env, name, final_ty);
         cur_env = llvm_env_add_var(cur_env, "__asgn__", name);
         let if_res: List[String] = llvm_emit_if_stmt(toks, p, n, cur_env);
         p = parse_int(list_get(if_res, 0));
-        cur_env = list_new();
-        cur_env = list_push(cur_env, list_get(if_res, 1));
-        cur_env = list_push(cur_env, list_get(if_res, 2));
-        cur_env = list_push(cur_env, list_get(if_res, 3));
-        cur_env = list_push(cur_env, list_get(if_res, 4));
-        cur_env = list_push(cur_env, list_get(if_res, 5));
+        cur_env = llvm_let_pack5(if_res, 1);
         cur_env = llvm_env_add_var(cur_env, "__asgn__", "");
         if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
         let mut out_if: List[String] = list_new();
@@ -105,37 +103,28 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
         out_if = list_push(out_if, list_get(cur_env, 4));
         return out_if;
     }
-
     let mut rhs_env: List[String] = env;
-    if ann_ty != "" {
-        rhs_env = llvm_env_add_var(env, "__expect__", llvm_ty_map(ann_ty));
-    }
+    if ann_ty != "" { rhs_env = llvm_env_add_var(env, "__expect__", llvm_ty_map(ann_ty)); }
     let rhs_res: List[String] = llvm_emit_expr(toks, p, n, rhs_env);
     let mut rhs_val: String = list_get(rhs_res, 0);
     let rhs_ty: String = list_get(rhs_res, 1);
     p = parse_int(list_get(rhs_res, 2));
-
-    let mut cur_env: List[String] = list_new();
-    cur_env = list_push(cur_env, list_get(rhs_res, 3));
-    cur_env = list_push(cur_env, list_get(rhs_res, 4));
-    cur_env = list_push(cur_env, list_get(rhs_res, 5));
-    cur_env = list_push(cur_env, list_get(rhs_res, 6));
-    cur_env = list_push(cur_env, list_get(rhs_res, 7));
-
+    let mut cur_env: List[String] = llvm_let_pack5(rhs_res, 3);
     let mut final_ty: String = rhs_ty;
-    if ann_ty != "" {
-        final_ty = llvm_ty_map(ann_ty);
+    if ann_ty != "" { final_ty = llvm_ty_map(ann_ty); }
+    if final_ty == "void" { final_ty = "i64"; rhs_val = "0"; }
+    if chars_len(final_ty) >= 5 && str_slice(final_ty, 0, 5) == "%dyn." && !(chars_len(rhs_ty) >= 5 && str_slice(rhs_ty, 0, 5) == "%dyn.") {
+        let tname: String = str_slice(final_ty, 5, chars_len(final_ty));
+        let mut sname: String = rhs_ty;
+        if chars_len(sname) >= 8 && str_slice(sname, 0, 8) == "%struct." { sname = str_slice(sname, 8, chars_len(sname)); }
+        let c_res: List[String] = llvm_emit_dyn_coercion(sname, tname, rhs_val, false, cur_env);
+        rhs_val = list_get(c_res, 0);
+        cur_env = llvm_let_pack5(c_res, 2);
     }
-    if final_ty == "void" {
-        final_ty = "i64";
-        rhs_val = "0";
-    }
-
     let rc: Int = parse_int(list_get(cur_env, 0));
-    let nrc: Int = rc + 1;
     let slot: String = name + "." + rc.to_string();
     let mut bumped: List[String] = list_new();
-    bumped = list_push(bumped, nrc.to_string());
+    bumped = list_push(bumped, (rc + 1).to_string());
     bumped = list_push(bumped, list_get(cur_env, 1));
     bumped = list_push(bumped, list_get(cur_env, 2));
     bumped = list_push(bumped, list_get(cur_env, 3));
@@ -143,27 +132,20 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
     cur_env = llvm_env_add_var(bumped, "__slot__" + name, slot);
     println("  %" + slot + ".slot = alloca " + final_ty + ", align 8");
     println("  store " + final_ty + " " + rhs_val + ", " + final_ty + "* %" + slot + ".slot, align 8");
-
-    if final_ty == "%OoStr" {
-        println("  call void @oo_str_retain(%OoStr " + rhs_val + ")");
-    } else if final_ty == "%OoIList" || final_ty == "%OoSList" || final_ty == "%OoFList" {
+    if final_ty == "%OoStr" { println("  call void @oo_str_retain(%OoStr " + rhs_val + ")"); }
+    else if final_ty == "%OoIList" || final_ty == "%OoSList" || final_ty == "%OoFList" {
         let mut rfn: String = "ilist";
         if final_ty == "%OoSList" { rfn = "slist"; }
         if final_ty == "%OoFList" { rfn = "flist"; }
         println("  call void @oo_" + rfn + "_retain(" + final_ty + "* byval(" + final_ty + ") %" + slot + ".slot)");
     }
-
     cur_env = llvm_env_add_var(cur_env, name, final_ty);
     if chars_len(ann_ty) >= 6 {
         if str_slice(ann_ty, 0, 6) == "Result" || str_slice(ann_ty, 0, 6) == "Option" {
             cur_env = llvm_env_add_var(cur_env, "__rt__" + name, ann_ty);
         }
     }
-
-    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
-        p = p + 1;
-    }
-
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
     let mut out: List[String] = list_new();
     out = list_push(out, p.to_string());
     out = list_push(out, list_get(cur_env, 0));
@@ -176,46 +158,32 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
 
 pub fn llvm_emit_assign_stmt(name: String, toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
     let mut p = pos;
-    if p < n && field_at(list_get(toks, p), 0) == "EQ" {
-        p = p + 1;
-    }
-
+    if p < n && field_at(list_get(toks, p), 0) == "EQ" { p = p + 1; }
     let rhs_res: List[String] = llvm_emit_expr(toks, p, n, env);
-    let rhs_val: String = list_get(rhs_res, 0);
+    let mut rhs_val: String = list_get(rhs_res, 0);
     let rhs_ty: String = list_get(rhs_res, 1);
     p = parse_int(list_get(rhs_res, 2));
-
-    let mut cur_env: List[String] = list_new();
-    cur_env = list_push(cur_env, list_get(rhs_res, 3));
-    cur_env = list_push(cur_env, list_get(rhs_res, 4));
-    cur_env = list_push(cur_env, list_get(rhs_res, 5));
-    cur_env = list_push(cur_env, list_get(rhs_res, 6));
-    cur_env = list_push(cur_env, list_get(rhs_res, 7));
-
+    let mut cur_env: List[String] = llvm_let_pack5(rhs_res, 3);
     let vty: String = llvm_env_get_var_ty(cur_env, name);
     let lty: String = llvm_ty_map(vty);
     let aslot: String = llvm_env_slot(cur_env, name);
-
+    if chars_len(lty) >= 5 && str_slice(lty, 0, 5) == "%dyn." && !(chars_len(rhs_ty) >= 5 && str_slice(rhs_ty, 0, 5) == "%dyn.") {
+        let tname: String = str_slice(lty, 5, chars_len(lty));
+        let mut sname: String = rhs_ty;
+        if chars_len(sname) >= 8 && str_slice(sname, 0, 8) == "%struct." { sname = str_slice(sname, 8, chars_len(sname)); }
+        let c_res: List[String] = llvm_emit_dyn_coercion(sname, tname, rhs_val, false, cur_env);
+        rhs_val = list_get(c_res, 0);
+        cur_env = llvm_let_pack5(c_res, 2);
+    }
     if lty == "%OoStr" || lty == "%OoIList" || lty == "%OoSList" || lty == "%OoFList" || lty == "%OoLL_I" || lty == "%OoLL_S" || lty == "%OoLL_F" {
         let reg_res: List[String] = llvm_gen_reg(cur_env);
         let old_reg: String = list_get(reg_res, 0);
-        cur_env = list_new();
-        cur_env = list_push(cur_env, list_get(reg_res, 1));
-        cur_env = list_push(cur_env, list_get(reg_res, 2));
-        cur_env = list_push(cur_env, list_get(reg_res, 3));
-        cur_env = list_push(cur_env, list_get(reg_res, 4));
-        cur_env = list_push(cur_env, list_get(reg_res, 5));
-
+        cur_env = llvm_let_pack5(reg_res, 1);
         println("  " + old_reg + " = load " + lty + ", " + lty + "* %" + aslot + ".slot, align 8");
         if lty == "%OoIList" || lty == "%OoSList" || lty == "%OoFList" || lty == "%OoLL_I" || lty == "%OoLL_S" || lty == "%OoLL_F" {
             let reg_old: List[String] = llvm_gen_reg(cur_env);
             let old_slot: String = list_get(reg_old, 0) + ".old";
-            cur_env = list_new();
-            cur_env = list_push(cur_env, list_get(reg_old, 1));
-            cur_env = list_push(cur_env, list_get(reg_old, 2));
-            cur_env = list_push(cur_env, list_get(reg_old, 3));
-            cur_env = list_push(cur_env, list_get(reg_old, 4));
-            cur_env = list_push(cur_env, list_get(reg_old, 5));
+            cur_env = llvm_let_pack5(reg_old, 1);
             println("  " + old_slot + " = alloca " + lty + ", align 8");
             println("  store " + lty + " " + old_reg + ", " + lty + "* " + old_slot + ", align 8");
             println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + aslot + ".slot, align 8");
@@ -239,11 +207,7 @@ pub fn llvm_emit_assign_stmt(name: String, toks: List[String], pos: Int, n: Int,
     } else {
         println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + aslot + ".slot, align 8");
     }
-
-    if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
-        p = p + 1;
-    }
-
+    if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
     let mut out: List[String] = list_new();
     out = list_push(out, p.to_string());
     out = list_push(out, list_get(cur_env, 0));

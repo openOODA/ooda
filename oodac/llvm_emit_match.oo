@@ -14,6 +14,7 @@ import "llvm_emit_env.oo";
 import "llvm_emit_expr.oo";
 import "llvm_emit_block.oo";
 import "llvm_emit_match_slot.oo";
+import "llvm_emit_match_enum.oo";
 
 fn llvm_match_pack(p: Int, env: List[String]) -> List[String] {
     let mut out: List[String] = list_new();
@@ -43,26 +44,17 @@ fn llvm_match_fail(msg: String) {
 
 fn llvm_match_parse_arm(toks: List[String], pos: Int, n: Int, a: String, b: String) -> List[String] {
     let mut p = pos;
-    if p >= n || field_at(list_get(toks, p), 0) != "IDENT" {
-        llvm_match_fail("expected " + a + "/" + b + " arm");
-    }
+    if p >= n || field_at(list_get(toks, p), 0) != "IDENT" { llvm_match_fail("expected " + a + "/" + b + " arm"); }
     let ctor: String = field_at(list_get(toks, p), 3);
-    if ctor != a && ctor != b {
-        llvm_match_fail("expected " + a + "/" + b + " arm");
-    }
+    if ctor != a && ctor != b { llvm_match_fail("expected " + a + "/" + b + " arm"); }
     p = p + 1;
     let mut bind = "_" + ctor;
     if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
         p = p + 1;
-        if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
-            bind = field_at(list_get(toks, p), 3);
-            p = p + 1;
-        }
+        if p < n && field_at(list_get(toks, p), 0) == "IDENT" { bind = field_at(list_get(toks, p), 3); p = p + 1; }
         if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
     }
-    if p >= n || field_at(list_get(toks, p), 0) != "FATARROW" {
-        llvm_match_fail("expected => after " + ctor);
-    }
+    if p >= n || field_at(list_get(toks, p), 0) != "FATARROW" { llvm_match_fail("expected => after " + ctor); }
     p = p + 1;
     let mut out: List[String] = list_new();
     out = list_push(out, p.to_string());
@@ -137,9 +129,9 @@ fn llvm_match_emit_arm(toks: List[String], pos: Int, n: Int, env: List[String], 
             cur_env = llvm_match_env5(ex, 3);
             llvm_match_store_asgn(cur_env, ev, et);
         } else {
-            let st: List[String] = llvm_emit_stmt(toks, p, n, cur_env);
-            p = parse_int(list_get(st, 0));
-            cur_env = llvm_match_env5(st, 1);
+            let ex: List[String] = llvm_emit_expr(toks, p, n, cur_env);
+            p = parse_int(list_get(ex, 2));
+            cur_env = llvm_match_env5(ex, 3);
         }
     }
     if p < n && field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
@@ -154,29 +146,48 @@ pub fn llvm_emit_match_stmt(toks: List[String], pos: Int, n: Int, env: List[Stri
     let mut rty: String = list_get(scr_res, 1);
     p = parse_int(list_get(scr_res, 2));
     cur_env = llvm_match_env5(scr_res, 3);
-    if !llvm_match_is_res(rty) {
-        llvm_match_fail("need Result");
+    let is_res: Bool = llvm_match_is_res(rty);
+    let is_struct: Bool = chars_len(rty) >= 8 && str_slice(rty, 0, 8) == "%struct.";
+    if !is_res && !is_struct {
+        llvm_match_fail("need Result or enum");
     }
     if p >= n || field_at(list_get(toks, p), 0) != "LBRACE" {
         llvm_match_fail("expected { after scrutinee");
     }
     p = p + 1;
+    if !is_res {
+        return llvm_match_emit_enum(toks, p, n, cur_env, scrut, rty);
+    }
 
-    let ok_arm: List[String] = llvm_match_parse_arm(toks, p, n, "Ok", "Some");
-    let p_ok: Int = parse_int(list_get(ok_arm, 0));
-    let ok_bind: String = list_get(ok_arm, 1);
-    let p_err_hd: Int = llvm_match_skip_arm(toks, p_ok, n);
-    let err_arm: List[String] = llvm_match_parse_arm(toks, p_err_hd, n, "Err", "None");
-    let p_err: Int = parse_int(list_get(err_arm, 0));
-    let err_bind: String = list_get(err_arm, 1);
+    let first_ctor: String = field_at(list_get(toks, p), 3);
+    let is_first_ok: Bool = (first_ctor == "Ok" || first_ctor == "Some");
+    let mut p_ok: Int = 0;
+    let mut ok_bind: String = "_Ok";
+    let mut p_err: Int = 0;
+    let mut err_bind: String = "_Err";
+    if is_first_ok {
+        let ok_arm: List[String] = llvm_match_parse_arm(toks, p, n, "Ok", "Some");
+        p_ok = parse_int(list_get(ok_arm, 0));
+        ok_bind = list_get(ok_arm, 1);
+        let p_err_hd: Int = llvm_match_skip_arm(toks, p_ok, n);
+        let err_arm: List[String] = llvm_match_parse_arm(toks, p_err_hd, n, "Err", "None");
+        p_err = parse_int(list_get(err_arm, 0));
+        err_bind = list_get(err_arm, 1);
+    } else {
+        let err_arm: List[String] = llvm_match_parse_arm(toks, p, n, "Err", "None");
+        p_err = parse_int(list_get(err_arm, 0));
+        err_bind = list_get(err_arm, 1);
+        let p_ok_hd: Int = llvm_match_skip_arm(toks, p_err, n);
+        let ok_arm: List[String] = llvm_match_parse_arm(toks, p_ok_hd, n, "Ok", "Some");
+        p_ok = parse_int(list_get(ok_arm, 0));
+        ok_bind = list_get(ok_arm, 1);
+    }
 
     let ok_lr: List[String] = llvm_gen_label("bb_match_ok", cur_env);
     let lbl_ok: String = list_get(ok_lr, 0);
-    cur_env = llvm_match_env5(ok_lr, 1);
-    let err_lr: List[String] = llvm_gen_label("bb_match_err", cur_env);
+    let err_lr: List[String] = llvm_gen_label("bb_match_err", llvm_match_env5(ok_lr, 1));
     let lbl_err: String = list_get(err_lr, 0);
-    cur_env = llvm_match_env5(err_lr, 1);
-    let end_lr: List[String] = llvm_gen_label("bb_match_end", cur_env);
+    let end_lr: List[String] = llvm_gen_label("bb_match_end", llvm_match_env5(err_lr, 1));
     let lbl_end: String = list_get(end_lr, 0);
     cur_env = llvm_match_env5(end_lr, 1);
 

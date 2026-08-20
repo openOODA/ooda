@@ -229,3 +229,7 @@ OoStr oo_file_stamp(OoStr path) {
   snprintf(buf, sizeof buf, "%lld:%lld", (long long)st.st_size, (long long)st.st_mtime);
   return oo_str_lit(buf);
 }
+
+void oo_process_exit(long long c) {
+  exit((int)c);
+}

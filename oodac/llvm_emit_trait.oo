@@ -1,0 +1,238 @@
+// # LLVM VTable generation for dynamic traits and interface polymorphism
+//
+// Logline: Scans trait definitions and impl blocks, extracts method metadata tables, and provides method index, return type, and signature queries.
+//
+// Setup: llvm_ty_map and token format tools are in scope; tables format as |Trait=m:ret:params...|.
+//
+// Beats:
+//   1. Skip trait declarations during linear item walks.
+//   2. Scan trait definitions and method signatures into a metadata table.
+//   3. Scan impl blocks and map trait methods to concrete implementing functions.
+//   4. Query method indices, return types, and parameter signatures for VTable lowering.
+
+import "token_fmt.oo";
+import "llvm_emit_ty.oo";
+import "llvm_emit_env.oo";
+
+pub fn llvm_skip_trait(toks: List[String], pos: Int, n: Int) -> Int {
+    let mut p = pos + 1;
+    while p < n {
+        if field_at(list_get(toks, p), 0) == "LBRACE" {
+            let mut depth = 1;
+            p = p + 1;
+            while p < n && depth > 0 {
+                let k: String = field_at(list_get(toks, p), 0);
+                if k == "LBRACE" { depth = depth + 1; }
+                else if k == "RBRACE" { depth = depth - 1; }
+                p = p + 1;
+            }
+            return p;
+        }
+        p = p + 1;
+    }
+    return p;
+}
+
+pub fn llvm_scan_traits(toks: List[String], n: Int) -> String {
+    let mut tab: String = "|";
+    let mut p = 0;
+    while p < n {
+        let k: String = field_at(list_get(toks, p), 0);
+        let txt: String = field_at(list_get(toks, p), 3);
+        if k == "KW_TRAIT" || (k == "IDENT" && txt == "trait") {
+            p = p + 1;
+            if p < n && (field_at(list_get(toks, p), 0) == "IDENT" || field_at(list_get(toks, p), 0) == "KW_TYPE") {
+                let tname: String = field_at(list_get(toks, p), 3);
+                p = p + 1;
+                if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+                    p = p + 1;
+                    let mut mentries: String = "";
+                    while p < n && field_at(list_get(toks, p), 0) != "RBRACE" {
+                        let mk: String = field_at(list_get(toks, p), 0);
+                        if mk == "KW_PUB" || mk == "KW_FN" {
+                            if mk == "KW_PUB" && p + 1 < n && field_at(list_get(toks, p + 1), 0) == "KW_FN" { p = p + 1; }
+                            p = p + 1;
+                            if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                                let mname: String = field_at(list_get(toks, p), 3);
+                                p = p + 1;
+                                let mut param_tys: String = "";
+                                if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+                                    p = p + 1;
+                                    while p < n && field_at(list_get(toks, p), 0) != "RPAREN" {
+                                        if field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
+                                        else if field_at(list_get(toks, p), 0) == "IDENT" {
+                                            p = p + 1;
+                                            let mut pty: String = "Int";
+                                            if p < n && field_at(list_get(toks, p), 0) == "COLON" {
+                                                p = p + 1;
+                                                if p < n && field_at(list_get(toks, p), 0) == "AMP" { p = p + 1; }
+                                                if p < n { pty = field_at(list_get(toks, p), 3); p = p + 1; }
+                                            }
+                                            if param_tys != "" { param_tys = param_tys + ","; }
+                                            param_tys = param_tys + llvm_ty_map(pty);
+                                        } else { p = p + 1; }
+                                    }
+                                    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
+                                }
+                                let mut rty: String = "void";
+                                if p < n && field_at(list_get(toks, p), 0) == "ARROW" {
+                                    p = p + 1;
+                                    if p < n { rty = field_at(list_get(toks, p), 3); p = p + 1; }
+                                }
+                                let lrty: String = llvm_ty_map(rty);
+                                if mentries != "" { mentries = mentries + ";"; }
+                                mentries = mentries + mname + ":" + lrty + ":" + param_tys;
+                                while p < n && field_at(list_get(toks, p), 0) != "SEMI" && field_at(list_get(toks, p), 0) != "RBRACE" && field_at(list_get(toks, p), 0) != "KW_FN" && field_at(list_get(toks, p), 0) != "KW_PUB" { p = p + 1; }
+                                if p < n && field_at(list_get(toks, p), 0) == "SEMI" { p = p + 1; }
+                            } else { p = p + 1; }
+                        } else { p = p + 1; }
+                    }
+                    tab = tab + tname + "=" + mentries + "|";
+                }
+            }
+        }
+        p = p + 1;
+    }
+    return tab;
+}
+
+pub fn llvm_scan_impls(toks: List[String], n: Int) -> String {
+    let mut tab: String = "|";
+    let mut p = 0;
+    while p < n {
+        let k: String = field_at(list_get(toks, p), 0);
+        let txt: String = field_at(list_get(toks, p), 3);
+        if k == "KW_IMPL" || (k == "IDENT" && txt == "impl") {
+            p = p + 1;
+            let mut tname = "";
+            let mut sname = "";
+            if p < n && (field_at(list_get(toks, p), 0) == "IDENT" || field_at(list_get(toks, p), 0) == "KW_TYPE") {
+                tname = field_at(list_get(toks, p), 3);
+                p = p + 1;
+            }
+            while p < n && field_at(list_get(toks, p), 0) != "LBRACE" {
+                if field_at(list_get(toks, p), 0) == "IDENT" && field_at(list_get(toks, p), 3) == "for" {
+                    if p + 1 < n { sname = field_at(list_get(toks, p + 1), 3); p = p + 1; }
+                }
+                p = p + 1;
+            }
+            if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+                p = p + 1;
+                let mut mentries: String = "";
+                let mut depth = 1;
+                while p < n && depth > 0 {
+                    let ik: String = field_at(list_get(toks, p), 0);
+                    if ik == "LBRACE" { depth = depth + 1; p = p + 1; }
+                    else if ik == "RBRACE" { depth = depth - 1; p = p + 1; }
+                    else if (ik == "KW_PUB" || ik == "KW_FN") && depth == 1 {
+                        if ik == "KW_PUB" && p + 1 < n && field_at(list_get(toks, p + 1), 0) == "KW_FN" { p = p + 1; }
+                        p = p + 1;
+                        if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                            let mname: String = field_at(list_get(toks, p), 3);
+                            if mentries != "" { mentries = mentries + ","; }
+                            mentries = mentries + mname + ":" + sname + "_" + mname;
+                        }
+                        p = p + 1;
+                    } else { p = p + 1; }
+                }
+                if tname != "" && sname != "" {
+                    tab = tab + tname + ":" + sname + "=" + mentries + "|";
+                }
+            }
+        }
+        p = p + 1;
+    }
+    return tab;
+}
+
+pub fn llvm_trait_methods_of(ttab: String, tname: String) -> String {
+    let needle: String = "|" + tname + "=";
+    let slen = chars_len(ttab);
+    let nlen = chars_len(needle);
+    let mut i = 0;
+    while i + nlen <= slen {
+        if str_slice(ttab, i, i + nlen) == needle {
+            let j = i + nlen;
+            let mut k = j;
+            while k < slen && char_at(ttab, k) != "|" { k = k + 1; }
+            return str_slice(ttab, j, k);
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+pub fn llvm_trait_method_idx(ttab: String, tname: String, mname: String) -> Int {
+    let raw: String = llvm_trait_methods_of(ttab, tname);
+    let rlen = chars_len(raw);
+    let mut i = 0;
+    let mut idx = 0;
+    let mut cur_name = "";
+    while i < rlen {
+        let c: String = char_at(raw, i);
+        if c == ":" {
+            if cur_name == mname { return idx; }
+            idx = idx + 1;
+            while i < rlen && char_at(raw, i) != ";" { i = i + 1; }
+            cur_name = "";
+        } else if c != ";" { cur_name = cur_name + c; }
+        i = i + 1;
+    }
+    return idx;
+}
+
+pub fn llvm_trait_method_ret(ttab: String, tname: String, mname: String) -> String {
+    let raw: String = llvm_trait_methods_of(ttab, tname);
+    let rlen = chars_len(raw);
+    let mut i = 0;
+    let mut cur_name = "";
+    while i < rlen {
+        let c: String = char_at(raw, i);
+        if c == ":" {
+            let is_match = cur_name == mname;
+            i = i + 1;
+            let mut rty = "";
+            while i < rlen && char_at(raw, i) != ":" && char_at(raw, i) != ";" {
+                rty = rty + char_at(raw, i);
+                i = i + 1;
+            }
+            if is_match { return rty; }
+            while i < rlen && char_at(raw, i) != ";" { i = i + 1; }
+            cur_name = "";
+        } else if c != ";" { cur_name = cur_name + c; }
+        i = i + 1;
+    }
+    return "i64";
+}
+
+pub fn llvm_trait_method_sig(ttab: String, tname: String, mname: String) -> String {
+    let raw: String = llvm_trait_methods_of(ttab, tname);
+    let rlen = chars_len(raw);
+    let mut i = 0;
+    let mut cur_name = "";
+    while i < rlen {
+        let c: String = char_at(raw, i);
+        if c == ":" {
+            let is_match = cur_name == mname;
+            i = i + 1;
+            while i < rlen && char_at(raw, i) != ":" && char_at(raw, i) != ";" { i = i + 1; }
+            if i < rlen && char_at(raw, i) == ":" { i = i + 1; }
+            let mut ps = "i8*";
+            let mut custom_p = "";
+            while i < rlen && char_at(raw, i) != ";" {
+                custom_p = custom_p + char_at(raw, i);
+                i = i + 1;
+            }
+            if custom_p != "" {
+                let ncp = chars_len(custom_p);
+                let mut ci = 0;
+                while ci < ncp && char_at(custom_p, ci) != "," { ci = ci + 1; }
+                if ci < ncp { ps = ps + ", " + str_slice(custom_p, ci + 1, ncp); }
+            }
+            if is_match { return ps; }
+            cur_name = "";
+        } else if c != ";" { cur_name = cur_name + c; }
+        i = i + 1;
+    }
+    return "i8*";
+}

@@ -1,11 +1,11 @@
 // # Lower LLVM functions
 //
-// Logline: Emits an LLVM function signature, stack slot allocations, capabilities, and body block.
+// Logline: Emits an LLVM function signature, stack slot allocations, capabilities, body block, sanitizer attributes, and DWARF metadata.
 //
 // Setup: Function declarations and parameter lists are prepared for LLVM IR translation.
 //
 // Beats:
-//   1. Lower the function signature and parameter types.
+//   1. Lower the function signature, parameter types, sanitizer attributes, and !DISubprogram node.
 //   2. Allocate stack slots and bind initial values or capability grants.
 //   3. Lower the body block and emit default return if needed.
 
@@ -17,6 +17,8 @@ import "llvm_emit_block.oo";
 import "llvm_emit_stmt.oo";
 import "llvm_emit_mainargs.oo";
 import "llvm_emit_sret.oo";
+import "llvm_emit_match_slot.oo";
+import "llvm_emit_debug.oo";
 
 pub fn llvm_skip_contracts(toks: List[String], pos: Int, n: Int) -> Int {
     let mut p = pos;
@@ -26,11 +28,8 @@ pub fn llvm_skip_contracts(toks: List[String], pos: Int, n: Int) -> Int {
         if k == "LBRACE" {
             if depth == 0 { return p; }
             depth = depth + 1;
-        } else if k == "RBRACE" || k == "RBRACKET" || k == "RPAREN" {
-            depth = depth - 1;
-        } else if k == "LBRACKET" || k == "LPAREN" {
-            depth = depth + 1;
-        }
+        } else if k == "RBRACE" || k == "RBRACKET" || k == "RPAREN" { depth = depth - 1; }
+        else if k == "LBRACKET" || k == "LPAREN" { depth = depth + 1; }
         p = p + 1;
     }
     return p;
@@ -40,25 +39,17 @@ pub fn llvm_skip_verify(toks: List[String], pos: Int, n: Int) -> Int {
     let mut p = pos;
     if p < n && field_at(list_get(toks, p), 0) == "KW_VERIFY" {
         p = p + 1;
-        if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
-            p = p + 1;
-        }
+        if p < n && field_at(list_get(toks, p), 0) == "IDENT" { p = p + 1; }
         if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
             let mut depth = 0;
             while p < n {
                 let k: String = field_at(list_get(toks, p), 0);
-                if k == "LBRACE" {
-                    depth = depth + 1;
-                }
+                if k == "LBRACE" { depth = depth + 1; }
                 if k == "RBRACE" {
                     depth = depth - 1;
                     p = p + 1;
-                    if depth == 0 {
-                        return p;
-                    }
-                } else {
-                    p = p + 1;
-                }
+                    if depth == 0 { return p; }
+                } else { p = p + 1; }
             }
         }
     }
@@ -66,20 +57,19 @@ pub fn llvm_skip_verify(toks: List[String], pos: Int, n: Int) -> Int {
 }
 
 pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: String, fntab: String, stab: String, str_pfx: String) -> List[String] {
-    let mut p = pos;
-    if field_at(list_get(toks, p), 0) == "KW_PUB" {
-        p = p + 1;
-    }
-    if p < n && field_at(list_get(toks, p), 0) == "KW_FN" {
-        p = p + 1;
-    }
+    return llvm_emit_fn_dbg(toks, pos, n, str_c, str_t, fntab, stab, str_pfx, "", "20", false, "");
+}
 
+pub fn llvm_emit_fn_dbg(toks: List[String], pos: Int, n: Int, str_c: String, str_t: String, fntab: String, stab: String, str_pfx: String, dbg_meta: String, dbg_next: String, is_dbg: Bool, src_path: String) -> List[String] {
+    let mut p = pos;
+    if field_at(list_get(toks, p), 0) == "KW_PUB" { p = p + 1; }
+    let fn_tok = list_get(toks, p);
+    if p < n && field_at(fn_tok, 0) == "KW_FN" { p = p + 1; }
     let fn_name: String = field_at(list_get(toks, p), 3);
     p = p + 1;
 
     let mut param_names: List[String] = list_new();
     let mut param_types: List[String] = list_new();
-
     if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
         p = p + 1;
         while p < n && field_at(list_get(toks, p), 0) != "RPAREN" {
@@ -89,9 +79,7 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
             if p < n && field_at(list_get(toks, p), 0) == "COLON" {
                 p = p + 1;
                 if p < n {
-                    if field_at(list_get(toks, p), 0) == "AMP" {
-                        p = p + 1;
-                    }
+                    if field_at(list_get(toks, p), 0) == "AMP" { p = p + 1; }
                     pty = field_at(list_get(toks, p), 3);
                     p = p + 1;
                     if (pty == "List" || pty == "Result" || pty == "Option") && p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
@@ -103,14 +91,9 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
             }
             param_names = list_push(param_names, pname);
             param_types = list_push(param_types, pty);
-
-            if p < n && field_at(list_get(toks, p), 0) == "COMMA" {
-                p = p + 1;
-            }
+            if p < n && field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
         }
-        if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
-            p = p + 1;
-        }
+        if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
     }
 
     let mut ret_ty_ooda: String = "void";
@@ -128,11 +111,8 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
     }
 
     p = llvm_skip_contracts(toks, p, n);
-
     let mut llvm_ret_ty: String = llvm_ty_map(ret_ty_ooda);
-    if fn_name == "main" {
-        llvm_ret_ty = "i32";
-    }
+    if fn_name == "main" { llvm_ret_ty = "i32"; }
 
     let mut param_sig: String = "";
     let np = list_len(param_names);
@@ -140,18 +120,35 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
     while i < np {
         let pn: String = list_get(param_names, i);
         let pt: String = llvm_ty_map(list_get(param_types, i));
-        if i > 0 {
-            param_sig = param_sig + ", ";
-        }
+        if i > 0 { param_sig = param_sig + ", "; }
         param_sig = param_sig + pt + " %" + pn;
         i = i + 1;
     }
+    if fn_name == "main" { param_sig = "i32 %sys_argc, i8** %sys_argv"; }
 
-    if fn_name == "main" {
-        param_sig = "i32 %sys_argc, i8** %sys_argv";
+    let mut san_attrs: String = "";
+    if str_index_of(fntab, "__san_address__") >= 0 { san_attrs = san_attrs + " sanitize_address"; }
+    if str_index_of(fntab, "__san_thread__") >= 0 { san_attrs = san_attrs + " sanitize_thread"; }
+    if str_index_of(fntab, "__san_undefined__") >= 0 { san_attrs = san_attrs + " \"sanitize_undefined\""; }
+
+    let mut cur_meta = dbg_meta;
+    let mut cur_next = dbg_next;
+    let mut sp_node = "";
+    let mut fn_loc_tag = "";
+    if is_dbg {
+        let fn_line = parse_int(field_at(fn_tok, 1));
+        let sp_pair: List[String] = llvm_debug_sp_node(cur_next, fn_name, fn_line, ret_ty_ooda);
+        cur_next = list_get(sp_pair, 0);
+        sp_node = list_get(sp_pair, 1);
+        cur_meta = cur_meta + list_get(sp_pair, 2);
+        let loc_pair: List[String] = llvm_debug_loc_node(cur_next, fn_line, 1, sp_node);
+        cur_next = list_get(loc_pair, 0);
+        fn_loc_tag = ", !dbg !" + list_get(loc_pair, 1);
+        cur_meta = cur_meta + list_get(loc_pair, 2);
+        llvm_emit_fn_define_san(fn_name, llvm_ret_ty, param_sig, sp_node, san_attrs);
+    } else {
+        llvm_emit_fn_define_san(fn_name, llvm_ret_ty, param_sig, "", san_attrs);
     }
-
-    llvm_emit_fn_define(fn_name, llvm_ret_ty, param_sig);
     println("entry:");
 
     let mut env: List[String] = list_new();
@@ -163,53 +160,49 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
     env = llvm_env_seed_fnrets(env, fntab);
     env = llvm_env_add_var(env, "__fnret_ty__", llvm_ret_ty);
     env = llvm_env_add_var(env, "__stab__", stab);
-    if str_pfx != "" {
-        env = llvm_env_add_var(env, "__strpfx__", str_pfx);
-    }
+    if str_pfx != "" { env = llvm_env_add_var(env, "__strpfx__", str_pfx); }
+    if is_dbg { env = llvm_debug_fn_enter(env, sp_node, cur_next, cur_meta); }
+    env = llvm_seed_sum_ctors(env, toks, n);
     env = llvm_env_push_scope(env);
-    if fn_name == "main" {
-        env = llvm_env_add_var(env, "__is_main__", "1");
-    }
+    if fn_name == "main" { env = llvm_env_add_var(env, "__is_main__", "1"); }
 
     i = 0;
     while i < np {
         let pn: String = list_get(param_names, i);
         let pt_ooda: String = list_get(param_types, i);
         let pt: String = llvm_ty_map(pt_ooda);
-        println("  %" + pn + ".slot = alloca " + pt + ", align 8");
-        
+        println("  %" + pn + ".slot = alloca " + pt + ", align 8" + fn_loc_tag);
         if fn_name == "main" {
             if pn == "fs" {
-                println("  %" + pn + ".val = call " + pt + " @oo_cap_grant_fs()");
-                println("  store " + pt + " %" + pn + ".val, " + pt + "* %" + pn + ".slot, align 8");
+                println("  %" + pn + ".val = call " + pt + " @oo_cap_grant_fs()" + fn_loc_tag);
+                println("  store " + pt + " %" + pn + ".val, " + pt + "* %" + pn + ".slot, align 8" + fn_loc_tag);
             } else if pn == "sys" {
-                println("  %" + pn + ".val = call " + pt + " @oo_cap_grant_sys()");
-                println("  store " + pt + " %" + pn + ".val, " + pt + "* %" + pn + ".slot, align 8");
+                println("  %" + pn + ".val = call " + pt + " @oo_cap_grant_sys()" + fn_loc_tag);
+                println("  store " + pt + " %" + pn + ".val, " + pt + "* %" + pn + ".slot, align 8" + fn_loc_tag);
             } else if pn == "env" {
-                println("  %" + pn + ".val = call " + pt + " @oo_cap_grant_env()");
-                println("  store " + pt + " %" + pn + ".val, " + pt + "* %" + pn + ".slot, align 8");
+                println("  %" + pn + ".val = call " + pt + " @oo_cap_grant_env()" + fn_loc_tag);
+                println("  store " + pt + " %" + pn + ".val, " + pt + "* %" + pn + ".slot, align 8" + fn_loc_tag);
             } else if pn == "net" {
-                println("  %" + pn + ".val = call " + pt + " @oo_cap_grant_net()");
-                println("  store " + pt + " %" + pn + ".val, " + pt + "* %" + pn + ".slot, align 8");
+                println("  %" + pn + ".val = call " + pt + " @oo_cap_grant_net()" + fn_loc_tag);
+                println("  store " + pt + " %" + pn + ".val, " + pt + "* %" + pn + ".slot, align 8" + fn_loc_tag);
             } else if pn == "args" || pn == "argv" {
                 llvm_emit_main_args(pn);
             } else if pn == "argc" {
-                println("  %" + pn + ".val = sext i32 %sys_argc to i64");
-                println("  store i64 %" + pn + ".val, i64* %" + pn + ".slot, align 8");
+                println("  %" + pn + ".val = sext i32 %sys_argc to i64" + fn_loc_tag);
+                println("  store i64 %" + pn + ".val, i64* %" + pn + ".slot, align 8" + fn_loc_tag);
             } else {
-                println("  store " + pt + " 0, " + pt + "* %" + pn + ".slot, align 8");
+                println("  store " + pt + " 0, " + pt + "* %" + pn + ".slot, align 8" + fn_loc_tag);
             }
         } else {
-            println("  store " + pt + " %" + pn + ", " + pt + "* %" + pn + ".slot, align 8");
+            println("  store " + pt + " %" + pn + ", " + pt + "* %" + pn + ".slot, align 8" + fn_loc_tag);
             if pt == "%OoStr" {
-                println("  call void @oo_str_retain(%OoStr %" + pn + ")");
+                println("  call void @oo_str_retain(%OoStr %" + pn + ")" + fn_loc_tag);
             } else if pt == "%OoIList" {
-                println("  call void @oo_ilist_retain(%OoIList* byval(%OoIList) %" + pn + ".slot)");
+                println("  call void @oo_ilist_retain(%OoIList* byval(%OoIList) %" + pn + ".slot)" + fn_loc_tag);
             } else if pt == "%OoSList" {
-                println("  call void @oo_slist_retain(%OoSList* byval(%OoSList) %" + pn + ".slot)");
+                println("  call void @oo_slist_retain(%OoSList* byval(%OoSList) %" + pn + ".slot)" + fn_loc_tag);
             }
         }
-        
         env = llvm_env_add_var(env, pn, pt);
         i = i + 1;
     }
@@ -217,33 +210,46 @@ pub fn llvm_emit_fn(toks: List[String], pos: Int, n: Int, str_c: String, str_t: 
     let mut out_sc: String = str_c;
     let mut out_st: String = str_t;
     let mut did_ret = false;
-
     if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
         let block_res: List[String] = llvm_emit_block(toks, p, n, env);
         p = parse_int(list_get(block_res, 0));
         out_sc = list_get(block_res, 3);
         out_st = list_get(block_res, 5);
         let vars: String = list_get(block_res, 4);
-        if llvm_env_vars_has(vars, "__did_ret__") {
-            did_ret = true;
+        if llvm_env_vars_has(vars, "__did_ret__") { did_ret = true; }
+        if is_dbg {
+            let mut block_env: List[String] = list_new();
+            block_env = list_push(block_env, list_get(block_res, 1));
+            block_env = list_push(block_env, list_get(block_res, 2));
+            block_env = list_push(block_env, list_get(block_res, 3));
+            block_env = list_push(block_env, list_get(block_res, 4));
+            block_env = list_push(block_env, list_get(block_res, 5));
+            let dbg_unpacked: List[String] = llvm_debug_unpack_env(block_env);
+            cur_meta = list_get(dbg_unpacked, 0);
+            cur_next = list_get(dbg_unpacked, 1);
         }
     }
 
     if !did_ret {
         if fn_name == "main" || llvm_ret_ty == "i32" {
-            println("  ret i32 0");
+            println("  ret i32 0" + fn_loc_tag);
+        } else if is_dbg {
+            llvm_emit_fn_default_ret_dbg(llvm_ret_ty, fn_loc_tag);
         } else {
             llvm_emit_fn_default_ret(llvm_ret_ty);
         }
     }
     println("}");
     println("");
-
     p = llvm_skip_verify(toks, p, n);
 
     let mut res: List[String] = list_new();
     res = list_push(res, p.to_string());
     res = list_push(res, out_sc);
     res = list_push(res, out_st);
+    if is_dbg {
+        res = list_push(res, cur_meta);
+        res = list_push(res, cur_next);
+    }
     return res;
 }

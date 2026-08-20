@@ -1,0 +1,167 @@
+// # Prove LLVM Bitcode Generation and Direct LLD Linking
+//
+// Logline: Validates zero-C direct Bitcode (.bc) output via llvm-as/clang and direct native execution via lld/clang linking.
+//
+// Setup: FsCap and SysCap are available. Exercises oodac build with .bc target and native backend linking.
+//
+// Beats:
+//   1. Compile an isolated .oo test snippet to LLVM bitcode (.bc) and verify file validity.
+//   2. Compile and link the .oo source directly via LLVM/clang/lld backend.
+//   3. Execute the resulting binary and verify correct stdout and exit status.
+//   4. Print prove_llvm_lld_direct_link: PASSED on success.
+
+fn lld_sq(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut i = 0;
+    let mut out: String = "'";
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "'" {
+            out = out + "'\\''";
+        } else {
+            out = out + c;
+        }
+        i = i + 1;
+    }
+    return out + "'";
+}
+
+pub fn main(fs: &FsCap, sys: &SysCap) {
+    let tmp_dir = ".ooda-cache/ooda-tmp/prove_lld";
+    let src_path = tmp_dir + "/sample.oo";
+    let bc_path = tmp_dir + "/sample.bc";
+    let bin_path = tmp_dir + "/sample.bin";
+    let bin_lld_path = tmp_dir + "/sample_lld.bin";
+    let bin_nat_path = tmp_dir + "/sample_nat.bin";
+    let out_path = tmp_dir + "/sample.out";
+
+    let mk_res: Result[String, String] = sys_exec(sys, "sh", "-c", "mkdir -p " + tmp_dir);
+    if mk_res.is_err() {
+        println("FAIL: mkdir tmp_dir");
+        process_exit(1);
+    }
+
+    let code = "pub fn main() {\n    let a = 100;\n    let b = 42;\n    let r = a + b;\n    println(\"LLD_DIRECT_LINK_OK: \" + r.to_string());\n}\n";
+    let wr_cmd = "printf '%s' " + lld_sq(code) + " > " + lld_sq(src_path);
+    let wr_res: Result[String, String] = sys_exec(sys, "sh", "-c", wr_cmd);
+    if wr_res.is_err() {
+        println("FAIL: write sample.oo");
+        process_exit(1);
+    }
+
+    let host_probe = "OODAC_BIN=\"${OODAC_BIN:-${OODA_COMPILER:-./oodac/oodac}}\"";
+
+    // 1. Build bitcode (.bc) directly
+    let bc_build_cmd = host_probe + " && $OODAC_BIN build " + lld_sq(src_path) + " " + lld_sq(bc_path);
+    let bc_res: Result[String, String] = sys_exec(sys, "sh", "-c", bc_build_cmd);
+    if bc_res.is_err() {
+        println("FAIL: build bitcode (.bc)");
+        process_exit(1);
+    }
+
+    if !path_exists(fs, bc_path) {
+        println("FAIL: bc file not created");
+        process_exit(1);
+    }
+
+    let bc_sz: Int = file_size(fs, bc_path);
+    if bc_sz <= 0 {
+        println("FAIL: bc file is empty");
+        process_exit(1);
+    }
+
+    // 2. Build native binary via LLVM / clang
+    let bin_build_cmd = host_probe + " && $OODAC_BIN --backend llvm build " + lld_sq(src_path) + " " + lld_sq(bin_path);
+    let bin_res: Result[String, String] = sys_exec(sys, "sh", "-c", bin_build_cmd);
+    if bin_res.is_err() {
+        println("FAIL: build llvm binary");
+        process_exit(1);
+    }
+
+    if !path_exists(fs, bin_path) {
+        println("FAIL: bin file not created");
+        process_exit(1);
+    }
+
+    // Execute the LLVM binary and verify output
+    let exec_cmd = lld_sq(bin_path) + " > " + lld_sq(out_path);
+    let exec_res: Result[String, String] = sys_exec(sys, "sh", "-c", exec_cmd);
+    if exec_res.is_err() {
+        println("FAIL: execute sample.bin");
+        process_exit(1);
+    }
+
+    let rd_res: Result[String, String] = read_file(fs, out_path);
+    if rd_res.is_err() {
+        println("FAIL: read sample.out");
+        process_exit(1);
+    }
+
+    let out_str: String = match rd_res { Ok(s) => s, Err(e) => e };
+    if str_index_of(out_str, "LLD_DIRECT_LINK_OK: 142") < 0 {
+        println("FAIL: unexpected output: " + out_str);
+        process_exit(1);
+    }
+
+    // 3. Build native binary with LLD in PATH
+    let fake_lld_dir = tmp_dir + "/fake_lld";
+    let prep_lld = "mkdir -p " + fake_lld_dir + " && ln -sf $(which ld) " + fake_lld_dir + "/ld.lld && ln -sf $(which ld) " + fake_lld_dir + "/lld";
+    let prep_res: Result[String, String] = sys_exec(sys, "sh", "-c", prep_lld);
+    if prep_res.is_err() {
+        println("FAIL: prep lld");
+        process_exit(1);
+    }
+
+    let lld_build_cmd = "PATH=\"" + fake_lld_dir + ":$PATH\" " + host_probe + " && PATH=\"" + fake_lld_dir + ":$PATH\" $OODAC_BIN --backend llvm build " + lld_sq(src_path) + " " + lld_sq(bin_lld_path);
+    let lld_res: Result[String, String] = sys_exec(sys, "sh", "-c", lld_build_cmd);
+    if lld_res.is_err() {
+        println("FAIL: build lld binary");
+        process_exit(1);
+    }
+
+    let exec_lld = lld_sq(bin_lld_path) + " > " + lld_sq(out_path);
+    let exec_lld_res: Result[String, String] = sys_exec(sys, "sh", "-c", exec_lld);
+    if exec_lld_res.is_err() {
+        println("FAIL: execute sample_lld.bin");
+        process_exit(1);
+    }
+
+    let rd_lld_res: Result[String, String] = read_file(fs, out_path);
+    if rd_lld_res.is_err() {
+        println("FAIL: read sample_lld.out");
+        process_exit(1);
+    }
+    let out_lld_str: String = match rd_lld_res { Ok(s) => s, Err(e) => e };
+    if str_index_of(out_lld_str, "LLD_DIRECT_LINK_OK: 142") < 0 {
+        println("FAIL: unexpected lld output: " + out_lld_str);
+        process_exit(1);
+    }
+
+    // 4. Build native binary bypassing host gcc
+    let nat_build_cmd = host_probe + " && OODA_BYPASS_GCC=1 $OODAC_BIN build " + lld_sq(src_path) + " " + lld_sq(bin_nat_path);
+    let nat_res: Result[String, String] = sys_exec(sys, "sh", "-c", nat_build_cmd);
+    if nat_res.is_err() {
+        println("FAIL: build native bypassing gcc");
+        process_exit(1);
+    }
+
+    let exec_nat = lld_sq(bin_nat_path) + " > " + lld_sq(out_path);
+    let exec_nat_res: Result[String, String] = sys_exec(sys, "sh", "-c", exec_nat);
+    if exec_nat_res.is_err() {
+        println("FAIL: execute sample_nat.bin");
+        process_exit(1);
+    }
+
+    let rd_nat_res: Result[String, String] = read_file(fs, out_path);
+    if rd_nat_res.is_err() {
+        println("FAIL: read sample_nat.out");
+        process_exit(1);
+    }
+    let out_nat_str: String = match rd_nat_res { Ok(s) => s, Err(e) => e };
+    if str_index_of(out_nat_str, "LLD_DIRECT_LINK_OK: 142") < 0 {
+        println("FAIL: unexpected native output: " + out_nat_str);
+        process_exit(1);
+    }
+
+    println("prove_llvm_lld_direct_link: PASSED");
+}

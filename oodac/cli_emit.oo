@@ -7,8 +7,8 @@
 // Beats:
 //   1. Map cmd to mode all/preamble/protos/bodies and append _noarc when PURE_NO_ARC is set.
 //   2. When EMIT_NO_CONCAT is set, read the file and call c_emit_stream_mode_at with the path, or fail unreadable.
-//   3. Otherwise load imports, tokenize each file with LINEFILE (SECRET: still uses concat src for markers), stream.
-//   4. emit-llvm with --backend llvm reads one file (oodac self-host IR). emit-x86 writes .s.
+//   3. Otherwise load imports, tokenize each file with LINEFILE, and stream C or LLVM IR.
+//   4. emit-llvm with --backend llvm and sanitizer markers; emit-x86 writes .s.
 
 import "load_import.oo";
 import "diag_json.oo";
@@ -28,15 +28,10 @@ pub fn run_emit_c_family(fs: &FsCap, sys: &SysCap, cmd: String, path: String) {
     if no_arc_res.is_ok() { no_arc = true; }
     
     let mut m = "";
-    if cmd == "emit-preamble" {
-        m = "preamble";
-    } else if cmd == "emit-protos" {
-        m = "protos";
-    } else if cmd == "emit-bodies" {
-        m = "bodies";
-    } else {
-        m = "all";
-    }
+    if cmd == "emit-preamble" { m = "preamble"; }
+    else if cmd == "emit-protos" { m = "protos"; }
+    else if cmd == "emit-bodies" { m = "bodies"; }
+    else { m = "all"; }
     if no_arc { m = m + "_noarc"; }
     
     if no_concat.is_ok() {
@@ -49,24 +44,16 @@ pub fn run_emit_c_family(fs: &FsCap, sys: &SysCap, cmd: String, path: String) {
             process_exit(1);
         }
     } else {
-        // Full program emit without giant string concatenation.
-        // emit-c (all) tokenizes once, then walks protos and bodies.
         if m == "preamble" || m == "preamble_noarc" {
             c_emit_stream_mode("", "preamble");
             return;
         }
-        // Concat src is kept for marker gates. Tokenize each import
-        // file (O(sum n_i²)) unless a secret marker needs concat lines.
         let le: List[String] = load_expand(fs, path, list_new(), list_new());
         let nle: Int = list_len(le);
         let src: String = list_get(le, nle - 1);
         let mut em: String = m;
-        if m == "all" {
-            em = "once";
-        }
-        if m == "all_noarc" {
-            em = "once_noarc";
-        }
+        if m == "all" { em = "once"; }
+        if m == "all_noarc" { em = "once_noarc"; }
         let mut toks: List[String] = list_new();
         let mut pi: Int = 0;
         while pi < nle - 1 {
@@ -107,24 +94,70 @@ fn llvm_fntab_from_env(fs: &FsCap, sys: &SysCap, path: String) -> String {
         let rr: Result[String, String] = read_file(fs, cached);
         if rr.is_ok() {
             let body: String = match rr { Ok(s) => s, Err(m) => m };
-            if chars_len(body) > 8 {
-                return body;
-            }
+            if chars_len(body) > 8 { return body; }
         }
     }
     return llvm_import_fntab(fs, path);
 }
 
+fn llvm_target_triple_from_env(fs: &FsCap, sys: &SysCap) -> String {
+    let tf: String = ".ooda-cache/ooda-tmp/target_triple.txt";
+    let cmd: String = "mkdir -p .ooda-cache/ooda-tmp && printf '%s' \"$OODA_TARGET_TRIPLE\" > " + shell_sq(tf);
+    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    if r.is_ok() {
+        let rr: Result[String, String] = read_file(fs, tf);
+        if rr.is_ok() { return match rr { Ok(s) => s, Err(e) => "" }; }
+    }
+    return "";
+}
+
+fn llvm_sanitize_from_env(fs: &FsCap, sys: &SysCap) -> String {
+    let sf: String = ".ooda-cache/ooda-tmp/sanitize.txt";
+    let cmd: String = "mkdir -p .ooda-cache/ooda-tmp && printf '%s' \"${OODA_SANITIZE:-${SANITIZE:-$OODA_FSANITIZE}}\" > " + shell_sq(sf);
+    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    if r.is_ok() {
+        let rr: Result[String, String] = read_file(fs, sf);
+        if rr.is_ok() { return match rr { Ok(s) => s, Err(e) => "" }; }
+    }
+    return "";
+}
+
 pub fn run_emit_llvm(fs: &FsCap, sys: &SysCap, path: String, backend: String) {
+    run_emit_llvm_san(fs, sys, path, backend, false, "", "");
+}
+
+pub fn run_emit_llvm_target(fs: &FsCap, sys: &SysCap, path: String, backend: String, triple_arg: String) {
+    run_emit_llvm_san(fs, sys, path, backend, false, triple_arg, "");
+}
+
+pub fn run_emit_llvm_opt(fs: &FsCap, sys: &SysCap, path: String, backend: String, is_debug: Bool, triple_arg: String) {
+    run_emit_llvm_san(fs, sys, path, backend, is_debug, triple_arg, "");
+}
+
+pub fn run_emit_llvm_san(fs: &FsCap, sys: &SysCap, path: String, backend: String, is_debug: Bool, triple_arg: String, san_arg: String) {
+    let mut tr: String = triple_arg;
+    if tr == "" { tr = llvm_target_triple_from_env(fs, sys); }
+    let mut san_str: String = san_arg;
+    if san_str == "" { san_str = llvm_sanitize_from_env(fs, sys); }
+    let mut san_markers: String = "";
+    if str_index_of(san_str, "address") >= 0 { san_markers = san_markers + "|__san_address__|"; }
+    if str_index_of(san_str, "thread") >= 0 { san_markers = san_markers + "|__san_thread__|"; }
+    if str_index_of(san_str, "undefined") >= 0 { san_markers = san_markers + "|__san_undefined__|"; }
+    if str_index_of(san_str, "fuzzer") >= 0 { san_markers = san_markers + "|__san_fuzzer__|"; }
+
     let probe_concat = "if [ -n \"$EMIT_NO_CONCAT\" ] || [ -n \"$OODA_EMIT_NO_CONCAT\" ]; then exit 0; else exit 1; fi";
     let no_concat_res = sys_exec(sys, "sh", "-c", probe_concat);
     let mut no_concat = false;
-    if no_concat_res.is_ok() { no_concat = true; }
-    if backend == "llvm" { no_concat = true; }
+    if no_concat_res.is_ok() || backend == "llvm" { no_concat = true; }
     let probe_pre = "if [ -n \"$EMIT_NO_PREAMBLE\" ] || [ -n \"$OODA_EMIT_NO_PREAMBLE\" ]; then exit 0; else exit 1; fi";
     let no_pre_res = sys_exec(sys, "sh", "-c", probe_pre);
     let mut no_pre = false;
     if no_pre_res.is_ok() { no_pre = true; }
+    let probe_dbg = "if [ -n \"$OODA_DEBUG\" ] || [ -n \"$DEBUG\" ] || [ \"$OODA_LLVM_DEBUG\" = \"1\" ]; then exit 0; else exit 1; fi";
+    let dbg_res = sys_exec(sys, "sh", "-c", probe_dbg);
+    let mut is_dbg = is_debug;
+    if dbg_res.is_ok() { is_dbg = true; }
+
     let mut src = "";
     if no_concat {
         let src_r = read_file(fs, path);
@@ -134,16 +167,17 @@ pub fn run_emit_llvm(fs: &FsCap, sys: &SysCap, path: String, backend: String) {
             println("ERR\tload\tunreadable file: " + path);
             process_exit(1);
         }
-        llvm_emit_stream(src, no_pre, llvm_fntab_from_env(fs, sys, path));
+        llvm_emit_stream_full(src, no_pre, llvm_fntab_from_env(fs, sys, path) + san_markers, path, is_dbg, tr);
         return;
     }
     src = load_source_with_imports(fs, path);
     run_check_core(sys, src);
-    llvm_emit_stream(src, no_pre, "");
+    llvm_emit_stream_full(src, no_pre, san_markers, path, is_dbg, tr);
 }
 
 pub fn run_print_llvm_fntab(fs: &FsCap, path: String) {
-    println(llvm_import_fntab(fs, path));
+    let tab_str: String = llvm_import_fntab(fs, path);
+    println(tab_str);
 }
 
 pub fn run_print_llvm_graph(fs: &FsCap, path: String) {
@@ -162,25 +196,15 @@ fn llvm_mod_ll_name(path: String) -> String {
     let mut i: Int = 0;
     while i < n {
         let c: String = char_at(path, i);
-        if c == "/" {
-            out = out + "_";
-        } else {
-            out = out + c;
-        }
+        if c == "/" { out = out + "_"; } else { out = out + c; }
         i = i + 1;
     }
     return out + ".ll";
 }
 
 pub fn run_emit_llvm_mods(fs: &FsCap, sys: &SysCap, path: String, outdir: String) {
-    if outdir == "" {
-        println("ERR\temit-mods\tmissing outdir");
-        process_exit(2);
-    }
-    if sys_exec(sys, "sh", "-c", "mkdir -p " + shell_sq(outdir)).is_err() {
-        println("ERR\temit-mods\tmkdir");
-        process_exit(1);
-    }
+    if outdir == "" { println("ERR\temit-mods\tmissing outdir"); process_exit(2); }
+    if sys_exec(sys, "sh", "-c", "mkdir -p " + shell_sq(outdir)).is_err() { println("ERR\temit-mods\tmkdir"); process_exit(1); }
     let le: List[String] = load_expand(fs, path, list_new(), list_new());
     let n: Int = list_len(le);
     let mut listing: String = "";

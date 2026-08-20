@@ -1,0 +1,145 @@
+// # Lower enum matches to LLVM
+//
+// Logline: Lowers custom enum match statements by tag comparison and payload extraction.
+//
+// Setup: Called from llvm_emit_match.oo when scrutinee is %struct.*.
+//
+// Beats:
+//   1. Extract tag from enum struct.
+//   2. For each variant arm, compare tag and extract typed payload.
+//   3. Emit arm body or assignment, and branch to merge label.
+
+import "token_fmt.oo";
+import "llvm_emit_ty.oo";
+import "llvm_emit_env.oo";
+import "llvm_emit_expr.oo";
+import "llvm_emit_block.oo";
+import "llvm_emit_match_slot.oo";
+import "c_emit_sum_spec.oo";
+
+fn llvm_menum_pack(p: Int, env: List[String]) -> List[String] {
+    let mut out: List[String] = list_new();
+    out = list_push(out, p.to_string());
+    out = list_push(out, list_get(env, 0));
+    out = list_push(out, list_get(env, 1));
+    out = list_push(out, list_get(env, 2));
+    out = list_push(out, list_get(env, 3));
+    out = list_push(out, list_get(env, 4));
+    return out;
+}
+
+fn llvm_menum_env5(src: List[String], base: Int) -> List[String] {
+    let mut e: List[String] = list_new();
+    e = list_push(e, list_get(src, base));
+    e = list_push(e, list_get(src, base + 1));
+    e = list_push(e, list_get(src, base + 2));
+    e = list_push(e, list_get(src, base + 3));
+    e = list_push(e, list_get(src, base + 4));
+    return e;
+}
+
+pub fn llvm_match_emit_enum(toks: List[String], pos: Int, n: Int, env: List[String], scrut: String, rty: String) -> List[String] {
+    let mut p = pos;
+    let mut cur_env: List[String] = env;
+    let end_lr: List[String] = llvm_gen_label("bb_match_end", cur_env);
+    let lbl_end: String = list_get(end_lr, 0);
+    cur_env = llvm_menum_env5(end_lr, 1);
+
+    let tag_reg_res: List[String] = llvm_gen_reg(cur_env);
+    let tag_val: String = list_get(tag_reg_res, 0);
+    cur_env = llvm_menum_env5(tag_reg_res, 1);
+    println("  " + tag_val + " = extractvalue " + rty + " " + scrut + ", 0");
+
+    while p < n && field_at(list_get(toks, p), 0) != "RBRACE" {
+        if field_at(list_get(toks, p), 0) != "IDENT" {
+            p = p + 1;
+        } else {
+            let ctor: String = field_at(list_get(toks, p), 3);
+            p = p + 1;
+            let spec: String = llvm_env_get_var_ty(cur_env, "__ctor__" + ctor);
+            let tag_num: String = c_sum_tag_of(spec);
+            let payk: String = c_sum_pay_of(spec);
+            let mut bind: String = "_" + ctor;
+            if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+                p = p + 1;
+                if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+                    bind = field_at(list_get(toks, p), 3);
+                    p = p + 1;
+                }
+                if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
+            }
+            if p < n && field_at(list_get(toks, p), 0) == "FATARROW" { p = p + 1; }
+
+            let arm_lr: List[String] = llvm_gen_label("bb_match_arm", cur_env);
+            let lbl_arm: String = list_get(arm_lr, 0);
+            cur_env = llvm_menum_env5(arm_lr, 1);
+            let next_lr: List[String] = llvm_gen_label("bb_match_next", cur_env);
+            let lbl_next: String = list_get(next_lr, 0);
+            cur_env = llvm_menum_env5(next_lr, 1);
+
+            let cmp_res: List[String] = llvm_gen_reg(cur_env);
+            let cmp_i1: String = list_get(cmp_res, 0);
+            cur_env = llvm_menum_env5(cmp_res, 1);
+
+            println("  " + cmp_i1 + " = icmp eq i32 " + tag_val + ", " + tag_num);
+            println("  br i1 " + cmp_i1 + ", label %" + lbl_arm + ", label %" + lbl_next);
+
+            println(lbl_arm + ":");
+            let mut arm_env: List[String] = cur_env;
+            if payk != "" && payk != "U" {
+                let pty: String = llvm_ty_map(payk);
+                let rc: Int = parse_int(list_get(arm_env, 0));
+                let arm_slot: String = bind + "." + rc.to_string();
+                let mut bumped: List[String] = list_new();
+                bumped = list_push(bumped, (rc + 1).to_string());
+                bumped = list_push(bumped, list_get(arm_env, 1));
+                bumped = list_push(bumped, list_get(arm_env, 2));
+                bumped = list_push(bumped, list_get(arm_env, 3));
+                bumped = list_push(bumped, list_get(arm_env, 4));
+                arm_env = llvm_env_add_var(bumped, "__slot__" + bind, arm_slot);
+                arm_env = llvm_env_add_var(arm_env, bind, pty);
+                println("  %" + arm_slot + ".slot = alloca " + pty + ", align 8");
+                llvm_match_zero_slot(pty, arm_slot);
+                let fidx: Int = parse_int(tag_num) + 1;
+                let pay_ld: List[String] = llvm_gen_reg(arm_env);
+                let pay_v: String = list_get(pay_ld, 0);
+                arm_env = llvm_menum_env5(pay_ld, 1);
+                println("  " + pay_v + " = extractvalue " + rty + " " + scrut + ", " + fidx.to_string());
+                println("  store " + pty + " " + pay_v + ", " + pty + "* %" + arm_slot + ".slot, align 8");
+            }
+            if p < n && field_at(list_get(toks, p), 0) == "LBRACE" {
+                let br: List[String] = llvm_emit_block(toks, p, n, arm_env);
+                p = parse_int(list_get(br, 0));
+                arm_env = llvm_menum_env5(br, 1);
+            } else {
+                let asgn: String = llvm_env_get_var_ty(arm_env, "__asgn__");
+                if asgn != "" {
+                    let ex: List[String] = llvm_emit_expr(toks, p, n, arm_env);
+                    let ev: String = list_get(ex, 0);
+                    let et: String = list_get(ex, 1);
+                    p = parse_int(list_get(ex, 2));
+                    arm_env = llvm_menum_env5(ex, 3);
+                    let aslot: String = llvm_env_slot(arm_env, asgn);
+                    let mut aty: String = llvm_env_get_var_ty(arm_env, asgn);
+                    if aty == "" { aty = et; }
+                    println("  store " + aty + " " + ev + ", " + aty + "* %" + aslot + ".slot, align 8");
+                } else {
+                    let ex: List[String] = llvm_emit_expr(toks, p, n, arm_env);
+                    p = parse_int(list_get(ex, 2));
+                    arm_env = llvm_menum_env5(ex, 3);
+                }
+            }
+            let arm_ret: Bool = llvm_env_vars_has(list_get(arm_env, 4), "__did_ret__");
+            if !arm_ret {
+                println("  br label %" + lbl_end);
+            }
+            println(lbl_next + ":");
+            cur_env = arm_env;
+            if p < n && field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
+        }
+    }
+    println("  unreachable");
+    println(lbl_end + ":");
+    if p < n && field_at(list_get(toks, p), 0) == "RBRACE" { p = p + 1; }
+    return llvm_menum_pack(p, cur_env);
+}

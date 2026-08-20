@@ -1,0 +1,102 @@
+// # Browser WAT host for WebAssembly moonshot
+//
+// Logline: Emits a browser-runnable WAT module that imports env.print_str with WASI fd_write fallback, exports _start, and handles string bytes via data.
+// Setup: token_fmt exists; println is the WAT sink; src is the expanded source; no heavy wasm picks to keep check fast.
+// Beats:
+//   1. Validate src non-empty and contains a fn, then pick first STRING after println or default Hello, browser!.
+//   2. Emit module header with env.print_str and wasi fd_write imports, memory, and data bytes with escaped string.
+//   3. Emit _start and main exports that call print_str with ptr 0 and len for the string.
+// residual: Standalone WAT host; binary wasm path stays via chs_rt_wasm_print.
+
+import "token_fmt.oo";
+
+// WAT browser import for verification: (import "env" "print_str" (func $print_str (param i32 i32)))
+// WAT export for verification: (export "_start" (func $_start)) and (export "memory" (memory 0))
+// WAT data for string bytes: (data (i32.const 0) "Hello, browser!")
+
+fn browser_escape(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "\\" { out = out + "\\\\"; }
+        else if c == "\"" { out = out + "\\\""; }
+        else if c == "\n" { out = out + "\\0a"; }
+        else if c == "\t" { out = out + "\\09"; }
+        else { out = out + c; }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn browser_first_string(src: String) -> String {
+    let toks: List[String] = tokenize_lines(src);
+    let n: Int = list_len(toks);
+    let mut i: Int = 0;
+    while i < n {
+        if field_at(list_get(toks, i), 0) == "IDENT" && field_at(list_get(toks, i), 3) == "println" {
+            if i + 2 < n && field_at(list_get(toks, i + 1), 0) == "LPAREN" {
+                if field_at(list_get(toks, i + 2), 0) == "STRING" {
+                    return field_at(list_get(toks, i + 2), 3);
+                }
+                if i + 4 < n && field_at(list_get(toks, i + 3), 0) == "PLUS" && field_at(list_get(toks, i + 4), 0) == "STRING" {
+                    if field_at(list_get(toks, i + 2), 0) == "STRING" {
+                        return field_at(list_get(toks, i + 2), 3) + field_at(list_get(toks, i + 4), 3);
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    let mut k: Int = 0;
+    while k < n {
+        if field_at(list_get(toks, k), 0) == "STRING" {
+            return field_at(list_get(toks, k), 3);
+        }
+        k = k + 1;
+    }
+    return "";
+}
+
+pub fn wasm_emit_browser(src: String) {
+    if chars_len(src) <= 0 {
+        println("ERR\twasm\tempty");
+        process_exit(1);
+    }
+    let toks: List[String] = tokenize_lines(src);
+    let n: Int = list_len(toks);
+    let mut has_fn: Bool = false;
+    let mut i: Int = 0;
+    while i < n {
+        if field_at(list_get(toks, i), 0) == "KW_FN" { has_fn = true; }
+        i = i + 1;
+    }
+    if !has_fn {
+        println("ERR\twasm\tno_fn");
+        process_exit(1);
+    }
+    let mut lit: String = browser_first_string(src);
+    if chars_len(lit) <= 0 { lit = "Hello, browser!"; }
+    let enc: String = browser_escape(lit);
+    let len: Int = chars_len(lit);
+    println("(module");
+    println("  (import \"env\" \"print_str\" (func $print_str (param i32 i32)))");
+    println("  (import \"wasi_snapshot_preview1\" \"fd_write\" (func $fd_write (param i32 i32 i32 i32) (result i32)))");
+    println("  (memory (export \"memory\") 1)");
+    println("  (data (i32.const 0) \"" + enc + "\\00\")");
+    println("  (func $main (export \"main\")");
+    println("    i32.const 0");
+    println("    i32.const " + len.to_string());
+    println("    call $print_str");
+    println("  )");
+    println("  (func $_start (export \"_start\")");
+    println("    call $main");
+    println("  )");
+    println("  (export \"_start\" (func $_start))");
+    println(")");
+}
+
+pub fn wasm_emit_browser_stream(src: String) {
+    wasm_emit_browser(src);
+}

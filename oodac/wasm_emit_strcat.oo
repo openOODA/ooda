@@ -1,17 +1,18 @@
-// # Detect println of two or more string literals
+// # Detect println of two or more string literals with let-bound ident concat
 //
-// Logline: Returns the joined text when a function body is only println of a STRING plus-chain.
+// Logline: Returns the joined text when a function body is only println of a STRING/IDENT plus-chain, handling N parts and multi-println 3-17.
 //
 // Setup: tokenize_lines and field_at exist. fname is the user function name.
 //
 // Beats:
-//   1. Find KW_FN plus IDENT fname and skip to the body brace.
-//   2. Accept println ( STRING (PLUS STRING)+ ) with optional semicolon, then RBRACE.
-//   3. Join those STRING texts. An IDENT in the chain misses.
+//   1. Find KW_FN plus IDENT fname and skip to the body brace, skipping let bindings before println.
+//   2. Accept println ( (STRING|IDENT) (PLUS (STRING|IDENT))* ) with IDENT resolved via KW_LET lookup, looping for all PLUS parts.
+//   3. For single println join the parts; for multi-println 3-17 join each println result with newline and require RBRACE.
 //
 // residual: runtime concat stays dummy end. Not a full WASM backend.
 
 import "token_fmt.oo";
+import "tc_parse_int.oo";
 
 fn ws_kind(toks: List[String], i: Int) -> String {
     return field_at(list_get(toks, i), 0);
@@ -19,6 +20,70 @@ fn ws_kind(toks: List[String], i: Int) -> String {
 
 fn ws_text(toks: List[String], i: Int) -> String {
     return field_at(list_get(toks, i), 3);
+}
+
+fn ws_str_let(toks: List[String], lb: Int, lim: Int, name: String) -> String {
+    let mut p: Int = lb + 1;
+    while p + 3 < lim {
+        if ws_kind(toks, p) == "KW_LET" && ws_kind(toks, p + 1) == "IDENT" && ws_text(toks, p + 1) == name && ws_kind(toks, p + 2) == "EQ" && ws_kind(toks, p + 3) == "STRING" {
+            return ws_text(toks, p + 3);
+        }
+        p = p + 1;
+    }
+    return "";
+}
+
+fn ws_one_concat_println(toks: List[String], p0: Int, n: Int, lbrace: Int) -> List[String] {
+    let empty: List[String] = list_new();
+    if p0 + 2 >= n {
+        return empty;
+    }
+    if ws_kind(toks, p0) != "IDENT" || ws_text(toks, p0) != "println" {
+        return empty;
+    }
+    if ws_kind(toks, p0 + 1) != "LPAREN" {
+        return empty;
+    }
+    let mut p: Int = p0 + 2;
+    let mut first: String = "";
+    if p < n && ws_kind(toks, p) == "STRING" {
+        first = ws_text(toks, p);
+    } else if p < n && ws_kind(toks, p) == "IDENT" {
+        first = ws_str_let(toks, lbrace, p, ws_text(toks, p));
+        if chars_len(first) <= 0 {
+            return empty;
+        }
+    } else {
+        return empty;
+    }
+    let mut joined: String = first;
+    p = p + 1;
+    while p + 1 < n && ws_kind(toks, p) == "PLUS" {
+        let mut nxt: String = "";
+        if ws_kind(toks, p + 1) == "STRING" {
+            nxt = ws_text(toks, p + 1);
+        } else if ws_kind(toks, p + 1) == "IDENT" {
+            nxt = ws_str_let(toks, lbrace, p, ws_text(toks, p + 1));
+            if chars_len(nxt) <= 0 {
+                return empty;
+            }
+        } else {
+            return empty;
+        }
+        joined = joined + nxt;
+        p = p + 2;
+    }
+    if p >= n || ws_kind(toks, p) != "RPAREN" {
+        return empty;
+    }
+    p = p + 1;
+    if p < n && ws_kind(toks, p) == "SEMI" {
+        p = p + 1;
+    }
+    let mut out: List[String] = list_new();
+    out = list_push(out, joined);
+    out = list_push(out, p.to_string());
+    return out;
 }
 
 pub fn wasm_fn_println_strcat(src: String, fname: String) -> String {
@@ -39,6 +104,10 @@ pub fn wasm_fn_println_strcat(src: String, fname: String) -> String {
                     return "";
                 }
                 p = p + 1;
+                while p + 3 < n && ws_kind(toks, p) == "KW_LET" {
+                    while p < n && ws_kind(toks, p) != "SEMI" { p = p + 1; }
+                    if p < n && ws_kind(toks, p) == "SEMI" { p = p + 1; }
+                }
                 if p + 2 >= n {
                     return "";
                 }
@@ -48,18 +117,34 @@ pub fn wasm_fn_println_strcat(src: String, fname: String) -> String {
                 if ws_kind(toks, p + 1) != "LPAREN" {
                     return "";
                 }
+                let lb: Int = i + 2;
+                let mut q: Int = lb;
+                while q < n && ws_kind(toks, q) != "LBRACE" { q = q + 1; }
+                let lbrace: Int = q;
                 p = p + 2;
-                if p >= n || ws_kind(toks, p) != "STRING" {
+                let mut first: String = "";
+                if p < n && ws_kind(toks, p) == "STRING" {
+                    first = ws_text(toks, p);
+                } else if p < n && ws_kind(toks, p) == "IDENT" {
+                    first = ws_str_let(toks, lbrace, p, ws_text(toks, p));
+                    if chars_len(first) <= 0 { return ""; }
+                } else {
                     return "";
                 }
-                let mut joined: String = ws_text(toks, p);
+                let mut joined: String = first;
                 let mut parts: Int = 1;
                 p = p + 1;
                 while p + 1 < n && ws_kind(toks, p) == "PLUS" {
-                    if ws_kind(toks, p + 1) != "STRING" {
+                    let mut nxt: String = "";
+                    if ws_kind(toks, p + 1) == "STRING" {
+                        nxt = ws_text(toks, p + 1);
+                    } else if ws_kind(toks, p + 1) == "IDENT" {
+                        nxt = ws_str_let(toks, lbrace, p, ws_text(toks, p + 1));
+                        if chars_len(nxt) <= 0 { return ""; }
+                    } else {
                         return "";
                     }
-                    joined = joined + ws_text(toks, p + 1);
+                    joined = joined + nxt;
                     parts = parts + 1;
                     p = p + 2;
                 }
@@ -75,6 +160,69 @@ pub fn wasm_fn_println_strcat(src: String, fname: String) -> String {
                 }
                 if p < n && ws_kind(toks, p) == "RBRACE" {
                     return joined;
+                }
+                return "";
+            }
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+pub fn wasm_fn_strcat_multi(src: String, fname: String) -> String {
+    if chars_len(src) <= 0 || chars_len(fname) <= 0 {
+        return "";
+    }
+    let toks: List[String] = tokenize_lines(src);
+    let n: Int = list_len(toks);
+    let mut i: Int = 0;
+    while i + 1 < n {
+        if ws_kind(toks, i) == "KW_FN" && ws_kind(toks, i + 1) == "IDENT" {
+            if ws_text(toks, i + 1) == fname {
+                let mut p: Int = i + 2;
+                while p < n && ws_kind(toks, p) != "LBRACE" {
+                    p = p + 1;
+                }
+                if p >= n {
+                    return "";
+                }
+                let lbrace: Int = p;
+                p = p + 1;
+                while p + 3 < n && ws_kind(toks, p) == "KW_LET" {
+                    while p < n && ws_kind(toks, p) != "SEMI" { p = p + 1; }
+                    if p < n && ws_kind(toks, p) == "SEMI" { p = p + 1; }
+                }
+                if p + 2 >= n {
+                    return "";
+                }
+                let mut cur: Int = p;
+                let mut count: Int = 0;
+                let mut big: String = "";
+                while cur + 2 < n {
+                    let one: List[String] = ws_one_concat_println(toks, cur, n, lbrace);
+                    if list_len(one) < 2 {
+                        break;
+                    }
+                    let lit: String = list_get(one, 0);
+                    let nxt: Int = parse_int(list_get(one, 1));
+                    if count == 0 {
+                        big = lit;
+                    } else {
+                        big = big + "\n" + lit;
+                    }
+                    count = count + 1;
+                    cur = nxt;
+                    if cur < n && ws_kind(toks, cur) == "RBRACE" {
+                        break;
+                    }
+                    if cur >= n || ws_kind(toks, cur) != "IDENT" {
+                        break;
+                    }
+                }
+                if count >= 3 && count <= 17 {
+                    if cur < n && ws_kind(toks, cur) == "RBRACE" {
+                        return big;
+                    }
                 }
                 return "";
             }

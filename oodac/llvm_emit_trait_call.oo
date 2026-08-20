@@ -1,0 +1,246 @@
+// # LLVM VTable struct types, global constants, and dynamic call dispatch
+//
+// Logline: Emits VTable struct declarations, global constant instances, fat pointer coercions, and indirect dynamic method calls.
+//
+// Setup: llvm_trait_methods_of, llvm_gen_reg, and token format tools are in scope; env holds emit state and symbol tables.
+//
+// Beats:
+//   1. Emit %VTable.<Trait> and %dyn.<Trait> fat pointer type declarations.
+//   2. Emit @VTable.<Trait>.<Struct> global constant instances with implementing function pointers.
+//   3. Lower struct to fat pointer dynamic coercions.
+//   4. Lower indirect dynamic trait method calls through VTables.
+
+import "token_fmt.oo";
+import "llvm_emit_ty.oo";
+import "llvm_emit_env.oo";
+import "llvm_emit_mem.oo";
+import "llvm_emit_trait.oo";
+
+fn llvm_tr_pack5(src: List[String], base: Int) -> List[String] {
+    let mut e: List[String] = list_new();
+    e = list_push(e, list_get(src, base));
+    e = list_push(e, list_get(src, base + 1));
+    e = list_push(e, list_get(src, base + 2));
+    e = list_push(e, list_get(src, base + 3));
+    e = list_push(e, list_get(src, base + 4));
+    return e;
+}
+
+pub fn llvm_emit_trait_types(ttab: String) {
+    let tlen = chars_len(ttab);
+    let mut i = 0;
+    while i < tlen {
+        if char_at(ttab, i) == "|" && i + 1 < tlen {
+            let mut j = i + 1;
+            let mut tname = "";
+            while j < tlen && char_at(ttab, j) != "=" && char_at(ttab, j) != "|" { tname = tname + char_at(ttab, j); j = j + 1; }
+            if tname != "" && j < tlen && char_at(ttab, j) == "=" {
+                j = j + 1;
+                let mut field_tys = "";
+                while j < tlen && char_at(ttab, j) != "|" {
+                    let mut mn = "";
+                    while j < tlen && char_at(ttab, j) != ":" && char_at(ttab, j) != "|" { mn = mn + char_at(ttab, j); j = j + 1; }
+                    if j < tlen && char_at(ttab, j) == ":" {
+                        j = j + 1;
+                        let mut mrty = "";
+                        while j < tlen && char_at(ttab, j) != ":" && char_at(ttab, j) != ";" && char_at(ttab, j) != "|" { mrty = mrty + char_at(ttab, j); j = j + 1; }
+                        let mut mparams = "i8*";
+                        if j < tlen && char_at(ttab, j) == ":" {
+                            j = j + 1;
+                            let mut extra_p = "";
+                            while j < tlen && char_at(ttab, j) != ";" && char_at(ttab, j) != "|" { extra_p = extra_p + char_at(ttab, j); j = j + 1; }
+                            if extra_p != "" {
+                                let nep = chars_len(extra_p);
+                                let mut ei = 0;
+                                while ei < nep && char_at(extra_p, ei) != "," { ei = ei + 1; }
+                                if ei < nep { mparams = mparams + ", " + str_slice(extra_p, ei + 1, nep); }
+                            }
+                        }
+                        if j < tlen && char_at(ttab, j) == ";" { j = j + 1; }
+                        let fn_ptr_ty: String = mrty + " (" + mparams + ")*";
+                        if field_tys != "" { field_tys = field_tys + ", "; }
+                        field_tys = field_tys + fn_ptr_ty;
+                    }
+                }
+                if field_tys == "" { field_tys = "i8*"; }
+                println("%VTable." + tname + " = type { " + field_tys + " }");
+                println("%dyn." + tname + " = type { i8*, %VTable." + tname + "* }");
+                println("%FatPtr." + tname + " = type { i8*, %VTable." + tname + "* }");
+            }
+            i = j;
+        } else { i = i + 1; }
+    }
+}
+
+pub fn llvm_emit_trait_vtables(ttab: String, itab: String) {
+    let ilen = chars_len(itab);
+    let mut i = 0;
+    while i < ilen {
+        if char_at(itab, i) == "|" && i + 1 < ilen {
+            let mut j = i + 1;
+            let mut tname = "";
+            while j < ilen && char_at(itab, j) != ":" && char_at(itab, j) != "|" { tname = tname + char_at(itab, j); j = j + 1; }
+            let mut sname = "";
+            if j < ilen && char_at(itab, j) == ":" {
+                j = j + 1;
+                while j < ilen && char_at(itab, j) != "=" && char_at(itab, j) != "|" { sname = sname + char_at(itab, j); j = j + 1; }
+            }
+            if tname != "" && sname != "" && j < ilen && char_at(itab, j) == "=" {
+                j = j + 1;
+                let mut vtable_entries = "";
+                let raw: String = llvm_trait_methods_of(ttab, tname);
+                let rlen = chars_len(raw);
+                let mut rk = 0;
+                while rk < rlen {
+                    let mut mn = "";
+                    while rk < rlen && char_at(raw, rk) != ":" { mn = mn + char_at(raw, rk); rk = rk + 1; }
+                    if rk < rlen && char_at(raw, rk) == ":" {
+                        rk = rk + 1;
+                        let mut mrty = "";
+                        while rk < rlen && char_at(raw, rk) != ":" && char_at(raw, rk) != ";" { mrty = mrty + char_at(raw, rk); rk = rk + 1; }
+                        let mut mparams = "i8*";
+                        if rk < rlen && char_at(raw, rk) == ":" {
+                            rk = rk + 1;
+                            let mut ep = "";
+                            while rk < rlen && char_at(raw, rk) != ";" { ep = ep + char_at(raw, rk); rk = rk + 1; }
+                            if ep != "" {
+                                let nep = chars_len(ep);
+                                let mut ei = 0;
+                                while ei < nep && char_at(ep, ei) != "," { ei = ei + 1; }
+                                if ei < nep { mparams = mparams + ", " + str_slice(ep, ei + 1, nep); }
+                            }
+                        }
+                        if rk < rlen && char_at(raw, rk) == ";" { rk = rk + 1; }
+                        let fn_ptr_ty: String = mrty + " (" + mparams + ")*";
+                        let concrete_fn: String = "@" + sname + "_" + mn;
+                        let entry = fn_ptr_ty + " bitcast (" + fn_ptr_ty + " " + concrete_fn + " to " + fn_ptr_ty + ")";
+                        if vtable_entries != "" { vtable_entries = vtable_entries + ", "; }
+                        vtable_entries = vtable_entries + entry;
+                    }
+                }
+                if vtable_entries == "" { vtable_entries = "i8* null"; }
+                println("@VTable." + tname + "." + sname + " = constant %VTable." + tname + " { " + vtable_entries + " }");
+                while j < ilen && char_at(itab, j) != "|" { j = j + 1; }
+            }
+            i = j;
+        } else { i = i + 1; }
+    }
+}
+
+pub fn llvm_emit_dyn_coercion(sname: String, tname: String, src_val: String, is_slot: Bool, env: List[String]) -> List[String] {
+    let mut cur_env: List[String] = env;
+    let mut raw_ptr = "";
+    if is_slot {
+        let reg_bc: List[String] = llvm_gen_reg(cur_env);
+        raw_ptr = list_get(reg_bc, 0);
+        cur_env = llvm_tr_pack5(reg_bc, 1);
+        println("  " + raw_ptr + " = bitcast %struct." + sname + "* %" + src_val + ".slot to i8*");
+    } else {
+        let reg_al: List[String] = llvm_gen_reg(cur_env);
+        let tmp_slot = list_get(reg_al, 0) + ".dyns";
+        cur_env = llvm_tr_pack5(reg_al, 1);
+        println("  " + tmp_slot + " = alloca %struct." + sname + ", align 8");
+        println("  store %struct." + sname + " " + src_val + ", %struct." + sname + "* " + tmp_slot + ", align 8");
+        let reg_bc: List[String] = llvm_gen_reg(cur_env);
+        raw_ptr = list_get(reg_bc, 0);
+        cur_env = llvm_tr_pack5(reg_bc, 1);
+        println("  " + raw_ptr + " = bitcast %struct." + sname + "* " + tmp_slot + " to i8*");
+    }
+    let reg_f0: List[String] = llvm_gen_reg(cur_env);
+    let fat0 = list_get(reg_f0, 0);
+    cur_env = llvm_tr_pack5(reg_f0, 1);
+    println("  " + fat0 + " = insertvalue %dyn." + tname + " zeroinitializer, i8* " + raw_ptr + ", 0");
+    let reg_f1: List[String] = llvm_gen_reg(cur_env);
+    let fat1 = list_get(reg_f1, 0);
+    cur_env = llvm_tr_pack5(reg_f1, 1);
+    println("  " + fat1 + " = insertvalue %dyn." + tname + " " + fat0 + ", %VTable." + tname + "* @VTable." + tname + "." + sname + ", 1");
+    let mut out: List[String] = list_new();
+    out = list_push(out, fat1);
+    out = list_push(out, "%dyn." + tname);
+    out = list_push(out, list_get(cur_env, 0));
+    out = list_push(out, list_get(cur_env, 1));
+    out = list_push(out, list_get(cur_env, 2));
+    out = list_push(out, list_get(cur_env, 3));
+    out = list_push(out, list_get(cur_env, 4));
+    return out;
+}
+
+pub fn llvm_emit_dyn_call(ttab: String, tname: String, mname: String, fat_val: String, arg_vals: List[String], arg_tys: List[String], p: Int, env: List[String]) -> List[String] {
+    let mut cur_env: List[String] = env;
+    let idx: Int = llvm_trait_method_idx(ttab, tname, mname);
+    let ret_ty: String = llvm_trait_method_ret(ttab, tname, mname);
+    let param_sig: String = llvm_trait_method_sig(ttab, tname, mname);
+    let reg_d: List[String] = llvm_gen_reg(cur_env);
+    let data_ptr: String = list_get(reg_d, 0);
+    cur_env = llvm_tr_pack5(reg_d, 1);
+    println("  " + data_ptr + " = extractvalue %dyn." + tname + " " + fat_val + ", 0");
+    let reg_vt: List[String] = llvm_gen_reg(cur_env);
+    let vt_ptr: String = list_get(reg_vt, 0);
+    cur_env = llvm_tr_pack5(reg_vt, 1);
+    println("  " + vt_ptr + " = extractvalue %dyn." + tname + " " + fat_val + ", 1");
+    let reg_slot: List[String] = llvm_gen_reg(cur_env);
+    let fn_slot: String = list_get(reg_slot, 0);
+    cur_env = llvm_tr_pack5(reg_slot, 1);
+    println("  " + fn_slot + " = getelementptr inbounds %VTable." + tname + ", %VTable." + tname + "* " + vt_ptr + ", i32 0, i32 " + idx.to_string());
+    let fn_ptr_ty: String = ret_ty + " (" + param_sig + ")*";
+    let reg_fn: List[String] = llvm_gen_reg(cur_env);
+    let fn_ptr: String = list_get(reg_fn, 0);
+    cur_env = llvm_tr_pack5(reg_fn, 1);
+    println("  " + fn_ptr + " = load " + fn_ptr_ty + ", " + fn_ptr_ty + "* " + fn_slot + ", align 8");
+    let mut call_args: String = "i8* " + data_ptr;
+    let argc = list_len(arg_vals);
+    let mut ai = 0;
+    while ai < argc {
+        let av = list_get(arg_vals, ai);
+        let at = list_get(arg_tys, ai);
+        call_args = call_args + ", " + at + " " + av;
+        ai = ai + 1;
+    }
+    let mut res_val = "";
+    if ret_ty == "void" {
+        println("  call void " + fn_ptr + "(" + call_args + ")");
+        res_val = "0";
+    } else {
+        let reg_call: List[String] = llvm_gen_reg(cur_env);
+        res_val = list_get(reg_call, 0);
+        cur_env = llvm_tr_pack5(reg_call, 1);
+        println("  " + res_val + " = call " + ret_ty + " " + fn_ptr + "(" + call_args + ")");
+    }
+    let mut out: List[String] = list_new();
+    out = list_push(out, res_val);
+    out = list_push(out, ret_ty);
+    out = list_push(out, p.to_string());
+    out = list_push(out, list_get(cur_env, 0));
+    out = list_push(out, list_get(cur_env, 1));
+    out = list_push(out, list_get(cur_env, 2));
+    out = list_push(out, list_get(cur_env, 3));
+    out = list_push(out, list_get(cur_env, 4));
+    return out;
+}
+
+pub fn llvm_emit_impl_methods(toks: List[String], pos0: Int, n: Int, str_c: String, str_t: String, fntab: String, stab: String, str_pfx: String, dbg_meta: String, dbg_next: String, is_dbg: Bool, src_path: String) -> List[String] {
+    let mut pos = pos0 + 1;
+    while pos < n && field_at(list_get(toks, pos), 0) != "LBRACE" { pos = pos + 1; }
+    if pos < n && field_at(list_get(toks, pos), 0) == "LBRACE" { pos = pos + 1; }
+    let mut cur_sc = str_c;
+    let mut cur_st = str_t;
+    let mut cur_meta = dbg_meta;
+    let mut cur_next = dbg_next;
+    while pos < n {
+        let k: String = field_at(list_get(toks, pos), 0);
+        if k == "RBRACE" { pos = pos + 1; break; }
+        else if k == "KW_PUB" || k == "KW_FN" {
+            let fn_res: List[String] = llvm_emit_fn_dbg(toks, pos, n, cur_sc, cur_st, fntab, stab, str_pfx, cur_meta, cur_next, is_dbg, src_path);
+            pos = parse_int(list_get(fn_res, 0));
+            cur_sc = list_get(fn_res, 1);
+            cur_st = list_get(fn_res, 2);
+            if is_dbg { cur_meta = list_get(fn_res, 3); cur_next = list_get(fn_res, 4); }
+        } else { pos = pos + 1; }
+    }
+    let mut out: List[String] = list_new();
+    out = list_push(out, pos.to_string());
+    out = list_push(out, cur_sc);
+    out = list_push(out, cur_st);
+    if is_dbg { out = list_push(out, cur_meta); out = list_push(out, cur_next); }
+    return out;
+}

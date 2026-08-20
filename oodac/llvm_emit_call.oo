@@ -1,13 +1,13 @@
 // # Lower calls to LLVM
 //
-// Logline: Emit println by argument type and lower Ok, Err, list, math, and user calls to LLVM IR.
+// Logline: Emit println by argument type and lower Ok, Err, list, math, and user calls to LLVM IR with DWARF metadata.
 //
 // Setup: Call expression tokens and function signatures are prepared for LLVM IR lowering.
 //
 // Beats:
 //   1. println emits one arg via oo_print_str, oo_print_int, oo_print_bool, or oo_print_double, then oo_println.
 //   2. Collect call args and rebuild the env after each llvm_emit_expr.
-//   3. Ok/Err insert into %OoResS; list names go to llvm_emit_list_call; math and user calls target @name.
+//   3. Ok/Err insert into %OoResS; list names go to llvm_emit_list_call; math and user calls target @name with debug tags.
 
 import "token_fmt.oo";
 import "llvm_emit_ty.oo";
@@ -15,66 +15,54 @@ import "llvm_emit_env.oo";
 import "llvm_emit_list.oo";
 import "llvm_emit_result.oo";
 import "llvm_emit_sret.oo";
+import "llvm_emit_debug.oo";
+import "c_emit_sum_spec.oo";
+
+fn llvm_call_pack5(src: List[String], base: Int) -> List[String] {
+    let mut e: List[String] = list_new();
+    e = list_push(e, list_get(src, base));
+    e = list_push(e, list_get(src, base + 1));
+    e = list_push(e, list_get(src, base + 2));
+    e = list_push(e, list_get(src, base + 3));
+    e = list_push(e, list_get(src, base + 4));
+    return e;
+}
 
 pub fn llvm_emit_builtin_println(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
     let mut p = pos + 1; // skip println
-    if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
-        p = p + 1;
-    }
+    if p < n && field_at(list_get(toks, p), 0) == "LPAREN" { p = p + 1; }
+    let dbg_loc: List[String] = llvm_debug_loc_tok(env, list_get(toks, pos));
+    let dbg_tag: String = list_get(dbg_loc, 0);
+    let mut cur_env: List[String] = llvm_call_pack5(dbg_loc, 1);
+
     let k: String = field_at(list_get(toks, p), 0);
     if k == "RPAREN" {
         p = p + 1;
-        println("  call void @oo_println()");
+        println("  call void @oo_println()" + dbg_tag);
         let mut out: List[String] = list_new();
         out = list_push(out, "");
         out = list_push(out, "void");
         out = list_push(out, p.to_string());
-        out = list_push(out, list_get(env, 0));
-        out = list_push(out, list_get(env, 1));
-        out = list_push(out, list_get(env, 2));
-        out = list_push(out, list_get(env, 3));
-        out = list_push(out, list_get(env, 4));
+        out = list_push(out, list_get(cur_env, 0));
+        out = list_push(out, list_get(cur_env, 1));
+        out = list_push(out, list_get(cur_env, 2));
+        out = list_push(out, list_get(cur_env, 3));
+        out = list_push(out, list_get(cur_env, 4));
         return out;
     }
 
-    let expr_res: List[String] = llvm_emit_expr(toks, p, n, env);
+    let expr_res: List[String] = llvm_emit_expr(toks, p, n, cur_env);
     let arg_reg: String = list_get(expr_res, 0);
     let arg_ty: String = list_get(expr_res, 1);
     p = parse_int(list_get(expr_res, 2));
+    cur_env = llvm_call_pack5(expr_res, 3);
+    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
 
-    let r_c: String = list_get(expr_res, 3);
-    let l_c: String = list_get(expr_res, 4);
-    let s_c: String = list_get(expr_res, 5);
-    let v_s: String = list_get(expr_res, 6);
-    let st_t: String = list_get(expr_res, 7);
-
-    let mut cur_env: List[String] = list_new();
-    cur_env = list_push(cur_env, r_c);
-    cur_env = list_push(cur_env, l_c);
-    cur_env = list_push(cur_env, s_c);
-    cur_env = list_push(cur_env, v_s);
-    cur_env = list_push(cur_env, st_t);
-
-    if p < n && field_at(list_get(toks, p), 0) == "RPAREN" {
-        p = p + 1;
-    }
-
-    if arg_ty == "%OoStr" {
-        println("  call void @oo_print_str(%OoStr " + arg_reg + ")");
-    } else if arg_ty == "i64" {
-        println("  call void @oo_print_int(i64 " + arg_reg + ")");
-    } else if arg_ty == "i32" {
-        println("  call void @oo_print_bool(i32 " + arg_reg + ")");
-    } else if arg_ty == "double" {
-        println("  call void @oo_print_double(double " + arg_reg + ")");
-    } else {
-        if chars_len(arg_ty) >= 6 && str_slice(arg_ty, 0, 6) == "%OoRes" {
-            println("ERR\tllvm_emit\tprintln Result residual");
-            process_exit(1);
-        }
-        println("  call void @oo_print_str(%OoStr " + arg_reg + ")");
-    }
-    println("  call void @oo_println()");
+    if arg_ty == "%OoStr" { println("  call void @oo_print_str(%OoStr " + arg_reg + ")" + dbg_tag); }
+    else if arg_ty == "i64" { println("  call void @oo_print_int(i64 " + arg_reg + ")" + dbg_tag); }
+    else if arg_ty == "i32" { println("  call void @oo_print_bool(i32 " + arg_reg + ")" + dbg_tag); }
+    else if arg_ty == "double" { println("  call void @oo_print_double(double " + arg_reg + ")" + dbg_tag); }
+    println("  call void @oo_println()" + dbg_tag);
 
     let mut out: List[String] = list_new();
     out = list_push(out, "");
@@ -88,44 +76,53 @@ pub fn llvm_emit_builtin_println(toks: List[String], pos: Int, n: Int, env: List
     return out;
 }
 
-pub fn llvm_emit_call_expr(fn_name: String, toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
-    let mut p = pos;
-    let mut cur_env = env;
-    if p < n && field_at(list_get(toks, p), 0) == "LPAREN" { p = p + 1; }
+pub fn llvm_emit_call(fn_name: String, toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    if fn_name == "println" { return llvm_emit_builtin_println(toks, pos, n, env); }
+    let dbg_loc: List[String] = llvm_debug_loc_tok(env, list_get(toks, pos));
+    let dbg_tag: String = list_get(dbg_loc, 0);
+    let mut cur_env: List[String] = llvm_call_pack5(dbg_loc, 1);
 
+    let mut p = pos + 1;
     let mut args_vals: List[String] = list_new();
     let mut args_tys: List[String] = list_new();
-
-    while p < n {
-        let ak: String = field_at(list_get(toks, p), 0);
-        if ak == "RPAREN" {
-            p = p + 1;
-            break;
+    if p < n && field_at(list_get(toks, p), 0) == "LPAREN" {
+        p = p + 1;
+        while p < n && field_at(list_get(toks, p), 0) != "RPAREN" {
+            if field_at(list_get(toks, p), 0) == "COMMA" { p = p + 1; }
+            let arg_res: List[String] = llvm_emit_expr(toks, p, n, cur_env);
+            args_vals = list_push(args_vals, list_get(arg_res, 0));
+            args_tys = list_push(args_tys, list_get(arg_res, 1));
+            p = parse_int(list_get(arg_res, 2));
+            cur_env = llvm_call_pack5(arg_res, 3);
         }
-        let expr_res: List[String] = llvm_emit_expr(toks, p, n, cur_env);
-        let arg_val: String = list_get(expr_res, 0);
-        let arg_ty: String = list_get(expr_res, 1);
-        p = parse_int(list_get(expr_res, 2));
-
-        cur_env = list_new();
-        cur_env = list_push(cur_env, list_get(expr_res, 3));
-        cur_env = list_push(cur_env, list_get(expr_res, 4));
-        cur_env = list_push(cur_env, list_get(expr_res, 5));
-        cur_env = list_push(cur_env, list_get(expr_res, 6));
-        cur_env = list_push(cur_env, list_get(expr_res, 7));
-
-        args_vals = list_push(args_vals, arg_val);
-        args_tys = list_push(args_tys, arg_ty);
-
-        if p < n && field_at(list_get(toks, p), 0) == "COMMA" {
-            p = p + 1;
-        }
+        if p < n && field_at(list_get(toks, p), 0) == "RPAREN" { p = p + 1; }
     }
 
     let mut treg = "";
     let mut lty = "";
-
-    if fn_name == "Ok" || fn_name == "Err" || fn_name == "Some" || fn_name == "None" {
+    let ctor_spec: String = llvm_env_get_var_ty(cur_env, "__ctor__" + fn_name);
+    if ctor_spec != "" {
+        let ty_name: String = c_sum_ty_of(ctor_spec);
+        let tag_str: String = c_sum_tag_of(ctor_spec);
+        let kind_str: String = c_sum_pay_of(ctor_spec);
+        let tag_num: Int = parse_int(tag_str);
+        lty = "%struct." + ty_name;
+        let reg_res: List[String] = llvm_gen_reg(cur_env);
+        let tr0: String = list_get(reg_res, 0);
+        cur_env = llvm_call_pack5(reg_res, 1);
+        println("  " + tr0 + " = insertvalue " + lty + " zeroinitializer, i32 " + tag_str + ", 0");
+        treg = tr0;
+        if kind_str != "U" && list_len(args_vals) > 0 {
+            let pval: String = list_get(args_vals, 0);
+            let pty: String = list_get(args_tys, 0);
+            let reg_res2: List[String] = llvm_gen_reg(cur_env);
+            let tr1: String = list_get(reg_res2, 0);
+            cur_env = llvm_call_pack5(reg_res2, 1);
+            let fidx: Int = tag_num + 1;
+            println("  " + tr1 + " = insertvalue " + lty + " " + tr0 + ", " + pty + " " + pval + ", " + fidx.to_string());
+            treg = tr1;
+        }
+    } else if fn_name == "Ok" || fn_name == "Err" || fn_name == "Some" || fn_name == "None" {
         let mut ctor = fn_name;
         if fn_name == "Some" { ctor = "Ok"; }
         if fn_name == "None" { ctor = "Err"; }
@@ -139,18 +136,9 @@ pub fn llvm_emit_call_expr(fn_name: String, toks: List[String], pos: Int, n: Int
         treg = list_get(okp, 0);
         lty = list_get(okp, 1);
         p = parse_int(list_get(okp, 2));
-        cur_env = list_new();
-        cur_env = list_push(cur_env, list_get(okp, 3));
-        cur_env = list_push(cur_env, list_get(okp, 4));
-        cur_env = list_push(cur_env, list_get(okp, 5));
-        cur_env = list_push(cur_env, list_get(okp, 6));
-        cur_env = list_push(cur_env, list_get(okp, 7));
+        cur_env = llvm_call_pack5(okp, 3);
     } else {
         let mut call_name = fn_name;
-        let mut a0ty: String = "";
-        let mut a1ty: String = "";
-        if list_len(args_tys) > 0 { a0ty = list_get(args_tys, 0); }
-        if list_len(args_tys) > 1 { a1ty = list_get(args_tys, 1); }
         if fn_name == "chars_len" { call_name = "oo_chars_len"; lty = "i64"; }
         else if fn_name == "process_exit" { call_name = "oo_process_exit"; lty = "void"; }
         else if fn_name == "char_at" { call_name = "oo_char_at"; lty = "%OoStr"; }
@@ -161,9 +149,7 @@ pub fn llvm_emit_call_expr(fn_name: String, toks: List[String], pos: Int, n: Int
         else if fn_name == "pow" { call_name = "oo_pow"; lty = "double"; }
         else if fn_name == "list_new" {
             lty = llvm_env_get_var_ty(cur_env, "__expect__");
-            if !llvm_ty_is_list(lty) {
-                lty = llvm_env_get_var_ty(cur_env, "__fnret_ty__");
-            }
+            if !llvm_ty_is_list(lty) { lty = llvm_env_get_var_ty(cur_env, "__fnret_ty__"); }
         } else if fn_name == "is_whitespace" || fn_name == "is_digit" || fn_name == "is_alpha" || fn_name == "is_alphanum" { lty = "i32"; }
         else if fn_name == "lex_item" { lty = "%OoResS"; }
         else if fn_name == "byte_at" { call_name = "oo_byte_at"; lty = "i64"; }
@@ -174,22 +160,13 @@ pub fn llvm_emit_call_expr(fn_name: String, toks: List[String], pos: Int, n: Int
         else if fn_name == "str_ends_with" { call_name = "oo_str_ends_with"; lty = "i32"; }
         else {
             let looked: String = llvm_env_get_var_ty(cur_env, "__fnret__" + fn_name);
-            if looked == "void" {
-                lty = "void";
-            } else if looked != "" {
-                lty = looked;
-            } else {
-                lty = "i64";
-            }
+            if looked == "void" { lty = "void"; }
+            else if looked != "" { lty = looked; }
+            else { lty = "i64"; }
         }
 
-        if fn_name == "list_new" || fn_name == "list_push"
-            || fn_name == "list_len" || fn_name == "list_get"
-            || fn_name == "list_set"
-        {
-            let lr: List[String] = llvm_emit_list_call(
-                fn_name, call_name, lty, args_vals, args_tys, cur_env
-            );
+        if fn_name == "list_new" || fn_name == "list_push" || fn_name == "list_len" || fn_name == "list_get" || fn_name == "list_set" {
+            let lr: List[String] = llvm_emit_list_call(fn_name, call_name, lty, args_vals, args_tys, cur_env);
             treg = list_get(lr, 0);
             lty = list_get(lr, 1);
             cur_env = list_new();
@@ -220,12 +197,12 @@ pub fn llvm_emit_call_expr(fn_name: String, toks: List[String], pos: Int, n: Int
             }
 
             if lty == "void" {
-                println("  call void @" + call_name + "(" + args_str + ")");
+                println("  call void @" + call_name + "(" + args_str + ")" + dbg_tag);
                 treg = "0";
             } else if llvm_sret_user_call(fn_name, lty) {
                 llvm_emit_sret_call(treg, lty, call_name, args_str);
             } else {
-                println("  " + treg + " = call " + lty + " @" + call_name + "(" + args_str + ")");
+                println("  " + treg + " = call " + lty + " @" + call_name + "(" + args_str + ")" + dbg_tag);
             }
         }
     }
@@ -240,4 +217,8 @@ pub fn llvm_emit_call_expr(fn_name: String, toks: List[String], pos: Int, n: Int
     out = list_push(out, list_get(cur_env, 3));
     out = list_push(out, list_get(cur_env, 4));
     return out;
+}
+
+pub fn llvm_emit_call_expr(fn_name: String, toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    return llvm_emit_call(fn_name, toks, pos, n, env);
 }

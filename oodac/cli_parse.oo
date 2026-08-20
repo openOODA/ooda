@@ -1,16 +1,20 @@
 // # Parse oodac CLI argv
 //
-// Logline: Walks argv for backend (c|wasm|llvm|x86), flags, and positionals, then packs cmd, path, out, backend, and four flag slots or exits.
+// Logline: Walks argv for backend (c|wasm|llvm|x86), flags, opt level, target triple, and positionals, then packs slots or exits.
 //
 // Setup: path_exists, file_size, shell_sq, sys_exec, and process_exit exist; main.oo imports this file and must keep that barrel.
 //
 // Beats:
-//   1. Scan flags then cmd, path, and out; an empty cmd defaults to llvm build of test.oo.
+//   1. Scan flags (backend, json, opt, lto, release, triple, pgo, sanitizers, debug) then cmd, path, and out.
 //   2. Require a readable path under 64KiB or exit.
-//   3. Pack eight slots: cmd, path, out, backend, json-errors, json, unused, runtime-cap.
+//   3. Pack slots: cmd, path, out, backend, json-errors, json, triple, runtime-cap, opt, lto, release, debug, pgo-gen, pgo-use, sanitizers.
+
+fn san_combine(cur: String, add: String) -> String {
+    if cur == "" { return add; }
+    return cur + "," + add;
+}
 
 pub fn parse_cli_argv(fs: &FsCap, sys: &SysCap, args: List[String]) -> List[String] {
-    // Parse: oodac [--backend c|wasm|llvm|x86] <cmd> <file> [out]
     if list_len(args) < 1 {
         println("oodac: usage: [--backend c|wasm|llvm|x86] tokens|ast|check|build|run|emit-c|emit-wasm|emit-llvm|emit-x86|outline|reflect <file>");
         process_exit(2);
@@ -22,6 +26,14 @@ pub fn parse_cli_argv(fs: &FsCap, sys: &SysCap, args: List[String]) -> List[Stri
     let mut json_errors: Bool = false;
     let mut is_json: Bool = false;
     let mut runtime_cap_required: Bool = false;
+    let mut target_triple: String = "";
+    let mut opt_level: String = "";
+    let mut lto: Bool = false;
+    let mut release: Bool = false;
+    let mut is_debug: Bool = false;
+    let mut pgo_gen: Bool = false;
+    let mut pgo_use: String = "";
+    let mut sanitizers: String = "";
     let mut npos: Int = 0;
     let mut i: Int = 0;
     while i < list_len(args) {
@@ -29,9 +41,80 @@ pub fn parse_cli_argv(fs: &FsCap, sys: &SysCap, args: List[String]) -> List[Stri
         if a == "--backend" {
             if i + 1 >= list_len(args) { println("ERR\tbackend\tmissing value"); process_exit(2); }
             let bv: String = list_get(args, i + 1);
-            if bv != "c" && bv != "wasm" && bv != "llvm" && bv != "x86" { println("ERR\tbackend\t" + bv + " residual"); process_exit(2); }
+            if bv != "c" && bv != "wasm" && bv != "llvm" && bv != "x86" && bv != "bc" { println("ERR\tbackend\t" + bv + " residual"); process_exit(2); }
             backend = bv;
             i = i + 2;
+        } else if a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Oz" {
+            opt_level = a;
+            i = i + 1;
+        } else if a == "--lto" {
+            lto = true;
+            i = i + 1;
+        } else if a == "--release" {
+            release = true;
+            i = i + 1;
+        } else if a == "-fprofile-generate" || a == "--pgo-generate" {
+            pgo_gen = true;
+            i = i + 1;
+        } else if a == "-fprofile-use" || a == "--pgo-use" {
+            if i + 1 < list_len(args) {
+                let pv = list_get(args, i + 1);
+                if str_slice(pv, 0, 1) != "-" {
+                    pgo_use = pv;
+                    i = i + 2;
+                } else {
+                    pgo_use = "default.profdata";
+                    i = i + 1;
+                }
+            } else {
+                pgo_use = "default.profdata";
+                i = i + 1;
+            }
+        } else if chars_len(a) >= 15 && str_slice(a, 0, 15) == "-fprofile-use=" {
+            pgo_use = str_slice(a, 15, chars_len(a));
+            i = i + 1;
+        } else if chars_len(a) >= 10 && str_slice(a, 0, 10) == "--pgo-use=" {
+            pgo_use = str_slice(a, 10, chars_len(a));
+            i = i + 1;
+        } else if a == "-fsanitize=address" || a == "--sanitize=address" {
+            sanitizers = san_combine(sanitizers, "address");
+            backend = "llvm";
+            i = i + 1;
+        } else if a == "-fsanitize=thread" || a == "--sanitize=thread" {
+            sanitizers = san_combine(sanitizers, "thread");
+            backend = "llvm";
+            i = i + 1;
+        } else if a == "-fsanitize=undefined" || a == "--sanitize=undefined" {
+            sanitizers = san_combine(sanitizers, "undefined");
+            backend = "llvm";
+            i = i + 1;
+        } else if a == "-fsanitize=fuzzer" || a == "--fuzz" || a == "--sanitize=fuzzer" {
+            sanitizers = san_combine(sanitizers, "fuzzer");
+            backend = "llvm";
+            i = i + 1;
+        } else if chars_len(a) >= 12 && str_slice(a, 0, 12) == "-fsanitize=" {
+            let sv = str_slice(a, 12, chars_len(a));
+            sanitizers = san_combine(sanitizers, sv);
+            backend = "llvm";
+            i = i + 1;
+        } else if chars_len(a) >= 11 && str_slice(a, 0, 11) == "--sanitize=" {
+            let sv = str_slice(a, 11, chars_len(a));
+            sanitizers = san_combine(sanitizers, sv);
+            backend = "llvm";
+            i = i + 1;
+        } else if a == "-g" || a == "--debug" {
+            is_debug = true;
+            i = i + 1;
+        } else if a == "--target-triple" || a == "--triple" {
+            if i + 1 >= list_len(args) { println("ERR\ttarget-triple\tmissing value"); process_exit(2); }
+            target_triple = list_get(args, i + 1);
+            i = i + 2;
+        } else if chars_len(a) >= 16 && str_slice(a, 0, 16) == "--target-triple=" {
+            target_triple = str_slice(a, 16, chars_len(a));
+            i = i + 1;
+        } else if chars_len(a) >= 9 && str_slice(a, 0, 9) == "--triple=" {
+            target_triple = str_slice(a, 9, chars_len(a));
+            i = i + 1;
         } else if a == "--json-errors" || a == "-json" { json_errors = true; i = i + 1; }
         else if a == "--json" { is_json = true; i = i + 1; }
         else if a == "--runtime-cap-required" { runtime_cap_required = true; i = i + 1; }
@@ -50,19 +133,20 @@ pub fn parse_cli_argv(fs: &FsCap, sys: &SysCap, args: List[String]) -> List[Stri
         out_arg = "test.bin";
         backend = "llvm";
     }
-    if path == "" {
-        println("oodac: missing file argument");
-        process_exit(2);
-    }
-    if !path_exists(fs, path) {
-        println("ERR\t" + cmd + "\tunreadable file: " + path);
-        process_exit(2);
-    }
-    // H6: per-file size gate before read (lex is O(n²) char_at — 64KiB max)
-    let fsz: Int = file_size(fs, path);
-    if fsz > 65536 {
-        println("ERR\tload\tsource exceeds 64KiB per-file limit");
-        process_exit(1);
+    if cmd != "eval" && cmd != "repl" {
+        if path == "" {
+            println("oodac: missing file argument");
+            process_exit(2);
+        }
+        if !path_exists(fs, path) {
+            println("ERR\t" + cmd + "\tunreadable file: " + path);
+            process_exit(2);
+        }
+        let fsz: Int = file_size(fs, path);
+        if fsz > 65536 {
+            println("ERR\tload\tsource exceeds 64KiB per-file limit");
+            process_exit(1);
+        }
     }
 
     let mut packed: List[String] = list_new();
@@ -78,7 +162,22 @@ pub fn parse_cli_argv(fs: &FsCap, sys: &SysCap, args: List[String]) -> List[Stri
     if runtime_cap_required { f_rc = "1"; }
     packed = list_push(packed, f_je);
     packed = list_push(packed, f_js);
-    packed = list_push(packed, "0");
+    packed = list_push(packed, target_triple);
     packed = list_push(packed, f_rc);
+    packed = list_push(packed, opt_level);
+    let mut f_lto: String = "0";
+    if lto { f_lto = "1"; }
+    let mut f_rel: String = "0";
+    if release { f_rel = "1"; }
+    packed = list_push(packed, f_lto);
+    packed = list_push(packed, f_rel);
+    let mut f_dbg: String = "0";
+    if is_debug { f_dbg = "1"; }
+    packed = list_push(packed, f_dbg);
+    let mut f_pgo: String = "0";
+    if pgo_gen { f_pgo = "1"; }
+    packed = list_push(packed, f_pgo);
+    packed = list_push(packed, pgo_use);
+    packed = list_push(packed, sanitizers);
     return packed;
 }

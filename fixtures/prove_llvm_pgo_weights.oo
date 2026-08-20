@@ -1,0 +1,128 @@
+// # Prove LLVM PGO Weights and Capability Expectations
+//
+// Logline: Verification fixture for profile-guided optimization branch weights, llvm.expect intrinsics, hot loops, and capability check branches.
+//
+// Setup: Comprehensive verification fixture for hot loop execution, branch probabilities, and capability validation.
+//
+// Beats:
+//   1. Execute high-iteration hot loops with accumulator computations.
+//   2. Verify capability token grant and permission check branch conditions.
+//   3. Verify expect intrinsics metadata and branch weight helpers.
+//   4. Print verification success message.
+
+import "oodac/llvm_emit_pgo.oo";
+import "std/runtime/rt_caps_check.oo";
+
+pub fn compute_hot_loop_sum(limit: Int) -> Int {
+    let mut sum: Int = 0;
+    let mut i: Int = 0;
+    while i < limit {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}
+
+pub fn compute_nested_hot_loop(outer: Int, inner: Int) -> Int {
+    let mut acc: Int = 0;
+    let mut i: Int = 0;
+    while i < outer {
+        let mut j: Int = 0;
+        while j < inner {
+            acc = acc + (i * j);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return acc;
+}
+
+pub fn check_capability_branch(tok: CapToken, domain: Int, perm: Int) -> Bool {
+    let mut granted: Bool = false;
+    if cap_token_is_valid(tok) {
+        if cap_token_has_domain(tok, domain) {
+            if cap_token_has_perm(tok, perm) {
+                granted = true;
+            }
+        }
+    }
+    return granted;
+}
+
+pub fn main() {
+    // 1. Hot loop execution
+    let s1: Int = compute_hot_loop_sum(1000);
+    if s1 != 499500 {
+        println("FAIL: compute_hot_loop_sum expected 499500, got " + s1.to_string());
+        process_exit(1);
+    }
+
+    let s2: Int = compute_nested_hot_loop(50, 50);
+    if s2 != 1500625 {
+        println("FAIL: compute_nested_hot_loop expected 1500625, got " + s2.to_string());
+        process_exit(1);
+    }
+
+    // 2. Capability check branches
+    let p_rw: Int = cap_mask_combine(cap_perm_read(), cap_perm_write());
+    let tok_fs: CapToken = cap_token_new(cap_domain_fs(), p_rw, 100);
+
+    let b_fs_r: Bool = check_capability_branch(tok_fs, cap_domain_fs(), cap_perm_read());
+    if !b_fs_r {
+        println("FAIL: check_capability_branch fs read should be true");
+        process_exit(1);
+    }
+
+    let b_fs_w: Bool = check_capability_branch(tok_fs, cap_domain_fs(), cap_perm_write());
+    if !b_fs_w {
+        println("FAIL: check_capability_branch fs write should be true");
+        process_exit(1);
+    }
+
+    let b_fs_ex: Bool = check_capability_branch(tok_fs, cap_domain_fs(), cap_perm_exec());
+    if b_fs_ex {
+        println("FAIL: check_capability_branch fs exec should be false");
+        process_exit(1);
+    }
+
+    let b_net_r: Bool = check_capability_branch(tok_fs, cap_domain_net(), cap_perm_read());
+    if b_net_r {
+        println("FAIL: check_capability_branch net read should be false on fs token");
+        process_exit(1);
+    }
+
+    // 3. PGO branch weight helper validations
+    let hw: Int = llvm_pgo_hot_weight();
+    let cw: Int = llvm_pgo_cold_weight();
+    if hw <= cw {
+        println("FAIL: hot weight must exceed cold weight");
+        process_exit(1);
+    }
+
+    let loop_tag: String = llvm_pgo_loop_weight_tag();
+    if loop_tag != ", !prof !0" {
+        println("FAIL: llvm_pgo_loop_weight_tag mismatch: " + loop_tag);
+        process_exit(1);
+    }
+
+    let cap_tag: String = llvm_pgo_cap_weight_tag();
+    if cap_tag != ", !prof !1" {
+        println("FAIL: llvm_pgo_cap_weight_tag mismatch: " + cap_tag);
+        process_exit(1);
+    }
+
+    let custom_tag: String = llvm_pgo_branch_weight_tag(42);
+    if custom_tag != ", !prof !42" {
+        println("FAIL: llvm_pgo_branch_weight_tag mismatch: " + custom_tag);
+        process_exit(1);
+    }
+
+    let node_text: String = llvm_pgo_metadata_node(5, 10000, 1);
+    let exp_node: String = "!5 = !{!\"branch_weights\", i32 10000, i32 1}\n";
+    if node_text != exp_node {
+        println("FAIL: llvm_pgo_metadata_node mismatch");
+        process_exit(1);
+    }
+
+    println("llvm_pgo_weights: PASSED");
+}
