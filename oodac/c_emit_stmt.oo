@@ -16,7 +16,7 @@ import "c_emit_helpers.oo";
 pub fn c_emit_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
     let mut p: Int = pos;
     let mut e: String = env;
-    let k: String = field_at(list_get(toks, p), 0);
+    let k: String = c_tokk(toks, p);
     if k == "LBRACE" {
         // Nested bare block: C braces + one ARC frame via c_emit_block
         // (push_scope on entry, scope_exit releases *only* that frame on RBRACE).
@@ -32,7 +32,7 @@ pub fn c_emit_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[St
     }
     if k == "KW_ELSE" {
         p = p + 1;
-        if p < n && field_at(list_get(toks, p), 0) == "KW_IF" {
+        if p < n && c_tokk(toks, p) == "KW_IF" {
             println("else {");
             let sti: List[String] = c_emit_if_stmt(toks, p, n, e);
             p = parse_int(list_get(sti, 0));
@@ -78,14 +78,14 @@ pub fn c_emit_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[St
         // M2: c_emit_ret_arc (locals only, no params). Stash value before drop.
         // ensures residual: no ret_arc (contract lower owns the return).
         p = p + 1;
-        if p < n && field_at(list_get(toks, p), 0) == "KW_MATCH" {
+        if p < n && c_tokk(toks, p) == "KW_MATCH" {
             let mr: List[String] = c_emit_match_let("__ret", toks, p, n, e);
             p = parse_int(list_get(mr, 0));
             e = list_get(mr, 1);
             c_emit_ret_arc(e, "__ret");
             return c_pack_pos_env(p, e);
         }
-        if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        if p < n && c_tokk(toks, p) == "SEMI" {
             c_emit_ret_arc(e, "void");
             p = p + 1;
             return c_pack_pos_env(p, e);
@@ -104,7 +104,7 @@ pub fn c_emit_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[St
         } else {
             c_emit_ret_arc(e, rval);
         }
-        if p < n && field_at(list_get(toks, p), 0) == "SEMI" {
+        if p < n && c_tokk(toks, p) == "SEMI" {
             p = p + 1;
         }
         return c_pack_pos_env(p, e);
@@ -114,7 +114,7 @@ pub fn c_emit_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[St
         return c_emit_ident_stmt(toks, p, n, e);
     }
     // STAR / grouped deref / bare primary. EQ after the expr is a write.
-    if k == "STAR" || k == "INT" || k == "STRING" || k == "KW_TRUE" || k == "KW_FALSE"
+    if k == "STAR" || k == "INT" || k == "FLOAT" || k == "STRING" || k == "KW_TRUE" || k == "KW_FALSE"
         || k == "LPAREN" || k == "BANG" || k == "MINUS"
     {
         return c_emit_expr_stmt(toks, p, n, e);
@@ -127,7 +127,7 @@ pub fn c_emit_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List[St
     }
     let start = p;
     while p < n {
-        let sk: String = field_at(list_get(toks, p), 0);
+        let sk: String = c_tokk(toks, p);
         if sk == "SEMI" {
             p = p + 1;
             return c_pack_pos_env(p, e);
@@ -161,9 +161,9 @@ pub fn c_emit_if_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List
     p = parse_int(list_get(br, 0));
     e = list_get(br, 1);
     println("}");
-    if p < n && field_at(list_get(toks, p), 0) == "KW_ELSE" {
+    if p < n && c_tokk(toks, p) == "KW_ELSE" {
         p = p + 1;
-        if p < n && field_at(list_get(toks, p), 0) == "KW_IF" {
+        if p < n && c_tokk(toks, p) == "KW_IF" {
             println("else {");
             let nxt: List[String] = c_emit_if_stmt(toks, p, n, e);
             p = parse_int(list_get(nxt, 0));
@@ -180,6 +180,57 @@ pub fn c_emit_if_stmt(toks: List[String], pos: Int, n: Int, env: String) -> List
     oo_emit_tmp_leave();
     println("}");
     return c_pack_pos_env(p, e);
+}
+
+// if cond { expr } else { expr } as a C ternary. pos at KW_IF.
+pub fn c_emit_if_expr_block(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
+    let mut p: Int = pos;
+    if p < n && c_tokk(toks, p) == "LBRACE" {
+        p = p + 1;
+    }
+    let mut text: String = "0";
+    if p < n && c_tokk(toks, p) != "RBRACE" {
+        let pr: List[String] = c_emit_expr_c(toks, p, n, env);
+        p = parse_int(list_get(pr, 0));
+        text = list_get(pr, 1);
+        if p < n && c_tokk(toks, p) == "SEMI" {
+            p = p + 1;
+        }
+        while p < n && c_tokk(toks, p) != "RBRACE" {
+            p = p + 1;
+        }
+    }
+    if p < n && c_tokk(toks, p) == "RBRACE" {
+        p = p + 1;
+    }
+    return c_emit_pack2(p.to_string(), text);
+}
+
+pub fn c_emit_if_expr(toks: List[String], pos: Int, n: Int, env: String) -> List[String] {
+    let mut p: Int = pos;
+    if p < n && c_tokk(toks, p) == "KW_IF" {
+        p = p + 1;
+    }
+    let prc: List[String] = c_emit_expr_c(toks, p, n, env);
+    p = parse_int(list_get(prc, 0));
+    let cond: String = list_get(prc, 1);
+    let thn: List[String] = c_emit_if_expr_block(toks, p, n, env);
+    p = parse_int(list_get(thn, 0));
+    let then_e: String = list_get(thn, 1);
+    let mut else_e: String = "0";
+    if p < n && c_tokk(toks, p) == "KW_ELSE" {
+        p = p + 1;
+        if p < n && c_tokk(toks, p) == "KW_IF" {
+            let nxt: List[String] = c_emit_if_expr(toks, p, n, env);
+            p = parse_int(list_get(nxt, 0));
+            else_e = list_get(nxt, 1);
+        } else {
+            let els: List[String] = c_emit_if_expr_block(toks, p, n, env);
+            p = parse_int(list_get(els, 0));
+            else_e = list_get(els, 1);
+        }
+    }
+    return c_emit_pack2(p.to_string(), "((" + cond + ") ? (" + then_e + ") : (" + else_e + "))");
 }
 
 pub fn c_pack_pos_env(p: Int, e: String) -> List[String] {

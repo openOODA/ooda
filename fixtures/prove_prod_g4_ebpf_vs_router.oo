@@ -1,0 +1,75 @@
+// # Product prove std/mesh_ebpf/mesh_virtual_service_router.oo
+//
+// Logline: Fail-closed emit+gcc+run asserts VirtualService routing and weighted traffic split evaluation is deterministic.
+//
+// Setup: Isolated emit-c. Imports std/mesh_ebpf/mesh_virtual_service_router.oo.
+//
+// Beats:
+//   1. Initialize virtual service router and configure weighted destination subsets.
+//   2. Route requests across URI prefix matching rules and weighted probability splits.
+//   3. Assert deterministic upstream cluster routing decisions and default fallback behavior.
+//   4. Print prod_g4_ebpf_vs_router: PASSED and exit 0.
+
+import "std/mesh_ebpf/mesh_virtual_service_router.oo";
+
+pub fn main() {
+    let mut router1: VirtualServiceRouter = virtual_service_router_new("reviews-default-cluster");
+    let mut router2: VirtualServiceRouter = virtual_service_router_new("reviews-default-cluster");
+
+    if (router1).total_routed != 0 || (router1).service_name != "reviews-default-cluster" {
+        println("FAIL virtual_service_router_new init");
+        process_exit(1);
+    }
+
+    // Configure 80% v1 / 20% v2 canary split on /reviews GET
+    let dw1: DestinationWeight = DestinationWeight {
+        subset_name: "v1",
+        weight: 80,
+        target_cluster: "reviews-v1",
+    };
+    let dw2: DestinationWeight = DestinationWeight {
+        subset_name: "v2",
+        weight: 20,
+        target_cluster: "reviews-v2",
+    };
+
+    let mut dest_list: List[DestinationWeight] = list_new();
+    dest_list = list_push(dest_list, dw1);
+    dest_list = list_push(dest_list, dw2);
+
+    virtual_service_add_route(&mut router1, "/reviews", "GET", dest_list, 100);
+    virtual_service_add_route(&mut router2, "/reviews", "GET", dest_list, 100);
+
+    // Roll 50 (50 < 80) -> routes to v1
+    let r1a: String = virtual_service_route(&mut router1, "/reviews", "GET", 50);
+    let r1b: String = virtual_service_route(&mut router2, "/reviews", "GET", 50);
+
+    if r1a != r1b || r1a != "reviews-v1" {
+        println("FAIL virtual_service weighted split v1");
+        process_exit(1);
+    }
+
+    // Roll 85 (80 <= 85 < 100) -> routes to v2
+    let r2a: String = virtual_service_route(&mut router1, "/reviews", "GET", 85);
+    let r2b: String = virtual_service_route(&mut router2, "/reviews", "GET", 85);
+
+    if r2a != r2b || r2a != "reviews-v2" {
+        println("FAIL virtual_service weighted split v2");
+        process_exit(1);
+    }
+
+    // Unmatched route -> falls back to default service cluster
+    let r_fallback: String = virtual_service_route(&mut router1, "/other", "POST", 10);
+    if r_fallback != "reviews-default-cluster" {
+        println("FAIL virtual_service default cluster fallback");
+        process_exit(1);
+    }
+
+    if (router1).total_routed != 3 {
+        println("FAIL total_routed count");
+        process_exit(1);
+    }
+
+    println("prod_g4_ebpf_vs_router: PASSED");
+    process_exit(0);
+}

@@ -1,0 +1,213 @@
+// # Credit Risk Engine Score and Default Probability
+//
+// Logline: Composite credit scoring, 1-year and cumulative default probability, loss given default, and credit spread.
+//
+// Setup: Imports credit_ops.oo for the borrower, score, default probability, and risk assessment types.
+//
+// Beats:
+//   1. Compute the weighted credit score across payment, utilization, history, and DTI subscores.
+//   2. Derive 1-year and cumulative default probability, loss given default, and credit spread.
+//   3. Expose Int/Float conversion helpers for basis-point arithmetic.
+
+import "./credit_ops.oo";
+
+pub fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 100000 { f = f + 100000.0; count = count - 100000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn float_to_int_approx(val: Float) -> Int {
+    let mut res: Int = 0;
+    let mut temp: Float = val;
+    if temp < 0.0 { temp = 0.0 - temp; }
+    while temp >= 1000000.0 { res = res + 1000000; temp = temp - 1000000.0; }
+    while temp >= 10000.0 { res = res + 10000; temp = temp - 10000.0; }
+    while temp >= 100.0 { res = res + 100; temp = temp - 100.0; }
+    while temp >= 1.0 { res = res + 1; temp = temp - 1.0; }
+    if val < 0.0 { return 0 - res; }
+    return res;
+}
+
+pub fn compute_credit_score(prof: &BorrowerProfile) -> CreditScore {
+    // 1. Payment History Subscore (35% weight)
+    let mut pay_sub: Int = 850;
+    let late_count: Int = (prof).number_of_late_payments;
+    let derog_count: Int = (prof).number_of_derogatory_recs;
+    let late_penalty: Int = late_count * 45;
+    let derog_penalty: Int = derog_count * 110;
+    pay_sub = pay_sub - late_penalty - derog_penalty;
+    if pay_sub < 300 {
+        pay_sub = 300;
+    }
+
+    // 2. Revolving Credit Utilization Subscore (30% weight)
+    let util: Float = (prof).revolving_credit_utilization;
+    let mut util_sub: Int = 850;
+    if util <= 0.10 {
+        util_sub = 850;
+    } else if util <= 0.30 {
+        util_sub = 790;
+    } else if util <= 0.50 {
+        util_sub = 680;
+    } else if util <= 0.80 {
+        util_sub = 540;
+    } else {
+        util_sub = 380;
+    }
+
+    // 3. Length of Credit History Subscore (15% weight)
+    let months: Int = (prof).credit_history_months;
+    let mut hist_sub: Int = 500;
+    if months >= 120 {
+        hist_sub = 850;
+    } else if months >= 60 {
+        hist_sub = 750;
+    } else if months >= 24 {
+        hist_sub = 640;
+    } else {
+        hist_sub = 500;
+    }
+
+    // 4. Debt-To-Income Subscore (20% weight)
+    let dti: Float = borrower_calculate_dti(prof);
+    let mut dti_sub: Int = 850;
+    if dti <= 0.20 {
+        dti_sub = 850;
+    } else if dti <= 0.36 {
+        dti_sub = 760;
+    } else if dti <= 0.50 {
+        dti_sub = 600;
+    } else {
+        dti_sub = 420;
+    }
+
+    // Weighted composite: (pay * 35 + util * 30 + hist * 15 + dti * 20) / 100
+    let total_sub: Int = (pay_sub * 35) + (util_sub * 30) + (hist_sub * 15) + (dti_sub * 20);
+    let mut final_score: Int = total_sub / 100;
+
+    if final_score > 850 {
+        final_score = 850;
+    }
+    if final_score < 300 {
+        final_score = 300;
+    }
+
+    let cat: String = credit_score_category_from_score(final_score);
+    let grade: String = credit_score_rating_grade_from_score(final_score);
+    let valid: Bool = (prof).is_verified;
+
+    return CreditScore {
+        score: final_score,
+        category: cat,
+        rating_grade: grade,
+        payment_history_subscore: pay_sub,
+        utilization_subscore: util_sub,
+        history_length_subscore: hist_sub,
+        debt_to_income_subscore: dti_sub,
+        is_valid: valid,
+    };
+}
+
+pub fn compute_default_probability(
+    cs: &CreditScore,
+    prof: &BorrowerProfile,
+    fac: &CreditFacility
+) -> DefaultProbability {
+    let s: Int = (cs).score;
+    let mut pd_1y: Float = 0.02;
+    let mut tier: Int = 3;
+
+    if s >= 800 {
+        pd_1y = 0.003;
+        tier = 1;
+    } else if s >= 750 {
+        pd_1y = 0.012;
+        tier = 2;
+    } else if s >= 700 {
+        pd_1y = 0.028;
+        tier = 3;
+    } else if s >= 650 {
+        pd_1y = 0.055;
+        tier = 4;
+    } else if s >= 600 {
+        pd_1y = 0.110;
+        tier = 5;
+    } else if s >= 550 {
+        pd_1y = 0.200;
+        tier = 6;
+    } else {
+        pd_1y = 0.350;
+        tier = 7;
+    }
+
+    // Risk multiplier adjustments for DTI and LTV
+    let dti: Float = borrower_calculate_dti(prof);
+    if dti > 0.45 {
+        pd_1y = pd_1y * 1.35;
+    }
+    let ltv: Float = (fac).loan_to_value;
+    if ltv > 0.85 {
+        pd_1y = pd_1y * 1.25;
+    }
+
+    if pd_1y > 0.99 {
+        pd_1y = 0.99;
+    }
+
+    // Cumulative PD over facility tenor
+    let mut pd_cum: Float = pd_1y;
+    let tenor: Int = (fac).tenor_months;
+    if tenor > 12 {
+        let extra_months: Int = tenor - 12;
+        let extra_float: Float = int_to_float(extra_months);
+        let factor: Float = 1.0 + (0.05 * extra_float);
+        pd_cum = pd_1y * factor;
+        if pd_cum > 0.99 {
+            pd_cum = 0.99;
+        }
+    }
+
+    let ead: Float = (fac).principal_amount;
+
+    // Loss Given Default (LGD) depends on LTV collateralization
+    let mut lgd: Float = 0.45;
+    if ltv <= 0.50 {
+        lgd = 0.15;
+    } else if ltv <= 0.80 {
+        lgd = 0.30;
+    } else {
+        lgd = 0.50;
+    }
+
+    let el: Float = pd_1y * lgd * ead;
+
+    // Credit spread in basis points: PD * LGD * 10000 + 150 base bps
+    let spread_calc: Float = (pd_1y * lgd * 10000.0) + 150.0;
+    let spread_bps: Int = float_to_int_approx(spread_calc);
+
+    let mut high_risk: Bool = false;
+    if pd_1y > 0.10 {
+        high_risk = true;
+    }
+
+    return DefaultProbability {
+        probability_1y: pd_1y,
+        probability_cumulative: pd_cum,
+        exposure_at_default: ead,
+        loss_given_default: lgd,
+        expected_loss: el,
+        rating_tier: tier,
+        credit_spread_bps: spread_bps,
+        is_high_risk: high_risk,
+    };
+}

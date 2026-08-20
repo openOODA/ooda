@@ -1,0 +1,54 @@
+// # Product prove std/mesh_ebpf/mesh_envoy_xds_client.oo
+//
+// Logline: Fail-closed emit+gcc+run asserts Envoy xDS client discovery operations are deterministic.
+//
+// Setup: Isolated emit-c. Imports std/mesh_ebpf/mesh_envoy_xds_client.oo.
+//
+// Beats:
+//   1. Initialize xDS client state and subscribe to dynamic resources.
+//   2. Process valid and invalid configuration updates to test ACK/NACK behavior.
+//   3. Assert deterministic protocol state transitions and version tracking.
+//   4. Print prod_g4_ebpf_xds_client: PASSED and exit 0.
+
+import "std/mesh_ebpf/mesh_envoy_xds_client.oo";
+
+pub fn main() {
+    let mut client1: XdsClientState = xds_client_new("sidecar-node-01", "mesh-cluster-prod");
+    let mut client2: XdsClientState = xds_client_new("sidecar-node-01", "mesh-cluster-prod");
+
+    if (client1).ack_count != 0 || (client1).nack_count != 0 || (client1).last_nonce != "0" {
+        println("FAIL xds_client_new initial state");
+        process_exit(1);
+    }
+
+    let cds_url: String = "type.googleapis.com/envoy.config.cluster.v3.Cluster";
+    xds_subscribe_resource(&mut client1, cds_url, "service-catalog", "v1.0.0");
+    xds_subscribe_resource(&mut client2, cds_url, "service-catalog", "v1.0.0");
+
+    let ack_res1: String = xds_handle_update(&mut client1, cds_url, "service-catalog", "v1.1.0", "nonce-101", true);
+    let ack_res2: String = xds_handle_update(&mut client2, cds_url, "service-catalog", "v1.1.0", "nonce-101", true);
+
+    if ack_res1 != "ACK" || ack_res2 != "ACK" {
+        println("FAIL xds_handle_update ACK");
+        process_exit(1);
+    }
+
+    if (client1).ack_count != 1 || (client1).last_nonce != "nonce-101" {
+        println("FAIL xds client state after ACK");
+        process_exit(1);
+    }
+
+    let nack_res: String = xds_handle_update(&mut client1, cds_url, "service-catalog", "v1.2.0-broken", "nonce-102", false);
+    if nack_res != "NACK" {
+        println("FAIL xds_handle_update NACK");
+        process_exit(1);
+    }
+
+    if (client1).nack_count != 1 || (client1).last_nonce != "nonce-102" {
+        println("FAIL xds client state after NACK");
+        process_exit(1);
+    }
+
+    println("prod_g4_ebpf_xds_client: PASSED");
+    process_exit(0);
+}

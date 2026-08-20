@@ -1,0 +1,248 @@
+// # Const-int ALU for emit-x86
+//
+// Logline: Folds decimal plus, minus, times, divide, and one paren group.
+//
+// Setup: x86_tok_k, x86_tok_t, x86_bind_idx, and x86_neg_dec exist in x86_emit_harv.oo.
+//
+// Beats:
+//   1. Parse a signed decimal to Int.
+//   2. Chain PLUS/MINUS/STAR/SLASH; refuse divide by zero.
+//   3. Fold a parenthesized const-int group as one atom.
+//   4. Stop at RPAREN or SEMI so mix concat stays leftover.
+//
+// residual: C precedence and SysV stay later.
+
+import "x86_emit_harv.oo";
+
+pub fn x86_is_alu_op(k: String) -> Bool {
+    if k == "PLUS" { return true; }
+    if k == "MINUS" { return true; }
+    if k == "STAR" { return true; }
+    if k == "SLASH" { return true; }
+    if k == "PERCENT" { return true; }
+    return false;
+}
+
+fn x86_dig(c: String) -> Int {
+    if c == "0" { return 0; }
+    if c == "1" { return 1; }
+    if c == "2" { return 2; }
+    if c == "3" { return 3; }
+    if c == "4" { return 4; }
+    if c == "5" { return 5; }
+    if c == "6" { return 6; }
+    if c == "7" { return 7; }
+    if c == "8" { return 8; }
+    if c == "9" { return 9; }
+    return -1;
+}
+
+pub fn x86_parse_dec(s: String) -> List[Int] {
+    let empty: List[Int] = list_new();
+    let n = chars_len(s);
+    if n <= 0 {
+        return empty;
+    }
+    let mut i = 0;
+    let mut neg = false;
+    if char_at(s, 0) == "-" {
+        neg = true;
+        i = 1;
+    }
+    if i >= n {
+        return empty;
+    }
+    let mut acc = 0;
+    while i < n {
+        let d = x86_dig(char_at(s, i));
+        if d < 0 {
+            return empty;
+        }
+        acc = acc * 10 + d;
+        i = i + 1;
+    }
+    if neg {
+        acc = 0 - acc;
+    }
+    let mut one: List[Int] = list_new();
+    one = list_push(one, acc);
+    return one;
+}
+
+pub fn x86_dec_op(a: String, b: String, op: String) -> List[String] {
+    let empty: List[String] = list_new();
+    let pa = x86_parse_dec(a);
+    let pb = x86_parse_dec(b);
+    if list_len(pa) < 1 {
+        return empty;
+    }
+    if list_len(pb) < 1 {
+        return empty;
+    }
+    let mut v = list_get(pa, 0) + list_get(pb, 0);
+    if op == "MINUS" {
+        v = list_get(pa, 0) - list_get(pb, 0);
+    } else if op == "STAR" {
+        v = list_get(pa, 0) * list_get(pb, 0);
+    } else if op == "SLASH" {
+        if list_get(pb, 0) == 0 {
+            return empty;
+        }
+        v = list_get(pa, 0) / list_get(pb, 0);
+    } else if op == "PERCENT" {
+        if list_get(pb, 0) == 0 {
+            return empty;
+        }
+        v = list_get(pa, 0) % list_get(pb, 0);
+    } else if op != "PLUS" {
+        return empty;
+    }
+    let mut one: List[String] = list_new();
+    one = list_push(one, v.to_string());
+    return one;
+}
+
+pub fn x86_alu_atom(toks: List[String], n: Int, p: Int, inames: List[String], ivals: List[String]) -> List[String] {
+    let empty: List[String] = list_new();
+    if p >= n {
+        return empty;
+    }
+    let k: String = x86_tok_k(toks, p);
+    if k == "INT" {
+        let mut o: List[String] = list_new();
+        o = list_push(o, x86_tok_t(toks, p));
+        o = list_push(o, "1");
+        return o;
+    }
+    if k == "MINUS" {
+        if p + 1 < n && x86_tok_k(toks, p + 1) == "INT" {
+            let mut o: List[String] = list_new();
+            o = list_push(o, x86_neg_dec(x86_tok_t(toks, p + 1)));
+            o = list_push(o, "2");
+            return o;
+        }
+        return empty;
+    }
+    if k == "LPAREN" {
+        let inner = x86_alu_atom(toks, n, p + 1, inames, ivals);
+        if list_len(inner) < 2 {
+            return empty;
+        }
+        let w0 = x86_parse_dec(list_get(inner, 1));
+        if list_len(w0) < 1 {
+            return empty;
+        }
+        let mut acc: String = list_get(inner, 0);
+        let mut e = p + 1 + list_get(w0, 0);
+        while e < n {
+            let nk: String = x86_tok_k(toks, e);
+            if nk == "RPAREN" {
+                let mut o: List[String] = list_new();
+                o = list_push(o, acc);
+                o = list_push(o, (e + 1 - p).to_string());
+                return o;
+            }
+            if !x86_is_alu_op(nk) {
+                return empty;
+            }
+            let more = x86_alu_atom(toks, n, e + 1, inames, ivals);
+            if list_len(more) < 2 {
+                return empty;
+            }
+            let wm = x86_parse_dec(list_get(more, 1));
+            if list_len(wm) < 1 {
+                return empty;
+            }
+            let nxt = x86_dec_op(acc, list_get(more, 0), nk);
+            if list_len(nxt) < 1 {
+                return empty;
+            }
+            acc = list_get(nxt, 0);
+            e = e + 1 + list_get(wm, 0);
+        }
+        return empty;
+    }
+    if k == "IDENT" {
+        if p + 1 < n && x86_tok_k(toks, p + 1) == "LPAREN" {
+            return empty;
+        }
+        let idx = x86_bind_idx(inames, x86_tok_t(toks, p));
+        if idx < 0 {
+            return empty;
+        }
+        let mut o: List[String] = list_new();
+        o = list_push(o, list_get(ivals, idx));
+        o = list_push(o, "1");
+        return o;
+    }
+    return empty;
+}
+
+pub fn x86_alu_until(toks: List[String], n: Int, j: Int, inames: List[String], ivals: List[String], stop: String) -> List[String] {
+    let empty: List[String] = list_new();
+    let left = x86_alu_atom(toks, n, j, inames, ivals);
+    if list_len(left) < 2 {
+        return empty;
+    }
+    let w = x86_parse_dec(list_get(left, 1));
+    if list_len(w) < 1 {
+        return empty;
+    }
+    let p = j + list_get(w, 0);
+    if p >= n {
+        return empty;
+    }
+    let op: String = x86_tok_k(toks, p);
+    if !x86_is_alu_op(op) {
+        if x86_tok_k(toks, j) == "LPAREN" && op == stop {
+            let mut one: List[String] = list_new();
+            one = list_push(one, list_get(left, 0));
+            return one;
+        }
+        return empty;
+    }
+    let right = x86_alu_atom(toks, n, p + 1, inames, ivals);
+    if list_len(right) < 2 {
+        return empty;
+    }
+    let w2 = x86_parse_dec(list_get(right, 1));
+    if list_len(w2) < 1 {
+        return empty;
+    }
+    let got = x86_dec_op(list_get(left, 0), list_get(right, 0), op);
+    if list_len(got) < 1 {
+        return empty;
+    }
+    let mut acc: String = list_get(got, 0);
+    let mut e = p + 1 + list_get(w2, 0);
+    while e < n {
+        let nk: String = x86_tok_k(toks, e);
+        if nk == stop {
+            let mut one: List[String] = list_new();
+            one = list_push(one, acc);
+            return one;
+        }
+        if !x86_is_alu_op(nk) {
+            return empty;
+        }
+        let more = x86_alu_atom(toks, n, e + 1, inames, ivals);
+        if list_len(more) < 2 {
+            return empty;
+        }
+        let wm = x86_parse_dec(list_get(more, 1));
+        if list_len(wm) < 1 {
+            return empty;
+        }
+        let nxt = x86_dec_op(acc, list_get(more, 0), nk);
+        if list_len(nxt) < 1 {
+            return empty;
+        }
+        acc = list_get(nxt, 0);
+        e = e + 1 + list_get(wm, 0);
+    }
+    return empty;
+}
+
+pub fn x86_alu_try(toks: List[String], n: Int, j: Int, inames: List[String], ivals: List[String]) -> List[String] {
+    return x86_alu_until(toks, n, j, inames, ivals, "RPAREN");
+}

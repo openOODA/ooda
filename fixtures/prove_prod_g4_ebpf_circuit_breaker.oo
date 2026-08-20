@@ -1,0 +1,67 @@
+// # Product prove std/mesh_ebpf/mesh_circuit_breaker_fsm.oo
+//
+// Logline: Fail-closed emit+gcc+run asserts mesh circuit breaker FSM state transitions and recovery windows are deterministic.
+//
+// Setup: Isolated emit-c. Imports std/mesh_ebpf/mesh_circuit_breaker_fsm.oo.
+//
+// Beats:
+//   1. Configure circuit breaker with failure/success thresholds and recovery window.
+//   2. Simulate successive failures to trip Closed -> Open transition.
+//   3. Simulate timeout expiration to transition Open -> Half-Open and verify recovery to Closed.
+//   4. Print prod_g4_ebpf_circuit_breaker: PASSED and exit 0.
+
+import "std/mesh_ebpf/mesh_circuit_breaker_fsm.oo";
+
+pub fn main() {
+    let cfg: CircuitBreakerConfig = circuit_breaker_config_default();
+    let mut fsm: CircuitBreakerFsm = circuit_breaker_fsm_new(cfg);
+
+    if (fsm).state != 0 {
+        println("FAIL circuit breaker initial state not CLOSED");
+        process_exit(1);
+    }
+
+    let mut i: Int = 0;
+    while i < 5 {
+        let allowed: Bool = circuit_breaker_allow_request(&mut fsm, 1000 + i * 100);
+        if !allowed {
+            println("FAIL request rejected while closed");
+            process_exit(1);
+        }
+        circuit_breaker_record_result(&mut fsm, false, 1000 + i * 100);
+        i = i + 1;
+    }
+
+    if (fsm).state != 1 {
+        println("FAIL circuit breaker did not transition to OPEN");
+        process_exit(1);
+    }
+
+    let rej: Bool = circuit_breaker_allow_request(&mut fsm, 2000);
+    if rej {
+        println("FAIL request allowed while OPEN");
+        process_exit(1);
+    }
+
+    let half_allowed: Bool = circuit_breaker_allow_request(&mut fsm, 35000);
+    if !half_allowed {
+        println("FAIL probe request rejected after recovery timeout");
+        process_exit(1);
+    }
+    if (fsm).state != 2 {
+        println("FAIL circuit breaker did not transition to HALF_OPEN");
+        process_exit(1);
+    }
+
+    circuit_breaker_record_result(&mut fsm, true, 35100);
+    circuit_breaker_record_result(&mut fsm, true, 35200);
+    circuit_breaker_record_result(&mut fsm, true, 35300);
+
+    if (fsm).state != 0 {
+        println("FAIL circuit breaker did not recover to CLOSED");
+        process_exit(1);
+    }
+
+    println("prod_g4_ebpf_circuit_breaker: PASSED");
+    process_exit(0);
+}

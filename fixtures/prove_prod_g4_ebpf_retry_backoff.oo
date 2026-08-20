@@ -1,0 +1,65 @@
+// # Product prove std/mesh_ebpf/mesh_retry_exponential_backoff.oo
+//
+// Logline: Fail-closed emit+gcc+run asserts retry exponential backoff and jitter calculations are deterministic.
+//
+// Setup: Isolated emit-c. Imports std/mesh_ebpf/mesh_retry_exponential_backoff.oo.
+//
+// Beats:
+//   1. Construct default retry policy and initialize retry state tracking.
+//   2. Validate retryable status codes and compute bounded backoff with jitter seeds.
+//   3. Assert deterministic delay values, retry attempt increments, and exhaustion limits.
+//   4. Print prod_g4_ebpf_retry_backoff: PASSED and exit 0.
+
+import "std/mesh_ebpf/mesh_retry_exponential_backoff.oo";
+
+pub fn main() {
+    let pol: RetryPolicy = retry_policy_default();
+
+    if !retry_is_retryable(&pol, 503) || !retry_is_retryable(&pol, 429) || retry_is_retryable(&pol, 404) {
+        println("FAIL retry_is_retryable classification");
+        process_exit(1);
+    }
+
+    let mut state1: RetryState = retry_state_new(pol);
+    let mut state2: RetryState = retry_state_new(pol);
+
+    if (state1).attempts_made != 0 || (state1).exhausted_retries != 0 {
+        println("FAIL retry_state_new init");
+        process_exit(1);
+    }
+
+    // Attempt 1: exp_delay = 25ms, jitter_range = 0 -> exact 25ms
+    let d1a: Int = retry_calc_backoff_ms(&mut state1, 503, 7);
+    let d1b: Int = retry_calc_backoff_ms(&mut state2, 503, 7);
+
+    if d1a != d1b || d1a != 25 {
+        println("FAIL attempt 1 backoff delay");
+        process_exit(1);
+    }
+
+    // Attempt 2: exp_delay = 50ms, jitter_range = 25 -> 25 + (10 % 25) = 35ms
+    let d2a: Int = retry_calc_backoff_ms(&mut state1, 500, 10);
+    let d2b: Int = retry_calc_backoff_ms(&mut state2, 500, 10);
+
+    if d2a != d2b || d2a != 35 {
+        println("FAIL attempt 2 backoff delay with jitter");
+        process_exit(1);
+    }
+
+    // Attempt 3: exp_delay = 100ms
+    let d3: Int = retry_calc_backoff_ms(&mut state1, 502, 15);
+    if d3 <= 0 {
+        println("FAIL attempt 3 backoff delay");
+        process_exit(1);
+    }
+
+    // Attempt 4: Max retries (3) reached -> quota exhausted, return 0
+    let d4: Int = retry_calc_backoff_ms(&mut state1, 503, 20);
+    if d4 != 0 || (state1).exhausted_retries != 1 {
+        println("FAIL max retries exhaustion");
+        process_exit(1);
+    }
+
+    println("prod_g4_ebpf_retry_backoff: PASSED");
+    process_exit(0);
+}

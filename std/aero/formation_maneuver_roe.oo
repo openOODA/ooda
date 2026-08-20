@@ -1,0 +1,107 @@
+// # Formation Relative Orbital Elements & Impulsive Maneuver Planning
+//
+// Logline: Computes Relative Orbital Elements (ROE) and 2-impulse HCW relative rendezvous maneuver.
+//
+// Setup: Imports the formation engine for Vec3, RelativeState, hcw_propagate, formation_maneuver_new, vec3 helpers.
+//
+// Beats:
+//   1. Transform Keplerian chief and deputy elements into a six-component ROE vector.
+//   2. Compute a 2-impulse HCW rendezvous Delta-V pair to reach a target position.
+
+import "./formation_engine.oo";
+
+/// Compute Relative Orbital Elements (ROE) between Chief and Deputy Keplerian orbits
+pub fn compute_roe(a_c: Float, e_c: Float, i_c: Float, raan_c: Float, argp_c: Float, M_c: Float,
+                    a_d: Float, e_d: Float, i_d: Float, raan_d: Float, argp_d: Float, M_d: Float) -> RelativeKeplerianElements {
+    let da: Float = (a_d - a_c) / a_c;
+
+    let ex_c: Float = e_c * cos(argp_c);
+    let ey_c: Float = e_c * sin(argp_c);
+    let ex_d: Float = e_d * cos(argp_d);
+    let ey_d: Float = e_d * sin(argp_d);
+
+    let dex: Float = ex_d - ex_c;
+    let dey: Float = ey_d - ey_c;
+
+    let di: Float = i_d - i_c;
+    let draan: Float = raan_d - raan_c;
+
+    let dix: Float = di;
+    let diy: Float = draan * sin(i_c);
+
+    let u_c: Float = argp_c + M_c;
+    let u_d: Float = argp_d + M_d;
+    let dlam: Float = (u_d - u_c) + (draan * cos(i_c));
+
+    return roe_new(da, dex, dey, dix, diy, dlam);
+}
+
+/// Compute 2-Impulse HCW Relative Rendezvous maneuver to reach target position in time tof
+pub fn calculate_impulsive_rendezvous_dv(state0: RelativeState, target_pos: Vec3, n_mean: Float, tof: Float) -> FormationManeuver {
+    if tof <= 0.000001 {
+        let zero_v: Vec3 = vec3_zero();
+        return formation_maneuver_new(zero_v, zero_v, tof);
+    }
+    if n_mean <= 0.000001 {
+        let zero_v: Vec3 = vec3_zero();
+        return formation_maneuver_new(zero_v, zero_v, tof);
+    }
+
+    let p0: Vec3 = (state0).position;
+    let v0: Vec3 = (state0).velocity;
+    let x0: Float = ((p0).x);
+    let y0: Float = ((p0).y);
+    let z0: Float = ((p0).z);
+
+    let vx0: Float = ((v0).x);
+    let vy0: Float = ((v0).y);
+    let vz0: Float = ((v0).z);
+
+    let xf: Float = ((target_pos).x);
+    let yf: Float = ((target_pos).y);
+    let zf: Float = ((target_pos).z);
+
+    let theta: Float = n_mean * tof;
+    let s: Float = sin(theta);
+    let c: Float = cos(theta);
+
+    // Position difference target vector b = r_target - Phi_rr * r_0
+    let bx: Float = xf - ((4.0 - (3.0 * c)) * x0);
+    let by: Float = yf - (((6.0 * (s - theta)) * x0) + y0);
+    let bz: Float = zf - (c * z0);
+
+    // Phi_rv submatrix components
+    let a11: Float = s / n_mean;
+    let a12: Float = (2.0 * (1.0 - c)) / n_mean;
+    let a21: Float = (0.0 - (2.0 * (1.0 - c))) / n_mean;
+    let a22: Float = ((4.0 * s) - (3.0 * theta)) / n_mean;
+
+    let det: Float = (a11 * a22) - (a12 * a21);
+    if math_abs(det) < 0.000000000001 {
+        let zero_v: Vec3 = vec3_zero();
+        return formation_maneuver_new(zero_v, zero_v, tof);
+    }
+
+    // Solve for required post-impulse initial velocity v0+
+    let vx0_plus: Float = ((a22 * bx) - (a12 * by)) / det;
+    let vy0_plus: Float = (((0.0 - a21) * bx) + (a11 * by)) / det;
+
+    let mut vz0_plus: Float = 0.0;
+    if math_abs(s) > 0.000001 {
+        vz0_plus = (bz * n_mean) / s;
+    }
+
+    // First impulse Delta-V 1 at t = 0
+    let dv1: Vec3 = vec3_new(vx0_plus - vx0, vy0_plus - vy0, vz0_plus - vz0);
+
+    // Propagate state with v0+ to t = tof to find arrival velocity v_f_minus
+    let v_post: Vec3 = vec3_new(vx0_plus, vy0_plus, vz0_plus);
+    let state_post_impulse: RelativeState = relative_state_new(p0, v_post, 0.0);
+    let state_arrival: RelativeState = hcw_propagate(state_post_impulse, n_mean, tof);
+    let v_arrival: Vec3 = (state_arrival).velocity;
+
+    // Second impulse Delta-V 2 at t = tof to match target (zero relative velocity)
+    let dv2: Vec3 = vec3_neg(v_arrival);
+
+    return formation_maneuver_new(dv1, dv2, tof);
+}

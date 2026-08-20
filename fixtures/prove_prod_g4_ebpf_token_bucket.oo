@@ -1,0 +1,74 @@
+// # Product prove std/mesh_ebpf/mesh_rate_limit_token_bucket.oo
+//
+// Logline: Fail-closed emit+gcc+run asserts token bucket rate limiting operations are deterministic.
+//
+// Setup: Isolated emit-c. Imports std/mesh_ebpf/mesh_rate_limit_token_bucket.oo.
+//
+// Beats:
+//   1. Initialize mesh rate limiter and configure descriptor buckets.
+//   2. Acquire tokens, verify depletion throttling, and check time-based refill.
+//   3. Assert deterministic rate limiting decisions and quota enforcement.
+//   4. Print prod_g4_ebpf_token_bucket: PASSED and exit 0.
+
+import "std/mesh_ebpf/mesh_rate_limit_token_bucket.oo";
+
+pub fn main() {
+    let mut lim1: MeshRateLimiter = mesh_rate_limiter_new();
+    let mut lim2: MeshRateLimiter = mesh_rate_limiter_new();
+
+    if (lim1).total_checked != 0 || (lim1).limited_count != 0 {
+        println("FAIL mesh_rate_limiter_new init");
+        process_exit(1);
+    }
+
+    // Bucket: capacity 10, 5 refill/sec, initial time 1000 ms
+    mesh_rate_limiter_add_descriptor(&mut lim1, "api:search", 10, 5, 1000);
+    mesh_rate_limiter_add_descriptor(&mut lim2, "api:search", 10, 5, 1000);
+
+    // Initial acquire 6 tokens -> 4 left
+    let acq1a: Bool = mesh_rate_limiter_acquire(&mut lim1, "api:search", 6, 1000);
+    let acq1b: Bool = mesh_rate_limiter_acquire(&mut lim2, "api:search", 6, 1000);
+
+    if !acq1a || !acq1b {
+        println("FAIL initial token acquire");
+        process_exit(1);
+    }
+
+    // Try acquiring 5 tokens (only 4 available) -> should throttle
+    let acq2a: Bool = mesh_rate_limiter_acquire(&mut lim1, "api:search", 5, 1000);
+    let acq2b: Bool = mesh_rate_limiter_acquire(&mut lim2, "api:search", 5, 1000);
+
+    if acq2a || acq2b {
+        println("FAIL rate limiter depletion throttling");
+        process_exit(1);
+    }
+
+    if (lim1).limited_count != 1 || (lim2).limited_count != 1 {
+        println("FAIL limited_count metric");
+        process_exit(1);
+    }
+
+    // Advance 1000 ms -> +5 tokens refilled -> 4 + 5 = 9 available
+    let acq3a: Bool = mesh_rate_limiter_acquire(&mut lim1, "api:search", 5, 2000);
+    let acq3b: Bool = mesh_rate_limiter_acquire(&mut lim2, "api:search", 5, 2000);
+
+    if !acq3a || !acq3b {
+        println("FAIL refilled token acquire");
+        process_exit(1);
+    }
+
+    // Unconfigured descriptor allows unrestricted traffic
+    let acq_unconfigured: Bool = mesh_rate_limiter_acquire(&mut lim1, "api:unknown", 100, 2000);
+    if !acq_unconfigured {
+        println("FAIL unconfigured descriptor passthrough");
+        process_exit(1);
+    }
+
+    if (lim1).total_checked != 4 {
+        println("FAIL total_checked count");
+        process_exit(1);
+    }
+
+    println("prod_g4_ebpf_token_bucket: PASSED");
+    process_exit(0);
+}

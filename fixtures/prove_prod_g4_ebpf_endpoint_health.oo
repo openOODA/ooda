@@ -1,0 +1,75 @@
+// # Product prove std/mesh_ebpf/mesh_cluster_endpoint_health.oo
+//
+// Logline: Fail-closed emit+gcc+run asserts cluster endpoint health checking operations are deterministic.
+//
+// Setup: Isolated emit-c. Imports std/mesh_ebpf/mesh_cluster_endpoint_health.oo.
+//
+// Beats:
+//   1. Initialize endpoint health manager and register endpoints.
+//   2. Record health check successes and failures to transition status.
+//   3. Initiate graceful draining and assert deterministic state transitions.
+//   4. Print prod_g4_ebpf_endpoint_health: PASSED and exit 0.
+
+import "std/mesh_ebpf/mesh_cluster_endpoint_health.oo";
+
+pub fn main() {
+    let mut mgr1: EndpointHealthManager = endpoint_health_manager_new(2, 3);
+    let mut mgr2: EndpointHealthManager = endpoint_health_manager_new(2, 3);
+
+    if (mgr1).healthy_threshold != 2 || (mgr1).unhealthy_threshold != 3 || (mgr1).total_checks != 0 {
+        println("FAIL endpoint_health_manager_new init");
+        process_exit(1);
+    }
+
+    endpoint_register(&mut mgr1, "ep-10.0.0.1:8080");
+    endpoint_register(&mut mgr2, "ep-10.0.0.1:8080");
+
+    let s1a: Int = endpoint_record_check(&mut mgr1, "ep-10.0.0.1:8080", false);
+    let s1b: Int = endpoint_record_check(&mut mgr2, "ep-10.0.0.1:8080", false);
+
+    let s2a: Int = endpoint_record_check(&mut mgr1, "ep-10.0.0.1:8080", false);
+    let s2b: Int = endpoint_record_check(&mut mgr2, "ep-10.0.0.1:8080", false);
+
+    let s3a: Int = endpoint_record_check(&mut mgr1, "ep-10.0.0.1:8080", false);
+    let s3b: Int = endpoint_record_check(&mut mgr2, "ep-10.0.0.1:8080", false);
+
+    if s1a != 1 || s1b != 1 || s2a != 1 || s2b != 1 {
+        println("FAIL endpoint status before threshold");
+        process_exit(1);
+    }
+
+    if s3a != 2 || s3b != 2 {
+        println("FAIL endpoint unhealthy transition");
+        process_exit(1);
+    }
+
+    // Recover with 2 consecutive successes
+    let rec1: Int = endpoint_record_check(&mut mgr1, "ep-10.0.0.1:8080", true);
+    if rec1 != 2 {
+        println("FAIL intermediate recovery check");
+        process_exit(1);
+    }
+
+    let rec2: Int = endpoint_record_check(&mut mgr1, "ep-10.0.0.1:8080", true);
+    if rec2 != 1 {
+        println("FAIL healthy recovery threshold");
+        process_exit(1);
+    }
+
+    // Initiate drain
+    let drain_ok: Bool = endpoint_start_drain(&mut mgr1, "ep-10.0.0.1:8080");
+    let drain_fail: Bool = endpoint_start_drain(&mut mgr1, "ep-nonexistent");
+
+    if !drain_ok || drain_fail {
+        println("FAIL endpoint drain operation");
+        process_exit(1);
+    }
+
+    if (mgr1).total_checks != 5 {
+        println("FAIL total_checks count");
+        process_exit(1);
+    }
+
+    println("prod_g4_ebpf_endpoint_health: PASSED");
+    process_exit(0);
+}

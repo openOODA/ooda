@@ -1,0 +1,215 @@
+// # Const if and no-arg return scan for emit-x86
+//
+// Logline: Folds if INT==INT to one println const and records a no-arg const return.
+//
+// Setup: x86_tok_k and x86_tok_t exist in x86_emit_harv.oo.
+//
+// Beats:
+//   1. Scan a brace for println(STRING) or println(INT).
+//   2. Take then or else when INT or int-ident == or != ; allow else if and no else.
+//   3. Record fn name and return STRING or INT.
+//
+// residual: rsi/frame and while stay later.
+
+import "x86_emit_harv.oo";
+import "x86_emit_alu.oo";
+import "x86_emit_span.oo";
+
+fn x86_scan_print(toks: List[String], n: Int, p: Int) -> List[String] {
+    let empty: List[String] = list_new();
+    let mut i = p;
+    while i < n {
+        if x86_tok_k(toks, i) == "RBRACE" {
+            return empty;
+        }
+        if x86_tok_k(toks, i) == "IDENT" && x86_tok_t(toks, i) == "println" {
+            if i + 2 < n && x86_tok_k(toks, i + 1) == "LPAREN" {
+                if x86_tok_k(toks, i + 2) == "STRING" || x86_tok_k(toks, i + 2) == "INT" {
+                    if i + 3 < n && x86_tok_k(toks, i + 3) == "RPAREN" {
+                        let mut one: List[String] = list_new();
+                        one = list_push(one, x86_tok_t(toks, i + 2));
+                        return one;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return empty;
+}
+
+fn x86_if_lbrace(toks: List[String], n: Int, i: Int) -> Int {
+    let mut p = i + 1;
+    while p < n {
+        if x86_tok_k(toks, p) == "LBRACE" {
+            return p;
+        }
+        p = p + 1;
+    }
+    return -1;
+}
+
+fn x86_after_brace(toks: List[String], n: Int, p: Int) -> Int {
+    let mut i = p;
+    if i < n && x86_tok_k(toks, i) == "LBRACE" {
+        i = i + 1;
+    }
+    while i < n {
+        if x86_tok_k(toks, i) == "RBRACE" {
+            return i + 1;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+pub fn x86_if_taken_print(toks: List[String], n: Int, i: Int, inames: List[String], ivals: List[String]) -> List[String] {
+    let empty: List[String] = list_new();
+    if i + 1 >= n {
+        return empty;
+    }
+    let mut take_then = false;
+    let mut lb = -1;
+    let k1: String = x86_tok_k(toks, i + 1);
+    if k1 == "KW_TRUE" || k1 == "KW_FALSE" {
+        take_then = k1 == "KW_TRUE";
+        lb = i + 2;
+        if lb >= n || x86_tok_k(toks, lb) != "LBRACE" {
+            return empty;
+        }
+    } else {
+        let lhs: List[String] = x86_alu_span(toks, n, i + 1, inames, ivals);
+        if list_len(lhs) < 2 {
+            return empty;
+        }
+        let lw: List[Int] = x86_parse_dec(list_get(lhs, 1));
+        if list_len(lw) < 1 {
+            return empty;
+        }
+        let e = i + 1 + list_get(lw, 0);
+        if e >= n {
+            return empty;
+        }
+        let ck: String = x86_tok_k(toks, e);
+        if ck != "EQEQ" && ck != "NEQ" && ck != "GT" && ck != "LT" && ck != "GTE" && ck != "LTE" {
+            return empty;
+        }
+        let rhs: List[String] = x86_alu_span(toks, n, e + 1, inames, ivals);
+        if list_len(rhs) < 2 {
+            return empty;
+        }
+        let rw: List[Int] = x86_parse_dec(list_get(rhs, 1));
+        if list_len(rw) < 1 {
+            return empty;
+        }
+        lb = e + 1 + list_get(rw, 0);
+        if lb >= n || x86_tok_k(toks, lb) != "LBRACE" {
+            return empty;
+        }
+        let tk: List[String] = x86_cmp_take(ck, list_get(lhs, 0), list_get(rhs, 0));
+        if list_len(tk) < 1 {
+            return empty;
+        }
+        take_then = list_get(tk, 0) == "1";
+    }
+    let th = x86_scan_print(toks, n, lb + 1);
+    let after_then = x86_after_brace(toks, n, lb);
+    let mut mark: List[String] = list_new();
+    mark = list_push(mark, "1");
+    if after_then < n && x86_tok_k(toks, after_then) == "KW_ELSE" {
+        if after_then + 1 < n && x86_tok_k(toks, after_then + 1) == "KW_IF" {
+            if take_then {
+                if list_len(th) < 1 {
+                    return empty;
+                }
+                mark = list_push(mark, list_get(th, 0));
+                return mark;
+            }
+            return x86_if_taken_print(toks, n, after_then + 1, inames, ivals);
+        }
+        if after_then + 1 >= n || x86_tok_k(toks, after_then + 1) != "LBRACE" {
+            return empty;
+        }
+        let el = x86_scan_print(toks, n, after_then + 2);
+        if list_len(th) < 1 || list_len(el) < 1 {
+            return empty;
+        }
+        if take_then {
+            mark = list_push(mark, list_get(th, 0));
+        } else {
+            mark = list_push(mark, list_get(el, 0));
+        }
+        return mark;
+    }
+    if list_len(th) < 1 {
+        return empty;
+    }
+    if take_then {
+        mark = list_push(mark, list_get(th, 0));
+    } else {
+        mark = list_push(mark, "");
+    }
+    return mark;
+}
+
+pub fn x86_if_after(toks: List[String], n: Int, i: Int) -> Int {
+    let lb = x86_if_lbrace(toks, n, i);
+    if lb < 0 {
+        return i + 1;
+    }
+    let after_then = x86_after_brace(toks, n, lb);
+    if after_then + 1 >= n {
+        return after_then;
+    }
+    if x86_tok_k(toks, after_then) == "KW_ELSE" {
+        if after_then + 1 < n && x86_tok_k(toks, after_then + 1) == "KW_IF" {
+            return x86_if_after(toks, n, after_then + 1);
+        }
+        return x86_after_brace(toks, n, after_then + 1);
+    }
+    return after_then;
+}
+
+pub fn x86_fn_const_ret(toks: List[String], n: Int, i: Int) -> List[String] {
+    let empty: List[String] = list_new();
+    if i + 1 >= n || x86_tok_k(toks, i + 1) != "IDENT" {
+        return empty;
+    }
+    let nm: String = x86_tok_t(toks, i + 1);
+    if nm == "main" {
+        return empty;
+    }
+    let mut p = i + 2;
+    if p + 1 >= n || x86_tok_k(toks, p) != "LPAREN" {
+        return empty;
+    }
+    if x86_tok_k(toks, p + 1) != "RPAREN" {
+        return empty;
+    }
+    p = p + 2;
+    if p < n && x86_tok_k(toks, p) == "ARROW" {
+        p = p + 1;
+        if p < n && x86_tok_k(toks, p) == "IDENT" {
+            p = p + 1;
+        }
+    }
+    if p >= n || x86_tok_k(toks, p) != "LBRACE" {
+        return empty;
+    }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "KW_RETURN" {
+        return empty;
+    }
+    p = p + 1;
+    if p >= n {
+        return empty;
+    }
+    if x86_tok_k(toks, p) != "STRING" && x86_tok_k(toks, p) != "INT" {
+        return empty;
+    }
+    let val: String = x86_tok_t(toks, p);
+    let mut o: List[String] = list_new();
+    o = list_push(o, nm);
+    o = list_push(o, val);
+    return o;
+}

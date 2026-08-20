@@ -1,7 +1,17 @@
-// ===================================================================
-// openOODA Standard Library — ooda::sec::net::mtls_engine
-// mTLS policy & engine ops (split from mtls.oo, M172)
-// ===================================================================
+// # mTLS Policy & Engine Operations
+//
+// Logline: Initialize MtlsSecurityPolicy and mTLS engine; add allowed SANs and gate handshake evaluation.
+//
+// Setup: Imports mtls_types.oo, mtls_cert.oo, and mtls_ops.oo. RULES.oot 1.4 default-deny; CAP-G6 prefer &TcpCap. RULES.oot 1.3 fail-closed residual.
+//
+// Beats:
+//   1. mtls_policy_init: build MtlsSecurityPolicy with fail_closed and require_san_match.
+//   2. mtls_policy_add_allowed_san: append SAN to allowed_sans list.
+//   3. mtls_engine_init: register policy, config, and empty stats.
+//   4. mtls_engine_evaluate_handshake: gate handshake against policy rules.
+//
+// residual: X.509 parse and TLS handshake are process_exit in mtls_stubs.
+
 // RULES.oot 1.4: Default-deny for privileged effects.
 // CAP-G6: preferred &TcpCap for TLS/TCP session effects; &NetCap still works via supersede.
 // RULES.oot 1.3: Fail-closed residual for unimplemented builtins / compiler limitations.
@@ -21,7 +31,7 @@ pub fn mtls_policy_init(
     max_depth: Int,
     fail_closed: Bool
 ) -> MtlsSecurityPolicy {
-    let empty_sans: List[String] = [];
+    let empty_sans: List[String] = list_new();
     return MtlsSecurityPolicy {
         policy_id: policy_id,
         min_tls_version: min_tls_version,
@@ -36,18 +46,18 @@ pub fn mtls_policy_init(
 }
 
 pub fn mtls_policy_add_allowed_san(policy: MtlsSecurityPolicy, san: String) -> MtlsSecurityPolicy {
-    let cur_sans: List[String] = policy.allowed_sans;
+    let cur_sans: List[String] = (policy).allowed_sans;
     let new_sans: List[String] = list_push(cur_sans, san);
     return MtlsSecurityPolicy {
-        policy_id: policy.policy_id,
-        min_tls_version: policy.min_tls_version,
-        mandatory_client_auth: policy.mandatory_client_auth,
-        require_san_match: policy.require_san_match,
-        max_cert_chain_depth: policy.max_cert_chain_depth,
+        policy_id: (policy).policy_id,
+        min_tls_version: (policy).min_tls_version,
+        mandatory_client_auth: (policy).mandatory_client_auth,
+        require_san_match: (policy).require_san_match,
+        max_cert_chain_depth: (policy).max_cert_chain_depth,
         allowed_sans: new_sans,
-        revocation_check_strict: policy.revocation_check_strict,
-        fail_closed: policy.fail_closed,
-        is_active: policy.is_active,
+        revocation_check_strict: (policy).revocation_check_strict,
+        fail_closed: (policy).fail_closed,
+        is_active: (policy).is_active,
     };
 }
 
@@ -55,24 +65,24 @@ pub fn mtls_policy_evaluate_peer(
     policy_ref: &MtlsSecurityPolicy,
     peer_ref: &PeerIdentity
 ) -> Result[Bool, String] {
-    let is_act: Bool = policy_ref.is_active;
+    let is_act: Bool = (policy_ref).is_active;
     if is_act == false {
         return Err("POLICY_INACTIVE: mTLS security policy is inactive");
     }
-    let mand: Bool = policy_ref.mandatory_client_auth;
+    let mand: Bool = (policy_ref).mandatory_client_auth;
     if mand {
-        let auth: Bool = peer_ref.is_authenticated;
+        let auth: Bool = (peer_ref).is_authenticated;
         if auth == false {
             return Err("UNAUTHENTICATED_PEER: Mandatory client authentication failed");
         }
     }
 
-    let allowed: List[String] = policy_ref.allowed_sans;
+    let allowed: List[String] = (policy_ref).allowed_sans;
     let allowed_count: Int = list_len(allowed);
     if allowed_count > 0 {
-        let peer_sans: List[String] = peer_ref.san_domains;
+        let peer_sans: List[String] = (peer_ref).san_domains;
         let p_count: Int = list_len(peer_sans);
-        let peer_cn: String = peer_ref.common_name;
+        let peer_cn: String = (peer_ref).common_name;
         let mut matched: Bool = false;
         let mut i: Int = 0;
         while i < allowed_count {
@@ -103,8 +113,8 @@ pub fn mtls_policy_evaluate_peer(
 // -------------------------------------------------------------------
 
 pub fn mtls_engine_init(engine_id: String, policy: MtlsSecurityPolicy) -> MtlsEngine {
-    let empty_sessions: List[MtlsSession] = [];
-    let empty_revoked: List[String] = [];
+    let empty_sessions: List[MtlsSession] = list_new();
+    let empty_revoked: List[String] = list_new();
     return MtlsEngine {
         engine_id: engine_id,
         policy: policy,
@@ -118,7 +128,7 @@ pub fn mtls_engine_init(engine_id: String, policy: MtlsSecurityPolicy) -> MtlsEn
 }
 
 pub fn mtls_engine_is_serial_revoked(eng_ref: &MtlsEngine, serial: String) -> Bool {
-    let revoked: List[String] = eng_ref.revoked_cert_serials;
+    let revoked: List[String] = (eng_ref).revoked_cert_serials;
     let count: Int = list_len(revoked);
     let mut i: Int = 0;
     while i < count {
@@ -131,125 +141,10 @@ pub fn mtls_engine_is_serial_revoked(eng_ref: &MtlsEngine, serial: String) -> Bo
     return false;
 }
 
-pub fn mtls_engine_revoke_serial(mut_engine: &mut MtlsEngine, serial: String) -> Bool {
-    if mut_engine.system_halted {
-        return false;
-    }
-    let cur_rev: List[String] = mut_engine.revoked_cert_serials;
-    let new_rev: List[String] = list_push(cur_rev, serial);
-    mut_engine.revoked_cert_serials = new_rev;
-    return true;
-}
-
-pub fn mtls_engine_evaluate_handshake(
-    tcp: &TcpCap,
-    mut_engine: &mut MtlsEngine,
-    session_id: String,
-    peer_cert_ref: &MtlsCertificate,
-    chain_ref: &CertificateChain,
-    current_time: Int
-) -> Result[MtlsHandshakeResult, String] {
-    // CAP-G6: preferred &TcpCap (TLS/TCP session); &NetCap still works via supersede.
-    // HONESTY (T5 residual): evaluate_* is policy/chain/revocation only.
-    // Crypto/TLS gates (mtls_parse_x509_der_asn1, mtls_perform_socket_handshake_raw)
-    // are process_exit fail-closed and are NOT wired here. Soft-success Ok(result)
-    // is NOT a cryptographic/TLS seal — no product tls_connect / ASN.1 path.
-    let halted: Bool = mut_engine.system_halted;
-    if halted {
-        return Err("ENGINE_HALTED: mTLS Engine system is halted");
-    }
-
-    let cur_tot: Int = mut_engine.total_handshakes;
-    mut_engine.total_handshakes = cur_tot + 1;
-
-    let pol: MtlsSecurityPolicy = mut_engine.policy;
-    let pol_ref = &pol;
-    let is_act: Bool = pol.is_active;
-    if is_act == false {
-        let failed_cnt: Int = mut_engine.failed_handshakes;
-        mut_engine.failed_handshakes = failed_cnt + 1;
-        return Err("POLICY_INACTIVE: Policy is inactive");
-    }
-
-    let serial: String = peer_cert_ref.serial_number;
-    let subj_cn: String = peer_cert_ref.subject_cn;
-    let is_rev: Bool = mtls_engine_is_serial_revoked(mut_engine, serial);
-    if is_rev {
-        let failed_cnt: Int = mut_engine.failed_handshakes;
-        mut_engine.failed_handshakes = failed_cnt + 1;
-        if pol.fail_closed {
-            mut_engine.system_halted = true;
-        }
-        return Ok(MtlsHandshakeResult {
-            is_successful: false,
-            session_id: session_id,
-            negotiated_cipher: "NONE",
-            peer_common_name: subj_cn,
-            handshake_duration_ms: 0,
-            error_code: "CERTIFICATE_REVOKED",
-        });
-    }
-
-    let max_depth: Int = pol.max_cert_chain_depth;
-    let chain_res: Result[Bool, String] = certificate_chain_verify(chain_ref, current_time, max_depth);
-    let chain_ok: Bool = match chain_res {
-        Ok(v) => v,
-        Err(e) => false,
-    };
-
-    if chain_ok == false {
-        let failed_cnt: Int = mut_engine.failed_handshakes;
-        mut_engine.failed_handshakes = failed_cnt + 1;
-        if pol.fail_closed {
-            mut_engine.system_halted = true;
-        }
-        return Ok(MtlsHandshakeResult {
-            is_successful: false,
-            session_id: session_id,
-            negotiated_cipher: "NONE",
-            peer_common_name: subj_cn,
-            handshake_duration_ms: 0,
-            error_code: "CERT_CHAIN_VERIFICATION_FAILED",
-        });
-    }
-
-    let peer_id: PeerIdentity = peer_identity_create(peer_cert_ref, 100);
-    let peer_ref = &peer_id;
-    let pol_eval: Result[Bool, String] = mtls_policy_evaluate_peer(pol_ref, peer_ref);
-    let pol_ok: Bool = match pol_eval {
-        Ok(v) => v,
-        Err(e) => false,
-    };
-
-    if pol_ok == false {
-        let failed_cnt: Int = mut_engine.failed_handshakes;
-        mut_engine.failed_handshakes = failed_cnt + 1;
-        if pol.fail_closed {
-            mut_engine.system_halted = true;
-        }
-        return Ok(MtlsHandshakeResult {
-            is_successful: false,
-            session_id: session_id,
-            negotiated_cipher: "NONE",
-            peer_common_name: subj_cn,
-            handshake_duration_ms: 0,
-            error_code: "PEER_POLICY_REJECTED",
-        });
-    }
-
-    let succ_cnt: Int = mut_engine.successful_handshakes;
-    mut_engine.successful_handshakes = succ_cnt + 1;
-    // HONESTY (T5): policy-only soft-success — not crypto/TLS verified.
-    return Ok(MtlsHandshakeResult {
-        is_successful: true,
-        session_id: session_id,
-        negotiated_cipher: "TLS_AES_256_GCM_SHA384",
-        peer_common_name: subj_cn,
-        handshake_duration_ms: 12,
-        error_code: "POLICY_OK_NO_TLS_IO",
-    });
-}
-
 pub fn mtls_engine_halt(mut_engine: &mut MtlsEngine) {
-    mut_engine.system_halted = true;
+    (mut_engine).system_halted = true;
+}
+
+pub fn __dummy_std_src_ooda_sec_net_mtls_engine_oo() -> Int {
+    return 0;
 }

@@ -1,0 +1,107 @@
+// # Service Mesh Circuit Breaker Finite State Machine
+//
+// Logline: Implements Closed/Open/Half-Open 3-state circuit breaker preventing cascade downstream outages.
+//
+// Setup: Fault tolerance governor intercepting service invocations and enforcing fail-fast semantics.
+//
+// Beats:
+//   1. Track failures in Closed state; transition to Open when failure threshold is exceeded.
+//   2. Transition from Open to Half-Open after sleep window expiration.
+//   3. Transition Half-Open to Closed on consecutive successes, or back to Open on any failure.
+
+pub type CircuitBreakerConfig = struct {
+    failure_threshold: Int,
+    success_threshold: Int,
+    recovery_timeout_ms: Int,
+};
+
+pub type CircuitBreakerFsm = struct {
+    config: CircuitBreakerConfig,
+    state: Int, // 0: CLOSED, 1: OPEN, 2: HALF_OPEN
+    consecutive_failures: Int,
+    consecutive_successes: Int,
+    last_state_change_ms: Int,
+    total_calls_allowed: Int,
+    total_calls_rejected: Int,
+};
+
+pub fn circuit_breaker_config_default() -> CircuitBreakerConfig {
+    return CircuitBreakerConfig {
+        failure_threshold: 5,
+        success_threshold: 3,
+        recovery_timeout_ms: 30000,
+    };
+}
+
+pub fn circuit_breaker_fsm_new(cfg: CircuitBreakerConfig) -> CircuitBreakerFsm {
+    return CircuitBreakerFsm {
+        config: cfg,
+        state: 0, // CLOSED
+        consecutive_failures: 0,
+        consecutive_successes: 0,
+        last_state_change_ms: 0,
+        total_calls_allowed: 0,
+        total_calls_rejected: 0,
+    };
+}
+
+pub fn circuit_breaker_allow_request(
+    fsm: &mut CircuitBreakerFsm,
+    now_ms: Int
+) -> Bool {
+    if (fsm).state == 0 {
+        (fsm).total_calls_allowed = (fsm).total_calls_allowed + 1;
+        return true;
+    }
+
+    if (fsm).state == 1 {
+        let elapsed_ms: Int = now_ms - (fsm).last_state_change_ms;
+        if elapsed_ms >= ((fsm).config).recovery_timeout_ms {
+            (fsm).state = 2; // HALF_OPEN
+            (fsm).consecutive_successes = 0;
+            (fsm).consecutive_failures = 0;
+            (fsm).last_state_change_ms = now_ms;
+            (fsm).total_calls_allowed = (fsm).total_calls_allowed + 1;
+            return true;
+        }
+        (fsm).total_calls_rejected = (fsm).total_calls_rejected + 1;
+        return false;
+    }
+
+    if (fsm).state == 2 {
+        (fsm).total_calls_allowed = (fsm).total_calls_allowed + 1;
+        return true;
+    }
+
+    return false;
+}
+
+pub fn circuit_breaker_record_result(
+    fsm: &mut CircuitBreakerFsm,
+    success: Bool,
+    now_ms: Int
+) {
+    if success {
+        (fsm).consecutive_failures = 0;
+        if (fsm).state == 2 {
+            (fsm).consecutive_successes = (fsm).consecutive_successes + 1;
+            if (fsm).consecutive_successes >= ((fsm).config).success_threshold {
+                (fsm).state = 0; // CLOSED
+                (fsm).consecutive_successes = 0;
+                (fsm).last_state_change_ms = now_ms;
+            }
+        }
+    } else {
+        (fsm).consecutive_successes = 0;
+        (fsm).consecutive_failures = (fsm).consecutive_failures + 1;
+        if (fsm).state == 0 {
+            if (fsm).consecutive_failures >= ((fsm).config).failure_threshold {
+                (fsm).state = 1; // OPEN
+                (fsm).last_state_change_ms = now_ms;
+            }
+        } else if (fsm).state == 2 {
+            (fsm).state = 1; // Back to OPEN
+            (fsm).last_state_change_ms = now_ms;
+        }
+    }
+}

@@ -1,0 +1,151 @@
+// # Product Prove std/security_defense/morpher_adversarial_caps
+//
+// Logline: Adversarial test suite asserting that fake capability tokens and forged ambient authority are rejected across morphed routines.
+//
+// Setup: Standalone emit-c test fixture importing metamorphic morpher and security defense modules.
+//
+// Beats:
+//   1. Assert decoy traps capture unauthorized calls and deny ambient authority minting.
+//   2. Assert forged capability sets with residual dangerous flags (cap_sys_admin, cap_dac_override) fail closed.
+//   3. Assert illegal state transition injection into flattened dispatchers aborts safely.
+//   4. Assert ciphertext tampering in encrypted string payloads fails integrity verification.
+//   5. Print "prod_g4_sec_morpher_adversarial_caps: PASSED".
+
+import "std/security_defense/decoy_function_trap.oo";
+import "std/security_defense/capability_delegation_audit.oo";
+import "std/security_defense/control_flow_flattening.oo";
+import "std/security_defense/string_literal_encryptor.oo";
+import "std/security_defense/metamorphic_pipeline.oo";
+
+pub fn main() {
+    // -------------------------------------------------------------
+    // Attack Scenario 1: Decoy Trap & Fake Privilege Interception
+    // -------------------------------------------------------------
+    let mut trap_mgr: TrapManager = trap_manager_new();
+    let _t1: Bool = trap_manager_add_decoy(&mut trap_mgr, 1, "admin_override", 9001, 0); // 0: LOG_AND_BLOCK
+    let _t2: Bool = trap_manager_add_decoy(&mut trap_mgr, 2, "debug_backdoor", 9002, 2); // 2: DELAY_AND_ISOLATE
+    let _t3: Bool = trap_manager_add_decoy(&mut trap_mgr, 3, "crypto_key_dump", 9003, 0);
+
+    // Attacker invokes fake admin_override address (9001)
+    let action1: Int = trap_manager_trigger(&mut trap_mgr, 9001);
+    if action1 != 0 {
+        println("FAIL: decoy admin_override not blocked");
+        process_exit(1);
+    }
+
+    // Attacker invokes debug_backdoor (9002)
+    let action2: Int = trap_manager_trigger(&mut trap_mgr, 9002);
+    if action2 != 2 {
+        println("FAIL: decoy debug_backdoor not isolated");
+        process_exit(1);
+    }
+
+    // Normal non-decoy address (1234) should return -1
+    let normal_call: Int = trap_manager_trigger(&mut trap_mgr, 1234);
+    if normal_call != -1 {
+        println("FAIL: benign address misidentified as decoy");
+        process_exit(1);
+    }
+
+    if (trap_mgr).total_trips != 2 {
+        println("FAIL: total trap trips mismatch");
+        process_exit(1);
+    }
+
+    // -------------------------------------------------------------
+    // Attack Scenario 2: Ambient Authority & Capability Token Forgery
+    // -------------------------------------------------------------
+    // Legitimate dropped capability state (non-root, no dangerous caps)
+    let mut safe_state: ProcessCapabilityState = process_cap_state_new(1001);
+    (safe_state).effective.cap_net_bind_service = true;
+    (safe_state).is_non_root = true;
+
+    let safe_ok: Bool = capability_audit_verify_drop(&safe_state);
+    if !safe_ok {
+        println("FAIL: legitimate dropped capability state rejected");
+        process_exit(1);
+    }
+
+    // Adversarial Attack 2a: Forging CAP_SYS_ADMIN in effective set
+    let mut forged_admin: ProcessCapabilityState = process_cap_state_new(1002);
+    (forged_admin).effective.cap_sys_admin = true;
+    let forged_admin_ok: Bool = capability_audit_verify_drop(&forged_admin);
+    if forged_admin_ok {
+        println("FAIL: forged CAP_SYS_ADMIN was accepted");
+        process_exit(1);
+    }
+
+    // Adversarial Attack 2b: Retaining CAP_DAC_OVERRIDE
+    let mut forged_dac: ProcessCapabilityState = process_cap_state_new(1003);
+    (forged_dac).effective.cap_dac_override = true;
+    let forged_dac_ok: Bool = capability_audit_verify_drop(&forged_dac);
+    if forged_dac_ok {
+        println("FAIL: forged CAP_DAC_OVERRIDE was accepted");
+        process_exit(1);
+    }
+
+    // Adversarial Attack 2c: Forging CAP_SYS_MODULE in bounding set
+    let mut forged_mod: ProcessCapabilityState = process_cap_state_new(1004);
+    (forged_mod).bounding.cap_sys_module = true;
+    let forged_mod_ok: Bool = capability_audit_verify_drop(&forged_mod);
+    if forged_mod_ok {
+        println("FAIL: forged bounding CAP_SYS_MODULE was accepted");
+        process_exit(1);
+    }
+
+    // Adversarial Attack 2d: Root identity spoofing (is_non_root = false)
+    let mut forged_root: ProcessCapabilityState = process_cap_state_new(1005);
+    (forged_root).is_non_root = false;
+    let forged_root_ok: Bool = capability_audit_verify_drop(&forged_root);
+    if forged_root_ok {
+        println("FAIL: root state passed unverified");
+        process_exit(1);
+    }
+
+    // -------------------------------------------------------------
+    // Attack Scenario 3: Flattened Dispatcher State Confusion Hijack
+    // -------------------------------------------------------------
+    let mut ff: FlattenedFunction = flattened_function_new("auth_check", 10, 99);
+    let _b0: Bool = flattened_function_add_block(&mut ff, 10, 2, 20, -1, false);
+    let _b1: Bool = flattened_function_add_block(&mut ff, 20, 3, 99, -1, true);
+
+    // Attacker manually tampers with dispatcher switch var to jump into non-existent state 777
+    (ff).dispatcher_switch_var = 777;
+    let hijacked_step: Bool = flattened_function_step(&mut ff, false);
+    // Should fail closed: return false and force exit_state (99)
+    if hijacked_step || (ff).dispatcher_switch_var != 99 {
+        println("FAIL: illegal state transition did not fail closed to exit_state");
+        process_exit(1);
+    }
+
+    // -------------------------------------------------------------
+    // Attack Scenario 4: Encrypted Payload Ciphertext Bit-Flipping
+    // -------------------------------------------------------------
+    let mut original_bytes: List[Int] = list_new();
+    original_bytes = list_push(original_bytes, 65); // 'A'
+    original_bytes = list_push(original_bytes, 66); // 'B'
+    original_bytes = list_push(original_bytes, 67); // 'C'
+
+    let mut enc_payload: EncryptedStringPayload = string_encrypt_bytes(original_bytes, 3, 42);
+    let initial_valid: Bool = string_payload_verify(&enc_payload);
+    if !initial_valid {
+        println("FAIL: initial payload should be valid");
+        process_exit(1);
+    }
+
+    // Attacker tampers with ciphertext byte 1
+    let mut tampered_cipher: List[Int] = list_new();
+    tampered_cipher = list_push(tampered_cipher, list_get((enc_payload).ciphertext, 0));
+    tampered_cipher = list_push(tampered_cipher, 255); // Injected corruption
+    tampered_cipher = list_push(tampered_cipher, list_get((enc_payload).ciphertext, 2));
+    (enc_payload).ciphertext = tampered_cipher;
+
+    let tampered_valid: Bool = string_payload_verify(&enc_payload);
+    if tampered_valid {
+        println("FAIL: tampered ciphertext passed checksum validation");
+        process_exit(1);
+    }
+
+    println("prod_g4_sec_morpher_adversarial_caps: PASSED");
+    process_exit(0);
+}

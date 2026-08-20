@@ -1,0 +1,214 @@
+// # Walk tokens to harvest emit-x86 println consts
+// Logline: Walks fn lets and println args and returns the const write list.
+// Setup: harvest helpers, ALU, and if/call scan exist.
+// Beats: record binds, mix, ALU, if, call, mut assign; leftover ERR even if msgs nonempty.
+// residual: looping while (not leftover ERR) and AArch64 stay later.
+
+import "x86_emit_harv.oo";
+import "x86_emit_alu.oo";
+import "x86_emit_ctl.oo";
+import "x86_emit_bind.oo";
+import "x86_emit_span.oo";
+
+pub fn x86_collect_prints(toks: List[String]) -> List[String] {
+    let n = list_len(toks);
+    let mut msgs: List[String] = list_new();
+    let mut bind_names: List[String] = list_new();
+    let mut bind_vals: List[String] = list_new();
+    let mut int_names: List[String] = list_new();
+    let mut int_vals: List[String] = list_new();
+    let mut fn_names: List[String] = list_new();
+    let mut fn_rets: List[String] = list_new();
+    let mut saw_main = false;
+    let mut leftover_unresolved = false;
+    let mut i = 0;
+    while i < n {
+        let k: String = x86_tok_k(toks, i);
+        let t: String = x86_tok_t(toks, i);
+        if k == "KW_WHILE" || k == "KW_FOR" {
+            leftover_unresolved = true;
+        }
+        if k == "KW_FN" {
+            if i + 1 < n && x86_tok_k(toks, i + 1) == "IDENT" {
+                bind_names = list_new();
+                bind_vals = list_new();
+                int_names = list_new();
+                int_vals = list_new();
+                if x86_tok_t(toks, i + 1) == "main" {
+                    saw_main = true;
+                }
+                let fret: List[String] = x86_fn_const_ret(toks, n, i);
+                if list_len(fret) >= 2 {
+                    fn_names = list_push(fn_names, list_get(fret, 0));
+                    fn_rets = list_push(fn_rets, list_get(fret, 1));
+                }
+            }
+        }
+        if k == "KW_IF" {
+            let igot: List[String] = x86_if_taken_print(toks, n, i, int_names, int_vals);
+            if list_len(igot) >= 2 {
+                if chars_len(list_get(igot, 1)) > 0 {
+                    msgs = list_push(msgs, list_get(igot, 1));
+                }
+                i = x86_if_after(toks, n, i) - 1;
+            }
+        }
+        if k == "IDENT" && t != "println" {
+            let mut let_nm = false;
+            if i > 0 {
+                let pk: String = x86_tok_k(toks, i - 1);
+                if pk == "KW_LET" || pk == "KW_MUT" {
+                    let_nm = true;
+                }
+            }
+            if !let_nm && i + 2 < n && x86_tok_k(toks, i + 1) == "EQ" {
+                if x86_tok_k(toks, i + 2) == "INT" {
+                    if i + 3 >= n || !x86_is_alu_op(x86_tok_k(toks, i + 3)) {
+                        int_names = list_push(int_names, t);
+                        int_vals = list_push(int_vals, x86_tok_t(toks, i + 2));
+                    }
+                }
+            }
+        }
+        if k == "KW_LET" {
+            let bgot: List[String] = x86_apply_let(toks, n, i, bind_names, bind_vals, int_names, int_vals);
+            if list_len(bgot) >= 3 {
+                if list_get(bgot, 0) == "I" {
+                    int_names = list_push(int_names, list_get(bgot, 1));
+                    int_vals = list_push(int_vals, list_get(bgot, 2));
+                } else {
+                    bind_names = list_push(bind_names, list_get(bgot, 1));
+                    bind_vals = list_push(bind_vals, list_get(bgot, 2));
+                }
+            }
+        }
+        if k == "IDENT" && t == "println" {
+            let mut j = i + 1;
+            if j < n && x86_tok_k(toks, j) == "LPAREN" {
+                j = j + 1;
+            }
+            if j < n && x86_tok_k(toks, j) == "INT" {
+                if j + 1 < n && x86_tok_k(toks, j + 1) == "RPAREN" {
+                    msgs = list_push(msgs, x86_tok_t(toks, j));
+                } else {
+                    let agot: List[String] = x86_alu_try(toks, n, j, int_names, int_vals);
+                    if list_len(agot) >= 1 {
+                        msgs = list_push(msgs, list_get(agot, 0));
+                    } else {
+                        let igot: List[String] = x86_mix_try(toks, n, j, bind_names, bind_vals, int_names, int_vals);
+                        if list_len(igot) >= 1 {
+                            msgs = list_push(msgs, list_get(igot, 0));
+                        } else {
+                            leftover_unresolved = true;
+                        }
+                    }
+                }
+            } else if j < n && x86_tok_k(toks, j) == "MINUS" {
+                if j + 1 < n && x86_tok_k(toks, j + 1) == "INT" {
+                    if j + 2 < n && x86_tok_k(toks, j + 2) == "RPAREN" {
+                        msgs = list_push(msgs, x86_neg_dec(x86_tok_t(toks, j + 1)));
+                    } else {
+                        let a2: List[String] = x86_alu_try(toks, n, j, int_names, int_vals);
+                        if list_len(a2) >= 1 {
+                            msgs = list_push(msgs, list_get(a2, 0));
+                        } else {
+                            let mgot: List[String] = x86_mix_try(toks, n, j, bind_names, bind_vals, int_names, int_vals);
+                            if list_len(mgot) >= 1 {
+                                msgs = list_push(msgs, list_get(mgot, 0));
+                            } else {
+                                leftover_unresolved = true;
+                            }
+                        }
+                    }
+                } else if j + 1 < n && x86_tok_k(toks, j + 1) == "IDENT" {
+                    if j + 2 < n && x86_tok_k(toks, j + 2) == "RPAREN" {
+                        let idx = x86_bind_idx(int_names, x86_tok_t(toks, j + 1));
+                        if idx >= 0 {
+                            msgs = list_push(msgs, x86_neg_dec(list_get(int_vals, idx)));
+                        } else {
+                            leftover_unresolved = true;
+                        }
+                    } else {
+                        let mgot2: List[String] = x86_mix_try(toks, n, j, bind_names, bind_vals, int_names, int_vals);
+                        if list_len(mgot2) >= 1 {
+                            msgs = list_push(msgs, list_get(mgot2, 0));
+                        } else {
+                            leftover_unresolved = true;
+                        }
+                    }
+                } else {
+                    leftover_unresolved = true;
+                }
+            } else if j < n && x86_tok_k(toks, j) == "LPAREN" {
+                let ap: List[String] = x86_alu_try(toks, n, j, int_names, int_vals);
+                if list_len(ap) >= 1 {
+                    msgs = list_push(msgs, list_get(ap, 0));
+                } else {
+                    leftover_unresolved = true;
+                }
+            } else if j < n {
+                if x86_tok_k(toks, j) == "STRING" || x86_tok_k(toks, j) == "IDENT" {
+                    if x86_tok_k(toks, j) == "IDENT" {
+                        if j + 1 < n && x86_tok_k(toks, j + 1) == "LPAREN" {
+                            if j + 2 < n && x86_tok_k(toks, j + 2) == "RPAREN" {
+                                let fidx = x86_bind_idx(fn_names, x86_tok_t(toks, j));
+                                if fidx >= 0 {
+                                    msgs = list_push(msgs, list_get(fn_rets, fidx));
+                                } else {
+                                    leftover_unresolved = true;
+                                }
+                            } else {
+                                leftover_unresolved = true;
+                            }
+                        } else {
+                            let got: List[String] = x86_mix_try(toks, n, j, bind_names, bind_vals, int_names, int_vals);
+                            if list_len(got) >= 1 {
+                                msgs = list_push(msgs, list_get(got, 0));
+                            } else {
+                                let a3: List[String] = x86_alu_try(toks, n, j, int_names, int_vals);
+                                if list_len(a3) >= 1 {
+                                    msgs = list_push(msgs, list_get(a3, 0));
+                                } else if j + 1 < n && x86_tok_k(toks, j + 1) == "RPAREN" {
+                                    let idx = x86_bind_idx(int_names, x86_tok_t(toks, j));
+                                    if idx >= 0 {
+                                        msgs = list_push(msgs, list_get(int_vals, idx));
+                                    } else {
+                                        leftover_unresolved = true;
+                                    }
+                                } else {
+                                    leftover_unresolved = true;
+                                }
+                            }
+                        }
+                    } else {
+                        let got2: List[String] = x86_mix_try(toks, n, j, bind_names, bind_vals, int_names, int_vals);
+                        if list_len(got2) >= 1 {
+                            msgs = list_push(msgs, list_get(got2, 0));
+                        } else {
+                            let mp: List[String] = x86_mix_paren(toks, n, j, int_names, int_vals);
+                            if list_len(mp) >= 1 {
+                                msgs = list_push(msgs, list_get(mp, 0));
+                            } else {
+                                leftover_unresolved = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if !saw_main {
+        println("ERR\tx86_emit\tresidual: need fn main");
+        process_exit(1);
+    }
+    if leftover_unresolved {
+        println("ERR\tx86_emit\tleftover println(ident)");
+        process_exit(1);
+    }
+    if list_len(msgs) < 1 {
+        println("ERR\tx86_emit\tresidual: need println(\"...\") (not emit-c)");
+        process_exit(1);
+    }
+    return msgs;
+}

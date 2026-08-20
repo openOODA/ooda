@@ -9,6 +9,8 @@
 //   2. In protos mode, print a prototype for non-main, skip the body, and return.
 //   3. Emit main with ambient grants or a named fn with contracts and the block; release locals; return [pos, out_fn].
 
+import "c_emit_mangle.oo";
+
 // returns [new_pos_str, updated_fn_env]; fn_env carries __fr__name=T for String rets
 pub fn c_emit_fn(toks: List[String], pos: Int, n: Int, fn_env: String) -> List[String] {
     return c_emit_fn_mode(toks, pos, n, fn_env, "all");
@@ -25,13 +27,18 @@ pub fn c_emit_fn_mode(toks: List[String], pos: Int, n: Int, fn_env: String, mode
     let fn_name: String = c_tokt(toks, p);
     p = p + 1;
     p = p + 1;
+    // Per-source-file C name: stops the C linker redefining two .oo files' `pub fn X` as plain `X`. env keeps fn_name for __fr__ lookups.
+    let src_path: String = c_tokf(toks, pos, 1);
+    let c_fn_name: String = c_mangle_fn_name(fn_name, src_path);
+    // Inherit prior fn String-return map so println(make(..)) sees OoStr.
+    let mut env = fn_env;
+    let mut out_fn = fn_env;
+    env = c_env_put(env, "__cname__" + fn_name, c_fn_name);
+    out_fn = c_env_put(out_fn, "__cname__" + fn_name, c_fn_name);
     let mut plist = "";
     let mut first = true;
     // CAP-G3: type-driven main grants encoded as "name=suffix;name=suffix;"
     let mut mcap = "";
-    // Inherit prior fn String-return map so println(make(..)) sees OoStr.
-    let mut env = fn_env;
-    let mut out_fn = fn_env;
     while p < n {
         let pk: String = c_tokk(toks, p);
         if pk == "RPAREN" {
@@ -55,6 +62,10 @@ pub fn c_emit_fn_mode(toks: List[String], pos: Int, n: Int, fn_env: String, mode
                 pty = c_ty_at(toks, p, n);
                 c_emit_need_ty(pty);
                 let tp: Int = c_skip_amp_mut(toks, p, n);
+                let orig_was_ptr: Bool = c_tokk(toks, p) == "AMP";
+                if orig_was_ptr {
+                    env = c_env_put(env, "__ptr__" + pname, "1");
+                }
                 if tp < n && c_tokk(toks, tp) == "IDENT" {
                     let tn: String = c_tokt(toks, tp);
                     if tn == "List" {
@@ -132,7 +143,7 @@ pub fn c_emit_fn_mode(toks: List[String], pos: Int, n: Int, fn_env: String, mode
     
     if mode == "protos" || mode == "protos_noarc" {
         if fn_name != "main" {
-            let mut sig = ret_ty + " " + fn_name;
+            let mut sig = ret_ty + " " + c_fn_name;
             if first {
                 sig = sig + "(void)";
             } else {
@@ -196,7 +207,7 @@ pub fn c_emit_fn_mode(toks: List[String], pos: Int, n: Int, fn_env: String, mode
     } else {
         if mode == "all" || mode == "bodies" || mode == "all_noarc" || mode == "bodies_noarc" {
             println("");
-            let mut sig = ret_ty + " " + fn_name;
+            let mut sig = ret_ty + " " + c_fn_name;
             if first {
                 sig = sig + "(void)";
             } else {
@@ -206,15 +217,14 @@ pub fn c_emit_fn_mode(toks: List[String], pos: Int, n: Int, fn_env: String, mode
             if fl2 != "" {
                 println("#line " + fl2);
             }
-            println("#ifndef OO_FN_" + fn_name);
-            println("#define OO_FN_" + fn_name);
+            println("#ifndef OO_FN_" + c_fn_name);
+            println("#define OO_FN_" + c_fn_name);
             println(sig + " {");
             oo_emit_tmp_reset();
             // M126: call-entry fuel on shared static (recursion debits; no per-fn reset)
             if c_env_get(env, "__mc__") != "" {
                 c_emit_while_fuel_check(c_env_get(env, "__mc__"));
             }
-            // M112: ensures clauses checked via macro
         }
         if c_has_simple_ensures(toks, p, n) {
             env = c_env_put(env, "__ens__", "1");

@@ -1,0 +1,149 @@
+// # LLVM String-for, Float list_set, ResS sret lock
+//
+// Logline: Product emit-llvm + raw clang + chs_rt for the next C-parity floors.
+//
+// Setup: cwd is ooda/. Uses ./oodac/oodac. Host clang links chs_rt only.
+//
+// Beats:
+//   1. for_list_str/float use slist/flist get. list_set_node uses oo_l_Node_set.
+//   2. ress_sret / result_int use sret. Nested list_set and Option[Bool] still ERR.
+//   3. clang-run PASSED marks. Raw IR + chs_rt only.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn emit_ok(p: &ProcessCap, src: String, ll: String, err: String) -> Bool {
+    if process_exec(p, "./oodac/oodac --backend llvm emit-llvm " + src + " > " + ll + " 2>" + err).is_err() {
+        return false;
+    }
+    if process_exec(p, "grep -qE '^ERR' " + ll + " " + err).is_ok() {
+        return false;
+    }
+    return true;
+}
+
+fn clang_run(p: &ProcessCap, ll: String, bin: String, mark: String) {
+    if process_exec(p, "clang -O0 -Wno-override-module -Iruntime " + ll + " runtime/chs_rt.c -lm -o " + bin + " 2>" + bin + ".clang").is_err() {
+        fail("clang " + ll);
+    }
+    if process_exec(p, bin + " > " + bin + ".out 2>" + bin + ".err").is_err() {
+        fail("run " + ll);
+    }
+    if process_exec(p, "grep -qF '" + mark + "' " + bin + ".out").is_err() {
+        fail("no " + mark);
+    }
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    if process_exec(p, "test -x ./oodac/oodac").is_err() { fail("no product oodac"); }
+    if process_exec(p, "grep -a -q 'oodac: usage:' ./oodac/oodac").is_err() { fail("not compiler"); }
+    let d = ".ooda-cache/ooda-tmp/llvm_resi_more";
+    if process_exec(p, "mkdir -p " + d).is_err() { fail("mkdir"); }
+
+    if !emit_ok(p, "fixtures/for_list_str_smoke.oo", d + "/fs.ll", d + "/fs.err") { fail("emit for_str"); }
+    if process_exec(p, "grep -q oo_slist_get " + d + "/fs.ll").is_err() { fail("for_str no slist_get"); }
+    if process_exec(p, "grep -q 'call i64 @oo_ilist_get' " + d + "/fs.ll").is_ok() { fail("for_str used ilist_get"); }
+    clang_run(p, d + "/fs.ll", d + "/fs.bin", "for_list_str_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/list_set_float_smoke.oo", d + "/lf.ll", d + "/lf.err") { fail("emit flist_set"); }
+    if process_exec(p, "grep -q oo_flist_set " + d + "/lf.ll").is_err() { fail("no oo_flist_set"); }
+    if process_exec(p, "grep -q 'call void @oo_ilist_set' " + d + "/lf.ll").is_ok() { fail("float used ilist_set"); }
+    clang_run(p, d + "/lf.ll", d + "/lf.bin", "list_set_float_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/for_list_float_smoke.oo", d + "/ff.ll", d + "/ff.err") { fail("emit for_float"); }
+    if process_exec(p, "grep -q oo_flist_get " + d + "/ff.ll").is_err() { fail("for_float no flist_get"); }
+    if process_exec(p, "grep -q 'call i64 @oo_ilist_get' " + d + "/ff.ll").is_ok() { fail("for_float used ilist_get"); }
+    clang_run(p, d + "/ff.ll", d + "/ff.bin", "for_list_float_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/list_set_node_smoke.oo", d + "/ln.ll", d + "/ln.err") { fail("emit node_set"); }
+    if process_exec(p, "grep -q oo_l_Node_set " + d + "/ln.ll").is_err() { fail("no oo_l_Node_set"); }
+    if process_exec(p, "grep -q 'call i64 @list_set' " + d + "/ln.ll").is_ok() { fail("node used list_set pun"); }
+    clang_run(p, d + "/ln.ll", d + "/ln.bin", "list_set_node_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/for_list_node_smoke.oo", d + "/fn.ll", d + "/fn.err") { fail("emit for_node"); }
+    if process_exec(p, "grep -q 'sret(%struct.Node)' " + d + "/fn.ll").is_err() { fail("for_node get not sret"); }
+    if process_exec(p, "grep -q 'call i64 @oo_ilist_get' " + d + "/fn.ll").is_ok() { fail("for_node used ilist_get"); }
+    if process_exec(p, "grep -q 'call %struct.Node @oo_l_Node_get' " + d + "/fn.ll").is_ok() { fail("for_node by-value struct get"); }
+    if process_exec(p, "grep -q 'call %OoStr @oo_slist_get' " + d + "/fn.ll").is_ok() { fail("for_node used slist_get"); }
+    clang_run(p, d + "/fn.ll", d + "/fn.bin", "for_list_node_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/for_list_ll_int_smoke.oo", d + "/fll.ll", d + "/fll.err") { fail("emit for_ll"); }
+    if process_exec(p, "grep -q 'call void @oo_ll_I_get(%OoIList\\* sret' " + d + "/fll.ll").is_err() { fail("for_ll get not sret"); }
+    if process_exec(p, "grep -q 'call i64 @oo_ll_I_get' " + d + "/fll.ll").is_ok() { fail("for_ll by-value nested get"); }
+    if process_exec(p, "grep -q 'call %OoIList @oo_ll_I_get' " + d + "/fll.ll").is_ok() { fail("for_ll by-value IList get"); }
+    clang_run(p, d + "/fll.ll", d + "/fll.bin", "for_list_ll_int_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/list_set_ll_int_smoke.oo", d + "/sll.ll", d + "/sll.err") { fail("emit set_ll"); }
+    if process_exec(p, "grep -q oo_ll_I_set " + d + "/sll.ll").is_err() { fail("set_ll no oo_ll_I_set"); }
+    if process_exec(p, "grep -q 'call i64 @list_set' " + d + "/sll.ll").is_ok() { fail("set_ll used list_set pun"); }
+    if process_exec(p, "grep -q 'call void @oo_ilist_set' " + d + "/sll.ll").is_ok() { fail("set_ll used outer ilist_set"); }
+    clang_run(p, d + "/sll.ll", d + "/sll.bin", "list_set_ll_int_smoke: PASSED");
+
+    if process_exec(p, "./oodac/oodac --backend llvm emit-llvm fixtures/list_set_ll_fail.oo > " + d + "/lls.ll 2>" + d + "/lls.err").is_ok() {
+        if process_exec(p, "grep -qE '^ERR' " + d + "/lls.ll " + d + "/lls.err").is_err() {
+            fail("nested list_set did not fail-close");
+        }
+    }
+    if process_exec(p, "grep -qE 'ERR.+llvm_emit' " + d + "/lls.ll " + d + "/lls.err").is_err() {
+        fail("nested list_set missing ERR llvm_emit");
+    }
+
+    if !emit_ok(p, "fixtures/ress_sret_smoke.oo", d + "/rs.ll", d + "/rs.err") { fail("emit ress"); }
+    if process_exec(p, "grep -q 'define void @f(%OoResS\\* sret(%OoResS)' " + d + "/rs.ll").is_err() {
+        fail("ress not sret define");
+    }
+    if process_exec(p, "grep -q 'define %OoResS @f(' " + d + "/rs.ll").is_ok() {
+        fail("ress still by-value define");
+    }
+    if process_exec(p, "grep -q 'declare void @read_file(%OoResS\\* sret' " + d + "/rs.ll").is_ok() {
+        fail("read_file sret declare");
+    }
+    if process_exec(p, "grep -q 'declare void @process_exec(%OoResS\\* sret' " + d + "/rs.ll").is_ok() {
+        fail("process_exec sret declare");
+    }
+    if process_exec(p, "grep -q 'declare %OoResS @read_file' " + d + "/rs.ll").is_err() {
+        fail("read_file not by-value declare");
+    }
+    if process_exec(p, "grep -q 'declare %OoResS @process_exec' " + d + "/rs.ll").is_err() {
+        fail("process_exec not by-value declare");
+    }
+    clang_run(p, d + "/rs.ll", d + "/rs.bin", "ress_sret_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/result_int_smoke.oo", d + "/ri.ll", d + "/ri.err") { fail("emit resi"); }
+    if process_exec(p, "grep -q 'sret(%OoResI)' " + d + "/ri.ll").is_err() { fail("resi not sret"); }
+    if process_exec(p, "grep -q 'define %OoResI @f(' " + d + "/ri.ll").is_ok() { fail("resi still by-value"); }
+    clang_run(p, d + "/ri.ll", d + "/ri.bin", "result_int_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/result_bool_smoke.oo", d + "/rb.ll", d + "/rb.err") { fail("emit resb"); }
+    if process_exec(p, "grep -q 'sret(%OoResB)' " + d + "/rb.ll").is_err() { fail("resb not sret"); }
+    if process_exec(p, "grep -q 'define %OoResB @f(' " + d + "/rb.ll").is_ok() { fail("resb still by-value"); }
+    clang_run(p, d + "/rb.ll", d + "/rb.bin", "result_bool_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/result_float_smoke.oo", d + "/rf.ll", d + "/rf.err") { fail("emit resf"); }
+    if process_exec(p, "grep -q 'sret(%OoResF)' " + d + "/rf.ll").is_err() { fail("resf not sret"); }
+    if process_exec(p, "grep -q 'define %OoResF @f(' " + d + "/rf.ll").is_ok() { fail("resf still by-value"); }
+    clang_run(p, d + "/rf.ll", d + "/rf.bin", "result_float_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/option_bool_smoke.oo", d + "/obp.ll", d + "/obp.err") { fail("emit optb"); }
+    if process_exec(p, "grep -q 'sret(%OoResB)' " + d + "/obp.ll").is_err() { fail("optb not sret"); }
+    if process_exec(p, "grep -q 'define %OoResB @f(' " + d + "/obp.ll").is_ok() { fail("optb still by-value"); }
+    clang_run(p, d + "/obp.ll", d + "/obp.bin", "option_bool_smoke: PASSED");
+
+    if !emit_ok(p, "fixtures/option_float_smoke.oo", d + "/ofp.ll", d + "/ofp.err") { fail("emit optf"); }
+    if process_exec(p, "grep -q 'sret(%OoResF)' " + d + "/ofp.ll").is_err() { fail("optf not sret"); }
+    if process_exec(p, "grep -q 'define %OoResF @f(' " + d + "/ofp.ll").is_ok() { fail("optf still by-value"); }
+    clang_run(p, d + "/ofp.ll", d + "/ofp.bin", "option_float_smoke: PASSED");
+
+    if process_exec(p, "./oodac/oodac --backend llvm emit-llvm fixtures/llvm_option_bool.oo > " + d + "/ob.ll 2>" + d + "/ob.err").is_ok() {
+        if process_exec(p, "grep -qE '^ERR' " + d + "/ob.ll " + d + "/ob.err").is_err() {
+            fail("option leftover did not fail-close");
+        }
+    }
+    if process_exec(p, "grep -qE 'ERR.+llvm_emit' " + d + "/ob.ll " + d + "/ob.err").is_err() {
+        fail("option leftover missing ERR llvm_emit");
+    }
+
+    println("llvm_resi_more: PASSED");
+}

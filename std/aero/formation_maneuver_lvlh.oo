@@ -1,0 +1,91 @@
+// # Formation LVLH Frame Conversion
+//
+// Logline: ECI to LVLH relative state conversion and back-projection of relative position to ECI.
+//
+// Setup: Imports the formation engine for Vec3, RelativeState, vec3 helpers, and hcw_propagate.
+//
+// Beats:
+//   1. Transform Cartesian chief and deputy state vectors into LVLH relative coordinates.
+//   2. Back-project an LVLH relative position into the chief-centered ECI frame.
+//   3. Provide a drift-correction impulse aligned with the LVLH along-track direction.
+
+import "./formation_engine.oo";
+
+pub fn eci_to_lvlh(r_chief: Vec3, v_chief: Vec3, r_deputy: Vec3, v_deputy: Vec3) -> RelativeState {
+    let r_mag: Float = vec3_length(r_chief);
+    if r_mag < 0.000001 {
+        return relative_state_zero();
+    }
+
+    // Radial unit vector i_r
+    let i_r: Vec3 = vec3_scale(r_chief, 1.0 / r_mag);
+
+    // Cross-track unit vector i_h = (r x v) / |r x v|
+    let h_vec: Vec3 = vec3_cross(r_chief, v_chief);
+    let h_mag: Float = vec3_length(h_vec);
+    if h_mag < 0.000001 {
+        return relative_state_zero();
+    }
+    let i_h: Vec3 = vec3_scale(h_vec, 1.0 / h_mag);
+
+    // Along-track unit vector i_theta = i_h x i_r
+    let i_theta: Vec3 = vec3_cross(i_h, i_r);
+
+    // Difference vectors in ECI
+    let dr_eci: Vec3 = vec3_sub(r_deputy, r_chief);
+    let dv_eci: Vec3 = vec3_sub(v_deputy, v_chief);
+
+    // Relative Position in LVLH
+    let rx_lvlh: Float = vec3_dot(dr_eci, i_r);
+    let ry_lvlh: Float = vec3_dot(dr_eci, i_theta);
+    let rz_lvlh: Float = vec3_dot(dr_eci, i_h);
+
+    // Angular velocity vector of LVLH frame w = h_vec / r^2
+    let w_mag: Float = h_mag / (r_mag * r_mag);
+    let w_vec: Vec3 = vec3_scale(i_h, w_mag);
+
+    // Transport theorem velocity correction: v_rel = dv_eci - (w x dr_eci)
+    let w_cross_dr: Vec3 = vec3_cross(w_vec, dr_eci);
+    let v_rel_eci: Vec3 = vec3_sub(dv_eci, w_cross_dr);
+
+    let vx_lvlh: Float = vec3_dot(v_rel_eci, i_r);
+    let vy_lvlh: Float = vec3_dot(v_rel_eci, i_theta);
+    let vz_lvlh: Float = vec3_dot(v_rel_eci, i_h);
+
+    let pos: Vec3 = vec3_new(rx_lvlh, ry_lvlh, rz_lvlh);
+    let vel: Vec3 = vec3_new(vx_lvlh, vy_lvlh, vz_lvlh);
+
+    return relative_state_new(pos, vel, 0.0);
+}
+
+/// Convert LVLH relative position back to ECI position
+pub fn lvlh_to_eci_position(r_chief: Vec3, v_chief: Vec3, rel_pos: Vec3) -> Vec3 {
+    let r_mag: Float = vec3_length(r_chief);
+    if r_mag < 0.000001 {
+        return r_chief;
+    }
+    let i_r: Vec3 = vec3_scale(r_chief, 1.0 / r_mag);
+    let h_vec: Vec3 = vec3_cross(r_chief, v_chief);
+    let h_mag: Float = vec3_length(h_vec);
+    if h_mag < 0.000001 {
+        return r_chief;
+    }
+    let i_h: Vec3 = vec3_scale(h_vec, 1.0 / h_mag);
+    let i_theta: Vec3 = vec3_cross(i_h, i_r);
+
+    let x_part: Vec3 = vec3_scale(i_r, (rel_pos).x);
+    let y_part: Vec3 = vec3_scale(i_theta, (rel_pos).y);
+    let z_part: Vec3 = vec3_scale(i_h, (rel_pos).z);
+
+    let dr_eci: Vec3 = vec3_add(vec3_add(x_part, y_part), z_part);
+    return vec3_add(r_chief, dr_eci);
+}
+
+/// Compute immediate single impulse Delta-V to eliminate secular along-track drift
+pub fn calculate_drift_correction_dv(state: RelativeState, n_mean: Float) -> Vec3 {
+    let x0: Float = ((state).position).x;
+    let vy0: Float = ((state).velocity).y;
+    let target_vy: Float = hcw_bounded_v_intrack(x0, n_mean);
+    let delta_vy: Float = target_vy - vy0;
+    return vec3_new(0.0, delta_vy, 0.0);
+}

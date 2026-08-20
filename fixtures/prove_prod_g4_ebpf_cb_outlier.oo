@@ -1,0 +1,73 @@
+// # Product prove std/mesh_ebpf/mesh_circuit_breaker_outlier.oo
+//
+// Logline: Fail-closed emit+gcc+run asserts circuit breaker outlier detection operations are deterministic.
+//
+// Setup: Isolated emit-c. Imports std/mesh_ebpf/mesh_circuit_breaker_outlier.oo.
+//
+// Beats:
+//   1. Initialize outlier detector and register upstream hosts.
+//   2. Record consecutive 5xx error responses and trigger host ejection.
+//   3. Assert deterministic state transitions and ejection recovery.
+//   4. Print prod_g4_ebpf_cb_outlier: PASSED and exit 0.
+
+import "std/mesh_ebpf/mesh_circuit_breaker_outlier.oo";
+
+pub fn main() {
+    let mut det1: OutlierDetector = outlier_detector_new(3, 10000, 50);
+    let mut det2: OutlierDetector = outlier_detector_new(3, 10000, 50);
+
+    if (det1).consecutive_5xx_threshold != 3 || (det1).max_ejection_percent != 50 || (det1).total_hosts != 0 {
+        println("FAIL outlier_detector_new init");
+        process_exit(1);
+    }
+
+    outlier_add_host(&mut det1, "host-a");
+    outlier_add_host(&mut det1, "host-b");
+
+    outlier_add_host(&mut det2, "host-a");
+    outlier_add_host(&mut det2, "host-b");
+
+    if (det1).total_hosts != 2 || (det2).total_hosts != 2 {
+        println("FAIL outlier_add_host count");
+        process_exit(1);
+    }
+
+    let r1a: Bool = outlier_record_response(&mut det1, "host-a", 500, 1000);
+    let r1b: Bool = outlier_record_response(&mut det2, "host-a", 500, 1000);
+
+    let r2a: Bool = outlier_record_response(&mut det1, "host-a", 502, 1100);
+    let r2b: Bool = outlier_record_response(&mut det2, "host-a", 502, 1100);
+
+    let r3a: Bool = outlier_record_response(&mut det1, "host-a", 503, 1200);
+    let r3b: Bool = outlier_record_response(&mut det2, "host-a", 503, 1200);
+
+    if !r1a || !r1b || !r2a || !r2b || !r3a || !r3b {
+        println("FAIL outlier_record_response return");
+        process_exit(1);
+    }
+
+    if (det1).ejected_hosts_count != 1 || (det2).ejected_hosts_count != 1 {
+        println("FAIL outlier ejection threshold breach");
+        process_exit(1);
+    }
+
+    // Try ejecting second host - should be prevented by 50% max ejection limit (2 * 50 / 100 = 1)
+    let _r_b1: Bool = outlier_record_response(&mut det1, "host-b", 500, 1300);
+    let _r_b2: Bool = outlier_record_response(&mut det1, "host-b", 503, 1400);
+    let _r_b3: Bool = outlier_record_response(&mut det1, "host-b", 504, 1500);
+
+    if (det1).ejected_hosts_count != 1 {
+        println("FAIL max ejection percentage constraint");
+        process_exit(1);
+    }
+
+    // Recover host-a after ejection window expires (now_ms >= 1200 + 10000 = 11200)
+    let _r_rec: Bool = outlier_record_response(&mut det1, "host-a", 200, 12000);
+    if (det1).ejected_hosts_count != 0 {
+        println("FAIL outlier ejection recovery");
+        process_exit(1);
+    }
+
+    println("prod_g4_ebpf_cb_outlier: PASSED");
+    process_exit(0);
+}

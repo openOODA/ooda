@@ -1,0 +1,88 @@
+// # Service Mesh Adaptive Concurrency Controller
+//
+// Logline: Dynamically calculates concurrency limits using gradient-based latency feedback.
+//
+// Setup: Overload protection filter preventing queue buildup and tail latency inflation.
+//
+// Beats:
+//   1. Maintain min RTT baseline and calculate gradient ratio (min_rtt / sample_rtt).
+//   2. Update dynamic concurrency limit with headroom factor and gradient multiplier.
+//   3. Admit or reject incoming requests based on current in-flight count vs limit.
+
+pub type AdaptiveConcurrencyConfig = struct {
+    min_concurrency: Int,
+    max_concurrency: Int,
+    headroom_percent: Int,
+    min_rtt_ms: Int,
+};
+
+pub type AdaptiveConcurrencyState = struct {
+    config: AdaptiveConcurrencyConfig,
+    current_limit: Int,
+    in_flight: Int,
+    total_admitted: Int,
+    total_rejected: Int,
+};
+
+pub fn adaptive_concurrency_config_default() -> AdaptiveConcurrencyConfig {
+    return AdaptiveConcurrencyConfig {
+        min_concurrency: 5,
+        max_concurrency: 1000,
+        headroom_percent: 20,
+        min_rtt_ms: 10,
+    };
+}
+
+pub fn adaptive_concurrency_new(cfg: AdaptiveConcurrencyConfig) -> AdaptiveConcurrencyState {
+    let init_limit: Int = (cfg).min_concurrency;
+    return AdaptiveConcurrencyState {
+        config: cfg,
+        current_limit: init_limit,
+        in_flight: 0,
+        total_admitted: 0,
+        total_rejected: 0,
+    };
+}
+
+pub fn adaptive_concurrency_try_acquire(state: &mut AdaptiveConcurrencyState) -> Bool {
+    if (state).in_flight < (state).current_limit {
+        (state).in_flight = (state).in_flight + 1;
+        (state).total_admitted = (state).total_admitted + 1;
+        return true;
+    }
+    (state).total_rejected = (state).total_rejected + 1;
+    return false;
+}
+
+pub fn adaptive_concurrency_release(
+    state: &mut AdaptiveConcurrencyState,
+    measured_rtt_ms: Int
+) {
+    if (state).in_flight > 0 {
+        (state).in_flight = (state).in_flight - 1;
+    }
+
+    let min_rtt: Int = ((state).config).min_rtt_ms;
+    if measured_rtt_ms <= 0 {
+        return;
+    }
+
+    let grad_num: Int = min_rtt * 100;
+    let mut gradient: Int = grad_num / measured_rtt_ms;
+    if gradient > 200 {
+        gradient = 200;
+    }
+
+    let raw_limit: Int = ((state).current_limit * gradient) / 100;
+    let headroom: Int = (raw_limit * ((state).config).headroom_percent) / 100;
+    let mut new_limit: Int = raw_limit + headroom;
+
+    if new_limit < ((state).config).min_concurrency {
+        new_limit = ((state).config).min_concurrency;
+    }
+    if new_limit > ((state).config).max_concurrency {
+        new_limit = ((state).config).max_concurrency;
+    }
+
+    (state).current_limit = new_limit;
+}

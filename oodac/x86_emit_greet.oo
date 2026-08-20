@@ -1,0 +1,242 @@
+// # Emit SysV one-arg greet concat call
+//
+// Logline: Matches return STRING plus param plus STRING and println(fn(STRING)) then copies into the bump.
+//
+// Setup: tokenize_lines, tok helpers, ascii_esc, and frame enter/leave exist. Hello fold already missed.
+//
+// Beats:
+//   1. Find one fn whose body is prefix plus param plus suffix.
+//   2. Require main to be only println of that fn on one STRING.
+//   3. lea the name into %rdi, call, copy into .Lbuf; overflow above 4096 ERRs.
+//
+// residual: hello.oo fold stays RBRACE-tight. Int args stay later.
+
+import "token_fmt.oo";
+import "x86_emit_harv.oo";
+import "x86_emit_sys.oo";
+import "x86_emit_frame.oo";
+
+fn x86_greet_shape(toks: List[String], n: Int, i: Int) -> List[String] {
+    let empty: List[String] = list_new();
+    if i + 15 >= n {
+        return empty;
+    }
+    if x86_tok_k(toks, i) != "KW_FN" || x86_tok_k(toks, i + 1) != "IDENT" {
+        return empty;
+    }
+    let nm: String = x86_tok_t(toks, i + 1);
+    if nm == "main" {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 2) != "LPAREN" || x86_tok_k(toks, i + 3) != "IDENT" {
+        return empty;
+    }
+    let pn: String = x86_tok_t(toks, i + 3);
+    if x86_tok_k(toks, i + 4) != "COLON" || x86_tok_k(toks, i + 5) != "IDENT" {
+        return empty;
+    }
+    if x86_tok_t(toks, i + 5) != "String" {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 6) != "RPAREN" || x86_tok_k(toks, i + 7) != "ARROW" {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 8) != "IDENT" || x86_tok_t(toks, i + 8) != "String" {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 9) != "LBRACE" || x86_tok_k(toks, i + 10) != "KW_RETURN" {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 11) != "STRING" || x86_tok_k(toks, i + 12) != "PLUS" {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 13) != "IDENT" || x86_tok_t(toks, i + 13) != pn {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 14) != "PLUS" || x86_tok_k(toks, i + 15) != "STRING" {
+        return empty;
+    }
+    let pre: String = x86_tok_t(toks, i + 11);
+    let suf: String = x86_tok_t(toks, i + 15);
+    let mut p = i + 16;
+    if p < n && x86_tok_k(toks, p) == "SEMI" {
+        p = p + 1;
+    }
+    if p >= n || x86_tok_k(toks, p) != "RBRACE" {
+        return empty;
+    }
+    let mut o: List[String] = list_new();
+    o = list_push(o, nm);
+    o = list_push(o, pre);
+    o = list_push(o, suf);
+    return o;
+}
+
+fn x86_greet_main(toks: List[String], n: Int, i: Int, fname: String) -> List[String] {
+    let empty: List[String] = list_new();
+    if i + 12 >= n {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 2) != "LPAREN" || x86_tok_k(toks, i + 3) != "RPAREN" {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 4) != "LBRACE" || x86_tok_k(toks, i + 5) != "IDENT" {
+        return empty;
+    }
+    if x86_tok_t(toks, i + 5) != "println" || x86_tok_k(toks, i + 6) != "LPAREN" {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 7) != "IDENT" || x86_tok_t(toks, i + 7) != fname {
+        return empty;
+    }
+    if x86_tok_k(toks, i + 8) != "LPAREN" || x86_tok_k(toks, i + 9) != "STRING" {
+        return empty;
+    }
+    let arg: String = x86_tok_t(toks, i + 9);
+    if x86_tok_k(toks, i + 10) != "RPAREN" || x86_tok_k(toks, i + 11) != "RPAREN" {
+        return empty;
+    }
+    let mut p = i + 12;
+    if p < n && x86_tok_k(toks, p) == "SEMI" {
+        p = p + 1;
+    }
+    if p >= n || x86_tok_k(toks, p) != "RBRACE" {
+        return empty;
+    }
+    let mut o: List[String] = list_new();
+    o = list_push(o, arg);
+    return o;
+}
+
+pub fn x86_match_greet_call(src: String) -> List[String] {
+    let empty: List[String] = list_new();
+    if chars_len(src) <= 0 {
+        return empty;
+    }
+    let toks: List[String] = tokenize_lines(src);
+    let n = list_len(toks);
+    let mut fname = "";
+    let mut pre = "";
+    let mut suf = "";
+    let mut i = 0;
+    while i < n {
+        if x86_tok_k(toks, i) == "KW_FN" {
+            if i + 1 >= n || x86_tok_k(toks, i + 1) != "IDENT" {
+                return empty;
+            }
+            let nm: String = x86_tok_t(toks, i + 1);
+            if nm != "main" {
+                let idn: List[String] = x86_greet_shape(toks, n, i);
+                if list_len(idn) < 3 {
+                    return empty;
+                }
+                if chars_len(fname) > 0 {
+                    return empty;
+                }
+                fname = list_get(idn, 0);
+                pre = list_get(idn, 1);
+                suf = list_get(idn, 2);
+            }
+        }
+        i = i + 1;
+    }
+    if chars_len(fname) <= 0 {
+        return empty;
+    }
+    let mut arg = "";
+    let mut saw = false;
+    i = 0;
+    while i < n {
+        if x86_tok_k(toks, i) == "KW_FN" {
+            if i + 1 < n && x86_tok_k(toks, i + 1) == "IDENT" {
+                if x86_tok_t(toks, i + 1) == "main" {
+                    if saw {
+                        return empty;
+                    }
+                    let mb: List[String] = x86_greet_main(toks, n, i, fname);
+                    if list_len(mb) < 1 {
+                        return empty;
+                    }
+                    arg = list_get(mb, 0);
+                    saw = true;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if !saw {
+        return empty;
+    }
+    let mut o: List[String] = list_new();
+    o = list_push(o, fname);
+    o = list_push(o, pre);
+    o = list_push(o, arg);
+    o = list_push(o, suf);
+    return o;
+}
+
+pub fn x86_emit_greet_call(fname: String, pre: String, name: String, suf: String) {
+    let lp = chars_len(pre);
+    let ln = chars_len(name);
+    let ls = chars_len(suf);
+    if lp + ln + ls + 1 > 4096 {
+        println("ERR\tx86_emit\tx86 buf");
+        process_exit(1);
+    }
+    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
+    println("    .section .rodata");
+    println(".Lpre:");
+    println("    .ascii \"" + x86_ascii_esc(pre) + "\"");
+    println(".Lnm:");
+    println("    .ascii \"" + x86_ascii_esc(name) + "\"");
+    println(".Lsuf:");
+    println("    .ascii \"" + x86_ascii_esc(suf) + "\"");
+    println("    .section .bss");
+    println("    .p2align 4");
+    println(".Lbuf:");
+    println("    .skip 4096");
+    println("    .section .text");
+    println("    .globl _start");
+    println("    .globl main");
+    println("    .globl " + fname);
+    println(".Lcpy:");
+    println("    test %rcx, %rcx");
+    println("    jz .Lcpy_done");
+    println(".Lcpy_loop:");
+    println("    movb (%rsi), %al");
+    println("    movb %al, (%rdi)");
+    println("    inc %rsi");
+    println("    inc %rdi");
+    println("    dec %rcx");
+    println("    jnz .Lcpy_loop");
+    println(".Lcpy_done:");
+    println("    ret");
+    println(fname + ":");
+    x86_emit_frame_enter();
+    println("    mov %rdi, %r8");
+    println("    lea .Lbuf(%rip), %rdi");
+    println("    lea .Lpre(%rip), %rsi");
+    println("    mov $" + lp.to_string() + ", %rcx");
+    println("    call .Lcpy");
+    println("    mov %r8, %rsi");
+    println("    mov $" + ln.to_string() + ", %rcx");
+    println("    call .Lcpy");
+    println("    lea .Lsuf(%rip), %rsi");
+    println("    mov $" + ls.to_string() + ", %rcx");
+    println("    call .Lcpy");
+    println("    movb $10, (%rdi)");
+    println("    lea .Lbuf(%rip), %rax");
+    x86_emit_frame_leave();
+    println("main:");
+    println("_start:");
+    println("    lea .Lnm(%rip), %rdi");
+    println("    call " + fname);
+    println("    mov %rax, %rsi");
+    println("    mov $1, %rax");
+    println("    mov $1, %rdi");
+    println("    mov $" + (lp + ln + ls + 1).to_string() + ", %rdx");
+    println("    syscall");
+    println("    mov $60, %rax");
+    println("    xor %rdi, %rdi");
+    println("    syscall");
+}

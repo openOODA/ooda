@@ -1,0 +1,58 @@
+// # Product prove std/mesh_ebpf/mesh_traffic_mirror.oo
+//
+// Logline: Fail-closed emit+gcc+run asserts traffic shadowing and mirroring sampling decisions are deterministic.
+//
+// Setup: Isolated emit-c. Imports std/mesh_ebpf/mesh_traffic_mirror.oo.
+//
+// Beats:
+//   1. Initialize traffic mirror state and register shadow cluster targets.
+//   2. Evaluate request sampling hashes against configured percentage thresholds.
+//   3. Assert deterministic shadow routing decisions, primary counts, and mirror metrics.
+//   4. Print prod_g4_ebpf_traffic_mirror: PASSED and exit 0.
+
+import "std/mesh_ebpf/mesh_traffic_mirror.oo";
+
+pub fn main() {
+    let mut tm1: TrafficMirrorState = traffic_mirror_new();
+    let mut tm2: TrafficMirrorState = traffic_mirror_new();
+
+    if (tm1).primary_requests != 0 || (tm1).mirrored_requests != 0 || (tm1).skipped_requests != 0 {
+        println("FAIL traffic_mirror_new init");
+        process_exit(1);
+    }
+
+    // Configure 20% shadow sampling (20 / 100)
+    traffic_mirror_add_target(&mut tm1, "cluster-dark-shadow", 20, 100);
+    traffic_mirror_add_target(&mut tm2, "cluster-dark-shadow", 20, 100);
+
+    // Hash 15: 15 % 100 = 15 < 20 -> should mirror to shadow cluster
+    let m1a: String = traffic_mirror_evaluate(&mut tm1, 15);
+    let m1b: String = traffic_mirror_evaluate(&mut tm2, 15);
+
+    if m1a != m1b || m1a != "cluster-dark-shadow" {
+        println("FAIL traffic_mirror sampled hit");
+        process_exit(1);
+    }
+
+    if (tm1).mirrored_requests != 1 {
+        println("FAIL mirrored_requests count");
+        process_exit(1);
+    }
+
+    // Hash 75: 75 % 100 = 75 >= 20 -> should skip mirror
+    let m2a: String = traffic_mirror_evaluate(&mut tm1, 75);
+    let m2b: String = traffic_mirror_evaluate(&mut tm2, 75);
+
+    if m2a != m2b || m2a != "" {
+        println("FAIL traffic_mirror sampled skip");
+        process_exit(1);
+    }
+
+    if (tm1).skipped_requests != 1 || (tm1).primary_requests != 2 {
+        println("FAIL traffic_mirror aggregate counts");
+        process_exit(1);
+    }
+
+    println("prod_g4_ebpf_traffic_mirror: PASSED");
+    process_exit(0);
+}

@@ -13,6 +13,27 @@ import "token_fmt.oo";
 import "llvm_emit_ty.oo";
 import "llvm_emit_env.oo";
 
+// Latest binding of name wins. Skip a shadowed type or a slot already released.
+fn llvm_arc_slot(env: List[String], vname: String, vty: String, seen: String) -> String {
+    let left: String = llvm_ty_map(llvm_env_get_var_ty(env, vname));
+    let right: String = llvm_ty_map(vty);
+    if left == right {
+        let slot: String = llvm_env_slot(env, vname);
+        let mark: String = ";" + slot + ";";
+        let sn = chars_len(seen);
+        let mn = chars_len(mark);
+        let mut si = 0;
+        while si + mn <= sn {
+            if str_slice(seen, si, si + mn) == mark {
+                return "";
+            }
+            si = si + 1;
+        }
+        return slot;
+    }
+    return "";
+}
+
 pub fn llvm_emit_scope_exit(env: List[String]) -> List[String] {
     let vars = list_get(env, 3);
     let n = chars_len(vars);
@@ -34,6 +55,7 @@ pub fn llvm_emit_scope_exit(env: List[String]) -> List[String] {
     // Parse variable declarations in current frame: name:ty;
     let fn_len = chars_len(frame);
     let mut cur_env = env;
+    let mut seen: String = ";";
     let mut entry = "";
     let mut j = 0;
     while j <= fn_len {
@@ -57,9 +79,15 @@ pub fn llvm_emit_scope_exit(env: List[String]) -> List[String] {
                     let vname = str_slice(entry, 0, colon_pos);
                     let vty = str_slice(entry, colon_pos + 1, elen);
                     let skip_meta = chars_len(vname) >= 2 && str_slice(vname, 0, 2) == "__";
-                    if !skip_meta && llvm_ty_is_arc(vty) {
+                    let mut rel: String = "";
+                    if !skip_meta {
+                        if llvm_ty_is_arc(vty) {
+                            rel = llvm_arc_slot(cur_env, vname, vty, seen);
+                        }
+                    }
+                    if rel != "" {
+                        seen = seen + ";" + rel + ";";
                         let lty: String = llvm_ty_map(vty);
-                        let vslot: String = llvm_env_slot(cur_env, vname);
                         let reg_res: List[String] = llvm_gen_reg(cur_env);
                         let treg = list_get(reg_res, 0);
                         let r_c = list_get(reg_res, 1);
@@ -77,12 +105,20 @@ pub fn llvm_emit_scope_exit(env: List[String]) -> List[String] {
                         cur_env = next_env;
 
                         if lty == "%OoStr" {
-                            println("  " + treg + " = load " + lty + ", " + lty + "* %" + vslot + ".slot, align 8");
+                            println("  " + treg + " = load " + lty + ", " + lty + "* %" + rel + ".slot, align 8");
                             println("  call void @oo_str_release(%OoStr " + treg + ")");
                         } else if lty == "%OoIList" {
-                            println("  call void @oo_ilist_release(%OoIList* byval(%OoIList) %" + vslot + ".slot)");
+                            println("  call void @oo_ilist_release(%OoIList* byval(%OoIList) %" + rel + ".slot)");
                         } else if lty == "%OoSList" {
-                            println("  call void @oo_slist_release(%OoSList* byval(%OoSList) %" + vslot + ".slot)");
+                            println("  call void @oo_slist_release(%OoSList* byval(%OoSList) %" + rel + ".slot)");
+                        } else if lty == "%OoFList" {
+                            println("  call void @oo_flist_release(%OoFList* byval(%OoFList) %" + rel + ".slot)");
+                        } else if lty == "%OoLL_I" {
+                            println("  call void @oo_ll_I_release(%OoLL_I* byval(%OoLL_I) %" + rel + ".slot)");
+                        } else if lty == "%OoLL_S" {
+                            println("  call void @oo_ll_S_release(%OoLL_S* byval(%OoLL_S) %" + rel + ".slot)");
+                        } else if lty == "%OoLL_F" {
+                            println("  call void @oo_ll_F_release(%OoLL_F* byval(%OoLL_F) %" + rel + ".slot)");
                         }
                     }
                 }
@@ -124,6 +160,7 @@ pub fn llvm_emit_ret_arc(env: List[String]) -> List[String] {
     let frame = str_slice(vars, first_scope + 2, n);
     let fn_len = chars_len(frame);
     let mut cur_env = env;
+    let mut seen2: String = ";";
     let mut entry = "";
     let mut j = 0;
     while j <= fn_len {
@@ -147,9 +184,15 @@ pub fn llvm_emit_ret_arc(env: List[String]) -> List[String] {
                     let vname = str_slice(entry, 0, colon_pos);
                     let vty = str_slice(entry, colon_pos + 1, elen);
                     let skip_meta2 = chars_len(vname) >= 2 && str_slice(vname, 0, 2) == "__";
-                    if !skip_meta2 && llvm_ty_is_arc(vty) {
+                    let mut rel2: String = "";
+                    if !skip_meta2 {
+                        if llvm_ty_is_arc(vty) {
+                            rel2 = llvm_arc_slot(cur_env, vname, vty, seen2);
+                        }
+                    }
+                    if rel2 != "" {
+                        seen2 = seen2 + ";" + rel2 + ";";
                         let lty: String = llvm_ty_map(vty);
-                        let vslot2: String = llvm_env_slot(cur_env, vname);
                         let reg_res: List[String] = llvm_gen_reg(cur_env);
                         let treg: String = list_get(reg_res, 0);
                         cur_env = list_new();
@@ -159,12 +202,20 @@ pub fn llvm_emit_ret_arc(env: List[String]) -> List[String] {
                         cur_env = list_push(cur_env, list_get(reg_res, 4));
                         cur_env = list_push(cur_env, list_get(reg_res, 5));
                         if lty == "%OoStr" {
-                            println("  " + treg + " = load " + lty + ", " + lty + "* %" + vslot2 + ".slot, align 8");
+                            println("  " + treg + " = load " + lty + ", " + lty + "* %" + rel2 + ".slot, align 8");
                             println("  call void @oo_str_release(%OoStr " + treg + ")");
                         } else if lty == "%OoIList" {
-                            println("  call void @oo_ilist_release(%OoIList* byval(%OoIList) %" + vslot2 + ".slot)");
+                            println("  call void @oo_ilist_release(%OoIList* byval(%OoIList) %" + rel2 + ".slot)");
                         } else if lty == "%OoSList" {
-                            println("  call void @oo_slist_release(%OoSList* byval(%OoSList) %" + vslot2 + ".slot)");
+                            println("  call void @oo_slist_release(%OoSList* byval(%OoSList) %" + rel2 + ".slot)");
+                        } else if lty == "%OoFList" {
+                            println("  call void @oo_flist_release(%OoFList* byval(%OoFList) %" + rel2 + ".slot)");
+                        } else if lty == "%OoLL_I" {
+                            println("  call void @oo_ll_I_release(%OoLL_I* byval(%OoLL_I) %" + rel2 + ".slot)");
+                        } else if lty == "%OoLL_S" {
+                            println("  call void @oo_ll_S_release(%OoLL_S* byval(%OoLL_S) %" + rel2 + ".slot)");
+                        } else if lty == "%OoLL_F" {
+                            println("  call void @oo_ll_F_release(%OoLL_F* byval(%OoLL_F) %" + rel2 + ".slot)");
                         }
                     }
                 }

@@ -1,9 +1,6 @@
 // # Lower let and assign to LLVM
-//
 // Logline: Stores a let RHS or if/match into a named slot, and writes assigns with ARC retain/release.
-//
 // Setup: llvm_ty_map, llvm_env_add_var, llvm_emit_expr, llvm_emit_if_stmt, and llvm_emit_let_match exist.
-//
 // Beats:
 //   1. Parse let name, optional type, and EQ.
 //   2. KW_MATCH and KW_IF write through a named slot.
@@ -39,13 +36,9 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
             }
         }
         if p < n && field_at(list_get(toks, p), 0) == "LBRACKET" {
-            if p + 1 < n && ann_ty == "List" {
-                ann_ty = "List[" + field_at(list_get(toks, p + 1), 3) + "]";
-            }
-            if p + 1 < n && (ann_ty == "Result" || ann_ty == "Option") {
-                if field_at(list_get(toks, p + 1), 0) == "IDENT" {
-                    ann_ty = ann_ty + "[" + field_at(list_get(toks, p + 1), 3) + "]";
-                }
+            if ann_ty == "List" || ann_ty == "Result" || ann_ty == "Option" {
+                let eaten: List[String] = llvm_ty_eat_generic(ann_ty, toks, p, n);
+                ann_ty = list_get(eaten, 1);
             }
             let mut depth = 0;
             while p < n {
@@ -153,10 +146,11 @@ pub fn llvm_emit_let_stmt(toks: List[String], pos: Int, n: Int, env: List[String
 
     if final_ty == "%OoStr" {
         println("  call void @oo_str_retain(%OoStr " + rhs_val + ")");
-    } else if final_ty == "%OoIList" {
-        println("  call void @oo_ilist_retain(%OoIList* byval(%OoIList) %" + slot + ".slot)");
-    } else if final_ty == "%OoSList" {
-        println("  call void @oo_slist_retain(%OoSList* byval(%OoSList) %" + slot + ".slot)");
+    } else if final_ty == "%OoIList" || final_ty == "%OoSList" || final_ty == "%OoFList" {
+        let mut rfn: String = "ilist";
+        if final_ty == "%OoSList" { rfn = "slist"; }
+        if final_ty == "%OoFList" { rfn = "flist"; }
+        println("  call void @oo_" + rfn + "_retain(" + final_ty + "* byval(" + final_ty + ") %" + slot + ".slot)");
     }
 
     cur_env = llvm_env_add_var(cur_env, name, final_ty);
@@ -202,7 +196,7 @@ pub fn llvm_emit_assign_stmt(name: String, toks: List[String], pos: Int, n: Int,
     let lty: String = llvm_ty_map(vty);
     let aslot: String = llvm_env_slot(cur_env, name);
 
-    if lty == "%OoStr" || lty == "%OoIList" || lty == "%OoSList" {
+    if lty == "%OoStr" || lty == "%OoIList" || lty == "%OoSList" || lty == "%OoFList" || lty == "%OoLL_I" || lty == "%OoLL_S" || lty == "%OoLL_F" {
         let reg_res: List[String] = llvm_gen_reg(cur_env);
         let old_reg: String = list_get(reg_res, 0);
         cur_env = list_new();
@@ -213,7 +207,7 @@ pub fn llvm_emit_assign_stmt(name: String, toks: List[String], pos: Int, n: Int,
         cur_env = list_push(cur_env, list_get(reg_res, 5));
 
         println("  " + old_reg + " = load " + lty + ", " + lty + "* %" + aslot + ".slot, align 8");
-        if lty == "%OoIList" || lty == "%OoSList" {
+        if lty == "%OoIList" || lty == "%OoSList" || lty == "%OoFList" || lty == "%OoLL_I" || lty == "%OoLL_S" || lty == "%OoLL_F" {
             let reg_old: List[String] = llvm_gen_reg(cur_env);
             let old_slot: String = list_get(reg_old, 0) + ".old";
             cur_env = list_new();
@@ -225,12 +219,17 @@ pub fn llvm_emit_assign_stmt(name: String, toks: List[String], pos: Int, n: Int,
             println("  " + old_slot + " = alloca " + lty + ", align 8");
             println("  store " + lty + " " + old_reg + ", " + lty + "* " + old_slot + ", align 8");
             println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + aslot + ".slot, align 8");
-            if lty == "%OoIList" {
-                println("  call void @oo_ilist_retain(%OoIList* byval(%OoIList) %" + aslot + ".slot)");
-                println("  call void @oo_ilist_release(%OoIList* byval(%OoIList) " + old_slot + ")");
+            if lty == "%OoLL_I" || lty == "%OoLL_S" || lty == "%OoLL_F" {
+                let mut suf: String = "I";
+                if lty == "%OoLL_S" { suf = "S"; }
+                if lty == "%OoLL_F" { suf = "F"; }
+                println("  call void @oo_ll_" + suf + "_release(" + lty + "* byval(" + lty + ") " + old_slot + ")");
             } else {
-                println("  call void @oo_slist_retain(%OoSList* byval(%OoSList) %" + aslot + ".slot)");
-                println("  call void @oo_slist_release(%OoSList* byval(%OoSList) " + old_slot + ")");
+                let mut rfn: String = "ilist";
+                if lty == "%OoSList" { rfn = "slist"; }
+                if lty == "%OoFList" { rfn = "flist"; }
+                println("  call void @oo_" + rfn + "_retain(" + lty + "* byval(" + lty + ") %" + aslot + ".slot)");
+                println("  call void @oo_" + rfn + "_release(" + lty + "* byval(" + lty + ") " + old_slot + ")");
             }
         } else if lty == "%OoStr" {
             println("  store " + lty + " " + rhs_val + ", " + lty + "* %" + aslot + ".slot, align 8");

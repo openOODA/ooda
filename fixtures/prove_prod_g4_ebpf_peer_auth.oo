@@ -1,0 +1,68 @@
+// # Product prove std/mesh_ebpf/mesh_peer_authentication.oo
+//
+// Logline: Fail-closed emit+gcc+run asserts mesh peer authentication policy evaluation is deterministic.
+//
+// Setup: Isolated emit-c. Imports std/mesh_ebpf/mesh_peer_authentication.oo.
+//
+// Beats:
+//   1. Initialize peer authentication policy resolver.
+//   2. Add workload-level STRICT mTLS policy rules.
+//   3. Evaluate connections under STRICT and PERMISSIVE modes to assert deterministic decisions.
+//   4. Print prod_g4_ebpf_peer_auth: PASSED and exit 0.
+
+import "std/mesh_ebpf/mesh_peer_authentication.oo";
+
+pub fn main() {
+    let mut res1: PeerAuthResolver = peer_auth_resolver_new();
+    let mut res2: PeerAuthResolver = peer_auth_resolver_new();
+
+    if (res1).connections_evaluated != 0 || (res1).strict_enforced != 0 || (res1).rejected_count != 0 {
+        println("FAIL peer_auth_resolver_new init");
+        process_exit(1);
+    }
+
+    // Add STRICT policy (mode = 1) for payment service
+    peer_auth_add_policy(&mut res1, "payments", "payment-svc", 1);
+    peer_auth_add_policy(&mut res2, "payments", "payment-svc", 1);
+
+    // Evaluate TLS connection to STRICT service -> should allow
+    let allow_tls1: Bool = peer_auth_evaluate_connection(&mut res1, "payments", "payment-svc", 8443, true);
+    let allow_tls2: Bool = peer_auth_evaluate_connection(&mut res2, "payments", "payment-svc", 8443, true);
+
+    if !allow_tls1 || !allow_tls2 {
+        println("FAIL peer_auth STRICT TLS allowed");
+        process_exit(1);
+    }
+
+    if (res1).strict_enforced != 1 {
+        println("FAIL peer_auth strict_enforced count");
+        process_exit(1);
+    }
+
+    // Evaluate Plaintext connection to STRICT service -> should reject
+    let reject_plain: Bool = peer_auth_evaluate_connection(&mut res1, "payments", "payment-svc", 8443, false);
+    if reject_plain {
+        println("FAIL peer_auth STRICT plaintext rejected");
+        process_exit(1);
+    }
+
+    if (res1).rejected_count != 1 {
+        println("FAIL peer_auth rejected_count");
+        process_exit(1);
+    }
+
+    // Evaluate Plaintext connection to unspecified service -> default PERMISSIVE (mode = 2) should allow
+    let allow_perm: Bool = peer_auth_evaluate_connection(&mut res1, "frontend", "web-ui", 8080, false);
+    if !allow_perm {
+        println("FAIL peer_auth PERMISSIVE plaintext allowed");
+        process_exit(1);
+    }
+
+    if (res1).permissive_accepted != 1 || (res1).connections_evaluated != 3 {
+        println("FAIL peer_auth aggregate metrics");
+        process_exit(1);
+    }
+
+    println("prod_g4_ebpf_peer_auth: PASSED");
+    process_exit(0);
+}

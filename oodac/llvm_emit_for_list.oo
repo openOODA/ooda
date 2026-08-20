@@ -1,0 +1,167 @@
+// # Lower collection for-in over List[Int] or List[String]
+//
+// Logline: Lowers for x in xs to list_len plus list_get when xs is %OoIList or %OoSList; leftover collections fail closed.
+//
+// Setup: llvm_env_get_var_ty, llvm_env_slot, llvm_gen_label, llvm_gen_reg, and llvm_emit_block exist.
+//
+// Beats:
+//   1. Parse for IDENT in IDENT { body }; require %OoIList or %OoSList.
+//   2. Unique index slot, call the matching len helper, loop while i < n, bind x from get.
+//   3. Increment i and branch back; leftover collection types print ERR llvm_emit.
+
+fn llvm_for_env5(src: List[String], base: Int) -> List[String] {
+    let mut e: List[String] = list_new();
+    e = list_push(e, list_get(src, base));
+    e = list_push(e, list_get(src, base + 1));
+    e = list_push(e, list_get(src, base + 2));
+    e = list_push(e, list_get(src, base + 3));
+    e = list_push(e, list_get(src, base + 4));
+    return e;
+}
+
+pub fn llvm_emit_for_list_stmt(toks: List[String], pos: Int, n: Int, env: List[String]) -> List[String] {
+    let mut p = pos + 1;
+    let v: String = field_at(list_get(toks, p), 3);
+    p = p + 2;
+    if p >= n || field_at(list_get(toks, p), 0) != "IDENT" {
+        println("ERR\tllvm_emit\tfor residual (need collection IDENT)");
+        process_exit(1);
+    }
+    let xs: String = field_at(list_get(toks, p), 3);
+    p = p + 1;
+    if p < n && field_at(list_get(toks, p), 0) == "DOTDOT" {
+        println("ERR\tllvm_emit\tfor residual (only INT..INT range-for)");
+        process_exit(1);
+    }
+    let mut cur_env: List[String] = env;
+    let xty: String = llvm_ty_map(llvm_env_get_var_ty(cur_env, xs));
+    let mut lty: String = "%OoIList";
+    let mut lfn: String = "oo_ilist_len";
+    let mut gfn: String = "oo_ilist_get";
+    let mut ety: String = "i64";
+    if xty == "%OoSList" {
+        lty = "%OoSList";
+        lfn = "oo_slist_len";
+        gfn = "oo_slist_get";
+        ety = "%OoStr";
+    } else if xty == "%OoFList" {
+        lty = "%OoFList";
+        lfn = "oo_flist_len";
+        gfn = "oo_flist_get";
+        ety = "double";
+    } else if xty == "%OoLL_I" {
+        lty = "%OoLL_I";
+        lfn = "oo_ll_I_len";
+        gfn = "oo_ll_I_get";
+        ety = "%OoIList";
+    } else if llvm_ty_is_olist(xty) {
+        lty = xty;
+        lfn = "oo_l_" + str_slice(xty, 5, chars_len(xty)) + "_len";
+        gfn = "oo_l_" + str_slice(xty, 5, chars_len(xty)) + "_get";
+        ety = "%struct." + str_slice(xty, 5, chars_len(xty));
+    } else if xty != "%OoIList" {
+        println("ERR\tllvm_emit\tfor residual (only List[Int] collection)");
+        process_exit(1);
+    }
+    let xslot: String = llvm_env_slot(cur_env, xs);
+    let rc: Int = parse_int(list_get(cur_env, 0));
+    let islot: String = v + ".i." + rc.to_string();
+    let vslot: String = v + "." + (rc + 1).to_string();
+    let mut bumped: List[String] = list_new();
+    bumped = list_push(bumped, (rc + 2).to_string());
+    bumped = list_push(bumped, list_get(cur_env, 1));
+    bumped = list_push(bumped, list_get(cur_env, 2));
+    bumped = list_push(bumped, list_get(cur_env, 3));
+    bumped = list_push(bumped, list_get(cur_env, 4));
+    cur_env = bumped;
+    println("  %" + islot + ".slot = alloca i64, align 8");
+    println("  store i64 0, i64* %" + islot + ".slot, align 8");
+    println("  %" + vslot + ".slot = alloca " + ety + ", align 8");
+    if ety == "i64" {
+        println("  store i64 0, i64* %" + vslot + ".slot, align 8");
+    } else if ety == "double" {
+        println("  store double 0.0, double* %" + vslot + ".slot, align 8");
+    } else if ety == "%OoStr" {
+        println("  store %OoStr zeroinitializer, %OoStr* %" + vslot + ".slot, align 8");
+    } else {
+        println("  store " + ety + " zeroinitializer, " + ety + "* %" + vslot + ".slot, align 8");
+    }
+    cur_env = llvm_env_add_var(cur_env, v, ety);
+    cur_env = llvm_env_add_var(cur_env, "__slot__" + v, vslot);
+    let byv_r: List[String] = llvm_gen_reg(cur_env);
+    let byv: String = list_get(byv_r, 0) + ".byv";
+    cur_env = llvm_for_env5(byv_r, 1);
+    println("  " + byv + " = alloca " + lty + ", align 8");
+    let ld_r: List[String] = llvm_gen_reg(cur_env);
+    let xsld: String = list_get(ld_r, 0);
+    cur_env = llvm_for_env5(ld_r, 1);
+    println("  " + xsld + " = load " + lty + ", " + lty + "* %" + xslot + ".slot, align 8");
+    println("  store " + lty + " " + xsld + ", " + lty + "* " + byv + ", align 8");
+    let n_r: List[String] = llvm_gen_reg(cur_env);
+    let nreg: String = list_get(n_r, 0);
+    cur_env = llvm_for_env5(n_r, 1);
+    println("  " + nreg + " = call i64 @" + lfn + "(" + lty + "* byval(" + lty + ") " + byv + ")");
+    let c_lr: List[String] = llvm_gen_label("bb_for_cond", cur_env);
+    let lbl_c: String = list_get(c_lr, 0);
+    cur_env = llvm_for_env5(c_lr, 1);
+    let b_lr: List[String] = llvm_gen_label("bb_for_body", cur_env);
+    let lbl_b: String = list_get(b_lr, 0);
+    cur_env = llvm_for_env5(b_lr, 1);
+    let e_lr: List[String] = llvm_gen_label("bb_for_end", cur_env);
+    let lbl_e: String = list_get(e_lr, 0);
+    cur_env = llvm_for_env5(e_lr, 1);
+    println("  br label %" + lbl_c);
+    println(lbl_c + ":");
+    let i_r: List[String] = llvm_gen_reg(cur_env);
+    let ireg: String = list_get(i_r, 0);
+    cur_env = llvm_for_env5(i_r, 1);
+    println("  " + ireg + " = load i64, i64* %" + islot + ".slot, align 8");
+    let cmp_r: List[String] = llvm_gen_reg(cur_env);
+    let cmp: String = list_get(cmp_r, 0);
+    cur_env = llvm_for_env5(cmp_r, 1);
+    println("  " + cmp + " = icmp slt i64 " + ireg + ", " + nreg);
+    println("  br i1 " + cmp + ", label %" + lbl_b + ", label %" + lbl_e);
+    println(lbl_b + ":");
+    let g_r: List[String] = llvm_gen_reg(cur_env);
+    let got: String = list_get(g_r, 0);
+    cur_env = llvm_for_env5(g_r, 1);
+    let ibyv_r: List[String] = llvm_gen_reg(cur_env);
+    let ibyv: String = list_get(ibyv_r, 0) + ".byv";
+    cur_env = llvm_for_env5(ibyv_r, 1);
+    let xs2_r: List[String] = llvm_gen_reg(cur_env);
+    let xs2: String = list_get(xs2_r, 0);
+    cur_env = llvm_for_env5(xs2_r, 1);
+    println("  " + xs2 + " = load " + lty + ", " + lty + "* %" + xslot + ".slot, align 8");
+    println("  " + ibyv + " = alloca " + lty + ", align 8");
+    println("  store " + lty + " " + xs2 + ", " + lty + "* " + ibyv + ", align 8");
+    if llvm_ty_is_olist(lty) || lty == "%OoLL_I" {
+        println("  " + got + ".sret = alloca " + ety + ", align 8");
+        println("  call void @" + gfn + "(" + ety + "* sret(" + ety + ") " + got + ".sret, " + lty + "* byval(" + lty + ") " + ibyv + ", i64 " + ireg + ")");
+        println("  " + got + " = load " + ety + ", " + ety + "* " + got + ".sret, align 8");
+    } else {
+        println("  " + got + " = call " + ety + " @" + gfn + "(" + lty + "* byval(" + lty + ") " + ibyv + ", i64 " + ireg + ")");
+    }
+    println("  store " + ety + " " + got + ", " + ety + "* %" + vslot + ".slot, align 8");
+    let br: List[String] = llvm_emit_block(toks, p, n, cur_env);
+    p = parse_int(list_get(br, 0));
+    cur_env = llvm_for_env5(br, 1);
+    let i2_r: List[String] = llvm_gen_reg(cur_env);
+    let i2: String = list_get(i2_r, 0);
+    cur_env = llvm_for_env5(i2_r, 1);
+    let in_r: List[String] = llvm_gen_reg(cur_env);
+    let inx: String = list_get(in_r, 0);
+    cur_env = llvm_for_env5(in_r, 1);
+    println("  " + i2 + " = load i64, i64* %" + islot + ".slot, align 8");
+    println("  " + inx + " = add i64 " + i2 + ", 1");
+    println("  store i64 " + inx + ", i64* %" + islot + ".slot, align 8");
+    println("  br label %" + lbl_c);
+    println(lbl_e + ":");
+    let mut out: List[String] = list_new();
+    out = list_push(out, p.to_string());
+    out = list_push(out, list_get(cur_env, 0));
+    out = list_push(out, list_get(cur_env, 1));
+    out = list_push(out, list_get(cur_env, 2));
+    out = list_push(out, list_get(cur_env, 3));
+    out = list_push(out, list_get(cur_env, 4));
+    return out;
+}
