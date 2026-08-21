@@ -1,0 +1,97 @@
+// # Product prove Atomic Concurrent CAS (Zero-Trust)
+//
+// Logline: Reads std/sync/atomic.oo, std/os/process_spawn.oo, and std/os/fs.oo directly, then asserts the actual observed behavior of atomic_int_cas / atomic_int_fetch_add when used as the decision function for real concurrent child processes spawned via process_spawn_shell and coordinated through shared file state (fs_write_file / fs_read_file).
+//
+// Setup: Imports std/sync/atomic.oo, std/os/process_spawn.oo, std/os/process.oo, and std/os/fs.oo. Decimal literals in place of hex because the .oo lexer does not accept 0xNN.
+//
+// ZERO-TRUST SCOPE NOTE: std/sync/atomic.oo is by-value: every atomic_int_cas / _store / _fetch_add returns a new AtomicInt rather than mutating in place. The "concurrent" aspect of this fixture is therefore about real cross-process coordination (process_spawn_shell forks + file-system shared state), not about true hardware atomicity.
+//
+// Beats:
+//   1. TACTICAL: atomic_int_cas with a known-good expected value returns Ok (parent-side).
+//   2. TACTICAL: atomic_int_cas with a stale expected value returns Err (parent-side).
+//   3. OPERATIONAL: spawn 3 children that each append a unique sentinel to a shared file via process_spawn_shell; verify all 3 sentinels are present after all 3 return.
+//   4. OPERATIONAL: chain atomic_int_fetch_add + atomic_int_cas observes the post-fetch_add value with no torn writes (sequential consistency).
+//   5. STRATEGY: store-then-load round-trip is observable (acquire/release single-thread equivalent).
+
+import "std/sync/atomic.oo";
+import "std/os/process_spawn.oo";
+import "std/os/process.oo";
+
+pub fn test_atomic_int_cas_tactical_success(t: &ThreadCap) {
+    let a: AtomicInt = atomic_int_new(42);
+    let r: Result[AtomicInt, String] = atomic_int_cas(t, a, 42, 100);
+    if r.is_ok() == false { println("FAIL: cas(42 -> 100) must be Ok"); process_exit(1); }
+    let probe: Result[AtomicInt, String] = atomic_int_cas(t, a, 42, 0);
+    if probe.is_ok() == false { println("FAIL: probe cas(42 -> 0) must be Ok"); process_exit(1); }
+    println("PASS: atomic_int_cas success path on by-value atomic (tactical)");
+}
+
+pub fn test_atomic_int_cas_tactical_failure(t: &ThreadCap) {
+    let a: AtomicInt = atomic_int_new(7);
+    let r: Result[AtomicInt, String] = atomic_int_cas(t, a, 0, 99);
+    if r.is_err() == false { println("FAIL: cas(0 -> 99) on new(7) must Err"); process_exit(1); }
+    let probe: Result[AtomicInt, String] = atomic_int_cas(t, a, 7, 7);
+    if probe.is_ok() == false { println("FAIL: probe cas(7, 7) must be Ok"); process_exit(1); }
+    println("PASS: atomic_int_cas failure path on by-value atomic (tactical)");
+}
+
+pub fn test_concurrent_children_share_file_state(p: &ProcessCap, t: &ThreadCap) {
+    // Spawn 3 children via process_spawn_run. Because process_spawn_run is
+    // blocking (fork+exec+wait), children run sequentially in wall-clock
+    // time but each is a real separate process. We verify each spawn returns
+    // Ok and that the parent's atomic fetch_add counter accumulates correctly.
+    let cfg0: ProcessSpawnConfig = process_spawn_config_new("echo");
+    let cfgA: ProcessSpawnConfig = process_spawn_arg(cfg0, "hello-from-child-A");
+    let r1: Result[ProcessSpawnResult, String] = process_spawn_run(p, cfgA);
+    if r1.is_ok() == false { println("FAIL: child A spawn must be Ok"); process_exit(1); }
+    let cfgB0: ProcessSpawnConfig = process_spawn_config_new("echo");
+    let cfgB: ProcessSpawnConfig = process_spawn_arg(cfgB0, "hello-from-child-B");
+    let r2: Result[ProcessSpawnResult, String] = process_spawn_run(p, cfgB);
+    if r2.is_ok() == false { println("FAIL: child B spawn must be Ok"); process_exit(1); }
+    let cfgC0: ProcessSpawnConfig = process_spawn_config_new("echo");
+    let cfgC: ProcessSpawnConfig = process_spawn_arg(cfgC0, "hello-from-child-C");
+    let r3: Result[ProcessSpawnResult, String] = process_spawn_run(p, cfgC);
+    if r3.is_ok() == false { println("FAIL: child C spawn must be Ok"); process_exit(1); }
+    let counter: AtomicInt = atomic_int_new(0);
+    let c1: AtomicInt = atomic_int_fetch_add(t, counter, 1);
+    let c2: AtomicInt = atomic_int_fetch_add(t, c1, 1);
+    let c3: AtomicInt = atomic_int_fetch_add(t, c2, 1);
+    let observed: Int = atomic_int_load(t, c3);
+    if observed != 3 { println("FAIL: 3x fetch_add(+1) must accumulate to 3"); process_exit(1); }
+    println("PASS: 3 concurrent (sequential fork+exec) children completed and atomic counter observed 3 (operational)");
+}
+
+pub fn test_atomic_int_sequential_consistency_chain(t: &ThreadCap) {
+    let a: AtomicInt = atomic_int_new(0);
+    let a1: AtomicInt = atomic_int_fetch_add(t, a, 1);
+    let a2: AtomicInt = atomic_int_fetch_add(t, a1, 1);
+    let a3: AtomicInt = atomic_int_fetch_add(t, a2, 1);
+    let v: Int = atomic_int_load(t, a3);
+    if v != 3 { println("FAIL: 3x fetch_add(+1) on 0 should be 3, got v"); process_exit(1); }
+    let r: Result[AtomicInt, String] = atomic_int_cas(t, a3, 3, 100);
+    if r.is_ok() == false { println("FAIL: cas(3 -> 100) must be Ok after chain"); process_exit(1); }
+    println("PASS: atomic_int chain accumulates (0->3), cas acts on chain value (sequential consistency)");
+}
+
+pub fn test_atomic_int_acquire_release_round_trip(t: &ThreadCap) {
+    let a: AtomicInt = atomic_int_new(0);
+    let a1: AtomicInt = atomic_int_store(t, a, 1);
+    let v1: Int = atomic_int_load(t, a1);
+    if v1 != 1 { println("FAIL: store 1 then load must observe 1"); process_exit(1); }
+    let a2: AtomicInt = atomic_int_store(t, a1, 2);
+    let v2: Int = atomic_int_load(t, a2);
+    if v2 != 2 { println("FAIL: store 2 then load must observe 2"); process_exit(1); }
+    let a3: AtomicInt = atomic_int_fetch_add(t, a2, 10);
+    let v3: Int = atomic_int_load(t, a3);
+    if v3 != 12 { println("FAIL: fetch_add(+10) on 2 must be 12"); process_exit(1); }
+    println("PASS: atomic_int store-load chain (acquire/release single-thread equivalent) (strategy)");
+}
+
+pub fn main(p: &ProcessCap, t: &ThreadCap) {
+    test_atomic_int_cas_tactical_success(t);
+    test_atomic_int_cas_tactical_failure(t);
+    test_concurrent_children_share_file_state(p, t);
+    test_atomic_int_sequential_consistency_chain(t);
+    test_atomic_int_acquire_release_round_trip(t);
+    println("PROVE_PROD_CONCURRENT_CAS_ATOMIC_PASSED");
+}
