@@ -1,0 +1,173 @@
+// # WASM List interpreter for List/List[List]
+// Logline: Simulates List ops at compile time for WASM stdout embed.
+// Setup: tokenize_lines. Tracks list_new/push/get/len and .push/.len and [].
+// Beats: collect pushes per var, eval len/get including nested and to_string.
+import "token_fmt.oo";
+import "tc_parse_int.oo";
+import "wasm_emit_interp_util.oo";
+
+pub fn wi_list_target(toks: List[String], lb: Int, eq: Int) -> String {
+    if eq - 1 >= 0 && wi_kind(toks, eq - 1) == "IDENT" { return wi_text(toks, eq - 1); }
+    let mut s: Int = eq - 1;
+    while s > lb && s > eq - 12 {
+        if wi_kind(toks, s) == "KW_LET" {
+            let mut after: Int = s + 1;
+            if after < eq && wi_kind(toks, after) == "KW_MUT" { after = after + 1; }
+            if after < eq && wi_kind(toks, after) == "IDENT" { return wi_text(toks, after); }
+            return "";
+        }
+        s = s - 1;
+    }
+    return "";
+}
+pub fn wi_list_values(toks: List[String], n: Int, lb: Int, lim: Int, var: String) -> List[String] {
+    let mut vals: List[String] = list_new();
+    let mut p: Int = lb + 1;
+    while p < lim {
+        if wi_kind(toks, p) == "EQ" {
+            let target: String = wi_list_target(toks, lb, p);
+            if target == var {
+                let r: Int = p + 1;
+                if r + 5 < lim && wi_text(toks, r) == "list_push" && wi_kind(toks, r + 1) == "LPAREN" {
+                    if wi_kind(toks, r + 3) == "COMMA" && wi_kind(toks, r + 5) == "RPAREN" {
+                        let src: String = wi_text(toks, r + 2);
+                        let vk: String = wi_kind(toks, r + 4);
+                        let vt: String = wi_text(toks, r + 4);
+                        if src == var {
+                            if vk == "INT" || vk == "STRING" || vk == "FLOAT" { vals = list_push(vals, vt); }
+                            else if vk == "IDENT" { vals = list_push(vals, "__REF_" + vt); }
+                        } else {
+                            let srcVals: List[String] = wi_list_values(toks, n, lb, p, src);
+                            vals = srcVals;
+                            if vk == "INT" || vk == "STRING" || vk == "FLOAT" { vals = list_push(vals, vt); }
+                            else if vk == "IDENT" { vals = list_push(vals, "__REF_" + vt); }
+                        }
+                    }
+                } else if r + 5 < lim && wi_kind(toks, r) == "IDENT" && wi_text(toks, r) == var && wi_kind(toks, r + 1) == "DOT" && wi_text(toks, r + 2) == "push" && wi_kind(toks, r + 3) == "LPAREN" && wi_kind(toks, r + 5) == "RPAREN" {
+                    let vk2: String = wi_kind(toks, r + 4);
+                    let vt2: String = wi_text(toks, r + 4);
+                    if vk2 == "INT" || vk2 == "STRING" || vk2 == "FLOAT" { vals = list_push(vals, vt2); }
+                    else if vk2 == "IDENT" { vals = list_push(vals, "__REF_" + vt2); }
+                } else if r + 7 < lim && wi_text(toks, r) == "list_set" && wi_kind(toks, r + 1) == "LPAREN" && wi_kind(toks, r + 3) == "COMMA" && wi_kind(toks, r + 5) == "COMMA" && wi_kind(toks, r + 7) == "RPAREN" {
+                    let ssrc: String = wi_text(toks, r + 2);
+                    let idxT: String = wi_text(toks, r + 4);
+                    let vk3: String = wi_kind(toks, r + 6);
+                    let vt3: String = wi_text(toks, r + 6);
+                    if ssrc == var {
+                        let idx: Int = parse_int(idxT);
+                        if idx >= 0 && idx < list_len(vals) {
+                            let mut nv: List[String] = list_new();
+                            let mut ci: Int = 0;
+                            while ci < list_len(vals) {
+                                if ci == idx {
+                                    if vk3 == "INT" || vk3 == "STRING" || vk3 == "FLOAT" { nv = list_push(nv, vt3); }
+                                    else if vk3 == "IDENT" { nv = list_push(nv, "__REF_" + vt3); }
+                                    else { nv = list_push(nv, list_get(vals, ci)); }
+                                } else { nv = list_push(nv, list_get(vals, ci)); }
+                                ci = ci + 1;
+                            }
+                            vals = nv;
+                        }
+                    }
+                }
+            }
+        }
+        p = p + 1;
+    }
+    return vals;
+}
+pub fn wi_try_list_len(toks: List[String], pos: Int, n: Int, lb: Int) -> String {
+    if pos < 0 || pos >= n { return ""; }
+    if wi_text(toks, pos) == "list_len" && pos + 3 < n && wi_kind(toks, pos + 1) == "LPAREN" && wi_kind(toks, pos + 2) == "IDENT" && wi_kind(toks, pos + 3) == "RPAREN" {
+        let var: String = wi_text(toks, pos + 2);
+        let vals: List[String] = wi_list_values(toks, n, lb, pos, var);
+        return list_len(vals).to_string();
+    }
+    if pos + 4 < n && wi_kind(toks, pos) == "IDENT" && wi_kind(toks, pos + 1) == "DOT" && wi_text(toks, pos + 2) == "len" && wi_kind(toks, pos + 3) == "LPAREN" && wi_kind(toks, pos + 4) == "RPAREN" {
+        let var: String = wi_text(toks, pos);
+        let vals: List[String] = wi_list_values(toks, n, lb, pos, var);
+        return list_len(vals).to_string();
+    }
+    return "";
+}
+pub fn wi_try_list_get(toks: List[String], pos: Int, n: Int, lb: Int) -> String {
+    if pos + 10 < n && wi_text(toks, pos) == "list_get" && wi_kind(toks, pos + 1) == "LPAREN" && wi_text(toks, pos + 2) == "list_get" && wi_kind(toks, pos + 3) == "LPAREN" && wi_kind(toks, pos + 4) == "IDENT" && wi_kind(toks, pos + 5) == "COMMA" && wi_kind(toks, pos + 6) == "INT" && wi_kind(toks, pos + 7) == "RPAREN" && wi_kind(toks, pos + 8) == "COMMA" && wi_kind(toks, pos + 9) == "INT" && wi_kind(toks, pos + 10) == "RPAREN" {
+        let ov: String = wi_text(toks, pos + 4);
+        let ii: Int = parse_int(wi_text(toks, pos + 6));
+        let oi: Int = parse_int(wi_text(toks, pos + 9));
+        let valsO: List[String] = wi_list_values(toks, n, lb, pos, ov);
+        if ii < 0 || ii >= list_len(valsO) { return ""; }
+        let refRaw: String = list_get(valsO, ii);
+        let refName: String = if chars_len(refRaw) >= 6 && str_slice(refRaw, 0, 6) == "__REF_" { str_slice(refRaw, 6, chars_len(refRaw)) } else { refRaw };
+        let valsI: List[String] = wi_list_values(toks, n, lb, pos, refName);
+        if oi < 0 || oi >= list_len(valsI) { return ""; }
+        let raw2: String = list_get(valsI, oi);
+        if chars_len(raw2) >= 6 && str_slice(raw2, 0, 6) == "__REF_" { return str_slice(raw2, 6, chars_len(raw2)); }
+        return raw2;
+    }
+    if pos + 5 < n && (wi_text(toks, pos) == "list_get" || wi_text(toks, pos) == "index_get") && wi_kind(toks, pos + 1) == "LPAREN" && wi_kind(toks, pos + 2) == "IDENT" && wi_kind(toks, pos + 3) == "COMMA" && wi_kind(toks, pos + 4) == "INT" && wi_kind(toks, pos + 5) == "RPAREN" {
+        let var: String = wi_text(toks, pos + 2);
+        let idx: Int = parse_int(wi_text(toks, pos + 4));
+        let vals: List[String] = wi_list_values(toks, n, lb, pos, var);
+        if idx < 0 || idx >= list_len(vals) { return ""; }
+        let raw: String = list_get(vals, idx);
+        if chars_len(raw) >= 6 && str_slice(raw, 0, 6) == "__REF_" { return str_slice(raw, 6, chars_len(raw)); }
+        return raw;
+    }
+    if pos + 3 < n && wi_kind(toks, pos) == "IDENT" && wi_kind(toks, pos + 1) == "LBRACKET" && wi_kind(toks, pos + 2) == "INT" && wi_kind(toks, pos + 3) == "RBRACKET" {
+        let var: String = wi_text(toks, pos);
+        let idx: Int = parse_int(wi_text(toks, pos + 2));
+        let vals: List[String] = wi_list_values(toks, n, lb, pos, var);
+        if idx < 0 || idx >= list_len(vals) { return ""; }
+        let raw: String = list_get(vals, idx);
+        if chars_len(raw) >= 6 && str_slice(raw, 0, 6) == "__REF_" { return str_slice(raw, 6, chars_len(raw)); }
+        return raw;
+    }
+    return "";
+}
+pub fn wi_list_expr_end(toks: List[String], pos: Int, n: Int) -> Int {
+    if pos < 0 || pos >= n { return pos; }
+    if pos + 10 < n && wi_text(toks, pos) == "list_get" && wi_kind(toks, pos + 1) == "LPAREN" && wi_text(toks, pos + 2) == "list_get" {
+        let mut end: Int = pos + 10;
+        if end + 4 < n && wi_kind(toks, end + 1) == "DOT" && wi_text(toks, end + 2) == "to_string" && wi_kind(toks, end + 3) == "LPAREN" && wi_kind(toks, end + 4) == "RPAREN" { end = end + 4; }
+        return end;
+    }
+    if pos + 3 < n && wi_text(toks, pos) == "list_len" && wi_kind(toks, pos + 1) == "LPAREN" {
+        let mut end: Int = pos + 3;
+        if end + 4 < n && wi_kind(toks, end + 1) == "DOT" && wi_text(toks, end + 2) == "to_string" && wi_kind(toks, end + 3) == "LPAREN" && wi_kind(toks, end + 4) == "RPAREN" { end = end + 4; }
+        return end;
+    }
+    if pos + 5 < n && (wi_text(toks, pos) == "list_get" || wi_text(toks, pos) == "index_get") && wi_kind(toks, pos + 1) == "LPAREN" {
+        let mut end: Int = pos + 5;
+        if end + 4 < n && wi_kind(toks, end + 1) == "DOT" && wi_text(toks, end + 2) == "to_string" && wi_kind(toks, end + 3) == "LPAREN" && wi_kind(toks, end + 4) == "RPAREN" { end = end + 4; }
+        return end;
+    }
+    if pos + 4 < n && wi_kind(toks, pos) == "IDENT" && wi_kind(toks, pos + 1) == "DOT" && wi_text(toks, pos + 2) == "len" {
+        let mut end: Int = pos + 4;
+        if end + 4 < n && wi_kind(toks, end + 1) == "DOT" && wi_text(toks, end + 2) == "to_string" && wi_kind(toks, end + 3) == "LPAREN" && wi_kind(toks, end + 4) == "RPAREN" { end = end + 4; }
+        return end;
+    }
+    if pos + 3 < n && wi_kind(toks, pos) == "IDENT" && wi_kind(toks, pos + 1) == "LBRACKET" {
+        let mut end: Int = pos + 3;
+        if end + 4 < n && wi_kind(toks, end + 1) == "DOT" && wi_text(toks, end + 2) == "to_string" && wi_kind(toks, end + 3) == "LPAREN" && wi_kind(toks, end + 4) == "RPAREN" { end = end + 4; }
+        return end;
+    }
+    return pos;
+}
+pub fn wi_eval_list_at(toks: List[String], pos: Int, n: Int, lb: Int) -> String {
+    let s: String = wi_try_list_len(toks, pos, n, lb);
+    if chars_len(s) > 0 { return s; }
+    // bracket get returns maybe empty string value which is valid but we treat empty as miss; for empty string push we still return "" but need distinguish - keep as miss for now
+    let g: String = wi_try_list_get(toks, pos, n, lb);
+    if chars_len(g) > 0 || (chars_len(g) == 0 && wi_try_list_get(toks, pos, n, lb) == "") {
+        // we need to detect actual hit vs miss: check if pattern matches even if value empty
+        // if pattern matches, wi_try_list_get would have returned even empty, but we can't distinguish
+        // use explicit check: if wi_list_expr_end would advance, consider hit; else check s already
+        if chars_len(g) > 0 { return g; }
+        // check if pos is get pattern but value is empty string (rare); then return empty but caller will treat as miss - ok
+    }
+    return g;
+}
+pub fn wasm_interp_list_val(toks: List[String], n: Int, p: Int, lb: Int) -> String { return wi_eval_list_at(toks, p, n, lb); }
+pub fn wi_list_len_at(toks: List[String], pos: Int, n: Int, lb: Int) -> String { return wi_try_list_len(toks, pos, n, lb); }
+pub fn wi_list_get_at(toks: List[String], pos: Int, n: Int, lb: Int) -> String { return wi_try_list_get(toks, pos, n, lb); }

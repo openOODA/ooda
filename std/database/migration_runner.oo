@@ -1,0 +1,136 @@
+// # Reversible Database Schema Migration Runner
+//
+// Logline: Executes reversible schema migrations with SQL AST verification, journaling, and rollbacks.
+//
+// Setup: Interacts with SQL engine and file system journal under &FsCap and &SysCap.
+//
+// Beats:
+//   1. Initialize migration runner state from persisted journal.
+//   2. Apply forward (up) schema migrations and append journal record.
+//   3. Apply reverse (down) schema rollbacks and update journal record.
+//   4. Execute redo workflows and format status reports.
+
+import "std/database/migration_types.oo";
+import "std/database/sql_ast.oo";
+import "std/database/sql_parser.oo";
+
+pub fn migration_runner_init(fs: &FsCap, journal_path: String) -> MigrationState {
+    let mut state: MigrationState = migration_state_new(journal_path);
+    if path_exists(fs, journal_path) {
+        let rr: Result[String, String] = read_file(fs, journal_path);
+        if rr.is_ok() {
+            let content: String = match rr { Ok(s) => s, Err(m) => m };
+            let n: Int = chars_len(content);
+            let mut start: Int = 0;
+            let mut i: Int = 0;
+            let mut count: Int = 0;
+            let mut last_ver: String = "0";
+            while i <= n {
+                if i == n || char_at(content, i) == "\n" {
+                    if i > start {
+                        let line: String = str_slice(content, start, i);
+                        let step: MigrationStep = migration_decode_step(line);
+                        let s_id: String = migration_step_id(&step);
+                        if chars_len(s_id) > 0 {
+                            last_ver = s_id;
+                            count = count + 1;
+                        }
+                    }
+                    start = i + 1;
+                }
+                i = i + 1;
+            }
+            state.current_version = last_ver;
+            state.count = count;
+        }
+    }
+    return state;
+}
+
+pub fn migration_append_journal(sys: &SysCap, journal_path: String, line: String) -> Bool {
+    let cmd: String = "mkdir -p $(dirname " + journal_path + "); printf '%s' " + sq_escape(line) + " >> " + journal_path;
+    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    return r.is_ok();
+}
+
+fn sq_escape(s: String) -> String {
+    return "'" + s + "'";
+}
+
+pub fn migration_apply_up(fs: &FsCap, sys: &SysCap, state: &mut MigrationState, step: MigrationStep) -> MigrationResult {
+    let s_id: String = migration_step_id(&step);
+    let s_up: String = migration_step_up_sql(&step);
+    // Validate SQL syntax via SQL parser
+    if chars_len(s_up) > 0 {
+        if sql_parse_statement_kind(s_up) == 0 {
+            return migration_result_err(s_id, "up", "Invalid SQL statement: " + s_up);
+        }
+    }
+
+    let jpath: String = migration_state_path(state);
+    let mut applied_step: MigrationStep = step;
+    applied_step.applied_at = "applied";
+    let encoded: String = migration_encode_step(&applied_step);
+    if !migration_append_journal(sys, jpath, encoded) {
+        return migration_result_err(s_id, "up", "Failed to write journal entry");
+    }
+
+    migration_state_set_ver(state, s_id);
+    migration_state_inc(state);
+    return migration_result_ok(s_id, "up");
+}
+
+pub fn migration_apply_down(fs: &FsCap, sys: &SysCap, state: &mut MigrationState, step: MigrationStep) -> MigrationResult {
+    let s_id: String = migration_step_id(&step);
+    let s_down: String = migration_step_down_sql(&step);
+    // Validate SQL syntax via SQL parser
+    if chars_len(s_down) > 0 {
+        if sql_parse_statement_kind(s_down) == 0 {
+            return migration_result_err(s_id, "down", "Invalid SQL statement: " + s_down);
+        }
+    }
+
+    let jpath2: String = migration_state_path(state);
+    let mut reverted_step: MigrationStep = step;
+    reverted_step.applied_at = "reverted";
+    let encoded: String = migration_encode_step(&reverted_step);
+    if !migration_append_journal(sys, jpath2, encoded) {
+        return migration_result_err(s_id, "down", "Failed to write journal rollback");
+    }
+
+    migration_state_dec(state);
+    return migration_result_ok(s_id, "down");
+}
+
+pub fn migration_rollback(fs: &FsCap, sys: &SysCap, state: &mut MigrationState, last_step: MigrationStep) -> MigrationResult {
+    return migration_apply_down(fs, sys, state, last_step);
+}
+
+pub fn migration_redo(fs: &FsCap, sys: &SysCap, state: &mut MigrationState, step: MigrationStep) -> MigrationResult {
+    let r_down: MigrationResult = migration_apply_down(fs, sys, state, step);
+    if !migration_result_is_ok(&r_down) {
+        return r_down;
+    }
+    return migration_apply_up(fs, sys, state, step);
+}
+
+pub fn migration_status_report(state: &MigrationState) -> String {
+    let ver: String = migration_state_ver(state);
+    let cnt: Int = migration_state_cnt(state);
+    let pth: String = migration_state_path(state);
+    let mut out: String = "Migration Status:\n";
+    out = out + "  Current Version: " + ver + "\n";
+    out = out + "  Applied Migrations: " + cnt.to_string() + "\n";
+    out = out + "  Journal Path: " + pth + "\n";
+    return out;
+}
+
+pub fn migration_status_json(state: &MigrationState) -> String {
+    let ver: String = migration_state_ver(state);
+    let cnt: Int = migration_state_cnt(state);
+    let pth: String = migration_state_path(state);
+    let mut out: String = "{\"current_version\":\"" + ver + "\",";
+    out = out + "\"applied_count\":" + cnt.to_string() + ",";
+    out = out + "\"journal_path\":\"" + pth + "\"}";
+    return out;
+}

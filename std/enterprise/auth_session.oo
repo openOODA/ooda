@@ -1,0 +1,80 @@
+// # Enterprise Authentication Session Lifecycle
+//
+// Logline: Creates AuthSession records, validates and terminates them on the AuthEngine, and exposes the auth_session_is_expired TTL helper.
+//
+// Setup: Imports auth_types.oo for AuthSession and AuthEngine. RULES.oot 1.4 default-deny; RULES.oot 1.3 fail-closed residual.
+//
+// Beats:
+//   1. auth_session_is_expired: gate on is_active flag and expires_at timestamp.
+//   2. auth_engine_start_session: append a fresh AuthSession if the engine is not halted.
+//   3. auth_engine_validate_session: scan sessions by id, return non-expired status.
+//   4. auth_engine_terminate_session: mark a session inactive and replace the list.
+
+import "./auth_types.oo";
+
+type AuthSession = struct {
+    session_id: String, user_id: String, started_at: Int, expires_at: Int, is_active: Bool
+};
+
+type AuthEngine = struct {
+    tenant_id: String, policy: Int, users: List[Int], tokens: List[Int],
+    sessions: List[AuthSession], total_authentications: Int,
+    successful_authentications: Int, failed_authentications: Int,
+    total_tokens_issued: Int, total_revocations: Int, system_halted: Bool
+};
+
+pub fn auth_session_is_expired(sess_ref: &AuthSession, cur_time: Int) -> Bool {
+    let active: Bool = (sess_ref).is_active;
+    if active == false  { return true; }
+    let exp: Int = (sess_ref).expires_at;
+    if cur_time >= exp  { return true; }
+    return false;
+}
+
+pub fn auth_engine_start_session(sess_eng: &mut AuthEngine, start_uid: String, start_sid: String, start_time: Int) -> Result[AuthSession, String] {
+    let mut sess_eng: AuthEngine = sess_eng;
+    let halted: Bool = (sess_eng).system_halted;
+    if halted {
+        return Err("SYSTEM_HALTED: Security subsystem is halted");
+    }
+    let mut initial_sessions: List[AuthSession] = list_new();
+    let new_session = auth_session_create(start_sid, start_uid, start_time, 0);
+    let initial_sessions_2 = list_push(initial_sessions, new_session);
+    (sess_eng).sessions = initial_sessions_2;
+    return Ok(new_session);
+}
+
+pub fn auth_engine_validate_session(val_eng: &AuthEngine, check_sid: String, check_time: Int) -> Bool {
+    let mut idx = 0;
+    let n = list_len((val_eng).sessions);
+    while idx < n {
+        let s = list_get((val_eng).sessions, idx);
+        let sid: String = s.session_id;
+        if sid == check_sid {
+            let not_expired: Bool = auth_session_is_expired(&s, check_time) == false;
+            return not_expired;
+        }
+        idx = idx + 1;
+    }
+    return false;
+}
+
+pub fn auth_engine_terminate_session(term_eng: &mut AuthEngine, term_sid: String) -> Bool {
+    let mut term_eng: AuthEngine = term_eng;
+    let mut new_sessions: List[AuthSession] = list_new();
+    let mut found = false;
+    let mut idx = 0;
+    let n = list_len((term_eng).sessions);
+    while idx < n {
+        let mut s = list_get((term_eng).sessions, idx);
+        let sid: String = s.session_id;
+        if sid == term_sid {
+            s.is_active = false;
+            found = true;
+        }
+        new_sessions = list_push(new_sessions, s);
+        idx = idx + 1;
+    }
+    if found  { (term_eng).sessions = new_sessions; }
+    return found;
+}

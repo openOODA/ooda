@@ -1,0 +1,203 @@
+// # Enterprise Compliance Framework Evaluation & Audit Reporting
+//
+// Logline: Walks registered requirements, computes a per-framework pass score, enforces the policy threshold, and emits ComplianceAuditReport records into the engine reports list.
+//
+// Setup: Imports compliance_types.oo for ComplianceEngine, ComplianceRequirement, and ComplianceAuditReport. RULES.oot 1.4 default-deny; RULES.oot 1.3 fail-closed residual.
+//
+// Beats:
+//   1. compliance_engine_evaluate_framework: walk requirements, compute score, fail-closed halt on threshold breach.
+//   2. compliance_engine_is_compliant, get_overall_score, query_failed_requirements.
+//   3. compliance_engine_enforce_with_capability: capability-gated enforce returning Result.
+
+pub type ComplianceRequirement = struct {
+    id: Int,
+    code: String,
+    title: String,
+    category: String,
+    risk_level: Int,
+    is_mandatory: Bool,
+    is_passed: Bool
+};
+
+pub type CompliancePolicy = struct {
+    id: Int,
+    framework_name: String,
+    version: String,
+    min_passing_score: Int,
+    require_all_mandatory: Bool,
+    is_active: Bool
+};
+
+pub type ComplianceAuditReport = struct {
+    report_id: Int,
+    framework_name: String,
+    total_controls: Int,
+    passed_controls: Int,
+    failed_controls: Int,
+    compliance_score: Int,
+    is_compliant: Bool,
+    timestamp: Int
+};
+
+pub type ComplianceEngine = struct {
+    policies: List[CompliancePolicy],
+    requirements: List[ComplianceRequirement],
+    reports: List[ComplianceAuditReport],
+    strict_mode: Bool,
+    total_evaluations: Int,
+    total_violations: Int,
+    system_halted: Bool
+};
+
+pub fn compliance_engine_evaluate_framework(eng: &mut ComplianceEngine, framework_name: String, timestamp: Int) -> ComplianceAuditReport {
+    let mut eng: ComplianceEngine = eng;
+    let mut eval_count = (eng).total_evaluations;
+    eval_count = eval_count + 1;
+    (eng).total_evaluations = eval_count;
+    let reqs = (eng).requirements;
+    let n = list_len(reqs);
+    let mut i = 0;
+    let mut total_cnt = 0;
+    let mut passed_cnt = 0;
+    let mut failed_cnt = 0;
+    let mut mandatory_failed = false;
+    while i < n {
+        let r = list_get(reqs, i);
+        total_cnt = total_cnt + 1;
+        if r.is_passed {
+            passed_cnt = passed_cnt + 1;
+        } else {
+            failed_cnt = failed_cnt + 1;
+            if r.is_mandatory {
+                mandatory_failed = true;
+            }
+        }
+        i = i + 1;
+    }
+    let mut score = 0;
+    if total_cnt > 0 {
+        score = (passed_cnt * 100) / total_cnt;
+    } else {
+        score = 100;
+    }
+    let mut target_min_score = 80;
+    let mut require_mandatory = true;
+    let pols = (eng).policies;
+    let num_pols = list_len(pols);
+    let mut j = 0;
+    while j < num_pols {
+        let p = list_get(pols, j);
+        if p.framework_name == framework_name {
+            if p.is_active {
+                target_min_score = p.min_passing_score;
+                require_mandatory = p.require_all_mandatory;
+            }
+        }
+        j = j + 1;
+    }
+    let mut is_ok = true;
+    if score < target_min_score {
+        is_ok = false;
+    }
+    if require_mandatory {
+        if mandatory_failed {
+            is_ok = false;
+        }
+    }
+    if is_ok == false {
+        let mut viol_cnt = (eng).total_violations;
+        viol_cnt = viol_cnt + 1;
+        (eng).total_violations = viol_cnt;
+        if (eng).strict_mode {
+            (eng).system_halted = true;
+        }
+    }
+    let rep = ComplianceAuditReport {
+        report_id: eval_count,
+        framework_name: framework_name,
+        total_controls: total_cnt,
+        passed_controls: passed_cnt,
+        failed_controls: failed_cnt,
+        compliance_score: score,
+        is_compliant: is_ok,
+        timestamp: timestamp
+    };
+    let mut new_reps: List[ComplianceAuditReport] = list_new();
+    let old_reps = (eng).reports;
+    let num_reps = list_len(old_reps);
+    let mut k = 0;
+    while k < num_reps {
+        new_reps = list_push(new_reps, list_get(old_reps, k));
+        k = k + 1;
+    }
+    new_reps = list_push(new_reps, rep);
+    (eng).reports = new_reps;
+    return rep;
+}
+
+pub fn compliance_engine_is_compliant(engine: &ComplianceEngine, framework_name: String) -> Bool {
+    if (engine).system_halted {
+        return false;
+    }
+    let reps = (engine).reports;
+    let n = list_len(reps);
+    let mut i = n;
+    while i > 0 {
+        i = i - 1;
+        let r = list_get(reps, i);
+        if r.framework_name == framework_name {
+            return r.is_compliant;
+        }
+    }
+    return false;
+}
+
+pub fn compliance_engine_get_overall_score(engine: &ComplianceEngine) -> Int {
+    let reqs = (engine).requirements;
+    let n = list_len(reqs);
+    if n == 0 {
+        return 100;
+    }
+    let mut i = 0;
+    let mut passed_cnt = 0;
+    while i < n {
+        let r = list_get(reqs, i);
+        if r.is_passed {
+            passed_cnt = passed_cnt + 1;
+        }
+        i = i + 1;
+    }
+    return (passed_cnt * 100) / n;
+}
+
+pub fn compliance_engine_query_failed_requirements(engine: &ComplianceEngine, category: String) -> List[ComplianceRequirement] {
+    let mut matched: List[ComplianceRequirement] = list_new();
+    let reqs = (engine).requirements;
+    let n = list_len(reqs);
+    let mut i = 0;
+    while i < n {
+        let r = list_get(reqs, i);
+        if r.is_passed == false {
+            if category == "*" {
+                matched = list_push(matched, r);
+            } else if r.category == category {
+                matched = list_push(matched, r);
+            }
+        }
+        i = i + 1;
+    }
+    return matched;
+}
+
+pub fn compliance_engine_enforce_with_capability(sys: &SysCap, eng: &mut ComplianceEngine, framework_name: String, timestamp: Int) -> Result[ComplianceAuditReport, String] {
+    let mut eng: ComplianceEngine = eng;
+    if (eng).system_halted {
+        return Err("COMPLIANCE_HALTED: Engine is in halted state due to prior compliance violation");
+    }
+    let report = compliance_engine_evaluate_framework(eng, framework_name, timestamp);
+    if report.is_compliant {
+        return Ok(report);
+    } else {
+        return Err("COMPLIANCE_FAILED: Framework evaluation failed compliance threshold");
+    }
+}

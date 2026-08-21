@@ -1,94 +1,88 @@
-// # Native LSP Server Engine Smoke Test
+// # Smoke Test for Full Language Server Protocol (LSP) Server
 //
-// Logline: Comprehensive verification of native Language Server Protocol framing, diagnostics, completions, and hover engines.
+// Logline: Verify LSP initialize, completion, hover, definition, codeAction, and lifecycle handlers.
 //
-// Setup: Imports std/test.oo and lsp/lsp.oo for end-to-end protocol testing.
+// Setup: Exercises lsp_server dispatcher and JSON-RPC replies under &FsCap and &SysCap.
 //
 // Beats:
-//   1. Verify LSP server initialization, shutdown, and capability negotiation.
-//   2. Verify JSON-RPC 2.0 framing and Content-Length encoding.
-//   3. Verify autocomplete suggestions for capabilities, keywords, and builtins.
-//   4. Verify hover documentation resolution and compiler diagnostic parsing.
-//   5. Output test summary and print lsp_server_smoke: PASSED.
+//   1. Verify initialize response advertises full capabilities.
+//   2. Verify completion and hover responses.
+//   3. Verify definition resolution.
+//   4. Verify code action generation and quick-fix mapping.
+//   5. Verify shutdown and exit lifecycle handling.
 
-import "std/test.oo";
-import "lsp/lsp.oo";
+import "lsp/lsp_types.oo";
+import "lsp/lsp_server.oo";
+import "lsp/lsp_code_action.oo";
 
-pub fn run_smoke_suite() -> Int {
-    let mut tr: TestRunner = test_runner_new();
-
-    // 1. Lifecycle & Capabilities
-    let st: LspServerState = lsp_engine_init();
-    tr = test_assert(tr, "server initial state not initialized", st.is_initialized == false);
-
-    let init_resp: String = lsp_server_handle_initialize("1", "file:///workspace");
-    tr = test_assert(tr, "server initialize response contains capabilities", chars_len(init_resp) > 0);
-    tr = test_assert(tr, "server initialize has jsonrpc 2.0", lsp_str_starts_with(init_resp, "{\"jsonrpc\":\"2.0\""));
-
-    let shut_resp: String = lsp_server_handle_shutdown("2");
-    tr = test_assert(tr, "server shutdown returns null result", lsp_str_starts_with(shut_resp, "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":null}"));
-
-    // 2. Framing & JSON-RPC
-    let raw_payload: String = "{\"jsonrpc\":\"2.0\",\"id\":10,\"result\":{\"status\":\"active\"}}";
-    let framed: String = lsp_frame_message(raw_payload);
-    tr = test_assert(tr, "framed starts with Content-Length", lsp_str_starts_with(framed, "Content-Length: "));
-
-    let mut clen: Int = 0;
-    clen = lsp_jsonrpc_parse_content_length(framed);
-    tr = test_assert_eq_int(tr, "parsed Content-Length matches payload len", clen, chars_len(raw_payload));
-
-    let err_msg: String = lsp_jsonrpc_make_error("3", 0 - 32601, "Method not found");
-    tr = test_assert(tr, "jsonrpc error formatting contains code", chars_len(err_msg) > 0);
-
-    // 3. Completions
-    let mut comp_fs: List[String] = list_new();
-    comp_fs = lsp_completion_resolve("&Fs");
-    tr = test_assert(tr, "completions for &Fs contains multiple capabilities", list_len(comp_fs) >= 3);
-
-    let mut comp_fn: List[String] = list_new();
-    comp_fn = lsp_completion_resolve("fn");
-    tr = test_assert(tr, "completions for fn resolves keyword", list_len(comp_fn) >= 1);
-
-    let mut comp_print: List[String] = list_new();
-    comp_print = lsp_completion_resolve("println");
-    tr = test_assert(tr, "completions for println resolves builtin", list_len(comp_print) >= 1);
-
-    // 4. Hover Documentation
-    let h_fs: LspHover = lsp_hover_resolve("FsCap", 0, 0);
-    tr = test_assert(tr, "hover documentation for FsCap resolved", chars_len(h_fs.contents) > 0);
-
-    let h_sys: LspHover = lsp_hover_resolve("SysCap", 0, 0);
-    tr = test_assert(tr, "hover documentation for SysCap resolved", chars_len(h_sys.contents) > 0);
-
-    let h_print: LspHover = lsp_hover_resolve("println", 0, 0);
-    tr = test_assert(tr, "hover documentation for println resolved", chars_len(h_print.contents) > 0);
-
-    let h_kw: LspHover = lsp_hover_resolve("struct", 0, 0);
-    tr = test_assert(tr, "hover documentation for struct resolved", chars_len(h_kw.contents) > 0);
-
-    // 5. Diagnostics
-    let err_sample: String = "ERR\ttype\tType error at 15:8: undefined symbol";
-    let mut diags: List[String] = list_new();
-    diags = lsp_parse_compiler_output(err_sample);
-    tr = test_assert_eq_int(tr, "diagnostic extracted from compiler output", list_len(diags), 1);
-
-    let pub_diags: String = lsp_diags_to_publish_json("file:///main.oo", diags);
-    tr = test_assert(tr, "publishDiagnostics payload generated", chars_len(pub_diags) > 0);
-
-    // 6. Facade Dispatch
-    let req: String = "{\"jsonrpc\":\"2.0\",\"id\":100,\"method\":\"textDocument/completion\",\"params\":{\"prefix\":\"&Net\"}}";
-    let proc_resp: String = lsp_process_message(req);
-    tr = test_assert(tr, "lsp_process_message routes completion", lsp_str_starts_with(proc_resp, "Content-Length: "));
-
-    test_summary(tr);
-    let failed: Int = tr.failed;
-    return failed;
+fn fail_smoke(msg: String) {
+    println("FAIL: " + msg);
+    process_exit(1);
 }
 
 pub fn main() {
-    let mut failed: Int = 0;
-    failed = run_smoke_suite();
-    if failed == 0 {
-        println("lsp_server_smoke: PASSED");
+    // 1. Initialize
+    let init_req: String = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file:///project\"}}";
+    let init_resp: String = lsp_server_process_message(init_req);
+    if str_index_of(init_resp, "\"codeActionProvider\":true") < 0 {
+        fail_smoke("initialize missing codeActionProvider: " + init_resp);
     }
+    if str_index_of(init_resp, "\"hoverProvider\":true") < 0 {
+        fail_smoke("initialize missing hoverProvider");
+    }
+    if str_index_of(init_resp, "\"definitionProvider\":true") < 0 {
+        fail_smoke("initialize missing definitionProvider");
+    }
+
+    // 2. Completion
+    let comp_req: String = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/completion\",\"params\":{\"prefix\":\"Sys\"}}";
+    let comp_resp: String = lsp_server_process_message(comp_req);
+    if str_index_of(comp_resp, "SysCap") < 0 {
+        fail_smoke("completion missing SysCap: " + comp_resp);
+    }
+
+    // 3. Hover
+    let hover_req: String = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"textDocument/hover\",\"params\":{\"symbol\":\"SysCap\"}}";
+    let hover_resp: String = lsp_server_process_message(hover_req);
+    if str_index_of(hover_resp, "SysCap") < 0 {
+        fail_smoke("hover missing SysCap documentation: " + hover_resp);
+    }
+
+    // 4. Definition
+    let def_req: String = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/definition\",\"params\":{\"uri\":\"file:///src/main.oo\"}}";
+    let def_resp: String = lsp_server_process_message(def_req);
+    if str_index_of(def_resp, "\"uri\":\"file:///src/main.oo\"") < 0 {
+        fail_smoke("definition missing target URI: " + def_resp);
+    }
+
+    // 5. Code Action (Quick Fix)
+    let ca_req: String = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"textDocument/codeAction\",\"params\":{\"uri\":\"file:///src/main.oo\",\"code\":\"E_CAP\"}}";
+    let ca_resp: String = lsp_server_process_message(ca_req);
+    if str_index_of(ca_resp, "Fix: Add required &Cap parameter") < 0 {
+        fail_smoke("codeAction missing E_CAP fix title: " + ca_resp);
+    }
+
+    // 6. Direct Code Action Resolver tests
+    let parse_actions: List[LspCodeAction] = lsp_code_action_resolve("E_PARSE", "file:///a.oo", 10, 5);
+    if list_len(parse_actions) < 1 {
+        fail_smoke("expected action for E_PARSE");
+    }
+    let imp_actions: List[LspCodeAction] = lsp_code_action_resolve("E_IMP", "file:///a.oo", 1, 1);
+    if list_len(imp_actions) < 1 {
+        fail_smoke("expected action for E_IMP");
+    }
+
+    let custom_act: LspCodeAction = lsp_types_action_new("custom", "quickfix", "");
+    if lsp_code_action_title(&custom_act) != "custom" {
+        fail_smoke("custom action title mismatch");
+    }
+
+    // 7. Shutdown
+    let shut_req: String = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"shutdown\",\"params\":{}}";
+    let shut_resp: String = lsp_server_process_message(shut_req);
+    if str_index_of(shut_resp, "\"result\":null") < 0 {
+        fail_smoke("shutdown response should return null result");
+    }
+
+    println("OK: LSP_SERVER_SMOKE_PASSED");
 }

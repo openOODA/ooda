@@ -1,0 +1,221 @@
+// # P2P Swarm Peer Identity, Multiaddr Parsing & Reputation Scoring
+//
+// Logline: Manages swarm peer identities, multiaddr endpoint routing, connection lifecycle states, and latency scoring.
+//
+// Setup: Sovereign peer descriptors maintaining cryptographic NodeID identities and trust scores (-100 to +100).
+//
+// Beats:
+//   1. Parse multiaddr schemas (/ip4/<ip>/udp/<port>/quic-v1/p2p/<peer_id>).
+//   2. Track peer lifecycle states (Discovered, Handshaking, Connected, Degraded, Banned).
+//   3. Apply reputation updates (+2 success, -20 protocol error, -100 malformed/banned).
+//   4. Provide PeerStore with full delimiter serialization for state/score retention.
+// RULES.oot 1.4: Pure data module.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+pub type SwarmPeer = struct {
+    peer_id: String,
+    ip: String,
+    port: Int,
+    multiaddr: String,
+    state: String,
+    score: Int,
+    rtt_ms: Int,
+    success_count: Int,
+    fail_count: Int,
+    is_valid: Bool
+};
+
+pub type PeerStore = struct {
+    peers: String,
+    count: Int
+};
+
+fn swarm_peer_parse_int(s: String) -> Int {
+    let mut acc: Int = 0;
+    let mut i: Int = 0;
+    let n: Int = chars_len(s);
+    if n == 0 { return 0; }
+    let is_neg: Bool = (char_at(s, 0) == "-");
+    if is_neg { i = 1; }
+    while i < n {
+        let c: String = char_at(s, i);
+        let mut d: Int = 0;
+        if c == "1" { d = 1; } else if c == "2" { d = 2; } else if c == "3" { d = 3; }
+        else if c == "4" { d = 4; } else if c == "5" { d = 5; } else if c == "6" { d = 6; }
+        else if c == "7" { d = 7; } else if c == "8" { d = 8; } else if c == "9" { d = 9; }
+        acc = acc * 10 + d;
+        i = i + 1;
+    }
+    if is_neg { return 0 - acc; }
+    return acc;
+}
+
+pub fn peer_state_name(code: Int) -> String {
+    if code == 0 { return "DISCOVERED"; }
+    if code == 1 { return "CONNECTING"; }
+    if code == 2 { return "HANDSHAKING"; }
+    if code == 3 { return "AUTHENTICATED"; }
+    if code == 4 { return "CONNECTED"; }
+    if code == 5 { return "DEGRADED"; }
+    if code == 6 { return "DISCONNECTED"; }
+    if code == 7 { return "BANNED"; }
+    return "UNKNOWN";
+}
+
+pub fn swarm_peer_empty() -> SwarmPeer {
+    return SwarmPeer {
+        peer_id: "", ip: "", port: 0, multiaddr: "", state: "INVALID",
+        score: 0, rtt_ms: 0, success_count: 0, fail_count: 0, is_valid: false
+    };
+}
+
+pub fn swarm_peer_new(peer_id: String, ip: String, port: Int) -> SwarmPeer {
+    let maddr: String = "/ip4/" + ip + "/udp/" + port.to_string() + "/quic-v1/p2p/" + peer_id;
+    return SwarmPeer {
+        peer_id: peer_id, ip: ip, port: port, multiaddr: maddr, state: "DISCOVERED",
+        score: 50, rtt_ms: 50, success_count: 0, fail_count: 0, is_valid: true
+    };
+}
+
+pub fn swarm_peer_parse_multiaddr(maddr: String) -> SwarmPeer {
+    if !str_starts_with(maddr, "/ip4/") { return swarm_peer_empty(); }
+    let idx_udp: Int = str_index_of(maddr, "/udp/");
+    if idx_udp < 0 { return swarm_peer_empty(); }
+    let ip_str: String = str_slice(maddr, 5, idx_udp);
+    let idx_p2p: Int = str_index_of(maddr, "/p2p/");
+    if idx_p2p < 0 { return swarm_peer_empty(); }
+    let idx_quic: Int = str_index_of(maddr, "/quic-v1/");
+    let mut port_end: Int = idx_quic;
+    if idx_quic < 0 { port_end = idx_p2p; }
+    let port_str: String = str_slice(maddr, idx_udp + 5, port_end);
+    let peer_id: String = str_slice(maddr, idx_p2p + 5, chars_len(maddr));
+    let port_int: Int = swarm_peer_parse_int(port_str);
+    return SwarmPeer {
+        peer_id: peer_id, ip: ip_str, port: port_int, multiaddr: maddr,
+        state: "DISCOVERED", score: 50, rtt_ms: 50, success_count: 0, fail_count: 0, is_valid: true
+    };
+}
+
+pub fn swarm_peer_record_success(p: SwarmPeer, rtt: Int) -> SwarmPeer {
+    let mut new_score: Int = p.score + 2;
+    if new_score > 100 { new_score = 100; }
+    let updated_rtt: Int = (p.rtt_ms * 3 + rtt) / 4;
+    return SwarmPeer {
+        peer_id: p.peer_id, ip: p.ip, port: p.port, multiaddr: p.multiaddr,
+        state: "CONNECTED", score: new_score, rtt_ms: updated_rtt,
+        success_count: p.success_count + 1, fail_count: p.fail_count, is_valid: p.is_valid
+    };
+}
+
+pub fn swarm_peer_record_failure(p: SwarmPeer, penalty: Int) -> SwarmPeer {
+    let mut new_score: Int = p.score - penalty;
+    if new_score < -100 { new_score = -100; }
+    let mut new_state: String = p.state;
+    if new_score <= -50 { new_state = "BANNED"; }
+    else if new_score < 0 { new_state = "DEGRADED"; }
+    return SwarmPeer {
+        peer_id: p.peer_id, ip: p.ip, port: p.port, multiaddr: p.multiaddr,
+        state: new_state, score: new_score, rtt_ms: p.rtt_ms,
+        success_count: p.success_count, fail_count: p.fail_count + 1, is_valid: p.is_valid
+    };
+}
+
+pub fn peer_store_new() -> PeerStore {
+    return PeerStore { peers: "\n", count: 0 };
+}
+
+pub fn peer_store_encode_peer(p: SwarmPeer) -> String {
+    return p.peer_id + "|" + p.multiaddr + "|" + p.state + "|" + p.score.to_string() + "|" + p.rtt_ms.to_string() + "|" + p.success_count.to_string() + "|" + p.fail_count.to_string();
+}
+
+pub fn peer_store_decode_peer(raw: String) -> SwarmPeer {
+    let mut s: String = raw;
+    if str_ends_with(s, ";") { s = str_slice(s, 0, chars_len(s) - 1); }
+    if !s.contains("|") { return swarm_peer_parse_multiaddr(s); }
+    let parts: List[String] = str_split(s, "|");
+    let n: Int = list_len(parts);
+    if n < 4 { return swarm_peer_empty(); }
+    let pid: String = list_get(parts, 0);
+    let maddr: String = list_get(parts, 1);
+    let state: String = list_get(parts, 2);
+    let score: Int = swarm_peer_parse_int(list_get(parts, 3));
+    let mut rtt: Int = 50;
+    let mut succ: Int = 0;
+    let mut fail: Int = 0;
+    if n >= 5 { rtt = swarm_peer_parse_int(list_get(parts, 4)); }
+    if n >= 6 { succ = swarm_peer_parse_int(list_get(parts, 5)); }
+    if n >= 7 { fail = swarm_peer_parse_int(list_get(parts, 6)); }
+    let base: SwarmPeer = swarm_peer_parse_multiaddr(maddr);
+    return SwarmPeer {
+        peer_id: pid, ip: base.ip, port: base.port, multiaddr: maddr,
+        state: state, score: score, rtt_ms: rtt, success_count: succ, fail_count: fail, is_valid: true
+    };
+}
+
+pub fn peer_store_upsert(ps: PeerStore, peer: SwarmPeer) -> PeerStore {
+    let encoded: String = peer_store_encode_peer(peer);
+    let pid: String = peer.peer_id;
+    let lines: List[String] = str_split(ps.peers, "\n");
+    let mut new_str: String = "\n";
+    let mut found: Bool = false;
+    let mut i: Int = 0;
+    while i < list_len(lines) {
+        let line: String = list_get(lines, i);
+        if chars_len(line) > 0 {
+            let p: SwarmPeer = peer_store_decode_peer(line);
+            if p.is_valid && p.peer_id == pid {
+                new_str = new_str + encoded + "\n";
+                found = true;
+            } else {
+                new_str = new_str + line + "\n";
+            }
+        }
+        i = i + 1;
+    }
+    if !found {
+        new_str = new_str + encoded + "\n";
+        return PeerStore { peers: new_str, count: ps.count + 1 };
+    }
+    return PeerStore { peers: new_str, count: ps.count };
+}
+
+pub fn peer_store_add_or_update(ps: PeerStore, peer: SwarmPeer) -> PeerStore {
+    return peer_store_upsert(ps, peer);
+}
+
+pub fn peer_store_find(ps: PeerStore, pid: String) -> SwarmPeer {
+    let lines: List[String] = str_split(ps.peers, "\n");
+    let mut i: Int = 0;
+    while i < list_len(lines) {
+        let line: String = list_get(lines, i);
+        if chars_len(line) > 0 {
+            let p: SwarmPeer = peer_store_decode_peer(line);
+            if p.is_valid && p.peer_id == pid { return p; }
+        }
+        i = i + 1;
+    }
+    return swarm_peer_empty();
+}
+
+pub fn peer_store_count(ps: PeerStore) -> Int {
+    return ps.count;
+}
+
+pub fn peer_store_prune_banned(ps: PeerStore) -> PeerStore {
+    let lines: List[String] = str_split(ps.peers, "\n");
+    let mut new_str: String = "\n";
+    let mut new_count: Int = 0;
+    let mut i: Int = 0;
+    while i < list_len(lines) {
+        let line: String = list_get(lines, i);
+        if chars_len(line) > 0 {
+            let p: SwarmPeer = peer_store_decode_peer(line);
+            if p.is_valid && !(p.state == "BANNED") && p.score >= 0 {
+                new_str = new_str + line + "\n";
+                new_count = new_count + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return PeerStore { peers: new_str, count: new_count };
+}

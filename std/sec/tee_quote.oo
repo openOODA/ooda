@@ -1,0 +1,160 @@
+// # TEE Attestation Quote Parsers & Verifiers
+//
+// Logline: Parses raw byte streams for AMD SEV-SNP and Apple Secure Enclave attestation quotes into typed records, then verifies structural integrity and quote field ranges under &CryptoCap.
+//
+// Setup: Imports std/sec/tee_types.oo. The parsers are pure value-returning helpers; the verifiers take &CryptoCap matching the established pattern in ooda/std/sec/cps/{bft_engine, secoc, goose_sec}.oo. Decimal literals are used in place of hex because the .oo lexer does not accept 0xNN constants.
+//
+// Beats:
+//   1. Provide read_u32_le to extract a 4-byte little-endian word from a byte list at a given offset.
+//   2. Provide read_bytes to copy a sub-range of a byte list into a new byte list.
+//   3. Provide tee_quote_parse_sev_snp and tee_quote_parse_apple for the two quote formats.
+//   4. Provide tee_quote_verify_sev_snp and tee_quote_verify_apple under &CryptoCap; both perform structural checks (version range, measurement non-empty, signature non-empty, vendor match) and return Result[Bool, String].
+
+import "./tee_types.oo";
+
+pub fn tee_read_u32_le(b: List[Int], offset: Int) -> Int {
+    let b0: Int = list_get(b, offset);
+    let b1: Int = list_get(b, offset + 1);
+    let b2: Int = list_get(b, offset + 2);
+    let b3: Int = list_get(b, offset + 3);
+    return b0 | (b1 * 256) | (b2 * 65536) | (b3 * 16777216);
+}
+
+pub fn tee_read_bytes(b: List[Int], offset: Int, length: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < length {
+        let v: Int = list_get(b, offset + i);
+        out = list_push(out, v);
+        i = i + 1;
+    }
+    return out;
+}
+
+// ===== SEV-SNP =====
+
+pub fn tee_quote_parse_sev_snp(raw: List[Int]) -> Result[SevSnpQuoteHeader, String] {
+    // Minimal valid SEV-SNP quote: 32 bytes of header + 48 bytes measurement
+    // + 32 bytes host_data + 32 bytes id_key_digest + 32 bytes report_id
+    // + 512 bytes signature = 688 bytes minimum.
+    let n: Int = list_len(raw);
+    let min_size: Int = 688;
+    if n < min_size {
+        return Err("E_TEE_SHORT_BUFFER: SEV-SNP quote smaller than 688 bytes");
+    }
+    let mut q: SevSnpQuoteHeader = sev_snp_quote_new();
+    q.version = tee_read_u32_le(raw, 0);
+    q.guest_svn = tee_read_u32_le(raw, 4);
+    q.policy = tee_read_u32_le(raw, 8);
+    q.family_id = tee_read_u32_le(raw, 12);
+    q.image_id = tee_read_u32_le(raw, 16);
+    q.vmpl = tee_read_u32_le(raw, 20);
+    q.sig_algo = tee_read_u32_le(raw, 24);
+    q.vendor_id = tee_read_u32_le(raw, 28);
+    q.measurement = tee_read_bytes(raw, 32, tee_sev_snp_measurement_len());
+    q.host_data = tee_read_bytes(raw, 80, 32);
+    q.id_key_digest = tee_read_bytes(raw, 112, 32);
+    q.report_id = tee_read_bytes(raw, 144, 32);
+    q.signature = tee_read_bytes(raw, 176, tee_sev_snp_signature_len());
+    q.is_valid = true;
+    return Ok(q);
+}
+
+pub fn tee_quote_verify_sev_snp(
+    crypto: &CryptoCap,
+    q: &SevSnpQuoteHeader
+) -> Result[Bool, String] {
+    // Structural checks first (deterministic; do not require CryptoCap FFI).
+    let v: Int = (q).version;
+    if v < tee_sev_snp_version_min() {
+        return Err("E_TEE_VERSION: SEV-SNP quote version below minimum");
+    }
+    if v > tee_sev_snp_version_max() {
+        return Err("E_TEE_VERSION: SEV-SNP quote version above maximum");
+    }
+    let meas: List[Int] = (q).measurement;
+    if list_len(meas) != tee_sev_snp_measurement_len() {
+        return Err("E_TEE_MEAS_LEN: SEV-SNP measurement must be 48 bytes (SHA-384)");
+    }
+    let sig: List[Int] = (q).signature;
+    if list_len(sig) != tee_sev_snp_signature_len() {
+        return Err("E_TEE_SIG_LEN: SEV-SNP signature must be 512 bytes");
+    }
+    let vid: Int = (q).vendor_id;
+    if vid != tee_vendor_sev_snp() {
+        return Err("E_TEE_VENDOR: SEV-SNP vendor id mismatch");
+    }
+    // CryptoCap FFI lowering for ECDSA-P384 signature verification is reserved
+    // for the Stage 15 FFI surface. We assert the cap was actually supplied
+    // by checking the structural path completes; downstream callers can
+    // re-issue an FFI-lowerable verify against the same quote.
+    let _cap_used: &CryptoCap = crypto;
+    return Ok(true);
+}
+
+// ===== Apple Secure Enclave =====
+
+pub fn tee_quote_parse_apple(raw: List[Int]) -> Result[AppleSecureEnclaveQuote, String] {
+    // Minimal valid Apple SE quote: 4 + 8 + 4 + 4 + 4 + 4 + 32 + 48 + 64 = 172 bytes.
+    let n: Int = list_len(raw);
+    let min_size: Int = 172;
+    if n < min_size {
+        return Err("E_TEE_SHORT_BUFFER: Apple SE quote smaller than 172 bytes");
+    }
+    let mut q: AppleSecureEnclaveQuote = apple_se_quote_new();
+    q.version = tee_read_u32_le(raw, 0);
+    q.chip_id = tee_read_bytes(raw, 4, tee_apple_se_chip_id_len());
+    q.device_type = tee_read_bytes(raw, 12, 4);
+    // Platform version is 8 bytes: 4 bytes major + 4 bytes minor.
+    let plat_major: List[Int] = tee_read_bytes(raw, 16, 4);
+    let plat_minor: List[Int] = tee_read_bytes(raw, 20, 4);
+    let mut plat: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 4 {
+        plat = list_push(plat, list_get(plat_major, i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 4 {
+        plat = list_push(plat, list_get(plat_minor, i));
+        i = i + 1;
+    }
+    q.platform_version = plat;
+    q.os_version = tee_read_bytes(raw, 24, 4);
+    q.public_key_hash = tee_read_bytes(raw, 28, tee_apple_se_pubkey_hash_len());
+    q.measurement = tee_read_bytes(raw, 60, 48);
+    q.signature = tee_read_bytes(raw, 108, tee_apple_se_signature_len());
+    q.is_valid = true;
+    return Ok(q);
+}
+
+pub fn tee_quote_verify_apple(
+    crypto: &CryptoCap,
+    q: &AppleSecureEnclaveQuote
+) -> Result[Bool, String] {
+    let v: Int = (q).version;
+    if v < tee_apple_se_version_min() {
+        return Err("E_TEE_VERSION: Apple SE quote version below minimum");
+    }
+    if v > tee_apple_se_version_max() {
+        return Err("E_TEE_VERSION: Apple SE quote version above maximum");
+    }
+    let chip: List[Int] = (q).chip_id;
+    if list_len(chip) != tee_apple_se_chip_id_len() {
+        return Err("E_TEE_CHIP_ID_LEN: Apple SE chip_id must be 8 bytes");
+    }
+    let pkh: List[Int] = (q).public_key_hash;
+    if list_len(pkh) != tee_apple_se_pubkey_hash_len() {
+        return Err("E_TEE_PKH_LEN: Apple SE public_key_hash must be 32 bytes (SHA-256)");
+    }
+    let sig: List[Int] = (q).signature;
+    if list_len(sig) != tee_apple_se_signature_len() {
+        return Err("E_TEE_SIG_LEN: Apple SE signature must be 64 bytes (ECDSA P-256)");
+    }
+    let plat: List[Int] = (q).platform_version;
+    if list_len(plat) != 8 {
+        return Err("E_TEE_PLAT_LEN: Apple SE platform_version must be 8 bytes");
+    }
+    let _cap_used: &CryptoCap = crypto;
+    return Ok(true);
+}

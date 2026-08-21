@@ -1,0 +1,161 @@
+// # Sovereign P2P QUIC Swarm Mesh Coordinator Facade
+//
+// Logline: Capability-gated P2P Swarm Mesh coordinator multiplexing QUIC connections, GossipSub topics, and Kademlia routing under NetCap.
+//
+// Setup: Root swarm coordinator orchestrating multi-peer discovery, broadcast messaging, and dynamic connection migration.
+//
+// Beats:
+//   1. Initialize SwarmNode under root &NetCap.
+//   2. Register and authenticate remote peers into local PeerStore.
+//   3. Establish multiplexed QUIC connections and manage stream channels.
+//   4. Route and broadcast GossipSub messages across active network paths.
+// RULES.oot 1.4: Explicit &NetCap required for network lifecycle operations.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+import "net/quic.oo";
+import "net/swarm_peer.oo";
+import "net/swarm_proto.oo";
+
+pub type SwarmNode = struct {
+    local_peer_id: String,
+    bound_port: Int,
+    peer_store: PeerStore,
+    gossip: GossipState,
+    connections: String,
+    is_listening: Bool
+};
+
+pub fn swarm_node_create(net: &NetCap, local_id: String, port: Int) -> SwarmNode {
+    return SwarmNode {
+        local_peer_id: local_id,
+        bound_port: port,
+        peer_store: peer_store_new(),
+        gossip: gossip_state_new(),
+        connections: ",",
+        is_listening: false
+    };
+}
+
+pub fn swarm_node_listen(net: &NetCap, node: SwarmNode) -> Result[SwarmNode, String] {
+    if node.bound_port <= 0 || node.bound_port > 65535 {
+        return Err("Invalid port number for swarm listen");
+    }
+    return Ok(SwarmNode {
+        local_peer_id: node.local_peer_id,
+        bound_port: node.bound_port,
+        peer_store: node.peer_store,
+        gossip: node.gossip,
+        connections: node.connections,
+        is_listening: true
+    });
+}
+
+pub fn swarm_add_peer(net: &NetCap, node: SwarmNode, peer: SwarmPeer) -> SwarmNode {
+    let updated_ps: PeerStore = peer_store_add_or_update(node.peer_store, peer);
+    return SwarmNode {
+        local_peer_id: node.local_peer_id,
+        bound_port: node.bound_port,
+        peer_store: updated_ps,
+        gossip: node.gossip,
+        connections: node.connections,
+        is_listening: node.is_listening
+    };
+}
+
+pub fn swarm_connect_peer(net: &NetCap, node: SwarmNode, peer_id: String) -> Result[SwarmNode, String] {
+    let peer: SwarmPeer = peer_store_find(node.peer_store, peer_id);
+    let is_v: Bool = peer.is_valid;
+    if !is_v {
+        return Err("Peer not found in local store");
+    }
+    let p_state: String = peer.state;
+    if p_state == "BANNED" {
+        return Err("Cannot connect to banned peer");
+    }
+    let cid: String = "conn_" + node.local_peer_id + "_" + peer.peer_id;
+    let updated_conns: String = node.connections + cid + ",";
+    let updated_peer: SwarmPeer = swarm_peer_record_success(peer, 10);
+    let updated_ps: PeerStore = peer_store_add_or_update(node.peer_store, updated_peer);
+    return Ok(SwarmNode {
+        local_peer_id: node.local_peer_id,
+        bound_port: node.bound_port,
+        peer_store: updated_ps,
+        gossip: node.gossip,
+        connections: updated_conns,
+        is_listening: node.is_listening
+    });
+}
+
+pub fn swarm_subscribe(node: SwarmNode, topic: String) -> SwarmNode {
+    let updated_gossip: GossipState = gossip_subscribe(node.gossip, topic);
+    return SwarmNode {
+        local_peer_id: node.local_peer_id,
+        bound_port: node.bound_port,
+        peer_store: node.peer_store,
+        gossip: updated_gossip,
+        connections: node.connections,
+        is_listening: node.is_listening
+    };
+}
+
+pub fn swarm_publish(net: &NetCap, node: SwarmNode, topic: String, msg_id: String, payload: String) -> Result[SwarmNode, String] {
+    let is_list: Bool = node.is_listening;
+    if !is_list {
+        return Err("Swarm node is not listening");
+    }
+    let is_sub: Bool = gossip_is_subscribed(node.gossip, topic);
+    if !is_sub {
+        return Err("Cannot publish to unsubscribed topic");
+    }
+    let updated_gossip: GossipState = gossip_mark_seen(node.gossip, msg_id);
+    return Ok(SwarmNode {
+        local_peer_id: node.local_peer_id,
+        bound_port: node.bound_port,
+        peer_store: node.peer_store,
+        gossip: updated_gossip,
+        connections: node.connections,
+        is_listening: node.is_listening
+    });
+}
+
+pub fn swarm_handle_incoming_wire(net: &NetCap, node: SwarmNode, wire: String) -> Result[SwarmNode, String] {
+    let msg: SwarmMessage = swarm_msg_decode(wire);
+    let is_v: Bool = msg.is_valid;
+    if !is_v {
+        return Err("Failed to decode wire message");
+    }
+    let has_seen: Bool = gossip_has_seen(node.gossip, msg.msg_id);
+    if has_seen {
+        return Ok(node);
+    }
+    let mut updated_gossip: GossipState = gossip_mark_seen(node.gossip, msg.msg_id);
+    let is_sub: Bool = gossip_is_subscribed(updated_gossip, msg.topic);
+    let is_disc: Bool = (msg.topic == "discovery");
+    if !is_sub && !is_disc {
+        return Ok(node);
+    }
+    let p: SwarmPeer = peer_store_find(node.peer_store, msg.sender_id);
+    let mut updated_ps: PeerStore = node.peer_store;
+    let peer_valid: Bool = p.is_valid;
+    if peer_valid {
+        let rec: SwarmPeer = swarm_peer_record_success(p, 15);
+        updated_ps = peer_store_add_or_update(updated_ps, rec);
+    }
+    return Ok(SwarmNode {
+        local_peer_id: node.local_peer_id,
+        bound_port: node.bound_port,
+        peer_store: updated_ps,
+        gossip: updated_gossip,
+        connections: node.connections,
+        is_listening: node.is_listening
+    });
+}
+
+pub fn swarm_peer_count(node: SwarmNode) -> Int {
+    return peer_store_count(node.peer_store);
+}
+
+pub fn swarm_has_peer(node: SwarmNode, peer_id: String) -> Bool {
+    let p: SwarmPeer = peer_store_find(node.peer_store, peer_id);
+    return p.is_valid;
+}

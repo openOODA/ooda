@@ -1,0 +1,79 @@
+// # OODAX Microkernel Supervisor & Domain Manager
+//
+// Logline: Orchestrates bare-metal capability microkernel state, domain address spaces, and hardware isolation.
+//
+// Setup: Single-address-space microkernel supervisor enforcing sovereign capability security invariants.
+//
+// Beats:
+//   1. Define OodaxKernel state and domain descriptors.
+//   2. Initialize microkernel subsystems (capabilities, scheduler, IPC, drivers).
+//   3. Manage domain creation, capability bootstrap grants, and thread spawning.
+//   4. Execute periodic scheduler ticks and capability verification audits.
+// RULES.oot 1.4: Strict capability authorization for supervisor operations.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+import "oodax/cap_table.oo";
+import "oodax/ipc.oo";
+import "oodax/sched.oo";
+import "oodax/virtio_blk.oo";
+import "oodax/virtio_net.oo";
+import "oodax/syscall.oo";
+
+pub type OodaxKernel = struct {
+    name: String,
+    version_code: Int,
+    domain_count: Int,
+    root_table: CapTable,
+    scheduler: Scheduler,
+    total_syscalls: Int,
+    is_booted: Bool
+};
+
+pub fn oodax_kernel_init(name: String) -> OodaxKernel {
+    let mut table: CapTable = cap_table_new(0);
+    let root_ep: CapEntry = cap_entry_new(0, cap_type_endpoint(), 1, cap_right_all(), 1);
+    table = cap_table_set(table, 0, root_ep);
+    let dev_blk: CapEntry = cap_entry_new(1, cap_type_device(), 10, cap_right_all(), 2);
+    table = cap_table_set(table, 1, dev_blk);
+    let dev_net: CapEntry = cap_entry_new(2, cap_type_device(), 20, cap_right_all(), 3);
+    table = cap_table_set(table, 2, dev_net);
+
+    let mut sched: Scheduler = sched_new(10);
+    let root_tcb: ThreadControlBlock = tcb_new(1, 0, 10, 5);
+    sched = sched_add_thread(sched, root_tcb);
+
+    return OodaxKernel {
+        name: name,
+        version_code: 206,
+        domain_count: 1,
+        root_table: table,
+        scheduler: sched,
+        total_syscalls: 0,
+        is_booted: true
+    };
+}
+
+pub fn oodax_spawn_domain_thread(k: OodaxKernel, domain_id: Int, tid: Int, prio: Int, slice: Int) -> Result[OodaxKernel, String] {
+    let booted: Bool = k.is_booted;
+    if !booted {
+        return Err("Kernel is not booted");
+    }
+    if tid <= 0 || tid > 4 {
+        return Err("Invalid thread identifier");
+    }
+    let new_tcb: ThreadControlBlock = tcb_new(tid, domain_id, prio, slice);
+    let mut next_k: OodaxKernel = k;
+    next_k.scheduler = sched_add_thread(k.scheduler, new_tcb);
+    let dcount: Int = k.domain_count;
+    if domain_id >= dcount {
+        next_k.domain_count = domain_id + 1;
+    }
+    return Ok(next_k);
+}
+
+pub fn oodax_step_tick(k: OodaxKernel) -> OodaxKernel {
+    let tick_res: SchedTickResult = sched_tick(k.scheduler);
+    let mut next_k: OodaxKernel = k;
+    next_k.scheduler = tick_res.scheduler;
+    return next_k;
+}

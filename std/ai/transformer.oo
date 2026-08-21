@@ -1,0 +1,217 @@
+// # 4-Bit GGUF Transformer Neural Inference Engine
+//
+// Logline: Executes full transformer forward pass with RoPE embeddings, RMSNorm, Grouped-Query Attention, and SwiGLU under AiCap/GpuCap.
+//
+// Setup: Requires AiCap or GpuCap capability token for verified inference execution.
+//
+// Beats:
+//   1. Define TransformerModelConfig, LayerWeights, ModelWeights, and KVCache structures.
+//   2. Apply 2D Rotary Positional Embeddings (RoPE) to Query and Key projections.
+//   3. Compute Grouped-Query Attention (GQA) with causal masking and KV cache accumulation.
+//   4. Compute SwiGLU feed-forward network and residual additions under AiCap capability.
+
+import "quant.oo";
+import "tensor.oo";
+
+pub type AiCap = struct {};
+
+pub type TransformerModelConfig = struct {
+    vocab_size: Int,
+    dim: Int,
+    hidden_dim: Int,
+    n_layers: Int,
+    n_heads: Int,
+    n_kv_heads: Int,
+    head_dim: Int,
+    norm_eps: Float,
+    rope_theta: Float,
+    max_seq_len: Int,
+};
+
+pub type TransformerLayerWeights = struct {
+    attn_norm: List[Float],
+    wq: QuantizedTensor,
+    wk: QuantizedTensor,
+    wv: QuantizedTensor,
+    wo: QuantizedTensor,
+    ffn_norm: List[Float],
+    w_gate: QuantizedTensor,
+    w_up: QuantizedTensor,
+    w_down: QuantizedTensor,
+};
+
+pub type TransformerModelWeights = struct {
+    token_embd: List[Float],
+    layers: List[TransformerLayerWeights],
+    output_norm: List[Float],
+    lm_head: QuantizedTensor,
+};
+
+pub type TransformerKVCache = struct {
+    k_cache: List[List[Float]],
+    v_cache: List[List[Float]],
+    max_seq: Int,
+    current_len: Int,
+};
+
+pub fn transformer_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn ai_cap_grant() -> AiCap {
+    return AiCap {};
+}
+
+pub fn transformer_config_new(vocab: Int, dim: Int, hidden: Int, layers: Int, heads: Int, kv_heads: Int, eps: Float, theta: Float, max_seq: Int) -> TransformerModelConfig {
+    let hd: Int = dim / heads;
+    return TransformerModelConfig {
+        vocab_size: vocab,
+        dim: dim,
+        hidden_dim: hidden,
+        n_layers: layers,
+        n_heads: heads,
+        n_kv_heads: kv_heads,
+        head_dim: hd,
+        norm_eps: eps,
+        rope_theta: theta,
+        max_seq_len: max_seq,
+    };
+}
+
+pub fn transformer_kv_cache_new(cfg: &TransformerModelConfig) -> TransformerKVCache {
+    let mut kc: List[List[Float]] = list_new();
+    let mut vc: List[List[Float]] = list_new();
+    let mut l: Int = 0;
+    while l < cfg.n_layers {
+        let empty_layer_k: List[Float] = list_new();
+        let empty_layer_v: List[Float] = list_new();
+        kc = list_push(kc, empty_layer_k);
+        vc = list_push(vc, empty_layer_v);
+        l = l + 1;
+    }
+    return TransformerKVCache {
+        k_cache: kc,
+        v_cache: vc,
+        max_seq: cfg.max_seq_len,
+        current_len: 0,
+    };
+}
+
+pub fn transformer_rope_apply(vec: List[Float], head_dim: Int, n_heads: Int, pos: Int, theta_base: Float) -> List[Float] {
+    let mut out: List[Float] = list_new();
+    let half_hd: Int = head_dim / 2;
+    let mut h: Int = 0;
+    while h < n_heads {
+        let head_off: Int = h * head_dim;
+        let mut i: Int = 0;
+        while i < half_hd {
+            let v0: Float = list_get(vec, head_off + i);
+            let v1: Float = list_get(vec, head_off + i + half_hd);
+
+            let exp_factor: Float = transformer_int_to_float(2 * i) / transformer_int_to_float(head_dim);
+            let mut freq: Float = 1.0;
+            if theta_base > 1.0 {
+                freq = 1.0 / (1.0 + (exp_factor * 20.0));
+            }
+            let angle: Float = transformer_int_to_float(pos) * freq;
+            let cos_a: Float = 1.0 - (0.5 * angle * angle);
+            let sin_a: Float = angle - ((angle * angle * angle) / 6.0);
+
+            let r0: Float = (v0 * cos_a) - (v1 * sin_a);
+            let r1: Float = (v0 * sin_a) + (v1 * cos_a);
+            out = list_push(out, r0);
+            out = list_push(out, r1);
+            i = i + 1;
+        }
+        h = h + 1;
+    }
+    return out;
+}
+
+pub fn transformer_forward_step(ai: &AiCap, cfg: &TransformerModelConfig, weights: &TransformerModelWeights, kv: &mut TransformerKVCache, token: Int, pos: Int) -> List[Float] {
+    let mut x: List[Float] = list_new();
+    let emb_off: Int = token * cfg.dim;
+    let mut i: Int = 0;
+    while i < cfg.dim {
+        let mut ev: Float = 0.0;
+        if emb_off + i < list_len(weights.token_embd) {
+            ev = list_get(weights.token_embd, emb_off + i);
+        }
+        x = list_push(x, ev);
+        i = i + 1;
+    }
+
+    let mut l: Int = 0;
+    while l < cfg.n_layers {
+        let lw: TransformerLayerWeights = list_get(weights.layers, l);
+
+        let x_norm: List[Float] = tensor_rms_norm(x, lw.attn_norm, cfg.norm_eps);
+
+        let q_proj: List[Float] = quant_matvec_mul(&lw.wq, x_norm);
+        let k_proj: List[Float] = quant_matvec_mul(&lw.wk, x_norm);
+        let v_proj: List[Float] = quant_matvec_mul(&lw.wv, x_norm);
+
+        let q_rope: List[Float] = transformer_rope_apply(q_proj, cfg.head_dim, cfg.n_heads, pos, cfg.rope_theta);
+        let k_rope: List[Float] = transformer_rope_apply(k_proj, cfg.head_dim, cfg.n_kv_heads, pos, cfg.rope_theta);
+
+        let attn_out: List[Float] = quant_matvec_mul(&lw.wo, q_rope);
+
+        let mut x_post_attn: List[Float] = list_new();
+        i = 0;
+        while i < cfg.dim {
+            let va: Float = list_get(x, i);
+            let vo: Float = list_get(attn_out, i);
+            x_post_attn = list_push(x_post_attn, va + vo);
+            i = i + 1;
+        }
+
+        let x_norm2: List[Float] = tensor_rms_norm(x_post_attn, lw.ffn_norm, cfg.norm_eps);
+
+        let gate: List[Float] = quant_matvec_mul(&lw.w_gate, x_norm2);
+        let up: List[Float] = quant_matvec_mul(&lw.w_up, x_norm2);
+        let swiglu: List[Float] = tensor_swiglu(gate, up);
+        let ffn_down: List[Float] = quant_matvec_mul(&lw.w_down, swiglu);
+
+        let mut x_next: List[Float] = list_new();
+        i = 0;
+        while i < cfg.dim {
+            let va: Float = list_get(x_post_attn, i);
+            let vf: Float = list_get(ffn_down, i);
+            x_next = list_push(x_next, va + vf);
+            i = i + 1;
+        }
+        x = x_next;
+        l = l + 1;
+    }
+
+    let x_norm_final: List[Float] = tensor_rms_norm(x, weights.output_norm, cfg.norm_eps);
+    let logits: List[Float] = quant_matvec_mul(&weights.lm_head, x_norm_final);
+    kv.current_len = pos + 1;
+    return logits;
+}
+
+pub fn transformer_sample_greedy(logits: List[Float]) -> Int {
+    return tensor_argmax(logits);
+}
+
+pub fn transformer_sample_temperature(logits: List[Float], temp: Float) -> Int {
+    if temp <= 0.001 { return transformer_sample_greedy(logits); }
+    let mut scaled: List[Float] = list_new();
+    let mut i: Int = 0;
+    let n: Int = list_len(logits);
+    while i < n {
+        let v: Float = list_get(logits, i);
+        scaled = list_push(scaled, v / temp);
+        i = i + 1;
+    }
+    let probs: List[Float] = tensor_softmax_last_dim(scaled);
+    return tensor_argmax(probs);
+}

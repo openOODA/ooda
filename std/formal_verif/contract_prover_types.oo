@@ -1,0 +1,256 @@
+// # Contract Prover Types
+//
+// Logline: Names linear Hoare terms and a flat-CNF DPLL solver with unit propagation and pure literals.
+//
+// Setup: Pure data and SAT search. No capability tokens. Used by contract_prover_engine.oo.
+//
+// Beats:
+//   1. Store linear terms, relations, assignments, ProofCert, and Counterexample.
+//   2. Substitute assignments into relations for Dijkstra WP.
+//   3. Decide a 0-terminated CNF with DPLL unit and pure rules.
+
+pub type LinTerm = struct { cx: Int, cy: Int, k: Int };
+pub type RelAtom = struct { term: LinTerm, op: Int };
+pub type AssignStep = struct { dst: Int, rhs: LinTerm };
+pub type ProofCert = struct {
+    theorem_name: String,
+    wp_formula: String,
+    vc_formula: String,
+    holds: Bool,
+};
+pub type Counterexample = struct {
+    x_val: Int,
+    y_val: Int,
+    model: List[Int],
+    note: String,
+};
+pub type ProveOutcome = struct { passed: Bool, cert: ProofCert, cex: Counterexample };
+
+pub fn lin_term(cx: Int, cy: Int, k: Int) -> LinTerm { return LinTerm { cx: cx, cy: cy, k: k }; }
+pub fn rel_gt(t: LinTerm) -> RelAtom { return RelAtom { term: t, op: 1 }; }
+pub fn rel_ge(t: LinTerm) -> RelAtom { return RelAtom { term: t, op: 2 }; }
+pub fn assign_x(rhs: LinTerm) -> AssignStep { return AssignStep { dst: 0, rhs: rhs }; }
+pub fn assign_y(rhs: LinTerm) -> AssignStep { return AssignStep { dst: 1, rhs: rhs }; }
+
+pub fn lin_eval(t: LinTerm, x: Int, y: Int) -> Int {
+    return (t).cx * x + (t).cy * y + (t).k;
+}
+
+pub fn rel_holds(r: RelAtom, x: Int, y: Int) -> Bool {
+    let v: Int = lin_eval((r).term, x, y);
+    if (r).op == 1 { return v > 0; }
+    if (r).op == 2 { return v >= 0; }
+    if (r).op == 3 { return v < 0; }
+    return v <= 0;
+}
+
+pub fn rel_negate(r: RelAtom) -> RelAtom {
+    if (r).op == 1 { return RelAtom { term: (r).term, op: 4 }; }
+    if (r).op == 2 { return RelAtom { term: (r).term, op: 3 }; }
+    if (r).op == 3 { return RelAtom { term: (r).term, op: 2 }; }
+    return RelAtom { term: (r).term, op: 1 };
+}
+
+pub fn lin_subst(t: LinTerm, step: AssignStep) -> LinTerm {
+    let rx: Int = (step).rhs.cx;
+    let ry: Int = (step).rhs.cy;
+    let rk: Int = (step).rhs.k;
+    if (step).dst == 0 {
+        return LinTerm { cx: (t).cx * rx, cy: (t).cy + (t).cx * ry, k: (t).k + (t).cx * rk };
+    }
+    return LinTerm { cx: (t).cx + (t).cy * rx, cy: (t).cy * ry, k: (t).k + (t).cy * rk };
+}
+
+pub fn rel_subst(r: RelAtom, step: AssignStep) -> RelAtom {
+    return RelAtom { term: lin_subst((r).term, step), op: (r).op };
+}
+
+pub fn lin_text(t: LinTerm) -> String {
+    return (t).cx.to_string() + "*x + " + (t).cy.to_string() + "*y + " + (t).k.to_string();
+}
+
+pub fn rel_text(r: RelAtom) -> String {
+    let mut s: String = "<=";
+    if (r).op == 1 { s = ">"; }
+    if (r).op == 2 { s = ">="; }
+    if (r).op == 3 { s = "<"; }
+    return "(" + lin_text((r).term) + " " + s + " 0)";
+}
+
+pub fn proof_cert_new(name: String, wp: String, vc: String) -> ProofCert {
+    return ProofCert { theorem_name: name, wp_formula: wp, vc_formula: vc, holds: true };
+}
+
+pub fn cex_new(x: Int, y: Int, model: List[Int], note: String) -> Counterexample {
+    return Counterexample { x_val: x, y_val: y, model: model, note: note };
+}
+
+pub fn prove_ok(cert: ProofCert) -> ProveOutcome {
+    return ProveOutcome { passed: true, cert: cert, cex: cex_new(0, 0, list_new(), "") };
+}
+
+pub fn prove_err(cex: Counterexample) -> ProveOutcome {
+    return ProveOutcome { passed: false, cert: proof_cert_new("", "", ""), cex: cex };
+}
+
+pub fn set_int(src: List[Int], idx: Int, val: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let n: Int = list_len(src);
+    let mut i: Int = 0;
+    while i < n {
+        if i == idx {
+            out = list_push(out, val);
+        } else {
+            out = list_push(out, list_get(src, i));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn pack_eval(flat: List[Int], from: Int, assigns: List[Int]) -> Int {
+    let n: Int = list_len(flat);
+    let mut open: Int = 0;
+    let mut i: Int = from;
+    while i < n {
+        let p: Int = list_get(flat, i);
+        if p == 0 { break; }
+        let mut var: Int = p;
+        let mut neg: Bool = false;
+        if p < 0 { var = 0 - p; neg = true; }
+        let val: Int = list_get(assigns, var);
+        if val == 0 { open = open + 1; }
+        else {
+            if neg && val == -1 { return 1; }
+            if (neg == false) && val == 1 { return 1; }
+        }
+        i = i + 1;
+    }
+    if open == 0 { return -1; }
+    return 0;
+}
+
+fn unit_pack(flat: List[Int], from: Int, assigns: List[Int]) -> Int {
+    let mut unseen: Int = 0;
+    let mut pack: Int = 0;
+    let n: Int = list_len(flat);
+    let mut i: Int = from;
+    while i < n {
+        let p: Int = list_get(flat, i);
+        if p == 0 { break; }
+        let mut var: Int = p;
+        if p < 0 { var = 0 - p; }
+        let val: Int = list_get(assigns, var);
+        if val == 0 {
+            unseen = unseen + 1;
+            pack = p;
+        } else {
+            if p < 0 && val == -1 { return 0; }
+            if p > 0 && val == 1 { return 0; }
+        }
+        i = i + 1;
+    }
+    if unseen == 1 { return pack; }
+    return 0;
+}
+
+fn next_clause(flat: List[Int], from: Int) -> Int {
+    let n: Int = list_len(flat);
+    let mut i: Int = from;
+    while i < n {
+        if list_get(flat, i) == 0 { return i + 1; }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn unit_propagate(flat: List[Int], assigns: List[Int]) -> List[Int] {
+    let mut cur: List[Int] = assigns;
+    let mut moved: Bool = true;
+    while moved {
+        moved = false;
+        let mut i: Int = 0;
+        while i < list_len(flat) {
+            let st: Int = pack_eval(flat, i, cur);
+            if st == -1 { return list_new(); }
+            if st == 0 {
+                let pack: Int = unit_pack(flat, i, cur);
+                if pack != 0 {
+                    if pack > 0 { cur = set_int(cur, pack, 1); }
+                    else { cur = set_int(cur, 0 - pack, -1); }
+                    moved = true;
+                }
+            }
+            i = next_clause(flat, i);
+        }
+    }
+    return cur;
+}
+
+fn apply_pure(flat: List[Int], nvars: Int, assigns: List[Int]) -> List[Int] {
+    let mut cur: List[Int] = assigns;
+    let mut v: Int = 1;
+    while v <= nvars {
+        if list_get(cur, v) == 0 {
+            let mut pos: Int = 0;
+            let mut neg: Int = 0;
+            let mut i: Int = 0;
+            while i < list_len(flat) {
+                if pack_eval(flat, i, cur) != 1 {
+                    let mut j: Int = i;
+                    while j < list_len(flat) {
+                        let p: Int = list_get(flat, j);
+                        if p == 0 { break; }
+                        let mut var: Int = p;
+                        if p < 0 { var = 0 - p; }
+                        if var == v {
+                            if p < 0 { neg = 1; } else { pos = 1; }
+                        }
+                        j = j + 1;
+                    }
+                }
+                i = next_clause(flat, i);
+            }
+            if pos == 1 && neg == 0 { cur = set_int(cur, v, 1); }
+            if pos == 0 && neg == 1 { cur = set_int(cur, v, -1); }
+        }
+        v = v + 1;
+    }
+    return cur;
+}
+
+fn all_sat(flat: List[Int], assigns: List[Int]) -> Bool {
+    let mut i: Int = 0;
+    while i < list_len(flat) {
+        if pack_eval(flat, i, assigns) != 1 { return false; }
+        i = next_clause(flat, i);
+    }
+    return true;
+}
+
+pub fn cnf_dpll(flat: List[Int], nvars: Int, start: List[Int]) -> List[Int] {
+    let after_u: List[Int] = unit_propagate(flat, start);
+    if list_len(after_u) == 0 { return list_new(); }
+    let cur: List[Int] = apply_pure(flat, nvars, after_u);
+    if all_sat(flat, cur) { return cur; }
+    let mut v: Int = 1;
+    let mut found: Int = 0;
+    while v <= nvars {
+        if list_get(cur, v) == 0 { found = v; break; }
+        v = v + 1;
+    }
+    if found == 0 { return list_new(); }
+    let t: List[Int] = cnf_dpll(flat, nvars, set_int(cur, found, 1));
+    if list_len(t) > 0 { return t; }
+    return cnf_dpll(flat, nvars, set_int(cur, found, -1));
+}
+
+pub fn blank_assigns(nvars: Int) -> List[Int] {
+    let mut a: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i <= nvars {
+        a = list_push(a, 0);
+        i = i + 1;
+    }
+    return a;
+}

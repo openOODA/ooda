@@ -1,0 +1,95 @@
+// # Stage 12 Sovereign Machine Code & Systems Runtime Smoke
+//
+// Logline: Validates stack formatting, algebraic SIMD math, Landlock jail, SwissMap, unmanaged lists, Result/Option chaining, packed structs, and sovereign binary emitters.
+//
+// Setup: cwd is ooda/. Product oodac and runtime/chs_rt.c exist.
+//
+// Beats:
+//   1. Verify std low-level runtime modules (NumBuffer, algebraic math, fs_jail, SwissMap, UnmanagedList, Result/Option chaining).
+//   2. Verify packed structs with bitwise equality and range-over-function generator iteration.
+//   3. Verify sovereign direct machine code emitters: x86-64 ELF, AArch64 ELF, and standalone WASM.
+//   4. Execute standalone binaries and assert all execution proof outputs.
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let mut oodac = "./oodac/oodac";
+    if path_exists(fs, "./ooda/oodac/oodac") {
+        oodac = "./ooda/oodac/oodac";
+    }
+    let tmpd = ".ooda-cache/ooda-tmp/stage12_smoke";
+
+    if !path_exists(fs, oodac) { fail("no oodac"); }
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
+
+
+    // Beat 1: Create fixture exercising low-level runtime components
+    let fix_src = tmpd + "/runtime_fixture.oo";
+    let w1 = process_exec(p, "printf 'import \"ooda/std/text/num_buffer.oo\";\\nimport \"ooda/std/math/algebraic.oo\";\\nimport \"ooda/std/fs/jail.oo\";\\nimport \"ooda/std/collections/swiss_map.oo\";\\nimport \"ooda/std/collections/unmanaged_list.oo\";\\nimport \"ooda/std/result.oo\";\\nimport \"ooda/std/option.oo\";\\n\\npub type PackedColor = packed struct {\\n    r: Int,\\n    g: Int,\\n    b: Int,\\n};\\n\\npub fn gen_numbers() -> List[Int] {\\n    let mut l: List[Int] = list_new();\\n    l = list_push(l, 10);\\n    l = list_push(l, 20);\\n    l = list_push(l, 30);\\n    return l;\\n}\\n\\npub fn main() {\\n    let nb: NumBuffer = int_format_stack(1234, 10);\\n    if nb.value != \"1234\" { process_exit(1); }\\n    let hx: String = int_to_hex(255);\\n    if hx != \"ff\" { process_exit(1); }\\n    let bn: String = int_to_bin(5);\\n    if bn != \"101\" { process_exit(1); }\\n\\n    let mut xs: List[Float] = list_new();\\n    xs = list_push(xs, 1.0);\\n    xs = list_push(xs, 2.0);\\n    xs = list_push(xs, 3.0);\\n    xs = list_push(xs, 4.0);\\n    let s: Float = algebraic_sum(xs);\\n    if s != 10.0 { process_exit(1); }\\n    let dot: Float = algebraic_dot_product(xs, xs);\\n    if dot != 30.0 { process_exit(1); }\\n\\n    let j: FsJail = fs_jail(\"/var/log\", true);\\n    if !fs_jail_is_allowed(j, \"/var/log/app.log\") { process_exit(1); }\\n    if fs_jail_is_allowed(j, \"/etc/passwd\") { process_exit(1); }\\n\\n    let mut sm: SwissMap = swiss_map_new();\\n    sm = swiss_map_set(sm, \"k1\", \"v1\");\\n    if !swiss_map_has(sm, \"k1\") { process_exit(1); }\\n    let r_get: Result[String, String] = swiss_map_get(sm, \"k1\");\\n    if r_get != Ok(\"v1\") { process_exit(1); }\\n\\n    let mut ul: UnmanagedList = unmanaged_list_new();\\n    ul = unmanaged_list_push(ul, 99);\\n    if unmanaged_list_get(ul, 0) != 99 { process_exit(1); }\\n\\n    let r_ok: Result[String, String] = Ok(\"item\");\\n    let r_map: Result[String, String] = res_map(r_ok, \"_suffix\");\\n    if r_map != Ok(\"item_suffix\") { process_exit(1); }\\n\\n    let opt_v: Result[String, String] = opt_some(\"test\");\\n    let opt_m: Result[String, String] = opt_map(opt_v, \"_done\");\\n    if opt_m != Ok(\"test_done\") { process_exit(1); }\\n\\n    let c1: PackedColor = PackedColor { r: 255, g: 128, b: 0 };\\n    let c2: PackedColor = PackedColor { r: 255, g: 128, b: 0 };\\n    if oo_eq_PackedColor(c1, c2) != 1 { process_exit(1); }\\n\\n    let mut iter_sum: Int = 0;\\n    for num in gen_numbers() {\\n        iter_sum = iter_sum + num;\\n    }\\n    if iter_sum != 60 { process_exit(1); }\\n\\n    println(\"stage12_runtime: OK\");\\n}\\n' > " + fix_src);
+
+    if w1.is_err() { fail("write runtime_fixture.oo"); }
+
+    let b_res = process_exec(p, oodac + " build " + fix_src + " -o " + tmpd + "/runtime_test.bin");
+    if b_res.is_err() { fail("build runtime_test.bin"); }
+
+    let r_run = process_exec(p, tmpd + "/runtime_test.bin > " + tmpd + "/runtime_test.out 2>&1");
+    if r_run.is_err() { fail("run runtime_test.bin"); }
+
+    let chk_rt = process_exec(p, "grep -q 'stage12_runtime: OK' " + tmpd + "/runtime_test.out");
+    if chk_rt.is_err() { fail("runtime_test output mismatch"); }
+
+    // Beat 2: Direct Sovereign x86-64 ELF Emitter
+    let x86_src = tmpd + "/hello_x86.oo";
+    let w2 = process_exec(p, "printf 'pub fn main() { println(\"Direct Sovereign x86-64 ELF OK\"); }\\n' > " + x86_src);
+    if w2.is_err() { fail("write hello_x86.oo"); }
+
+    let b_x86 = process_exec(p, oodac + " --backend x86_64-elf build " + x86_src + " -o " + tmpd + "/hello_x86.bin");
+    if b_x86.is_err() { fail("direct x86_64-elf build"); }
+
+    let r_x86 = process_exec(p, tmpd + "/hello_x86.bin > " + tmpd + "/hello_x86.out 2>&1");
+    if r_x86.is_err() { fail("run direct x86_64-elf binary"); }
+
+    let chk_x86 = process_exec(p, "grep -q 'Direct Sovereign x86-64 ELF OK' " + tmpd + "/hello_x86.out");
+    if chk_x86.is_err() { fail("x86_64-elf binary output mismatch"); }
+
+    // Beat 3: Direct Sovereign AArch64 ELF Emitter
+    let a64_src = tmpd + "/hello_a64.oo";
+    let w3 = process_exec(p, "printf 'pub fn main() { println(\"Direct Sovereign AArch64 ELF OK\"); }\\n' > " + a64_src);
+    if w3.is_err() { fail("write hello_a64.oo"); }
+
+    let b_a64 = process_exec(p, oodac + " --backend aarch64 build " + a64_src + " -o " + tmpd + "/hello_a64.bin");
+    if b_a64.is_err() { fail("direct aarch64 build"); }
+
+    let r_a64_readelf = process_exec(p, "readelf -h " + tmpd + "/hello_a64.bin > " + tmpd + "/a64_hdr.out");
+    if r_a64_readelf.is_err() { fail("readelf aarch64 binary"); }
+
+    let chk_a64 = process_exec(p, "grep -q 'AArch64' " + tmpd + "/a64_hdr.out");
+    if chk_a64.is_err() { fail("aarch64 readelf header mismatch"); }
+
+    // Beat 4: Direct Sovereign WASM Binary Emitter
+    let wasm_src = tmpd + "/hello_wasm.oo";
+    let w4 = process_exec(p, "printf 'pub fn main() { println(\"Direct Sovereign WASM OK\"); }\\n' > " + wasm_src);
+    if w4.is_err() { fail("write hello_wasm.oo"); }
+
+    let b_wasm = process_exec(p, oodac + " --backend wasm build " + wasm_src + " -o " + tmpd + "/hello_wasm.wasm");
+    if b_wasm.is_err() { fail("direct wasm build"); }
+
+    let r_wasm_hdr = process_exec(p, "od -An -tx1 -N4 " + tmpd + "/hello_wasm.wasm > " + tmpd + "/wasm_hdr.out");
+    if r_wasm_hdr.is_err() { fail("od wasm header"); }
+
+    let chk_wasm = process_exec(p, "grep -q '00 61 73 6d' " + tmpd + "/wasm_hdr.out");
+    if chk_wasm.is_err() { fail("wasm binary magic header mismatch"); }
+
+    let has_wasmtime = process_exec(p, "PATH=\"/home/jeryd/.wasmtime/bin:/usr/local/bin:$PATH\" which wasmtime > /dev/null 2>&1");
+    if has_wasmtime.is_ok() {
+        let r_wasm_run = process_exec(p, "PATH=\"/home/jeryd/.wasmtime/bin:/usr/local/bin:$PATH\" wasmtime " + tmpd + "/hello_wasm.wasm > " + tmpd + "/hello_wasm.out 2>&1");
+        if r_wasm_run.is_err() { fail("run wasm binary with wasmtime"); }
+        let chk_wasm_out = process_exec(p, "grep -q 'Direct Sovereign WASM OK' " + tmpd + "/hello_wasm.out");
+        if chk_wasm_out.is_err() { fail("wasm binary execution output mismatch"); }
+    }
+
+    println("stage12_sovereign_smoke: PASSED");
+}

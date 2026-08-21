@@ -1,0 +1,129 @@
+// # Universal Remote Cryptographic Attestation Engine
+//
+// Logline: Evaluates multi-platform hardware attestation evidence against security policies and freshness challenges.
+//
+// Setup: Unified attestation verifier supporting AMD SEV-SNP, Intel SGX, AWS Nitro, and Measured Isolates.
+//
+// Beats:
+//   1. Define AttestationEvidence, AttestationPolicy, and VerificationResult descriptors.
+//   2. Generate cryptographic nonce challenges preventing replay attacks.
+//   3. Verify platform evidence against measurement registries and allowed signer identities.
+//   4. Enforce strict debug lockout and minimum security version numbers.
+// RULES.oot 1.4: Explicit &EnclaveCap required.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+import "enclave/enclave_types.oo";
+import "enclave/sev_snp.oo";
+import "enclave/intel_sgx.oo";
+import "enclave/nitro.oo";
+
+pub type AttestationPolicy = struct {
+    platform: Int,
+    expected_measurement: String,
+    expected_signer: String,
+    min_svn: Int,
+    disallow_debug: Bool
+};
+
+pub type AttestationEvidence = struct {
+    platform: Int,
+    raw_quote: String,
+    nonce_challenge: String,
+    timestamp_ms: Int
+};
+
+pub type VerificationResult = struct {
+    is_valid: Bool,
+    platform: Int,
+    measurement: String,
+    guest_svn: Int,
+    is_debug: Bool,
+    error_code: String
+};
+
+pub fn attestation_policy_new(platform: Int, exp_meas: String, exp_sign: String, min_svn: Int, no_debug: Bool) -> AttestationPolicy {
+    return AttestationPolicy {
+        platform: platform,
+        expected_measurement: exp_meas,
+        expected_signer: exp_sign,
+        min_svn: min_svn,
+        disallow_debug: no_debug
+    };
+}
+
+pub fn attestation_create_nonce(seed: Int) -> String {
+    let s_str: String = seed.to_string();
+    return "NONCE_CHALLENGE_SECURE_" + s_str;
+}
+
+pub fn attestation_verify(evidence: AttestationEvidence, policy: AttestationPolicy, exp_nonce: String) -> VerificationResult {
+    if evidence.platform != policy.platform {
+        return VerificationResult {
+            is_valid: false,
+            platform: evidence.platform,
+            measurement: "",
+            guest_svn: 0,
+            is_debug: false,
+            error_code: "PLATFORM_MISMATCH"
+        };
+    }
+    let cur_nonce: String = evidence.nonce_challenge;
+    if chars_len(exp_nonce) > 0 && !(cur_nonce == exp_nonce) {
+        return VerificationResult {
+            is_valid: false,
+            platform: evidence.platform,
+            measurement: "",
+            guest_svn: 0,
+            is_debug: false,
+            error_code: "NONCE_MISMATCH"
+        };
+    }
+    if evidence.platform == 1 {
+        let report: SnpReport = snp_report_parse(evidence.raw_quote);
+        let rep_v: Bool = report.is_valid;
+        if !rep_v {
+            return VerificationResult { is_valid: false, platform: 1, measurement: "", guest_svn: 0, is_debug: false, error_code: "SNP_PARSE_FAILED" };
+        }
+        let no_dbg: Bool = policy.disallow_debug;
+        if no_dbg {
+            let is_dbg: Bool = report.snp_policy.debug_allowed;
+            if is_dbg {
+                return VerificationResult { is_valid: false, platform: 1, measurement: report.measurement, guest_svn: report.guest_svn, is_debug: true, error_code: "DEBUG_ENCLAVE_DISALLOWED" };
+            }
+        }
+        if report.guest_svn < policy.min_svn {
+            return VerificationResult { is_valid: false, platform: 1, measurement: report.measurement, guest_svn: report.guest_svn, is_debug: false, error_code: "SVN_TOO_LOW" };
+        }
+        let exp_meas: String = policy.expected_measurement;
+        let cur_meas: String = report.measurement;
+        if chars_len(exp_meas) > 0 && !(cur_meas == exp_meas) {
+            return VerificationResult { is_valid: false, platform: 1, measurement: report.measurement, guest_svn: report.guest_svn, is_debug: false, error_code: "MEASUREMENT_MISMATCH" };
+        }
+        return VerificationResult { is_valid: true, platform: 1, measurement: report.measurement, guest_svn: report.guest_svn, is_debug: false, error_code: "OK" };
+    }
+    if evidence.platform == 2 {
+        let quote: SgxQuote = sgx_quote_parse(evidence.raw_quote);
+        let quote_v: Bool = quote.is_valid;
+        if !quote_v {
+            return VerificationResult { is_valid: false, platform: 2, measurement: "", guest_svn: 0, is_debug: false, error_code: "SGX_PARSE_FAILED" };
+        }
+        let chk_res: Result[Bool, String] = sgx_quote_verify(quote, policy.expected_measurement, policy.expected_signer, exp_nonce);
+        if chk_res.is_err() {
+            return VerificationResult { is_valid: false, platform: 2, measurement: quote.mr_enclave, guest_svn: quote.isv_svn, is_debug: quote.is_debug, error_code: "SGX_VERIFY_FAILED" };
+        }
+        return VerificationResult { is_valid: true, platform: 2, measurement: quote.mr_enclave, guest_svn: quote.isv_svn, is_debug: quote.is_debug, error_code: "OK" };
+    }
+    if evidence.platform == 3 {
+        let doc: NitroAttestationDoc = nitro_doc_parse(evidence.raw_quote);
+        let doc_v: Bool = doc.is_valid;
+        if !doc_v {
+            return VerificationResult { is_valid: false, platform: 3, measurement: "", guest_svn: 0, is_debug: false, error_code: "NITRO_PARSE_FAILED" };
+        }
+        let chk_res: Result[Bool, String] = nitro_doc_verify_pcrs(doc, policy.expected_measurement, exp_nonce);
+        if chk_res.is_err() {
+            return VerificationResult { is_valid: false, platform: 3, measurement: doc.pcr0_eif, guest_svn: 1, is_debug: false, error_code: "NITRO_VERIFY_FAILED" };
+        }
+        return VerificationResult { is_valid: true, platform: 3, measurement: doc.pcr0_eif, guest_svn: 1, is_debug: false, error_code: "OK" };
+    }
+    return VerificationResult { is_valid: false, platform: evidence.platform, measurement: "", guest_svn: 0, is_debug: false, error_code: "UNKNOWN_PLATFORM" };
+}

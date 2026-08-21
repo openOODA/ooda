@@ -1,0 +1,115 @@
+// # Multi-Level Cache Tiling, Vectorization & Kernel Fusion
+//
+// Logline: Decomposes tensor iteration domains across L1/L2/L3 cache hierarchies and fuses producer-consumer kernels.
+//
+// Setup: Polyhedral loop tiling and kernel fusion optimizer for GPU and CPU vector execution.
+//
+// Beats:
+//   1. Plan multi-level cache tile sizes (L3 global, L2 cache, L1 threadgroup/scratchpad, Reg register).
+//   2. Compute tiled loop bounds and inner point iteration bounds.
+//   3. Verify SIMD vectorization legality on innermost point loops.
+//   4. Validate and synthesize fused polyhedral kernels (e.g. MatMul + Bias + Activation).
+
+pub type TileDimensionPlan = struct {
+    l3_tile_size: Int,
+    l2_tile_size: Int,
+    l1_tile_size: Int,
+    reg_tile_size: Int
+};
+
+pub type TileBound = struct {
+    tile_idx: Int,
+    start_idx: Int,
+    end_idx: Int,
+    step_size: Int
+};
+
+pub type FusedKernelStage = struct {
+    stage_name: String,
+    op_name: String,
+    in_tensor: String,
+    out_tensor: String
+};
+
+pub type FusedPolyhedralPlan = struct {
+    kernel_id: String,
+    stages: List[FusedKernelStage],
+    is_legal: Bool,
+    memory_saved_bytes: Int
+};
+
+pub fn tile_dimension_plan_default() -> TileDimensionPlan {
+    return TileDimensionPlan {
+        l3_tile_size: 256,
+        l2_tile_size: 64,
+        l1_tile_size: 16,
+        reg_tile_size: 4,
+    };
+}
+
+pub fn poly_compute_tile_bounds(loop_len: Int, tile_sz: Int) -> List[TileBound] {
+    let mut bounds: List[TileBound] = list_new();
+    let mut t_idx: Int = 0;
+    let mut start: Int = 0;
+    while start < loop_len {
+        let mut end: Int = start + tile_sz;
+        if end > loop_len { end = loop_len; }
+        let tb: TileBound = TileBound {
+            tile_idx: t_idx,
+            start_idx: start,
+            end_idx: end,
+            step_size: tile_sz,
+        };
+        bounds = list_push(bounds, tb);
+        start = start + tile_sz;
+        t_idx = t_idx + 1;
+    }
+    return bounds;
+}
+
+pub fn poly_is_vectorizable(dep_distance: Int, loop_bound: Int) -> Bool {
+    if loop_bound <= 0 { return false; }
+    // Loop is vectorizable if it carries zero loop-carried dependence (dep_distance == 0)
+    if dep_distance == 0 {
+        return true;
+    }
+    return false;
+}
+
+pub fn poly_fuse_producer_consumer_legal(producer_out: String, consumer_in: String, shared_mem_limit: Int, tensor_bytes: Int) -> Bool {
+    if producer_out != consumer_in {
+        return false;
+    }
+    if tensor_bytes > shared_mem_limit {
+        return false;
+    }
+    return true;
+}
+
+pub fn poly_create_fused_gemm_activation_plan(kernel_name: String, m: Int, n: Int, k: Int, act_type: String) -> FusedPolyhedralPlan {
+    let mut stages: List[FusedKernelStage] = list_new();
+    let s_gemm: FusedKernelStage = FusedKernelStage {
+        stage_name: "gemm_stage",
+        op_name: "matmul",
+        in_tensor: "A,B",
+        out_tensor: "T_GEMM",
+    };
+    let s_act: FusedKernelStage = FusedKernelStage {
+        stage_name: "act_stage",
+        op_name: act_type,
+        in_tensor: "T_GEMM",
+        out_tensor: "Y",
+    };
+    stages = list_push(stages, s_gemm);
+    stages = list_push(stages, s_act);
+
+    let intermediate_bytes: Int = m * n * 4;
+    let is_legal: Bool = poly_fuse_producer_consumer_legal("T_GEMM", "T_GEMM", 65536, intermediate_bytes);
+
+    return FusedPolyhedralPlan {
+        kernel_id: kernel_name,
+        stages: stages,
+        is_legal: is_legal,
+        memory_saved_bytes: intermediate_bytes,
+    };
+}

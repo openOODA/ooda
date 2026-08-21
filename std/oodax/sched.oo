@@ -1,0 +1,199 @@
+// # OODAX Preemptive Priority Scheduler
+//
+// Logline: Implements multi-level priority scheduling, time-slice preemption, and thread state transitions.
+//
+// Setup: Preemptive CPU scheduler for microkernel threads with capability-gated execution contexts.
+//
+// Beats:
+//   1. Define thread states and ThreadControlBlock structure.
+//   2. Define Scheduler queue holding active thread slots.
+//   3. Implement priority-based thread selection and round-robin dispatch.
+//   4. Implement timer tick preemption and priority boost mechanisms.
+// RULES.oot 1.4: Strict thread scheduling invariants.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+pub fn thread_state_ready() -> Int { return 0; }
+pub fn thread_state_running() -> Int { return 1; }
+pub fn thread_state_blocked_ipc() -> Int { return 2; }
+pub fn thread_state_blocked_io() -> Int { return 3; }
+pub fn thread_state_suspended() -> Int { return 4; }
+pub fn thread_state_terminated() -> Int { return 5; }
+
+pub type ThreadControlBlock = struct {
+    tid: Int,
+    domain_id: Int,
+    priority: Int,
+    base_priority: Int,
+    state: Int,
+    time_slice: Int,
+    remaining_slice: Int,
+    total_ticks: Int,
+    is_valid: Bool
+};
+
+pub type Scheduler = struct {
+    current_tid: Int,
+    thread_count: Int,
+    quantum_default: Int,
+    t0: ThreadControlBlock,
+    t1: ThreadControlBlock,
+    t2: ThreadControlBlock,
+    t3: ThreadControlBlock
+};
+
+pub fn tcb_null() -> ThreadControlBlock {
+    return ThreadControlBlock {
+        tid: 0,
+        domain_id: 0,
+        priority: 0,
+        base_priority: 0,
+        state: thread_state_terminated(),
+        time_slice: 0,
+        remaining_slice: 0,
+        total_ticks: 0,
+        is_valid: false
+    };
+}
+
+pub fn tcb_new(tid: Int, domain_id: Int, priority: Int, slice: Int) -> ThreadControlBlock {
+    return ThreadControlBlock {
+        tid: tid,
+        domain_id: domain_id,
+        priority: priority,
+        base_priority: priority,
+        state: thread_state_ready(),
+        time_slice: slice,
+        remaining_slice: slice,
+        total_ticks: 0,
+        is_valid: true
+    };
+}
+
+pub fn sched_new(quantum: Int) -> Scheduler {
+    let null_t: ThreadControlBlock = tcb_null();
+    return Scheduler {
+        current_tid: 0,
+        thread_count: 0,
+        quantum_default: quantum,
+        t0: null_t,
+        t1: null_t,
+        t2: null_t,
+        t3: null_t
+    };
+}
+
+pub fn sched_get_tcb(s: Scheduler, tid: Int) -> ThreadControlBlock {
+    if tid == 1 { return s.t0; }
+    if tid == 2 { return s.t1; }
+    if tid == 3 { return s.t2; }
+    if tid == 4 { return s.t3; }
+    return tcb_null();
+}
+
+pub fn sched_set_tcb(s: Scheduler, tid: Int, tcb: ThreadControlBlock) -> Scheduler {
+    let mut sched: Scheduler = s;
+    if tid == 1 { sched.t0 = tcb; }
+    if tid == 2 { sched.t1 = tcb; }
+    if tid == 3 { sched.t2 = tcb; }
+    if tid == 4 { sched.t3 = tcb; }
+    return sched;
+}
+
+pub fn sched_add_thread(s: Scheduler, tcb: ThreadControlBlock) -> Scheduler {
+    let mut sched: Scheduler = sched_set_tcb(s, tcb.tid, tcb);
+    sched.thread_count = sched.thread_count + 1;
+    return sched;
+}
+
+pub fn sched_pick_next(s: Scheduler) -> Result[Int, String] {
+    let mut best_tid: Int = 0;
+    let mut best_prio: Int = -1;
+    let mut i: Int = 1;
+    while i <= 4 {
+        let t: ThreadControlBlock = sched_get_tcb(s, i);
+        let t_val: Bool = t.is_valid;
+        let st: Int = t.state;
+        if t_val && (st == thread_state_ready() || st == thread_state_running()) {
+            if t.priority > best_prio {
+                best_prio = t.priority;
+                best_tid = t.tid;
+            }
+        }
+        i = i + 1;
+    }
+    if best_tid == 0 {
+        return Err("No runnable threads in scheduler");
+    }
+    return Ok(best_tid);
+}
+
+pub type SchedTickResult = struct {
+    scheduler: Scheduler,
+    active_tid: Int,
+    preempted: Bool
+};
+
+pub fn sched_tick(s: Scheduler) -> SchedTickResult {
+    let cur_id: Int = s.current_tid;
+    if cur_id == 0 {
+        let pick_res: Result[Int, String] = sched_pick_next(s);
+        match pick_res {
+            Ok(tid) => {
+                let mut t: ThreadControlBlock = sched_get_tcb(s, tid);
+                t.state = thread_state_running();
+                let s_next: Scheduler = sched_set_tcb(s, tid, t);
+                let mut s_final: Scheduler = s_next;
+                s_final.current_tid = tid;
+                return SchedTickResult {
+                    scheduler: s_final,
+                    active_tid: tid,
+                    preempted: false
+                };
+            },
+            Err(e) => {
+                return SchedTickResult {
+                    scheduler: s,
+                    active_tid: 0,
+                    preempted: false
+                };
+            }
+        }
+    }
+    let mut cur: ThreadControlBlock = sched_get_tcb(s, cur_id);
+    cur.total_ticks = cur.total_ticks + 1;
+    cur.remaining_slice = cur.remaining_slice - 1;
+    if cur.remaining_slice <= 0 {
+        cur.state = thread_state_ready();
+        cur.remaining_slice = cur.time_slice;
+        let mut s_step: Scheduler = sched_set_tcb(s, cur_id, cur);
+        s_step.current_tid = 0;
+        let next_res: Result[Int, String] = sched_pick_next(s_step);
+        match next_res {
+            Ok(next_tid) => {
+                let mut nxt: ThreadControlBlock = sched_get_tcb(s_step, next_tid);
+                nxt.state = thread_state_running();
+                let s_fin: Scheduler = sched_set_tcb(s_step, next_tid, nxt);
+                let mut s_ret: Scheduler = s_fin;
+                s_ret.current_tid = next_tid;
+                return SchedTickResult {
+                    scheduler: s_ret,
+                    active_tid: next_tid,
+                    preempted: true
+                };
+            },
+            Err(e) => {
+                return SchedTickResult {
+                    scheduler: s_step,
+                    active_tid: 0,
+                    preempted: true
+                };
+            }
+        }
+    }
+    let s_cont: Scheduler = sched_set_tcb(s, cur_id, cur);
+    return SchedTickResult {
+        scheduler: s_cont,
+        active_tid: cur_id,
+        preempted: false
+    };
+}

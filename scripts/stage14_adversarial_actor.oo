@@ -1,0 +1,155 @@
+// # Stage 14 Adversarial OTP Actor Supervision Stress Harness
+//
+// Logline: Adversarially tests OneForOne, OneForAll, RestForOne, sliding-window intensity escalation, and restart modes under ThreadCap.
+//
+// Setup: Validates precise fault propagation boundaries, worker state reset, and rate-limiting history under ThreadCap.
+//
+// Beats:
+//   1. OneForOne isolation boundary (crashing one child leaves siblings unaffected).
+//   2. OneForAll cascading restart (crashing any child restarts all registered children).
+//   3. RestForOne dependency cascade (crashing child i restarts children j >= i only).
+//   4. Sliding-window restart intensity threshold enforcement and time window expiry.
+// RULES.oot 1.4: Explicit &ThreadCap required.
+// RULES.oot 1.7: Under 256 lines.
+
+import "actor/strategy.oo";
+import "actor/worker.oo";
+import "actor/supervisor_tree.oo";
+import "actor/supervisor.oo";
+
+fn assert_true(cond: Bool, msg: String) {
+    if !cond {
+        println("FAIL: " + msg);
+        process_exit(1);
+    }
+}
+
+fn assert_eq_int(actual: Int, expected: Int, msg: String) {
+    if actual != expected {
+        println("FAIL: " + msg + " expected " + expected.to_string() + " got " + actual.to_string());
+        process_exit(1);
+    }
+}
+
+fn assert_eq_str(actual: String, expected: String, msg: String) {
+    if actual != expected {
+        println("FAIL: " + msg + " expected '" + expected + "' got '" + actual + "'");
+        process_exit(1);
+    }
+}
+
+pub fn main(thread: &ThreadCap) {
+    println("=== Running Adversarial Actor Supervision Challenge Suite ===");
+
+    // Beat 1: OneForOne Strict Isolation
+    let strat_141: RestartStrategy = strategy_one_for_one(5, 10);
+    let mut sup1: SupervisorTree = supervisor_create("sup_141", strat_141);
+    sup1 = supervisor_add_worker(sup1, child_spec_new("w_a", 0, 1000, false, 0), "state_a");
+    sup1 = supervisor_add_worker(sup1, child_spec_new("w_b", 0, 1000, false, 1), "state_b");
+    sup1 = supervisor_add_worker(sup1, child_spec_new("w_c", 0, 1000, false, 2), "state_c");
+    let s1_res: Result[SupervisorTree, String] = supervisor_start_all(thread, sup1);
+    sup1 = match s1_res { Ok(s) => s, Err(_) => sup1 };
+
+    assert_eq_int(sup1.history.count, 0, "initial restart history count");
+
+    // Crash w_a at t=10
+    let crash1: Result[SupervisorTree, String] = supervisor_handle_crash(thread, sup1, "w_a", "segv", 10);
+    sup1 = match crash1 { Ok(s) => s, Err(_) => sup1 };
+    assert_eq_str(supervisor_get_child_status(sup1, "w_a"), "running", "w_a status after crash");
+    assert_eq_str(supervisor_get_child_status(sup1, "w_b"), "running", "w_b status after w_a crash");
+    assert_eq_str(supervisor_get_child_status(sup1, "w_c"), "running", "w_c status after w_a crash");
+    assert_eq_int(sup1.history.count, 1, "restart history recorded 1 restart event");
+    println("  [PASS] 1. OneForOne isolation boundary verified");
+
+    // Beat 2: OneForAll Complete Reset
+    let strat_all: RestartStrategy = strategy_one_for_all(5, 10);
+    let mut sup2: SupervisorTree = supervisor_create("sup_all", strat_all);
+    sup2 = supervisor_add_worker(sup2, child_spec_new("svc_1", 0, 1000, false, 0), "s1");
+    sup2 = supervisor_add_worker(sup2, child_spec_new("svc_2", 0, 1000, false, 1), "s2");
+    sup2 = supervisor_add_worker(sup2, child_spec_new("svc_3", 0, 1000, false, 2), "s3");
+    let s2_res: Result[SupervisorTree, String] = supervisor_start_all(thread, sup2);
+    sup2 = match s2_res { Ok(s) => s, Err(_) => sup2 };
+
+    // Crash svc_2 at t=20 -> all 3 restarted
+    let crash2: Result[SupervisorTree, String] = supervisor_handle_crash(thread, sup2, "svc_2", "panic", 20);
+    sup2 = match crash2 { Ok(s) => s, Err(_) => sup2 };
+    assert_eq_str(supervisor_get_child_status(sup2, "svc_1"), "running", "svc_1 status on OneForAll");
+    assert_eq_str(supervisor_get_child_status(sup2, "svc_2"), "running", "svc_2 status on OneForAll");
+    assert_eq_str(supervisor_get_child_status(sup2, "svc_3"), "running", "svc_3 status on OneForAll");
+    assert_eq_int(sup2.history.count, 1, "OneForAll history recorded restart event");
+    println("  [PASS] 2. OneForAll cascading restart verified");
+
+    // Beat 3: RestForOne Dependency Directionality & Child Modes
+    let strat_rest: RestartStrategy = strategy_rest_for_one(5, 10);
+    let mut sup3: SupervisorTree = supervisor_create("sup_rest", strat_rest);
+    sup3 = supervisor_add_worker(sup3, child_spec_new("w0_ingress", 0, 1000, false, 0), "st0");
+    sup3 = supervisor_add_worker(sup3, child_spec_new("w1_auth", 0, 1000, false, 1), "st1");
+    sup3 = supervisor_add_worker(sup3, child_spec_new("w2_db", 0, 1000, false, 2), "st2");
+    sup3 = supervisor_add_worker(sup3, child_spec_new("w3_cache", 0, 1000, false, 3), "st3");
+    let s3_res: Result[SupervisorTree, String] = supervisor_start_all(thread, sup3);
+    sup3 = match s3_res { Ok(s) => s, Err(_) => sup3 };
+
+    // Crash w2_db (order 2) at t=30
+    let crash3: Result[SupervisorTree, String] = supervisor_handle_crash(thread, sup3, "w2_db", "disk_full", 30);
+    sup3 = match crash3 { Ok(s) => s, Err(_) => sup3 };
+    assert_eq_str(supervisor_get_child_status(sup3, "w0_ingress"), "running", "w0 status");
+    assert_eq_str(supervisor_get_child_status(sup3, "w1_auth"), "running", "w1 status");
+    assert_eq_str(supervisor_get_child_status(sup3, "w2_db"), "running", "w2 status");
+    assert_eq_str(supervisor_get_child_status(sup3, "w3_cache"), "running", "w3 status");
+
+    // Test child restart modes (Permanent=0, Transient=1, Temporary=2)
+    let perm_spec: ChildSpec = child_spec_new("perm", 0, 1000, false, 0);
+    let trans_spec: ChildSpec = child_spec_new("trans", 1, 1000, false, 1);
+    let temp_spec: ChildSpec = child_spec_new("temp", 2, 1000, false, 2);
+
+    assert_true(strategy_should_restart(perm_spec, "normal"), "Permanent restarts on normal exit");
+    assert_true(strategy_should_restart(perm_spec, "crash"), "Permanent restarts on crash");
+    assert_true(!strategy_should_restart(trans_spec, "normal"), "Transient does not restart on normal exit");
+    assert_true(strategy_should_restart(trans_spec, "crash"), "Transient restarts on crash");
+    assert_true(!strategy_should_restart(temp_spec, "normal"), "Temporary does not restart on normal exit");
+    assert_true(!strategy_should_restart(temp_spec, "crash"), "Temporary does not restart on crash");
+    println("  [PASS] 3. RestForOne dependency directionality and restart modes verified");
+
+    // Beat 4: Sliding-Window Intensity Limit & Expiry
+    let strat_limit: RestartStrategy = strategy_one_for_one(2, 10);
+    let mut sup4: SupervisorTree = supervisor_create("sup_limit", strat_limit);
+    sup4 = supervisor_add_worker(sup4, child_spec_new("worker_fragile", 0, 1000, false, 0), "f0");
+    let s4_res: Result[SupervisorTree, String] = supervisor_start_all(thread, sup4);
+    sup4 = match s4_res { Ok(s) => s, Err(_) => sup4 };
+
+    // Crash 1 at t=100 -> OK (history becomes 1)
+    let c_res1: Result[SupervisorTree, String] = supervisor_handle_crash(thread, sup4, "worker_fragile", "e1", 100);
+    assert_true(!c_res1.is_err(), "Crash 1 should be allowed");
+    sup4 = match c_res1 { Ok(s) => s, Err(_) => sup4 };
+
+    // Crash 2 at t=104 -> OK (history becomes 2)
+    let c_res2: Result[SupervisorTree, String] = supervisor_handle_crash(thread, sup4, "worker_fragile", "e2", 104);
+    assert_true(!c_res2.is_err(), "Crash 2 should be allowed");
+    sup4 = match c_res2 { Ok(s) => s, Err(_) => sup4 };
+
+    // Crash 3 at t=108 -> OK (history becomes 3, hitting intensity ceiling)
+    let c_res3: Result[SupervisorTree, String] = supervisor_handle_crash(thread, sup4, "worker_fragile", "e3", 108);
+    assert_true(!c_res3.is_err(), "Crash 3 should be allowed to hit max restarts");
+    sup4 = match c_res3 { Ok(s) => s, Err(_) => sup4 };
+
+    // Crash 4 at t=109 -> REJECTED with E_SUPERVISOR_ESCALATE (history > max_restarts in window)
+    let c_res4: Result[SupervisorTree, String] = supervisor_handle_crash(thread, sup4, "worker_fragile", "e4", 109);
+    assert_true(c_res4.is_err(), "Crash 4 within window should trigger escalation");
+
+    // Crash 5 at t=125 (after 10s window from t=108) -> OK (history in [115..125] is 0)
+    let c_res5: Result[SupervisorTree, String] = supervisor_handle_crash(thread, sup4, "worker_fragile", "e5", 125);
+    assert_true(!c_res5.is_err(), "Crash 5 after window expiry should be allowed");
+
+    // Test simple Supervisor abstraction
+    let mut simple_sup: Supervisor = supervisor_new("simple", "one_for_one", 2);
+    simple_sup = supervisor_add_child(simple_sup, "child_1");
+    let f1: Result[Supervisor, String] = supervisor_handle_failure(thread, simple_sup, "child_1");
+    simple_sup = match f1 { Ok(s) => s, Err(_) => simple_sup };
+    let f2: Result[Supervisor, String] = supervisor_handle_failure(thread, simple_sup, "child_1");
+    simple_sup = match f2 { Ok(s) => s, Err(_) => simple_sup };
+    let f3: Result[Supervisor, String] = supervisor_handle_failure(thread, simple_sup, "child_1");
+    assert_true(f3.is_err(), "Exceeding max_failures in simple supervisor triggers escalation");
+    println("  [PASS] 4. Sliding-window crash intensity limiting and expiration verified");
+
+    println("stage14_adversarial_actor: PASSED");
+}

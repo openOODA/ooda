@@ -1,0 +1,111 @@
+// # Undo-RAM Transactional Memory Smoke Test
+//
+// Logline: Validates ACID transactional memory, write-ahead logging, savepoints, and automatic fault isolation under MemCap.
+//
+// Setup: Standalone smoke test executing transactional memory mutations and rollbacks under MemCap.
+//
+// Beats:
+//   1. Perform transactional write and commit; verify value persists.
+//   2. Perform transactional write and rollback; verify cell reverts to pre-transaction value.
+//   3. Test checkpoint savepoints and selective rollback to checkpoint.
+//   4. Test micro-transactional isolation bubble fault containment and automatic rollback.
+// RULES.oot 1.4: Explicit &MemCap required.
+// RULES.oot 1.7: Under 256 lines.
+
+import "mem/txn_log.oo";
+import "mem/checkpoint.oo";
+import "mem/undoram.oo";
+import "mem/isolation.oo";
+
+fn assert_eq_int(actual: Int, expected: Int, msg: String) {
+    if actual != expected {
+        println("FAIL: " + msg + " expected " + expected.to_string() + " got " + actual.to_string());
+        process_exit(1);
+    }
+}
+
+pub fn main(mem: &MemCap) {
+    println("=== Running Undo-RAM Smoke Tests ===");
+
+    // Beat 1: Basic Write and Commit
+    let mut ram: UndoRam = undoram_new(mem, 32);
+    let b1: Result[UndoRam, String] = undoram_begin(mem, ram);
+    if b1.is_err() { process_exit(1); }
+    ram = match b1 { Ok(r) => r, Err(_) => ram };
+
+    let w1: Result[UndoRam, String] = undoram_write(mem, ram, 5, 42);
+    if w1.is_err() { process_exit(1); }
+    ram = match w1 { Ok(r) => r, Err(_) => ram };
+
+    let c1: Result[UndoRam, String] = undoram_commit(mem, ram);
+    if c1.is_err() { process_exit(1); }
+    ram = match c1 { Ok(r) => r, Err(_) => ram };
+
+    let r1: Result[Int, String] = undoram_read(ram, 5);
+    let val1: Int = match r1 { Ok(v) => v, Err(_) => 0 };
+    assert_eq_int(val1, 42, "committed write cell 5");
+
+    // Beat 2: Transactional Rollback
+    let b2: Result[UndoRam, String] = undoram_begin(mem, ram);
+    if b2.is_err() { process_exit(1); }
+    ram = match b2 { Ok(r) => r, Err(_) => ram };
+
+    let w2: Result[UndoRam, String] = undoram_write(mem, ram, 5, 999);
+    if w2.is_err() { process_exit(1); }
+    ram = match w2 { Ok(r) => r, Err(_) => ram };
+
+    let rb2: Result[UndoRam, String] = undoram_rollback(mem, ram);
+    if rb2.is_err() { process_exit(1); }
+    ram = match rb2 { Ok(r) => r, Err(_) => ram };
+
+    let r2: Result[Int, String] = undoram_read(ram, 5);
+    let val2: Int = match r2 { Ok(v) => v, Err(_) => 0 };
+    assert_eq_int(val2, 42, "rolled back write reverted to 42");
+
+    // Beat 3: Checkpoint and Selective Rollback
+    let b3: Result[UndoRam, String] = undoram_begin(mem, ram);
+    if b3.is_err() { process_exit(1); }
+    ram = match b3 { Ok(r) => r, Err(_) => ram };
+
+    let w3a: Result[UndoRam, String] = undoram_write(mem, ram, 10, 100);
+    if w3a.is_err() { process_exit(1); }
+    ram = match w3a { Ok(r) => r, Err(_) => ram };
+
+    let cp_res: Result[UndoRam, String] = undoram_checkpoint(mem, ram, "sp1");
+    if cp_res.is_err() { process_exit(1); }
+    ram = match cp_res { Ok(r) => r, Err(_) => ram };
+
+    let w3b: Result[UndoRam, String] = undoram_write(mem, ram, 10, 200);
+    if w3b.is_err() { process_exit(1); }
+    ram = match w3b { Ok(r) => r, Err(_) => ram };
+
+    let rb_cp: Result[UndoRam, String] = undoram_rollback_to_checkpoint(mem, ram, 1);
+    if rb_cp.is_err() { process_exit(1); }
+    ram = match rb_cp { Ok(r) => r, Err(_) => ram };
+
+    let r3: Result[Int, String] = undoram_read(ram, 10);
+    let val3: Int = match r3 { Ok(v) => v, Err(_) => 0 };
+    assert_eq_int(val3, 100, "rollback to savepoint 1 restored 100");
+
+    let c3: Result[UndoRam, String] = undoram_commit(mem, ram);
+    if c3.is_err() { process_exit(1); }
+    ram = match c3 { Ok(r) => r, Err(_) => ram };
+
+    // Beat 4: Isolation Bubble Fault Recovery
+    let mut bubble: IsolationBubble = isolation_bubble_create(mem, ram, true);
+    let safe_res: Result[IsolationBubble, String] = isolation_execute_safe(mem, bubble, 12, 777, true);
+    if safe_res.is_err() { process_exit(1); }
+    bubble = match safe_res { Ok(b) => b, Err(_) => bubble };
+
+    let r4: Result[Int, String] = undoram_read(bubble.ram, 12);
+    let val4: Int = match r4 { Ok(v) => v, Err(_) => 0 };
+    assert_eq_int(val4, 0, "fault-injected safe execution reverted cell 12 to 0");
+
+    let status_str: String = isolation_status(bubble);
+    if status_str != "fault_isolated" {
+        println("FAIL: expected fault_isolated status");
+        process_exit(1);
+    }
+
+    println("undoram_smoke: PASSED");
+}

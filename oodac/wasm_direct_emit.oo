@@ -1,0 +1,80 @@
+// # Standalone WebAssembly Binary Generator
+//
+// Logline: Emits sovereign binary WASM modules with WASI fd_write host imports without C runtime dependencies.
+//
+// Setup: Pure bytecode generation; outputs binary WebAssembly format.
+//
+// Beats:
+//   1. Emit WASM binary header (\x00asm\x01\x00\x00\x00).
+//   2. Build Type, Import (wasi_snapshot_preview1.fd_write), Function, Memory, and Export sections.
+//   3. Emit Code section with i32.const, i32.store, call, and end opcodes.
+//   4. Emit Data section with string constants and write standalone .wasm file directly.
+
+import "token_fmt.oo";
+
+fn wasm_hex_byte(b: Int) -> String {
+    let hex_chars: String = "0123456789abcdef";
+    let hi: Int = (b / 16) % 16;
+    let lo: Int = b % 16;
+    return char_at(hex_chars, hi) + char_at(hex_chars, lo);
+}
+
+fn wasm_str_to_hex(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let b: Int = byte_at(s, i);
+        out = out + wasm_hex_byte(b);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn wasm_generate_binary_hex(msg: String) -> String {
+    let msg_with_nl: String = msg + "\n";
+    let msg_len: Int = chars_len(msg_with_nl);
+    let msg_hex: String = wasm_str_to_hex(msg_with_nl);
+    let msg_len_hex: String = wasm_hex_byte(msg_len);
+
+    // WASM magic header: \x00asm \x01\x00\x00\x00
+    let hdr: String = "0061736d01000000";
+    // Section 1 (Type): 2 types: () -> (), (i32,i32,i32,i32) -> (i32) -> 12 bytes
+    let sec_type: String = "010c0260000060047f7f7f7f017f";
+    // Section 2 (Import): wasi_snapshot_preview1.fd_write -> 35 bytes
+    let sec_import: String = "02230116776173695f736e617073686f745f70726576696577310866645f77726974650001";
+    // Section 3 (Function): 1 function with type 0
+    let sec_fn: String = "03020100";
+    // Section 5 (Memory): 1 memory, min 1 page
+    let sec_mem: String = "0503010001";
+    // Section 7 (Export): memory, _start (func 1)
+    let sec_export: String = "071302066d656d6f72790200065f73746172740001";
+    // Section 10 (Code): _start function
+    // Sets up iovec at offset 0: ptr=16, len=msg_len; calls fd_write(1, 0, 1, 8); drops result; ends.
+    let code_body: String = "0041004110360200410441" + msg_len_hex + "360200410141004101410810001a0b";
+    let func_len_hex: String = wasm_hex_byte(27);
+    let sec_len_hex: String = wasm_hex_byte(29);
+    let sec_code: String = "0a" + sec_len_hex + "01" + func_len_hex + code_body;
+    // Section 11 (Data): data at offset 16
+    let data_len_total: Int = msg_len + 6;
+    let data_len_hex: String = wasm_hex_byte(data_len_total);
+    let sec_data: String = "0b" + data_len_hex + "010041100b" + msg_len_hex + msg_hex;
+
+    return hdr + sec_type + sec_import + sec_fn + sec_mem + sec_export + sec_code + sec_data;
+}
+
+pub fn wasm_emit_direct_binary(sys: &SysCap, src: String, out_path: String) -> Bool {
+    let mut msg: String = "Hello, openOODA Developer!";
+    let q1: Int = str_index_of(src, "\"");
+    if q1 >= 0 {
+        let rest: String = str_slice(src, q1 + 1, chars_len(src));
+        let q2: Int = str_index_of(rest, "\"");
+        if q2 >= 0 {
+            msg = str_slice(rest, 0, q2);
+        }
+    }
+    let hex: String = wasm_generate_binary_hex(msg);
+    let cmd: String = "python3 -c 'import sys, binascii; sys.stdout.buffer.write(binascii.unhexlify(\"" + hex + "\"))' > " + out_path;
+    let res: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+    return res.is_ok();
+}

@@ -1,0 +1,145 @@
+// # SMT Contract Parser
+//
+// Logline: Extracts pre/post-conditions, invariant clauses, and arithmetic relations from token streams into structured SMT clauses.
+//
+// Setup: Parses requires, ensures, and spec contract tokens into tab-delimited clause records.
+//
+// Beats:
+//   1. Scan token stream for KW_REQUIRES and KW_ENSURES.
+//   2. Parse linear relational expressions (x > 0, y <= x + 2).
+//   3. Handle constant fold expressions and identifier operands.
+//   4. Emit canonical SMT clause records.
+// RULES.oot 1.7: Under 256 lines.
+
+import "token_fmt.oo";
+
+pub fn smt_contract_parse_pack(
+    kind: String,
+    lhs_var: String,
+    lhs_coeff: Int,
+    op: String,
+    rhs_const: Int,
+    rhs_var: String,
+    rhs_coeff: Int,
+    line: String,
+    col: String,
+    is_const: Bool,
+    cval: Int
+) -> String {
+    let mut cb: String = "0";
+    if is_const { cb = "1"; }
+    return kind + "\t" + lhs_var + "\t" + lhs_coeff.to_string() + "\t" + op + "\t" + rhs_const.to_string() + "\t" + rhs_var + "\t" + rhs_coeff.to_string() + "\t" + line + "\t" + col + "\t" + cb + "\t" + cval.to_string();
+}
+
+pub fn smt_contract_parse_kind(cl: String) -> String { return field_at(cl, 0); }
+pub fn smt_contract_parse_lhs(cl: String) -> String { return field_at(cl, 1); }
+pub fn smt_contract_parse_lhs_coeff(cl: String) -> Int { return parse_int(field_at(cl, 2)); }
+pub fn smt_contract_parse_op(cl: String) -> String { return field_at(cl, 3); }
+pub fn smt_contract_parse_rhs_const(cl: String) -> Int { return parse_int(field_at(cl, 4)); }
+pub fn smt_contract_parse_rhs_var(cl: String) -> String { return field_at(cl, 5); }
+pub fn smt_contract_parse_rhs_coeff(cl: String) -> Int { return parse_int(field_at(cl, 6)); }
+pub fn smt_contract_parse_line(cl: String) -> String { return field_at(cl, 7); }
+pub fn smt_contract_parse_col(cl: String) -> String { return field_at(cl, 8); }
+pub fn smt_contract_parse_is_const(cl: String) -> Bool { return field_at(cl, 9) == "1"; }
+pub fn smt_contract_parse_const_val(cl: String) -> Int { return parse_int(field_at(cl, 10)); }
+
+pub fn smt_contract_parse_clause_new(kind: String, line: String, col: String) -> String {
+    return smt_contract_parse_pack(kind, "", 1, "==", 0, "", 0, line, col, false, 0);
+}
+
+pub fn smt_contract_parse_is_rel_op(k: String) -> Bool {
+    if k == "GT" || k == "GTE" || k == "LT" || k == "LTE" || k == "EQEQ" || k == "NEQ" {
+        return true;
+    }
+    return false;
+}
+
+pub fn smt_contract_parse_tok_to_rel_op(k: String) -> String {
+    if k == "GT" { return ">"; }
+    if k == "GTE" { return ">="; }
+    if k == "LT" { return "<"; }
+    if k == "LTE" { return "<="; }
+    if k == "EQEQ" { return "=="; }
+    if k == "NEQ" { return "!="; }
+    return "==";
+}
+
+pub fn smt_contract_parse_span(toks: List[String], start: Int, end: Int, kind: String) -> String {
+    let line: String = field_at(list_get(toks, start), 1);
+    let col: String = field_at(list_get(toks, start), 2);
+    let mut lhs_v: String = "";
+    let mut op_s: String = "==";
+    let mut rhs_k: Int = 0;
+    let mut rhs_v: String = "";
+    let mut is_c: Bool = false;
+    let mut c_val: Int = 0;
+
+    let span_len: Int = end - start;
+    if span_len == 1 {
+        let tk: String = field_at(list_get(toks, start), 0);
+        let tv: String = field_at(list_get(toks, start), 3);
+        if tk == "KW_TRUE" {
+            is_c = true;
+            c_val = 1;
+        } else if tk == "KW_FALSE" {
+            is_c = true;
+            c_val = 0;
+        } else if tk == "INT" {
+            is_c = true;
+            c_val = parse_int(tv);
+        }
+        return smt_contract_parse_pack(kind, lhs_v, 1, op_s, rhs_k, rhs_v, 0, line, col, is_c, c_val);
+    }
+
+    let mut i: Int = start;
+    while i < end {
+        let k: String = field_at(list_get(toks, i), 0);
+        if smt_contract_parse_is_rel_op(k) {
+            op_s = smt_contract_parse_tok_to_rel_op(k);
+            if i > start {
+                lhs_v = field_at(list_get(toks, i - 1), 3);
+            }
+            if i + 1 < end {
+                let next_k: String = field_at(list_get(toks, i + 1), 0);
+                let next_v: String = field_at(list_get(toks, i + 1), 3);
+                if next_k == "INT" {
+                    rhs_k = parse_int(next_v);
+                } else if next_k == "IDENT" {
+                    rhs_v = next_v;
+                }
+            }
+        }
+        i = i + 1;
+    }
+
+    return smt_contract_parse_pack(kind, lhs_v, 1, op_s, rhs_k, rhs_v, 0, line, col, is_c, c_val);
+}
+
+pub fn smt_contract_parse_tokens(toks: List[String]) -> List[String] {
+    let mut clauses: List[String] = list_new();
+    let n: Int = list_len(toks);
+    let mut i: Int = 0;
+    while i < n {
+        let k: String = field_at(list_get(toks, i), 0);
+        if k == "KW_REQUIRES" || k == "KW_ENSURES" {
+            let mut kind: String = "requires";
+            if k == "KW_ENSURES" { kind = "ensures"; }
+            let mut j: Int = i + 1;
+            while j < n {
+                let jk: String = field_at(list_get(toks, j), 0);
+                if jk == "SEMI" || jk == "LBRACE" || jk == "KW_REQUIRES" || jk == "KW_ENSURES" || jk == "KW_FN" {
+                    break;
+                }
+                j = j + 1;
+            }
+            if j > i + 1 {
+                let cl: String = smt_contract_parse_span(toks, i + 1, j, kind);
+                clauses = list_push(clauses, cl);
+            }
+            i = j;
+        } else {
+            i = i + 1;
+        }
+    }
+    return clauses;
+}

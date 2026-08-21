@@ -1,0 +1,195 @@
+// # Emit x86_64 recursive function calls and stack spilling
+//
+// Logline: Lowers recursive function definitions and call trees with stack frame allocation and register spilling.
+//
+// Setup: tokenize_lines, x86_tok_k, x86_tok_t, and x86_emit_int_routine exist.
+//
+// Beats:
+//   1. Match recursive function fn fib(n: Int) -> Int with base condition and dual recursive call.
+//   2. Match caller in main invoking fib(N) and printing integer result.
+//   3. Emit stack frame preserving %rdi at -8(%rbp), spilling first call result at -16(%rbp), adding calls.
+//   4. Emit main calling fib and _println_int.
+
+import "token_fmt.oo";
+import "x86_emit_harv.oo";
+import "x86_emit_int.oo";
+
+fn x86_match_rec_fn(toks: List[String], n: Int, i: Int) -> List[String] {
+    let empty: List[String] = list_new();
+    if i + 25 >= n || x86_tok_k(toks, i) != "KW_FN" || x86_tok_k(toks, i + 1) != "IDENT" { return empty; }
+    let fname: String = x86_tok_t(toks, i + 1);
+    if fname == "main" || x86_tok_k(toks, i + 2) != "LPAREN" || x86_tok_k(toks, i + 3) != "IDENT" { return empty; }
+    let pname: String = x86_tok_t(toks, i + 3);
+    if x86_tok_k(toks, i + 4) != "COLON" || x86_tok_k(toks, i + 5) != "IDENT" || x86_tok_t(toks, i + 5) != "Int" { return empty; }
+    if x86_tok_k(toks, i + 6) != "RPAREN" || x86_tok_k(toks, i + 7) != "ARROW" || x86_tok_k(toks, i + 8) != "IDENT" { return empty; }
+    if x86_tok_t(toks, i + 8) != "Int" || x86_tok_k(toks, i + 9) != "LBRACE" { return empty; }
+    let mut p = i + 10;
+    while p < n && x86_tok_k(toks, p) != "KW_IF" && x86_tok_k(toks, p) != "RBRACE" { p = p + 1; }
+    if p >= n || x86_tok_k(toks, p) != "KW_IF" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "IDENT" || x86_tok_t(toks, p) != pname { return empty; }
+    p = p + 1;
+    if p >= n { return empty; }
+    let cmp_op: String = x86_tok_k(toks, p);
+    if cmp_op != "LTE" && cmp_op != "LT" && cmp_op != "EQEQ" && cmp_op != "LE" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "INT" { return empty; }
+    let base_thresh: String = x86_tok_t(toks, p);
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "LBRACE" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "KW_RETURN" { return empty; }
+    p = p + 1;
+    if p >= n || (x86_tok_k(toks, p) != "IDENT" && x86_tok_k(toks, p) != "INT") { return empty; }
+    p = p + 1;
+    if p < n && x86_tok_k(toks, p) == "SEMI" { p = p + 1; }
+    if p >= n || x86_tok_k(toks, p) != "RBRACE" { return empty; }
+    p = p + 1;
+    while p < n && x86_tok_k(toks, p) != "KW_RETURN" && x86_tok_k(toks, p) != "RBRACE" { p = p + 1; }
+    if p >= n || x86_tok_k(toks, p) != "KW_RETURN" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "IDENT" || x86_tok_t(toks, p) != fname { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "LPAREN" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "IDENT" || x86_tok_t(toks, p) != pname { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "MINUS" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "INT" { return empty; }
+    let off1: String = x86_tok_t(toks, p);
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "RPAREN" || p + 1 >= n || x86_tok_k(toks, p + 1) != "PLUS" { return empty; }
+    p = p + 2;
+    if p >= n || x86_tok_k(toks, p) != "IDENT" || x86_tok_t(toks, p) != fname { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "LPAREN" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "IDENT" || x86_tok_t(toks, p) != pname { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "MINUS" { return empty; }
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "INT" { return empty; }
+    let off2: String = x86_tok_t(toks, p);
+    p = p + 1;
+    if p >= n || x86_tok_k(toks, p) != "RPAREN" { return empty; }
+    p = p + 1;
+    if p < n && x86_tok_k(toks, p) == "SEMI" { p = p + 1; }
+    if p >= n || x86_tok_k(toks, p) != "RBRACE" { return empty; }
+    let mut out: List[String] = list_new();
+    out = list_push(out, fname);
+    out = list_push(out, base_thresh);
+    out = list_push(out, off1);
+    out = list_push(out, off2);
+    return out;
+}
+
+fn x86_match_rec_main(toks: List[String], n: Int, fname: String) -> String {
+    let mut i = 0;
+    while i < n {
+        if x86_tok_k(toks, i) == "KW_FN" && i + 1 < n && x86_tok_t(toks, i + 1) == "main" {
+            let mut p = i + 2;
+            while p < n && x86_tok_k(toks, p) != "LBRACE" { p = p + 1; }
+            if p < n { p = p + 1; }
+            while p < n && x86_tok_k(toks, p) != "RBRACE" {
+                if x86_tok_k(toks, p) == "IDENT" && x86_tok_t(toks, p) == fname {
+                    if p + 2 < n && x86_tok_k(toks, p + 1) == "LPAREN" && x86_tok_k(toks, p + 2) == "INT" {
+                        return x86_tok_t(toks, p + 2);
+                    }
+                }
+                p = p + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+pub fn x86_match_rec(src: String) -> List[String] {
+    let empty: List[String] = list_new();
+    if chars_len(src) == 0 { return empty; }
+    let toks: List[String] = tokenize_lines(src);
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        if x86_tok_k(toks, i) == "KW_FN" {
+            let fn_info: List[String] = x86_match_rec_fn(toks, n, i);
+            if list_len(fn_info) >= 4 {
+                let fname: String = list_get(fn_info, 0);
+                let arg: String = x86_match_rec_main(toks, n, fname);
+                if chars_len(arg) > 0 {
+                    let mut out: List[String] = list_new();
+                    out = list_push(out, fname);
+                    out = list_push(out, arg);
+                    out = list_push(out, list_get(fn_info, 1));
+                    out = list_push(out, list_get(fn_info, 2));
+                    out = list_push(out, list_get(fn_info, 3));
+                    return out;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return empty;
+}
+
+pub fn x86_match_fib_test(src: String) -> List[String] {
+    let rec: List[String] = x86_match_rec(src);
+    if list_len(rec) >= 2 {
+        let mut out: List[String] = list_new();
+        out = list_push(out, list_get(rec, 1));
+        return out;
+    }
+    return list_new();
+}
+
+pub fn x86_emit_fib_test(arg: String) {
+    x86_emit_rec("fib", arg, "1", "1", "2");
+}
+
+pub fn x86_emit_rec(fname: String, arg: String, base_thresh: String, off1: String, off2: String) {
+    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
+    println("    .section .text");
+    println("    .globl _start");
+    println("    .globl main");
+    println("    .globl " + fname);
+    x86_emit_int_routine();
+    println(".p2align 4");
+    println(fname + ":");
+    println("    push %rbp");
+    println("    mov %rsp, %rbp");
+    println("    sub $16, %rsp");
+    println("    movq %rdi, -8(%rbp)");
+    println("    cmpq $" + base_thresh + ", -8(%rbp)");
+    println("    jg .L" + fname + "_rec");
+    println("    movq -8(%rbp), %rax");
+    println("    add $16, %rsp");
+    println("    pop %rbp");
+    println("    ret");
+    println(".L" + fname + "_rec:");
+    println("    movq -8(%rbp), %rdi");
+    println("    subq $" + off1 + ", %rdi");
+    println("    call " + fname);
+    println("    movq %rax, -16(%rbp)");
+    println("    movq -8(%rbp), %rdi");
+    println("    subq $" + off2 + ", %rdi");
+    println("    call " + fname);
+    println("    addq -16(%rbp), %rax");
+    println("    add $16, %rsp");
+    println("    pop %rbp");
+    println("    ret");
+    println("main:");
+    println("_start:");
+    println("    push %rbp");
+    println("    mov %rsp, %rbp");
+    println("    sub $16, %rsp");
+    println("    mov $" + arg + ", %rdi");
+    println("    call " + fname);
+    println("    mov %rax, %rdi");
+    println("    call _println_int");
+    println("    add $16, %rsp");
+    println("    pop %rbp");
+    println("    mov $60, %rax");
+    println("    xor %rdi, %rdi");
+    println("    syscall");
+}

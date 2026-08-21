@@ -1,0 +1,109 @@
+// # Hostile Adversarial Capability Verification Harness
+//
+// Logline: Stress-test compiler and runtime capability boundaries against hostile privilege escalation and forgery.
+//
+// Setup: ProcessCap, FsReadCap, and FsWriteCap granted to execute adversarial probes.
+//
+// Beats:
+//   1. Verify compile-time rejection of unauthorized fs, net, and sys operations.
+//   2. Verify compile-time rejection of attenuated capability escalation (FsReadCap->write, HttpCap->bind).
+//   3. Verify runtime fail-closed diagnostics on forged tokens and out-of-sandbox writes.
+//   4. Verify subprocess environment scrubbing and HMAC capability sealing.
+
+fn fail(msg: String) {
+    println("FAIL: " + msg);
+    process_exit(1);
+}
+
+fn assert_trap(p: &ProcessCap, cmd: String, needle: String, desc: String) {
+    let tmp_out = ".ooda-cache/ooda-tmp/probe_" + desc + ".out";
+    let full_cmd = cmd + " > " + tmp_out + " 2>&1 || true";
+    if process_exec(p, full_cmd).is_err() {
+        fail("exec failed for probe " + desc);
+    }
+    let grep_cmd = "grep -qE \"" + needle + "\" " + tmp_out;
+    if process_exec(p, grep_cmd).is_err() {
+        fail("probe '" + desc + "' did not match needle '" + needle + "'");
+    }
+    println("  OK [PROBE] " + desc);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap, fw: &FsWriteCap) {
+    let root = ".";
+    let tmpd = ".ooda-cache/ooda-tmp";
+    let oodac = root + "/oodac/oodac";
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
+
+    println("===================================================================");
+    println(" Stage 10 Adversarial Capability Security Stress Harness");
+    println("===================================================================");
+
+    // 1. Probe: Unauthorized fs read (no cap declared)
+    let p1 = tmpd + "/p1_no_fs_cap.oo";
+    let s1 = "printf '%s\\n' '// # P1' '// Logline: p1' 'pub fn p1() -> String { return read_file(\"/etc/passwd\"); }' > " + p1;
+    if process_exec(p, s1).is_err() { fail("write p1"); }
+    assert_trap(p, oodac + " check " + p1, "ERR.*capability.*Security Capability Violation.*read_file.*requires a &FsReadCap", "unauthorized_fs_read_no_cap");
+
+    // 2. Probe: Attenuated FS escalation (FsReadCap attempting write_file)
+    let p2 = tmpd + "/p2_read_attempt_write.oo";
+    let s2 = "printf '%s\\n' '// # P2' '// Logline: p2' 'pub fn p2(fs: &FsReadCap) { let _ = write_file(fs, \"/tmp/pwn\", \"x\"); }' > " + p2;
+    if process_exec(p, s2).is_err() { fail("write p2"); }
+    assert_trap(p, oodac + " check " + p2, "ERR.*capability.*Security Capability Violation.*write_file.*requires a &FsWriteCap", "attenuated_fs_read_to_write");
+
+    // 3. Probe: Unauthorized network fetch (no cap declared)
+    let p3 = tmpd + "/p3_no_net_cap.oo";
+    let s3 = "printf '%s\\n' '// # P3' '// Logline: p3' 'pub fn p3() { let _ = fetch(\"https://evil.example\"); }' > " + p3;
+    if process_exec(p, s3).is_err() { fail("write p3"); }
+    assert_trap(p, oodac + " check " + p3, "ERR.*capability.*Security Capability Violation.*fetch.*requires a &HttpCap", "unauthorized_net_fetch_no_cap");
+
+    // 4. Probe: Attenuated Net escalation (HttpCap attempting tcp_bind)
+    let p4 = tmpd + "/p4_http_attempt_bind.oo";
+    let s4 = "printf '%s\\n' '// # P4' '// Logline: p4' 'pub fn p4(h: &HttpCap) { let _ = tcp_bind(h, 8080); }' > " + p4;
+    if process_exec(p, s4).is_err() { fail("write p4"); }
+    assert_trap(p, oodac + " check " + p4, "ERR.*capability.*Security Capability Violation.*tcp_bind.*requires a &BindCap", "attenuated_http_to_bind");
+
+    // 5. Probe: Attenuated Net escalation (HttpCap attempting sock_raw)
+    let p5 = tmpd + "/p5_http_attempt_raw.oo";
+    let s5 = "printf '%s\\n' '// # P5' '// Logline: p5' 'pub fn p5(h: &HttpCap) { let _ = sock_raw(h); }' > " + p5;
+    if process_exec(p, s5).is_err() { fail("write p5"); }
+    assert_trap(p, oodac + " check " + p5, "ERR.*capability.*Security Capability Violation.*sock_raw.*requires a &NetCap", "attenuated_http_to_raw");
+
+    // 6. Probe: Attenuated Sys escalation (ProcessCap attempting python_embed)
+    let p6 = tmpd + "/p6_proc_attempt_python.oo";
+    let s6 = "printf '%s\\n' '// # P6' '// Logline: p6' 'pub fn p6(p: &ProcessCap) { let _ = python_embed(p, \"1+1\"); }' > " + p6;
+    if process_exec(p, s6).is_err() { fail("write p6"); }
+    assert_trap(p, oodac + " check " + p6, "ERR.*capability.*Security Capability Violation.*python_embed.*requires a &SysCap", "attenuated_process_to_sys");
+
+    // 7. Probe: Token declared but omitted in arg flow
+    let p7 = tmpd + "/p7_token_omitted_flow.oo";
+    let s7 = "printf '%s\\n' '// # P7' '// Logline: p7' 'pub fn p7(fs: &FsReadCap) { let _ = read_file(\"/etc/hosts\"); }' > " + p7;
+    if process_exec(p, s7).is_err() { fail("write p7"); }
+    assert_trap(p, oodac + " check " + p7, "ERR.*capability.*Security Capability Violation.*does not pass a matching cap token", "token_omitted_in_call");
+
+    // 8. Probe: Runtime zero token write rejection
+    let p8_c = tmpd + "/p8_zero_token.c";
+    let p8_bin = tmpd + "/p8_zero_token.bin";
+    let wr_p8 = "printf '%s\\n' '#include \"chs_rt.h\"' '#include <stdio.h>' 'int main(void) {' 'OoResV r = oo_write_file(0LL, oo_str_lit(\"/tmp/p8.txt\"), oo_str_lit(\"p8\"));' 'return 0; }' > " + p8_c;
+    if process_exec(p, wr_p8).is_err() { fail("write p8"); }
+    if process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + p8_c + " -o " + p8_bin + " -lm -ldl -lpthread").is_err() { fail("gcc p8"); }
+    assert_trap(p, "OODA_FS_WRITEDIR=/tmp " + p8_bin, "ERR.cap.*write_file: missing or forged capability", "runtime_zero_token_rejection");
+
+    // 9. Probe: Runtime write sandbox traversal rejection
+    let p9_c = tmpd + "/p9_sandbox_escape.c";
+    let p9_bin = tmpd + "/p9_sandbox_escape.bin";
+    let wr_p9 = "printf '%s\\n' '#include \"chs_rt.h\"' '#include <stdio.h>' 'int main(void) {' 'long long fw = oo_cap_grant_fswrite();' 'OoResV r = oo_write_file(fw, oo_str_lit(\"/etc/hostile_write.txt\"), oo_str_lit(\"x\"));' 'if (!r.ok) { printf(\"ERR_SANDBOX: %s\\\\n\", r.err.data); } return 0; }' > " + p9_c;
+    if process_exec(p, wr_p9).is_err() { fail("write p9"); }
+    if process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + p9_c + " -o " + p9_bin + " -lm -ldl -lpthread").is_err() { fail("gcc p9"); }
+    assert_trap(p, "OODA_FS_WRITEDIR=/tmp " + p9_bin, "ERR_SANDBOX.*write_file denied: path not under OODA_FS_WRITEDIR", "runtime_sandbox_traversal_denied");
+
+    // 10. Probe: Runtime policy path protection
+    let p10_c = tmpd + "/p10_policy_path.c";
+    let p10_bin = tmpd + "/p10_policy_path.bin";
+    let wr_p10 = "printf '%s\\n' '#include \"chs_rt.h\"' '#include <stdio.h>' 'int main(void) {' 'long long fw = oo_cap_grant_fswrite();' 'OoResV r = oo_write_file(fw, oo_str_lit(\"/tmp/SOUL.md\"), oo_str_lit(\"x\"));' 'if (!r.ok) { printf(\"ERR_POLICY: %s\\\\n\", r.err.data); } return 0; }' > " + p10_c;
+    if process_exec(p, wr_p10).is_err() { fail("write p10"); }
+    if process_exec(p, "gcc -O0 -I" + root + "/runtime " + root + "/runtime/chs_rt.c " + p10_c + " -o " + p10_bin + " -lm -ldl -lpthread").is_err() { fail("gcc p10"); }
+    assert_trap(p, "OODA_FS_WRITEDIR=/tmp " + p10_bin, "ERR_POLICY.*write_file denied: policy path", "runtime_policy_path_locked");
+
+    println("===================================================================");
+    println("s10_hostile_adversarial_smoke: PASSED (10 / 10 probes verified)");
+}

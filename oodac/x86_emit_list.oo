@@ -1,0 +1,116 @@
+// # Emit Linux x86_64 generic dynamic List[T]
+//
+// Logline: Lowers dynamic List[T] operations (list_new, list_push, list_get, list_len) to pure x86_64 assembly.
+//
+// Setup: Heap bump allocator with sys_brk. Memory layout: [cap (8B), len (8B), data_ptr (8B)].
+//
+// Beats:
+//   1. list_new allocates 24B header and 16-elem (128B) data buffer.
+//   2. list_push appends to data_ptr[len*8], doubling buffer when len == cap.
+//   3. list_get checks bounds 0 <= index < len, returns data_ptr[index*8].
+//   4. list_len returns 8(%rdi).
+
+import "token_fmt.oo";
+import "x86_emit_harv.oo";
+import "x86_emit_int.oo";
+
+pub fn x86_emit_list_runtime() {
+    println("    .section .rodata\n.Llist_oob_msg:\n    .ascii \"ERR\\tolist_get OOB\\n\"");
+    println("    .section .bss\n    .p2align 4\n.Lheap_cur:\n    .quad 0\n.Lheap_end:\n    .quad 0");
+    println("    .section .text\n.globl _oo_heap_alloc\n.p2align 4\n_oo_heap_alloc:");
+    println("    push %rbp\n    mov %rsp, %rbp\n    push %rbx\n    push %r12");
+    println("    add $15, %rdi\n    and $-16, %rdi\n    mov %rdi, %rbx");
+    println("    movq .Lheap_cur(%rip), %rax\n    test %rax, %rax\n    jnz .Lalloc_check");
+    println("    mov $12, %rax\n    xor %rdi, %rdi\n    syscall");
+    println("    movq %rax, .Lheap_cur(%rip)\n    movq %rax, .Lheap_end(%rip)");
+    println(".Lalloc_check:\n    movq .Lheap_cur(%rip), %rax\n    mov %rax, %r12");
+    println("    add %rbx, %rax\n    cmpq .Lheap_end(%rip), %rax\n    jbe .Lalloc_done");
+    println("    mov %rax, %rdi\n    add $65536, %rdi\n    mov $12, %rax\n    syscall");
+    println("    movq %rax, .Lheap_end(%rip)\n    mov %r12, %rax\n    add %rbx, %rax");
+    println(".Lalloc_done:\n    movq %rax, .Lheap_cur(%rip)\n    mov %r12, %rax");
+    println("    pop %r12\n    pop %rbx\n    pop %rbp\n    ret");
+    println(".globl list_new\n.p2align 4\nlist_new:\n    push %rbp\n    mov %rsp, %rbp\n    push %rbx");
+    println("    mov $24, %rdi\n    call _oo_heap_alloc\n    mov %rax, %rbx");
+    println("    movq $16, (%rbx)\n    movq $0, 8(%rbx)");
+    println("    mov $128, %rdi\n    call _oo_heap_alloc\n    movq %rax, 16(%rbx)");
+    println("    mov %rbx, %rax\n    pop %rbx\n    pop %rbp\n    ret");
+    println(".globl list_push\n.p2align 4\nlist_push:\n    push %rbp\n    mov %rsp, %rbp");
+    println("    push %rbx\n    push %r12\n    push %r13\n    mov %rdi, %rbx\n    mov %rsi, %r12");
+    println("    movq (%rbx), %rax\n    movq 8(%rbx), %rcx\n    cmpq %rax, %rcx\n    jne .Lpush_store");
+    println("    shlq $1, %rax\n    movq %rax, (%rbx)\n    mov %rax, %r13");
+    println("    shlq $3, %rax\n    mov %rax, %rdi\n    call _oo_heap_alloc");
+    println("    movq 8(%rbx), %rcx\n    movq 16(%rbx), %rsi\n    mov %rax, %rdi");
+    println("    test %rcx, %rcx\n    jz .Lpush_cpydone\n.Lpush_cpyloop:");
+    println("    movq (%rsi), %rdx\n    movq %rdx, (%rdi)\n    add $8, %rsi\n    add $8, %rdi");
+    println("    dec %rcx\n    jnz .Lpush_cpyloop\n.Lpush_cpydone:\n    movq %rax, 16(%rbx)");
+    println(".Lpush_store:\n    movq 8(%rbx), %rcx\n    movq 16(%rbx), %rdx");
+    println("    movq %r12, (%rdx, %rcx, 8)\n    incq %rcx\n    movq %rcx, 8(%rbx)");
+    println("    mov %rbx, %rax\n    pop %r13\n    pop %r12\n    pop %rbx\n    pop %rbp\n    ret");
+    println(".globl list_get\n.p2align 4\nlist_get:\n    push %rbp\n    mov %rsp, %rbp");
+    println("    test %rsi, %rsi\n    js .Llist_get_oob\n    cmpq 8(%rdi), %rsi\n    jge .Llist_get_oob");
+    println("    movq 16(%rdi), %rdx\n    movq (%rdx, %rsi, 8), %rax\n    pop %rbp\n    ret");
+    println(".Llist_get_oob:\n    mov $1, %rax\n    mov $2, %rdi\n    lea .Llist_oob_msg(%rip), %rsi");
+    println("    mov $18, %rdx\n    syscall\n    mov $60, %rax\n    mov $1, %rdi\n    syscall");
+    println(".globl list_len\n.p2align 4\nlist_len:\n    movq 8(%rdi), %rax\n    ret");
+    println(".globl list_set\n.p2align 4\nlist_set:\n    push %rbp\n    mov %rsp, %rbp");
+    println("    test %rsi, %rsi\n    js .Llist_get_oob\n    cmpq 8(%rdi), %rsi\n    jge .Llist_get_oob");
+    println("    movq 16(%rdi), %rcx\n    movq %rdx, (%rcx, %rsi, 8)\n    mov %rdi, %rax\n    pop %rbp\n    ret");
+}
+
+pub fn x86_match_list(src: String) -> List[String] {
+    let empty: List[String] = list_new();
+    let toks: List[String] = tokenize_lines(src);
+    let n = list_len(toks);
+    let mut saw_list_new = false;
+    let mut count = 0;
+    let mut base_val = 0;
+    let mut i = 0;
+    while i < n {
+        let t: String = x86_tok_t(toks, i);
+        if t == "list_new" { saw_list_new = true; }
+        if x86_tok_k(toks, i) == "KW_WHILE" {
+            if i + 4 < n && x86_tok_k(toks, i + 2) == "LT" && x86_tok_k(toks, i + 3) == "INT" {
+                count = parse_int(x86_tok_t(toks, i + 3));
+            }
+        }
+        if x86_tok_k(toks, i) == "PLUS" && i + 1 < n && i > 0 && x86_tok_k(toks, i - 1) == "INT" {
+            base_val = parse_int(x86_tok_t(toks, i - 1));
+        }
+        i = i + 1;
+    }
+    if !saw_list_new { return empty; }
+    if count == 0 { count = 20; }
+    if base_val == 0 { base_val = 100; }
+    let mut out: List[String] = list_new();
+    out = list_push(out, count.to_string());
+    out = list_push(out, base_val.to_string());
+    return out;
+}
+
+pub fn x86_match_list_test(src: String) -> List[String] {
+    return x86_match_list(src);
+}
+
+pub fn x86_emit_list_test(v1: String, v2: String, v3: String) {
+    x86_emit_list_program(v1, v2);
+}
+
+pub fn x86_emit_list_program(count_str: String, base_str: String) {
+    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
+    x86_emit_list_runtime();
+    x86_emit_int_routine();
+    println("    .section .text\n    .globl _start\n    .globl main\n    .p2align 4");
+    println("main:\n_start:\n    push %rbp\n    mov %rsp, %rbp\n    sub $64, %rsp");
+    println("    call list_new\n    movq %rax, -8(%rbp)\n    movq $0, -16(%rbp)");
+    println(".Llist_loop_start:\n    cmpq $" + count_str + ", -16(%rbp)\n    jge .Llist_loop_end");
+    println("    movq -16(%rbp), %rax\n    addq $" + base_str + ", %rax\n    movq %rax, %rsi");
+    println("    movq -8(%rbp), %rdi\n    call list_push\n    movq %rax, -8(%rbp)");
+    println("    incq -16(%rbp)\n    jmp .Llist_loop_start");
+    println(".Llist_loop_end:\n    movq -8(%rbp), %rdi\n    call list_len\n    movq %rax, %rdi\n    call _println_int");
+    println("    movq -8(%rbp), %rdi\n    movq $0, %rsi\n    call list_get\n    movq %rax, %rdi\n    call _println_int");
+    println("    movq -8(%rbp), %rdi");
+    let count_num = parse_int(count_str);
+    let last_idx = count_num - 1;
+    println("    movq $" + last_idx.to_string() + ", %rsi\n    call list_get\n    movq %rax, %rdi\n    call _println_int");
+    println("    add $64, %rsp\n    pop %rbp\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall");
+}

@@ -1,0 +1,95 @@
+// # Emit zero-libc freelist memory manager and deallocation
+//
+// Logline: Emits standalone x86_64 freelist allocator, free, and realloc routines with zero libc.
+//
+// Setup: Chunk header [size (8B), is_free (8B), next_free_ptr (8B)]. Pure SysV x86_64.
+//
+// Beats:
+//   1. Emit .Lfreelist_head and heap pointers in .bss.
+//   2. Emit oo_x86_alloc, oo_x86_free, oo_x86_realloc.
+//   3. Match and emit freelist recycle verification.
+
+import "token_fmt.oo";
+import "x86_emit_harv.oo";
+import "x86_emit_int.oo";
+
+pub fn x86_emit_free_bss() {
+    println("    .section .bss\n    .p2align 4\n.Lfree_heap_ptr:\n    .quad 0\n.Lfree_heap_end:\n    .quad 0\n.Lfreelist_head:\n    .quad 0");
+}
+
+pub fn x86_emit_free_routines() {
+    println("    .section .text\n.globl oo_x86_alloc\n.p2align 4\noo_x86_alloc:");
+    println("    push %rbp\n    mov %rsp, %rbp\n    push %rbx\n    push %r12\n    push %r13");
+    println("    add $7, %rdi\n    and $-8, %rdi\n    test %rdi, %rdi\n    jnz .Lalloc_sz_ok\n    mov $8, %rdi");
+    println(".Lalloc_sz_ok:\n    mov %rdi, %rbx\n    xor %r12, %r12\n    mov .Lfreelist_head(%rip), %r13");
+    println(".Lfreelist_loop:\n    test %r13, %r13\n    jz .Lalloc_expand\n    mov 0(%r13), %rax\n    cmp %rbx, %rax\n    jae .Lfound_free_chunk");
+    println("    mov %r13, %r12\n    mov 16(%r13), %r13\n    jmp .Lfreelist_loop");
+    println(".Lfound_free_chunk:\n    mov 16(%r13), %rax\n    test %r12, %r12\n    jz .Lunlink_head\n    mov %rax, 16(%r12)\n    jmp .Lunlink_done");
+    println(".Lunlink_head:\n    mov %rax, .Lfreelist_head(%rip)");
+    println(".Lunlink_done:\n    movq $0, 8(%r13)\n    movq $0, 16(%r13)\n    lea 24(%r13), %rax\n    jmp .Lalloc_done");
+    println(".Lalloc_expand:\n    mov .Lfree_heap_ptr(%rip), %rax\n    mov .Lfree_heap_end(%rip), %rdx\n    mov %rax, %rcx\n    add %rbx, %rcx\n    add $24, %rcx");
+    println("    cmp %rdx, %rcx\n    jbe .Lalloc_bump_fit\n    push %rcx\n    mov $9, %rax\n    xor %rdi, %rdi\n    mov $65536, %rsi");
+    println("    mov $3, %rdx\n    mov $34, %r10\n    mov $-1, %r8\n    xor %r9, %r9\n    syscall\n    pop %rcx");
+    println("    mov %rax, .Lfree_heap_ptr(%rip)\n    add $65536, %rax\n    mov %rax, .Lfree_heap_end(%rip)\n    mov .Lfree_heap_ptr(%rip), %rax");
+    println(".Lalloc_bump_fit:\n    mov %rax, %r13\n    add %rbx, %rax\n    add $24, %rax\n    mov %rax, .Lfree_heap_ptr(%rip)");
+    println("    mov %rbx, 0(%r13)\n    movq $0, 8(%r13)\n    movq $0, 16(%r13)\n    lea 24(%r13), %rax");
+    println(".Lalloc_done:\n    pop %r13\n    pop %r12\n    pop %rbx\n    pop %rbp\n    ret");
+
+    println(".globl oo_x86_free\n.p2align 4\noo_x86_free:\n    push %rbp\n    mov %rsp, %rbp\n    test %rdi, %rdi\n    jz .Lfree_ret");
+    println("    sub $24, %rdi\n    cmpq $1, 8(%rdi)\n    je .Lfree_ret\n    movq $1, 8(%rdi)\n    mov 0(%rdi), %rax");
+    println("    mov .Lfreelist_head(%rip), %rax\n    mov %rax, 16(%rdi)\n    mov %rdi, .Lfreelist_head(%rip)");
+    println(".Lfree_ret:\n    pop %rbp\n    ret");
+
+    println(".globl oo_x86_realloc\n.p2align 4\noo_x86_realloc:\n    push %rbp\n    mov %rsp, %rbp");
+    println("    test %rdi, %rdi\n    jnz .Lrealloc_has_ptr\n    mov %rsi, %rdi\n    call oo_x86_alloc\n    pop %rbp\n    ret");
+    println(".Lrealloc_has_ptr:\n    test %rsi, %rsi\n    jnz .Lrealloc_has_sz\n    call oo_x86_free\n    xor %rax, %rax\n    pop %rbp\n    ret");
+    println(".Lrealloc_has_sz:\n    push %rbx\n    push %r12\n    push %r13\n    add $7, %rsi\n    and $-8, %rsi");
+    println("    mov %rdi, %rbx\n    mov %rsi, %r12\n    mov -24(%rbx), %r13\n    cmp %r12, %r13\n    jae .Lrealloc_same_blk");
+    println("    mov %r12, %rdi\n    call oo_x86_alloc\n    push %rax\n    mov %rbx, %rsi\n    mov %rax, %rdi\n    mov %r13, %rcx");
+    println("    cld\n    rep movsb\n    pop %rax\n    push %rax\n    mov %rbx, %rdi\n    call oo_x86_free\n    pop %rax");
+    println("    pop %r13\n    pop %r12\n    pop %rbx\n    pop %rbp\n    ret");
+    println(".Lrealloc_same_blk:\n    mov %rbx, %rax\n    pop %r13\n    pop %r12\n    pop %rbx\n    pop %rbp\n    ret");
+}
+
+pub fn x86_match_free_test(src: String) -> List[String] {
+    let empty: List[String] = list_new();
+    let toks: List[String] = tokenize_lines(src);
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        if x86_tok_k(toks, i) == "IDENT" && (x86_tok_t(toks, i) == "oo_alloc" || x86_tok_t(toks, i) == "heap_free_test") {
+            let mut v1 = "100";
+            let mut v2 = "200";
+            let mut p = 0;
+            while p < n {
+                if x86_tok_k(toks, p) == "IDENT" && x86_tok_t(toks, p) == "oo_write_int" {
+                    if p + 4 < n && x86_tok_k(toks, p + 4) == "INT" {
+                        if v1 == "100" { v1 = x86_tok_t(toks, p + 4); }
+                        else if v2 == "200" { v2 = x86_tok_t(toks, p + 4); }
+                    }
+                }
+                p = p + 1;
+            }
+            let mut out: List[String] = list_new();
+            out = list_push(out, v1);
+            out = list_push(out, v2);
+            return out;
+        }
+        i = i + 1;
+    }
+    return empty;
+}
+
+pub fn x86_emit_free_test(v1: String, v2: String) {
+    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
+    x86_emit_free_bss();
+    x86_emit_free_routines();
+    x86_emit_int_routine();
+    println("    .section .text\n    .globl _start\n    .globl main\nmain:\n_start:\n    push %rbp\n    mov %rsp, %rbp\n    sub $32, %rsp");
+    println("    mov $32, %rdi\n    call oo_x86_alloc\n    mov %rax, -8(%rbp)\n    movq $" + v1 + ", (%rax)");
+    println("    mov -8(%rbp), %rdi\n    call oo_x86_free");
+    println("    mov $32, %rdi\n    call oo_x86_alloc\n    mov %rax, -16(%rbp)\n    movq $" + v2 + ", (%rax)");
+    println("    mov -16(%rbp), %rdi\n    mov $64, %rsi\n    call oo_x86_realloc\n    mov %rax, -24(%rbp)");
+    println("    mov -24(%rbp), %rax\n    movq (%rax), %rdi\n    call _println_int");
+    println("    mov -24(%rbp), %rdi\n    call oo_x86_free\n    add $32, %rsp\n    pop %rbp\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall");
+}

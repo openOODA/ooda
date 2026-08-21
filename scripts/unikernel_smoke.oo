@@ -1,0 +1,114 @@
+// # Bare-Metal Unikernels & MicroVMs Dedicated Smoke Test
+//
+// Logline: Comprehensive smoke proof verifying single-address-space bootloader, VirtIO ring buffers, Firecracker microVMs, and eBPF telemetry.
+//
+// Setup: Exercises unikernel and microVM virtualization subsystems under UnikernelCap and ProcessCap.
+//
+// Beats:
+//   1. Verify PVH v2 / Linux direct bootloader simulation achieving sub-5ms boot pipeline.
+//   2. Verify VirtIO split virtqueue ring buffers and VirtIO-Net packet dispatch.
+//   3. Verify Firecracker microVM hypervisor lifecycle, memory snapshots, and instant restore.
+//   4. Verify dynamic eBPF kprobe/tracepoint telemetry hooks and execution metrics.
+// RULES.oot 1.4: Pure capability-gated execution.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+import "unikernel/boot.oo";
+import "unikernel/virtio.oo";
+import "unikernel/firecracker.oo";
+import "unikernel/ebpf.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("===================================================================");
+    println(" openOODA Stage 15: Bare-Metal Unikernels & MicroVMs Smoke");
+    println("===================================================================");
+
+    // 1. Unikernel Bootloader & Sub-5ms Pipeline
+    let boot_cfg: BootConfig = boot_config_new(boot_proto_pvh_v2(), "console=hvc0 root=/dev/vda", 64);
+    let timing_res: Result[BootPhaseTiming, String] = unikernel_boot_simulate(boot_cfg);
+    match timing_res {
+        Ok(timing) => {
+            let is_sub5ms: Bool = boot_timing_is_sub_5ms(timing);
+            if !is_sub5ms { println("FAIL: boot latency exceeds 5ms budget"); process_exit(1); }
+            let t_total: Int = timing.total_boot_us;
+            if t_total > 5000 || t_total <= 0 { println("FAIL: invalid total boot timing"); process_exit(1); }
+            println("  [PASS] 1. Unikernel Bootloader PVH v2 & Sub-5ms Latency (" + t_total.to_string() + " us)");
+        },
+        Err(e) => {
+            println("FAIL: boot timing error");
+            process_exit(1);
+        }
+    }
+
+    // 2. VirtIO MMIO & Split Virtqueue Driver
+    let init_vq: VirtQueue = virtqueue_new(0, 64);
+    let add_res: Result[VirtQueue, String] = virtqueue_add_desc(init_vq, 1048576, 1500, 0);
+    if add_res.is_err() { println("FAIL: virtqueue add desc"); process_exit(1); }
+    let mut vq_loaded: VirtQueue = init_vq;
+    match add_res {
+        Ok(q) => { vq_loaded = q; },
+        Err(e) => { process_exit(1); }
+    }
+    let vq_proc: VirtQueue = virtqueue_process_used(vq_loaded);
+    if vq_proc.used_idx != 1 { println("FAIL: virtqueue process used"); process_exit(1); }
+
+    let init_net_dev: VirtioDevice = virtio_device_new(virtio_dev_net(), 536870912);
+    let tx_res: Result[VirtioDevice, String] = virtio_net_send_packet(init_net_dev, "ETH_FRAME_RAW_PAYLOAD_OODA_MESH");
+    if tx_res.is_err() { println("FAIL: virtio net send packet"); process_exit(1); }
+    let mut net_dev_used: VirtioDevice = init_net_dev;
+    match tx_res {
+        Ok(d) => { net_dev_used = d; },
+        Err(e) => { process_exit(1); }
+    }
+    if net_dev_used.tx_used != 1 { println("FAIL: virtio net tx_used count"); process_exit(1); }
+
+    let blk_dev: VirtioDevice = virtio_device_new(virtio_dev_blk(), 536875008);
+    let blk_res: Result[String, String] = virtio_blk_read_sector(blk_dev, 42);
+    if blk_res.is_err() { println("FAIL: virtio blk read sector"); process_exit(1); }
+    let mut sector_data: String = "";
+    match blk_res {
+        Ok(s) => { sector_data = s; },
+        Err(e) => { process_exit(1); }
+    }
+    if !(sector_data == "SECTOR_DATA_42_BLOCK_PAYLOAD_512B") { println("FAIL: blk sector data mismatch"); process_exit(1); }
+    println("  [PASS] 2. VirtIO MMIO Transport & Split Virtqueue Ring Buffers");
+
+    // 3. Firecracker MicroVM & Sub-Millisecond Snapshots
+    let vm_cfg: FirecrackerVmConfig = firecracker_config_new("vm_ooda_alpha01", 2, 128);
+    let vm_state: MicroVmState = firecracker_start_instance(vm_cfg);
+    let vm_v: Bool = vm_state.is_valid;
+    if !vm_v { println("FAIL: firecracker start instance"); process_exit(1); }
+    let vm_status: String = vm_state.status;
+    if !(vm_status == "Running") { println("FAIL: microvm state not running"); process_exit(1); }
+
+    let snap_state: MicroVmState = firecracker_create_snapshot(vm_state, "/var/lib/firecracker/snaps/alpha01.snap");
+    let snap_v: Bool = snap_state.is_valid;
+    if !snap_v { println("FAIL: firecracker create snapshot"); process_exit(1); }
+    let snap_stat: String = snap_state.status;
+    if !(snap_stat == "SnapshotSaved") { println("FAIL: snapshot status mismatch"); process_exit(1); }
+
+    let restored_vm: MicroVmState = firecracker_restore_from_snapshot(vm_cfg, "/var/lib/firecracker/snaps/alpha01.snap");
+    let res_v: Bool = restored_vm.is_valid;
+    if !res_v { println("FAIL: firecracker restore from snapshot"); process_exit(1); }
+    let is_res: Bool = restored_vm.is_restored;
+    if !is_res { println("FAIL: restored flag not set"); process_exit(1); }
+    println("  [PASS] 3. Firecracker MicroVM Lifecycle & Cold Snapshot Restore");
+
+    // 4. eBPF Kernel Probe & Telemetry Engine
+    let mut probe_mgr: UnikernelProbeManager = probe_manager_new(100);
+    probe_mgr = probe_record_kprobe(probe_mgr, "ooda_dispatch_step", 1000000, 350, 0);
+    probe_mgr = probe_record_kprobe(probe_mgr, "virtio_net_xmit", 1001000, 1450, 0);
+    probe_mgr = probe_record_tracepoint(probe_mgr, "sys_enter_poll", 1002000, 2200);
+
+    let ev_cnt: Int = probe_event_count(probe_mgr);
+    if ev_cnt != 3 { println("FAIL: probe event count"); process_exit(1); }
+
+    let slow_cnt: Int = probe_slow_count(probe_mgr);
+    if slow_cnt != 2 { println("FAIL: slow probe count"); process_exit(1); }
+
+    let max_dur: Int = probe_mgr.max_duration_ns;
+    if max_dur != 2200 { println("FAIL: probe max duration"); process_exit(1); }
+    println("  [PASS] 4. Unikernel eBPF Kprobe/Tracepoint Telemetry");
+
+    println("===================================================================");
+    println("unikernel_smoke: PASSED");
+}

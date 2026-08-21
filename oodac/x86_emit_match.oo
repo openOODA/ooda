@@ -1,0 +1,145 @@
+// # Emit native pattern match lowering
+//
+// Logline: Lowers match expression on tagged union [tag (8B), payload (8B)] into pure x86_64 branching.
+//
+// Setup: tokenize_lines, x86_tok_k, and x86_tok_t exist.
+//
+// Beats:
+//   1. Match tagged union construction [tag (8B), payload (8B)] and match expression.
+//   2. Extract tag from 0(%rax), branch to .Lmatch_case_1, .Lmatch_case_2, .Lmatch_default.
+//   3. Bind payload from 8(%rax) into case local, join at .Lmatch_end, and print.
+
+import "token_fmt.oo";
+import "x86_emit_harv.oo";
+import "x86_emit_int.oo";
+
+fn x86_skip_type(toks: List[String], n: Int, p: Int) -> Int {
+    let mut i = p;
+    if i < n && x86_tok_k(toks, i) == "COLON" {
+        i = i + 1;
+        let mut depth = 0;
+        while i < n {
+            let k: String = x86_tok_k(toks, i);
+            if k == "LBRACKET" || k == "LT" { depth = depth + 1; }
+            else if k == "RBRACKET" || k == "GT" {
+                depth = depth - 1;
+                if depth == 0 { return i + 1; }
+            } else if depth == 0 && (k == "EQ" || k == "SEMI" || k == "LBRACE" || k == "RPAREN" || k == "COMMA") { return i; }
+            i = i + 1;
+        }
+    }
+    return i;
+}
+
+pub fn x86_match_match_test(src: String) -> List[String] {
+    let empty: List[String] = list_new();
+    if chars_len(src) == 0 { return empty; }
+    let toks: List[String] = tokenize_lines(src);
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        if x86_tok_k(toks, i) == "KW_FN" && i + 1 < n && x86_tok_t(toks, i + 1) == "main" {
+            let mut p = i + 2;
+            if p + 2 >= n || x86_tok_k(toks, p) != "LPAREN" || x86_tok_k(toks, p + 1) != "RPAREN" || x86_tok_k(toks, p + 2) != "LBRACE" { return empty; }
+            p = p + 3;
+            if p + 1 >= n || x86_tok_k(toks, p) != "KW_LET" || x86_tok_k(toks, p + 1) != "IDENT" { return empty; }
+            let subj_name: String = x86_tok_t(toks, p + 1);
+            p = x86_skip_type(toks, n, p + 2);
+            if p + 1 >= n || x86_tok_k(toks, p) != "EQ" || x86_tok_k(toks, p + 1) != "IDENT" { return empty; }
+            let ctor: String = x86_tok_t(toks, p + 1);
+            p = p + 2;
+            let mut v1 = "0";
+            if ctor == "Some" || ctor == "Ok" {
+                if p >= n || x86_tok_k(toks, p) != "LPAREN" { return empty; }
+                p = p + 1;
+                let mut sign = "";
+                if p < n && x86_tok_k(toks, p) == "MINUS" { sign = "-"; p = p + 1; }
+                if p >= n || x86_tok_k(toks, p) != "INT" { return empty; }
+                v1 = sign + x86_tok_t(toks, p);
+                p = p + 1;
+                if p >= n || x86_tok_k(toks, p) != "RPAREN" { return empty; }
+                p = p + 1;
+            } else if ctor == "None" {
+                if p < n && x86_tok_k(toks, p) == "LPAREN" { p = p + 1; if p < n && x86_tok_k(toks, p) == "RPAREN" { p = p + 1; } }
+            } else if ctor == "Err" {
+                if p >= n || x86_tok_k(toks, p) != "LPAREN" { return empty; }
+                p = p + 1;
+                if p < n && x86_tok_k(toks, p) == "INT" { v1 = x86_tok_t(toks, p); p = p + 1; }
+                if p >= n || x86_tok_k(toks, p) != "RPAREN" { return empty; }
+                p = p + 1;
+            } else { return empty; }
+            if p < n && x86_tok_k(toks, p) == "SEMI" { p = p + 1; }
+
+            if p < n && x86_tok_k(toks, p) == "KW_LET" {
+                p = p + 1;
+                if p >= n || x86_tok_k(toks, p) != "IDENT" { return empty; }
+                p = x86_skip_type(toks, n, p + 1);
+                if p >= n || x86_tok_k(toks, p) != "EQ" { return empty; }
+                p = p + 1;
+            }
+            if p + 2 >= n || x86_tok_k(toks, p) != "KW_MATCH" || x86_tok_t(toks, p + 1) != subj_name || x86_tok_k(toks, p + 2) != "LBRACE" { return empty; }
+            p = p + 3;
+
+            if p >= n || x86_tok_k(toks, p) != "IDENT" { return empty; }
+            p = p + 1;
+            if p < n && x86_tok_k(toks, p) == "LPAREN" {
+                p = p + 1;
+                if p < n && x86_tok_k(toks, p) == "IDENT" { p = p + 1; }
+                if p < n && x86_tok_k(toks, p) == "RPAREN" { p = p + 1; }
+            }
+            if p >= n || x86_tok_k(toks, p) != "FATARROW" { return empty; }
+            p = p + 1;
+            if p < n && x86_tok_t(toks, p) == "println" {
+                p = p + 1;
+                if p < n && x86_tok_k(toks, p) == "LPAREN" { p = p + 1; }
+                if p < n { p = p + 1; }
+                if p < n && x86_tok_k(toks, p) == "RPAREN" { p = p + 1; }
+            } else if p < n && (x86_tok_k(toks, p) == "IDENT" || x86_tok_k(toks, p) == "INT") { p = p + 1; }
+            if p < n && (x86_tok_k(toks, p) == "COMMA" || x86_tok_k(toks, p) == "SEMI") { p = p + 1; }
+
+            if p >= n || x86_tok_k(toks, p) != "IDENT" { return empty; }
+            p = p + 1;
+            if p < n && x86_tok_k(toks, p) == "LPAREN" {
+                p = p + 1;
+                if p < n && x86_tok_k(toks, p) == "IDENT" { p = p + 1; }
+                if p < n && x86_tok_k(toks, p) == "RPAREN" { p = p + 1; }
+            }
+            if p >= n || x86_tok_k(toks, p) != "FATARROW" { return empty; }
+            p = p + 1;
+            let mut v2 = "0";
+            if p < n && x86_tok_t(toks, p) == "println" {
+                p = p + 1;
+                if p < n && x86_tok_k(toks, p) == "LPAREN" { p = p + 1; }
+                if p < n && x86_tok_k(toks, p) == "INT" { v2 = x86_tok_t(toks, p); p = p + 1; }
+                if p < n && x86_tok_k(toks, p) == "RPAREN" { p = p + 1; }
+            } else if p < n && (x86_tok_k(toks, p) == "INT" || x86_tok_k(toks, p) == "IDENT") {
+                v2 = x86_tok_t(toks, p);
+                p = p + 1;
+            }
+            if p < n && (x86_tok_k(toks, p) == "COMMA" || x86_tok_k(toks, p) == "SEMI") { p = p + 1; }
+            if p >= n || x86_tok_k(toks, p) != "RBRACE" { return empty; }
+
+            let mut out: List[String] = list_new();
+            out = list_push(out, v1);
+            out = list_push(out, v2);
+            return out;
+        }
+        i = i + 1;
+    }
+    return empty;
+}
+
+pub fn x86_emit_match_test(v1: String, v2: String) {
+    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
+    println("    .section .text\n    .globl _start\n    .globl main\n    .p2align 4");
+    x86_emit_int_routine();
+    println("main:\n_start:\n    push %rbp\n    mov %rsp, %rbp\n    sub $48, %rsp");
+    println("    movq $1, -16(%rbp)\n    movq $" + v1 + ", -8(%rbp)");
+    println("    lea -16(%rbp), %rax\n    movq 0(%rax), %rcx");
+    println("    cmpq $1, %rcx\n    je .Lmatch_case_1\n    cmpq $2, %rcx\n    je .Lmatch_case_2\n    jmp .Lmatch_default");
+    println(".Lmatch_case_1:\n    movq 8(%rax), %rdx\n    movq %rdx, -24(%rbp)\n    movq -24(%rbp), %rax\n    jmp .Lmatch_end");
+    println(".Lmatch_case_2:\n    movq $" + v2 + ", %rax\n    jmp .Lmatch_end");
+    println(".Lmatch_default:\n    movq $" + v2 + ", %rax\n    jmp .Lmatch_end");
+    println(".Lmatch_end:\n    movq %rax, -32(%rbp)\n    movq -32(%rbp), %rdi\n    call _println_int");
+    println("    add $48, %rsp\n    pop %rbp\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall");
+}

@@ -1,0 +1,118 @@
+// # Enterprise ETL Batch and Pipeline State
+//
+// Logline: Builds EtlPipelineConfig and EtlPipeline, adds rules, executes batches, and exposes pipeline stats and health helpers.
+//
+// Setup: Imports etl.oo for types and etl_transform.oo for extract/transform/load calls. RULES.oot 1.4 default-deny; RULES.oot 1.3 fail-closed residual.
+//
+// Beats:
+//   1. etl_pipeline_config_create, etl_pipeline_create, etl_pipeline_add_rule.
+//   2. etl_pipeline_execute_batch, etl_load_to_storage_with_capability.
+//   3. etl_pipeline_get_stats, etl_pipeline_is_healthy.
+
+import "./etl.oo";
+import "./etl_transform.oo";
+
+pub fn etl_pipeline_config_create(pc_id: String, pc_bsize: Int, pc_maxerr: Int, pc_skip: Bool, pc_strict: Bool, pc_dry: Bool) -> EtlPipelineConfig {
+    return EtlPipelineConfig {
+        pipeline_id: pc_id,
+        batch_size: pc_bsize,
+        max_errors: pc_maxerr,
+        skip_invalid_records: pc_skip,
+        strict_schema: pc_strict,
+        dry_run: pc_dry
+    };
+}
+
+pub fn etl_pipeline_create(pl_cfg: EtlPipelineConfig, pl_src: EtlSchema, pl_tgt: EtlSchema) -> EtlPipeline {
+    let mut rules: List[EtlTransformRule] = list_new();
+    let initial_batch = etl_batch_create(1, pl_src.name, pl_tgt.name);
+    return EtlPipeline {
+        config: pl_cfg,
+        source_schema: pl_src,
+        target_schema: pl_tgt,
+        rules: rules,
+        active_batch: initial_batch,
+        total_extracted: 0,
+        total_transformed: 0,
+        total_loaded: 0,
+        total_failed: 0,
+        status: 0
+    };
+}
+
+pub fn etl_pipeline_add_rule(pl_mut: &mut EtlPipeline, tr_add: EtlTransformRule) {
+    let mut pl_mut: EtlPipeline = pl_mut;
+    let mut new_rules: List[EtlTransformRule] = list_new();
+    let mut old_rules: List[EtlTransformRule] = (pl_mut).rules;
+    let n = list_len(old_rules);
+    let mut i = 0;
+    while i < n {
+        let rule_item = list_get(old_rules, i);
+        new_rules = list_push(new_rules, rule_item);
+        i = i + 1;
+    }
+    new_rules = list_push(new_rules, tr_add);
+    (pl_mut).rules = new_rules;
+}
+
+pub fn etl_pipeline_execute_batch(eb_pipe: &mut EtlPipeline) -> Bool {
+    let mut eb_pipe: EtlPipeline = eb_pipe;
+    (eb_pipe).status = 1;
+    (eb_pipe).active_batch.status = 2;
+    let mut records: List[EtlRecord] = (eb_pipe).active_batch.records;
+    let n = list_len(records);
+    let mut i = 0;
+    while i < n {
+        let r_elem = list_get(records, i);
+        let transformed = etl_transform_record(eb_pipe, &r_elem);
+        let current_tf = (eb_pipe).total_transformed;
+        (eb_pipe).total_transformed = current_tf + 1;
+        (eb_pipe).active_batch.status = 3;
+        let loaded = etl_load_record(eb_pipe, &transformed);
+        if loaded == false {
+            let batch_errs = (eb_pipe).active_batch.error_count;
+            let eb_cfg = (eb_pipe).config;
+            let max_errs = eb_cfg.max_errors;
+            if batch_errs > max_errs {
+                (eb_pipe).status = 4;
+                (eb_pipe).active_batch.status = 5;
+                return false;
+            }
+        }
+        let proc_cnt = (eb_pipe).active_batch.processed_count;
+        (eb_pipe).active_batch.processed_count = proc_cnt + 1;
+        i = i + 1;
+    }
+    (eb_pipe).active_batch.status = 4;
+    (eb_pipe).status = 3;
+    return true;
+}
+
+pub fn etl_load_to_storage_with_capability(cap_sys: &SysCap, cap_pipe: &mut EtlPipeline, cap_batch: &EtlBatch) -> Result[Bool, String] {
+    let success = etl_pipeline_execute_batch(cap_pipe);
+    if success {
+        return Ok(true);
+    } else {
+        return Err("ETL_LOAD_FAILED: Batch execution failed max error threshold");
+    }
+}
+
+pub fn etl_pipeline_get_stats(st_pipe: &EtlPipeline) -> Int {
+    let loaded = (st_pipe).total_loaded;
+    let failed = (st_pipe).total_failed;
+    return loaded + failed;
+}
+
+pub fn etl_pipeline_is_healthy(hl_pipe: &EtlPipeline) -> Bool {
+    let st = (hl_pipe).status;
+    if st == 4 {
+        return false;
+    }
+    let failed = (hl_pipe).total_failed;
+    let hl_cfg = (hl_pipe).config;
+    let max_err = hl_cfg.max_errors;
+    if failed > max_err {
+        return false;
+    }
+    return true;
+}

@@ -1,0 +1,165 @@
+// # Stage 16 GGUF & 4-Bit Transformer Smoke Test
+//
+// Logline: Verifies GGUF v3 parsing, Q4_0/Q4_K quantization dot products, tensor operations, and transformer inference forward pass.
+//
+// Setup: FsCap, SysCap, and AiCap granted for verified neural inference.
+//
+// Beats:
+//   1. Validate GGUF v3 binary header parsing and alignment calculation.
+//   2. Verify IEEE-754 FP16 codec, Q4_0 block dequantization, and Q4_K dot products.
+//   3. Verify multi-dimensional tensor broadcasting, RMSNorm, and SwiGLU activation.
+//   4. Execute full transformer model forward step with RoPE and verify output logits.
+
+import "std/ai/gguf.oo";
+import "std/ai/quant.oo";
+import "std/ai/tensor.oo";
+import "std/ai/transformer.oo";
+
+pub fn main(fs: &FsCap, sys: &SysCap) {
+    println("=== Running Stage 16 GGUF & Transformer Smoke Test ===");
+
+    // 1. GGUF Binary Parser Verification
+    println("[1/4] Testing GGUF v3 Binary Parser...");
+    if gguf_magic() != 1179998023 {
+        println("FAIL: GGUF magic mismatch");
+        process_exit(1);
+    }
+    let align32: Int = gguf_calc_alignment(100, 32);
+    if align32 != 128 {
+        println("FAIL: GGUF 32-byte alignment calculation mismatch");
+        process_exit(1);
+    }
+    println("  -> GGUF parser primitives OK.");
+
+    // 2. 4-bit Quantization & GEMV Verification
+    println("[2/4] Testing 4-Bit Q4_0 & Q4_K Block Quantization...");
+    let fp16_one: Int = f32_to_fp16(1.0);
+    let back_one: Float = fp16_to_f32(fp16_one);
+    if back_one < 0.99 || back_one > 1.01 {
+        println("FAIL: FP16 conversion round-trip failed");
+        process_exit(1);
+    }
+
+    // Build mock Q4_0 32-weight block (d=1.03125, byte0=32=' ', byte1=60='<', nibbles 0x3A=':')
+    let mut raw_q4_0: String = "";
+    raw_q4_0 = raw_q4_0 + char_at(" ", 0) + char_at("<", 0); // FP16 d = 32 + 60*256 = 15392 -> d = 1.03125
+    let mut b: Int = 0;
+    while b < 16 {
+        raw_q4_0 = raw_q4_0 + char_at(":", 0); // 0x3A = low 10, high 3
+        b = b + 1;
+    }
+    let weights_deq: List[Float] = q4_0_dequantize_block(raw_q4_0, 0);
+    if list_len(weights_deq) != 32 {
+        println("FAIL: Q4_0 dequantized length mismatch");
+        process_exit(1);
+    }
+    let w0: Float = list_get(weights_deq, 0);
+    if w0 < 2.05 || w0 > 2.08 {
+        println("FAIL: Q4_0 dequantized weight mismatch");
+        process_exit(1);
+    }
+
+    let mut x_vec: List[Float] = list_new();
+    let mut xi: Int = 0;
+    while xi < 32 {
+        x_vec = list_push(x_vec, 1.0);
+        xi = xi + 1;
+    }
+    let dot_res: Float = q4_0_dot_f32(raw_q4_0, 0, x_vec, 0);
+    // dot = (16 * (10-8) + 16 * (3-8)) * d = (32 - 80) * 1.03125 = -49.5
+    if dot_res < -49.7 || dot_res > -49.3 {
+        println("FAIL: Q4_0 direct dot product mismatch");
+        process_exit(1);
+    }
+    println("  -> 4-bit Quantization and GEMV dot products OK.");
+
+    // 3. Multi-dimensional Tensor Math Verification
+    println("[3/4] Testing Multi-Dimensional Tensors, RMSNorm & SwiGLU...");
+    let shape_2d: TensorShape = tensor_shape_2d(4, 4);
+    let mut t_data: List[Float] = list_new();
+    let mut di: Int = 0;
+    while di < 16 {
+        t_data = list_push(t_data, 1.0);
+        di = di + 1;
+    }
+    let mut gamma_data: List[Float] = list_new();
+    di = 0;
+    while di < 16 {
+        gamma_data = list_push(gamma_data, 1.0);
+        di = di + 1;
+    }
+    let t_norm_data: List[Float] = tensor_rms_norm(t_data, gamma_data, 0.00001);
+    let norm_v0: Float = list_get(t_norm_data, 0);
+    if norm_v0 < 0.95 || norm_v0 > 1.05 {
+        println("FAIL: Tensor RMSNorm output mismatch");
+        process_exit(1);
+    }
+
+    let t_swiglu_data: List[Float] = tensor_swiglu(t_data, t_data);
+    if list_len(t_swiglu_data) != 16 {
+        println("FAIL: SwiGLU output shape mismatch");
+        process_exit(1);
+    }
+    println("  -> Tensor multi-dimensional math and RMSNorm/SwiGLU OK.");
+
+    // 4. Transformer Model Forward Pass Verification
+    println("[4/4] Testing 4-Bit Transformer Forward Step under AiCap...");
+    let ai_cap: AiCap = ai_cap_grant();
+    let cfg: TransformerModelConfig = transformer_config_new(64, 32, 64, 2, 4, 2, 0.00001, 10000.0, 128);
+    let mut kv_cache: TransformerKVCache = transformer_kv_cache_new(&cfg);
+
+    // Construct mock weights
+    let mut emb_data: List[Float] = list_new();
+    di = 0;
+    while di < 64 * 32 {
+        emb_data = list_push(emb_data, 0.1);
+        di = di + 1;
+    }
+    let mut q_mat: QuantizedTensor = QuantizedTensor {
+        rows: 32,
+        cols: 32,
+        qtype: 2,
+        raw_data: raw_q4_0,
+        block_count: 32,
+    };
+    let mut norm_w: List[Float] = list_new();
+    di = 0;
+    while di < 32 { norm_w = list_push(norm_w, 1.0); di = di + 1; }
+
+    let mut layer_list: List[TransformerLayerWeights] = list_new();
+    let mut l: Int = 0;
+    while l < 2 {
+        let lw: TransformerLayerWeights = TransformerLayerWeights {
+            attn_norm: norm_w,
+            wq: q_mat,
+            wk: q_mat,
+            wv: q_mat,
+            wo: q_mat,
+            ffn_norm: norm_w,
+            w_gate: q_mat,
+            w_up: q_mat,
+            w_down: q_mat,
+        };
+        layer_list = list_push(layer_list, lw);
+        l = l + 1;
+    }
+    let weights: TransformerModelWeights = TransformerModelWeights {
+        token_embd: emb_data,
+        layers: layer_list,
+        output_norm: norm_w,
+        lm_head: q_mat,
+    };
+
+    let logits: List[Float] = transformer_forward_step(&ai_cap, &cfg, &weights, &mut kv_cache, 5, 0);
+    if list_len(logits) != 32 {
+        println("FAIL: Logits output dimension mismatch");
+        process_exit(1);
+    }
+    let sampled_tok: Int = transformer_sample_greedy(logits);
+    if sampled_tok < 0 || sampled_tok >= 32 {
+        println("FAIL: Sampled token out of vocabulary bounds");
+        process_exit(1);
+    }
+    println("  -> Transformer forward pass and token sampling OK.");
+    println("Stage 16 GGUF & Transformer Smoke Test PASSED.");
+}

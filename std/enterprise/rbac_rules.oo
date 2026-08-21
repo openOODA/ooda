@@ -1,0 +1,202 @@
+// # RBAC Rule Evaluation, Authorization, and Counters
+//
+// Logline: Walks role inheritance, checks permissions, runs default-deny authorization, and exposes engine counters and the fail-closed residual stubs.
+//
+// Setup: Imports rbac.oo and rbac_ops.oo. RULES.oot 1.4 default-deny; RULES.oot 1.3 fail-closed residual.
+//
+// Beats:
+//   1. rbac_role_inherits, rbac_check_role_permission with parent chain.
+//   2. rbac_user_has_role, rbac_authorize with default-deny.
+//   3. rbac_authorize_with_capability, rbac_get_eval_count, rbac_get_allowed_count, rbac_get_denied_count, rbac_do_work.
+//   4. rbac_eval_dynamic_expression residual stub.
+
+import "./rbac.oo";
+import "./rbac_ops.oo";
+
+pub fn rbac_role_inherits(engine: &RbacEngine, role_name: String, target_role: String) -> Bool {
+    let mut current_role: String = role_name;
+    let mut depth = 0;
+    let max_depth = 10;
+    while depth < max_depth {
+        if current_role == "" {
+            return false;
+        }
+        if current_role == target_role {
+            return true;
+        }
+        let mut found_parent: String = "";
+        let mut all_roles: List[Role] = (engine).roles;
+        let n = list_len(all_roles);
+        let mut i = 0;
+        while i < n {
+            let r: Role = list_get(all_roles, i);
+            let r_name: String = r.name;
+            if r_name == current_role {
+                if r.is_active {
+                    found_parent = r.parent_role;
+                }
+            }
+            i = i + 1;
+        }
+        if found_parent == "" {
+            return false;
+        }
+        if found_parent == current_role {
+            return false;
+        }
+        current_role = found_parent;
+        depth = depth + 1;
+    }
+    return false;
+}
+
+pub fn rbac_check_role_permission(engine: &RbacEngine, role_name: String, resource: String, action: String) -> Bool {
+    let mut current_role: String = role_name;
+    let mut depth = 0;
+    let max_depth = 10;
+    let use_wildcards: Bool = (engine).wildcards_enabled;
+    while depth < max_depth {
+        if current_role == "" {
+            return false;
+        }
+        let mut found_role = false;
+        let mut parent_name: String = "";
+        let mut all_roles: List[Role] = (engine).roles;
+        let n = list_len(all_roles);
+        let mut i = 0;
+        while i < n {
+            let r: Role = list_get(all_roles, i);
+            let r_name: String = r.name;
+            if r_name == current_role {
+                if r.is_active == false {
+                    return false;
+                }
+                found_role = true;
+                parent_name = r.parent_role;
+                let mut role_perms: List[Permission] = r.permissions;
+                let num_perms = list_len(role_perms);
+                let mut j = 0;
+                while j < num_perms {
+                    let p: Permission = list_get(role_perms, j);
+                    if permission_matches(p, resource, action, use_wildcards) {
+                        return true;
+                    }
+                    j = j + 1;
+                }
+            }
+            i = i + 1;
+        }
+        if found_role == false {
+            return false;
+        }
+        if parent_name == current_role {
+            return false;
+        }
+        current_role = parent_name;
+        depth = depth + 1;
+    }
+    return false;
+}
+
+pub fn rbac_user_has_role(engine: &RbacEngine, user_id: String, role_name: String) -> Bool {
+    let mut current_users: List[UserAssignment] = (engine).users;
+    let n = list_len(current_users);
+    let mut i = 0;
+    while i < n {
+        let u: UserAssignment = list_get(current_users, i);
+        let u_id: String = u.user_id;
+        if u_id == user_id {
+            if u.is_active == false {
+                return false;
+            }
+            let mut assigned_roles: List[String] = u.roles;
+            let num_roles = list_len(assigned_roles);
+            let mut j = 0;
+            while j < num_roles {
+                let r_name: String = list_get(assigned_roles, j);
+                if r_name == role_name {
+                    return true;
+                }
+                if rbac_role_inherits(engine, r_name, role_name) {
+                    return true;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+pub fn rbac_authorize(engine: &mut RbacEngine, user_id: String, resource: String, action: String) -> Bool {
+    let mut engine: RbacEngine = engine;
+    let mut ev_c: Int = (engine).eval_count;
+    ev_c = ev_c + 1;
+    (engine).eval_count = ev_c;
+    let mut current_users: List[UserAssignment] = (engine).users;
+    let n = list_len(current_users);
+    let mut i = 0;
+    while i < n {
+        let u: UserAssignment = list_get(current_users, i);
+        let u_id: String = u.user_id;
+        if u_id == user_id {
+            if u.is_active == false {
+                let mut den_c: Int = (engine).denied_count;
+                den_c = den_c + 1;
+                (engine).denied_count = den_c;
+                return false;
+            }
+            let mut assigned_roles: List[String] = u.roles;
+            let num_roles = list_len(assigned_roles);
+            let mut j = 0;
+            while j < num_roles {
+                let r_name: String = list_get(assigned_roles, j);
+                if rbac_check_role_permission(engine, r_name, resource, action) {
+                    let mut al_c: Int = (engine).allowed_count;
+                    al_c = al_c + 1;
+                    (engine).allowed_count = al_c;
+                    return true;
+                }
+                j = j + 1;
+            }
+        }
+        i = i + 1;
+    }
+    let mut den_c2: Int = (engine).denied_count;
+    den_c2 = den_c2 + 1;
+    (engine).denied_count = den_c2;
+    return false;
+}
+
+pub fn rbac_authorize_with_capability(sys: &SysCap, engine: &mut RbacEngine, user_id: String, resource: String, action: String) -> Result[Bool, String] {
+    let allowed: Bool = rbac_authorize(engine, user_id, resource, action);
+    if allowed {
+        return Ok(true);
+    } else {
+        return Err("ACCESS_DENIED: User lacks permission");
+    }
+}
+
+pub fn rbac_eval_dynamic_expression(engine: &RbacEngine, expr_ptr: Int) -> Bool {
+    process_exit(1);
+    return false;
+}
+
+pub fn rbac_get_eval_count(engine: &RbacEngine) -> Int {
+    return (engine).eval_count;
+}
+
+pub fn rbac_get_allowed_count(engine: &RbacEngine) -> Int {
+    return (engine).allowed_count;
+}
+
+pub fn rbac_get_denied_count(engine: &RbacEngine) -> Int {
+    return (engine).denied_count;
+}
+
+pub fn rbac_do_work(engine: &RbacEngine) -> Int {
+    let ev: Int = (engine).eval_count;
+    let r_n: Int = (engine).eval_count;
+    let u_n: Int = (engine).eval_count;
+    return ev + r_n + u_n;
+}

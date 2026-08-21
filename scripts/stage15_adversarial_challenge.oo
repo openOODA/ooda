@@ -1,0 +1,217 @@
+// # Stage 15 Adversarial Challenge & Stress Harness
+//
+// Logline: Hostile verification harness stress-testing QUIC flow control, SEV-SNP/SGX/Nitro attestation rejection, VirtIO queue overflow, and anti-replay sealing.
+//
+// Setup: Executes exhaustive negative and boundary tests asserting fail-closed behavior across Stage 15 modules.
+//
+// Beats:
+//   1. Stress-test QUIC stream limits, flow-control window overflow, and forged migration challenge-response nonces.
+//   2. Adversarially probe SEV-SNP, SGX, and Nitro attestation parsers with forged digests, debug mode, and bad nonces.
+//   3. Stress-test hardware memory sealing with anti-replay counter divergence, tampered tags, and measurement drift.
+//   4. Probe VirtIO ring buffer capacity overflows, invalid device IDs, and Firecracker cold restore boundary conditions.
+// RULES.oot 1.4: Pure adversarial verification harness.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+import "net/quic.oo";
+import "net/swarm_peer.oo";
+import "net/swarm_proto.oo";
+import "net/swarm.oo";
+import "enclave/enclave_types.oo";
+import "enclave/sev_snp.oo";
+import "enclave/intel_sgx.oo";
+import "enclave/nitro.oo";
+import "enclave/attestation.oo";
+import "enclave/enclave.oo";
+import "unikernel/boot.oo";
+import "unikernel/virtio.oo";
+import "unikernel/firecracker.oo";
+import "unikernel/ebpf.oo";
+
+pub fn main(net: &NetCap) {
+    println("===================================================================");
+    println(" openOODA Stage 15: Adversarial Challenge & Hostile Invariant Probes");
+    println("===================================================================");
+
+    // -------------------------------------------------------------
+    // Challenge 1: QUIC Flow Control Window & Migration Nonce Rejection
+    // -------------------------------------------------------------
+    let mut conn: QuicConnection = quic_conn_new("src_adv", "dst_adv", "127.0.0.1:8000", "127.0.0.1:9000");
+    conn.max_data_limit = 60; // Set tight 60-byte flow control limit
+    conn = quic_open_stream(conn, true);
+    // Write 50 chars (50 <= 60 -> ok)
+    conn = quic_stream_write(conn, 0, "01234567890123456789012345678901234567890123456789");
+    if conn.bytes_sent != 50 { println("FAIL: Adv 1.1 valid write"); process_exit(1); }
+
+    // Exceed flow control limit (50 + 20 = 70 > 60 -> must be rejected)
+    conn = quic_stream_write(conn, 0, "12345678901234567890");
+    if conn.bytes_sent != 50 { println("FAIL: Adv 1.2 flow control overflow not rejected"); process_exit(1); }
+
+    // Write to unallocated stream 99 (must be ignored, bytes_sent unchanged)
+    conn = quic_stream_write(conn, 99, "UNALLOCATED_STREAM_PAYLOAD");
+    if conn.bytes_sent != 50 { println("FAIL: Adv 1.3 unallocated stream write not rejected"); process_exit(1); }
+
+    // Path migration: Initialize with nonce A, then complete with wrong nonce B (must fail validation)
+    let mig: QuicConnection = quic_migrate_path_init(conn, "192.168.1.1:8000", "192.168.1.2:9000", "EXPECTED_CHALLENGE_NONCE_A");
+    let bad_mig: QuicConnection = quic_migrate_path_complete(mig, "FORGED_NONCE_ATTACK_B", "dst_migrated");
+    if bad_mig.is_path_validated { println("FAIL: Adv 1.4 forged migration nonce accepted"); process_exit(1); }
+    if bad_mig.dcid != "dst_adv" { println("FAIL: Adv 1.5 forged migration DCID mutated"); process_exit(1); }
+    println("  [PASS] 1. QUIC Flow Control & Path Migration Forgery Rejection");
+
+    // -------------------------------------------------------------
+    // Challenge 2: AMD SEV-SNP Attestation Policy & Signature Fail-Closed
+    // -------------------------------------------------------------
+    let snp_rep: SnpReport = snp_report_new("MEASUREMENT_VALID_SHA384", "NONCE_TEST", 1, 0, true);
+    let strict_pol: SnpPolicy = snp_policy_new(false, false, true, 2); // Disallows debug, requires min SVN 2
+
+    // Probe A: Debug mode rejection
+    let chk_dbg: Result[Bool, String] = snp_report_verify_policy(snp_rep, strict_pol);
+    if chk_dbg.is_ok() { println("FAIL: Adv 2.1 debug enclave accepted under strict policy"); process_exit(1); }
+
+    // Probe B: SVN too low rejection
+    let snp_rep_nodebug: SnpReport = snp_report_new("MEASUREMENT_VALID_SHA384", "NONCE_TEST", 1, 0, false);
+    let chk_svn: Result[Bool, String] = snp_report_verify_policy(snp_rep_nodebug, strict_pol);
+    if chk_svn.is_ok() { println("FAIL: Adv 2.2 low SVN accepted"); process_exit(1); }
+
+    // Probe C: VMPL out of bounds
+    let snp_rep_vmpl: SnpReport = snp_report_new("MEASUREMENT_VALID_SHA384", "NONCE_TEST", 5, 4, false);
+    let pol_vmpl: SnpPolicy = snp_policy_new(true, false, true, 0);
+    let chk_vmpl: Result[Bool, String] = snp_report_verify_policy(snp_rep_vmpl, pol_vmpl);
+    if chk_vmpl.is_ok() { println("FAIL: Adv 2.3 out of bounds VMPL accepted"); process_exit(1); }
+
+    // Probe D: Forged measurement signature check
+    let sig_ok: Bool = snp_report_verify_signature(snp_rep, "AMD_VCEK_KEY");
+    let mut snp_tampered: SnpReport = snp_rep;
+    snp_tampered.signature = "SIG_P384_FORGED_MEASUREMENT_TAMPERED";
+    let sig_tampered: Bool = snp_report_verify_signature(snp_tampered, "AMD_VCEK_KEY");
+    if !sig_ok || sig_tampered { println("FAIL: Adv 2.4 tampered SEV-SNP signature accepted"); process_exit(1); }
+
+    // Probe E: Empty VCEK key rejection & Malformed hex parse
+    if snp_report_verify_signature(snp_rep, "") { println("FAIL: Adv 2.5 empty VCEK key accepted"); process_exit(1); }
+    let malformed_snp: SnpReport = snp_report_parse("SNP_REPORT:INVALID");
+    if malformed_snp.is_valid { println("FAIL: Adv 2.6 malformed SNP report parsed as valid"); process_exit(1); }
+    println("  [PASS] 2. AMD SEV-SNP Hardware Attestation & Policy Rejection");
+
+    // -------------------------------------------------------------
+    // Challenge 3: Intel SGX & AWS Nitro Fail-Closed Measurement Rejection
+    // -------------------------------------------------------------
+    let sgx_q: SgxQuote = sgx_quote_new("MRENCLAVE_SECURE_VAL", "MRSIGNER_OFFICIAL_KEY", "NONCE_SGX_01", 3, false);
+
+    // SGX MRENCLAVE mismatch
+    let sgx_mismatch: Result[Bool, String] = sgx_quote_verify(sgx_q, "MRENCLAVE_FORGED_ATTACK", "MRSIGNER_OFFICIAL_KEY", "NONCE_SGX_01");
+    if sgx_mismatch.is_ok() { println("FAIL: Adv 3.1 SGX MRENCLAVE mismatch accepted"); process_exit(1); }
+
+    // SGX Nonce mismatch
+    let sgx_nonce_err: Result[Bool, String] = sgx_quote_verify(sgx_q, "MRENCLAVE_SECURE_VAL", "MRSIGNER_OFFICIAL_KEY", "FORGED_NONCE");
+    if sgx_nonce_err.is_ok() { println("FAIL: Adv 3.2 SGX challenge nonce mismatch accepted"); process_exit(1); }
+
+    // SGX Debug quote rejection
+    let sgx_dbg_q: SgxQuote = sgx_quote_new("MRENCLAVE_SECURE_VAL", "MRSIGNER_OFFICIAL_KEY", "NONCE_SGX_01", 3, true);
+    let sgx_dbg_err: Result[Bool, String] = sgx_quote_verify(sgx_dbg_q, "MRENCLAVE_SECURE_VAL", "MRSIGNER_OFFICIAL_KEY", "NONCE_SGX_01");
+    if sgx_dbg_err.is_ok() { println("FAIL: Adv 3.3 SGX debug quote accepted"); process_exit(1); }
+
+    // AWS Nitro PCR0 mismatch
+    let nitro_pcrs: NitroPcrs = nitro_pcrs_new("PCR0_REAL_IMAGE", "PCR1_KERNEL", "PCR2_RAMDISK", "PCR3_IAM", "PCR4_INST");
+    let nitro_doc: NitroAttestationDoc = nitro_doc_new(nitro_pcrs, "NONCE_NITRO_01", "SEC_POLICY");
+    let nitro_pcr_err: Result[Bool, String] = nitro_doc_verify_pcrs(nitro_doc, "PCR0_FORGED_IMAGE", "NONCE_NITRO_01");
+    if nitro_pcr_err.is_ok() { println("FAIL: Adv 3.4 Nitro PCR0 mismatch accepted"); process_exit(1); }
+
+    // AWS Nitro Nonce mismatch & Malformed CBOR parse
+    let nitro_nonce_err: Result[Bool, String] = nitro_doc_verify_pcrs(nitro_doc, "PCR0_REAL_IMAGE", "BAD_NONCE");
+    if nitro_nonce_err.is_ok() { println("FAIL: Adv 3.5 Nitro nonce mismatch accepted"); process_exit(1); }
+    let malformed_nitro: NitroAttestationDoc = nitro_doc_parse("NITRO_COSE_SIGN1:MALFORMED");
+    if malformed_nitro.is_valid { println("FAIL: Adv 3.6 malformed Nitro doc parsed as valid"); process_exit(1); }
+    println("  [PASS] 3. Intel SGX DCAP & AWS Nitro COSE Fail-Closed Validation");
+
+    // -------------------------------------------------------------
+    // Challenge 4: Universal Remote Attestation Multi-Platform Gate
+    // -------------------------------------------------------------
+    let snp_raw: String = "SNP_REPORT:1|2|0|0|MEAS_SNP_HEX|NONCE_UNIV_123";
+    let snp_ev: AttestationEvidence = AttestationEvidence { platform: 1, raw_quote: snp_raw, nonce_challenge: "NONCE_UNIV_123", timestamp_ms: 1000 };
+    let pol_platform_mismatch: AttestationPolicy = attestation_policy_new(2, "MEAS_SNP_HEX", "", 1, true); // SGX expected, SEV provided
+    let v_res1: VerificationResult = attestation_verify(snp_ev, pol_platform_mismatch, "NONCE_UNIV_123");
+    if v_res1.is_valid || v_res1.error_code != "PLATFORM_MISMATCH" { println("FAIL: Adv 4.1 platform mismatch accepted"); process_exit(1); }
+
+    let pol_valid: AttestationPolicy = attestation_policy_new(1, "MEAS_SNP_HEX", "", 1, true);
+    let v_res2: VerificationResult = attestation_verify(snp_ev, pol_valid, "NONCE_WRONG_CHALLENGE");
+    if v_res2.is_valid || v_res2.error_code != "NONCE_MISMATCH" { println("FAIL: Adv 4.2 nonce mismatch accepted"); process_exit(1); }
+    println("  [PASS] 4. Universal Remote Attestation Policy & Nonce Enforcement");
+
+    // -------------------------------------------------------------
+    // Challenge 5: Hardware Memory Sealing Anti-Replay & Anti-Tamper
+    // -------------------------------------------------------------
+    let enc_cap: EnclaveCap = enclave_cap_new(1, enclave_perm_all(), 0);
+    let sealed: SealedBlob = enclave_seal(enc_cap, "SUPER_SECRET_PAYLOAD", "MRENCLAVE_SEC_99", sealing_policy_measurement(), 100);
+
+    // Replay attack with expired sequence number (expected 101, provided 100)
+    let unseal_replay: Result[String, String] = enclave_unseal(enc_cap, sealed, "MRENCLAVE_SEC_99", 101);
+    if unseal_replay.is_ok() { println("FAIL: Adv 5.1 replay attack with stale sequence accepted"); process_exit(1); }
+
+    // Measurement drift (MRENCLAVE changed)
+    let unseal_drift: Result[String, String] = enclave_unseal(enc_cap, sealed, "MRENCLAVE_TAMPERED_99", 100);
+    if unseal_drift.is_ok() { println("FAIL: Adv 5.2 unsealing under drifted measurement accepted"); process_exit(1); }
+
+    // Tampered auth tag detection
+    let mut tampered_blob: SealedBlob = sealed;
+    tampered_blob.auth_tag = "TAG_AEAD_FORGED_BAD_TAG";
+    if !sealed_blob_is_tampered(tampered_blob) { println("FAIL: Adv 5.3 tampered blob not detected"); process_exit(1); }
+    let unseal_tampered: Result[String, String] = enclave_unseal(enc_cap, tampered_blob, "MRENCLAVE_SEC_99", 100);
+    if unseal_tampered.is_ok() { println("FAIL: Adv 5.4 unsealing tampered blob accepted"); process_exit(1); }
+    println("  [PASS] 5. Hardware Memory Sealing Anti-Replay & Tamper Detection");
+
+    // -------------------------------------------------------------
+    // Challenge 6: VirtIO Virtqueue Overflow & Device Mismatch Traps
+    // -------------------------------------------------------------
+    let mut vq: VirtQueue = virtqueue_new(0, 2); // Max 2 descriptors
+    let r1: Result[VirtQueue, String] = virtqueue_add_desc(vq, 4096, 512, 0);
+    match r1 { Ok(q) => { vq = q; }, Err(e) => { process_exit(1); } }
+    let r2: Result[VirtQueue, String] = virtqueue_add_desc(vq, 8192, 512, 0);
+    match r2 { Ok(q) => { vq = q; }, Err(e) => { process_exit(1); } }
+
+    // 3rd descriptor should overflow queue_size 2
+    let r3: Result[VirtQueue, String] = virtqueue_add_desc(vq, 12288, 512, 0);
+    if r3.is_ok() { println("FAIL: Adv 6.1 Virtqueue overflow accepted"); process_exit(1); }
+
+    // VirtIO-Net send on VirtIO-Blk device
+    let blk_dev: VirtioDevice = virtio_device_new(virtio_dev_blk(), 536870912);
+    let net_on_blk: Result[VirtioDevice, String] = virtio_net_send_packet(blk_dev, "PACKET_DATA");
+    if net_on_blk.is_ok() { println("FAIL: Adv 6.2 VirtIO-Net packet sent to block device"); process_exit(1); }
+
+    // Empty packet send
+    let net_dev: VirtioDevice = virtio_device_new(virtio_dev_net(), 536870912);
+    let empty_pkt: Result[VirtioDevice, String] = virtio_net_send_packet(net_dev, "");
+    if empty_pkt.is_ok() { println("FAIL: Adv 6.3 Empty VirtIO packet accepted"); process_exit(1); }
+
+    // VirtIO-Blk read on VirtIO-Net device
+    let blk_on_net: Result[String, String] = virtio_blk_read_sector(net_dev, 0);
+    if blk_on_net.is_ok() { println("FAIL: Adv 6.4 VirtIO-Blk read on net device accepted"); process_exit(1); }
+    println("  [PASS] 6. VirtIO Virtqueue Overflow & Device Mismatch Traps");
+
+    // -------------------------------------------------------------
+    // Challenge 7: Firecracker Lifecycle & Snapshot Cold Restore Bounds
+    // -------------------------------------------------------------
+    let bad_cfg: FirecrackerVmConfig = firecracker_config_new("vm_bad", 0, 0);
+    let bad_state: MicroVmState = firecracker_start_instance(bad_cfg);
+    if bad_state.is_valid { println("FAIL: Adv 7.1 Zero vCPU microVM started"); process_exit(1); }
+
+    let empty_snap_restore: MicroVmState = firecracker_restore_from_snapshot(bad_cfg, "");
+    if empty_snap_restore.is_valid { println("FAIL: Adv 7.2 Empty snapshot path restored"); process_exit(1); }
+
+    let good_cfg: FirecrackerVmConfig = firecracker_config_new("vm_fc_01", 2, 128);
+    let running_vm: MicroVmState = firecracker_start_instance(good_cfg);
+    let stopped_vm: MicroVmState = firecracker_stop_instance(running_vm);
+    let stopped_snap: MicroVmState = firecracker_create_snapshot(stopped_vm, "/tmp/snap.bin");
+    if stopped_snap.is_valid { println("FAIL: Adv 7.3 Snapshot created on stopped microVM"); process_exit(1); }
+    println("  [PASS] 7. Firecracker MicroVM Lifecycle & Cold Restore Invariants");
+
+    // -------------------------------------------------------------
+    // Challenge 8: Direct Swarm Peer Banning State Verification
+    // -------------------------------------------------------------
+    let p_init: SwarmPeer = swarm_peer_new("QmAdversarialAttacker", "192.168.99.99", 9000);
+    let p_penalized: SwarmPeer = swarm_peer_record_failure(p_init, 110);
+    if p_penalized.state != "BANNED" || p_penalized.score > -50 { println("FAIL: Adv 8.1 Peer not banned after penalty"); process_exit(1); }
+    println("  [PASS] 8. Direct Swarm Peer Reputation Penalty & Banning");
+
+    println("===================================================================");
+    println("stage15_adversarial_challenge: PROBES COMPLETE");
+    println("===================================================================");
+}

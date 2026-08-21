@@ -1,0 +1,124 @@
+// # P2P QUIC Swarm Mesh Dedicated Smoke Test
+//
+// Logline: Comprehensive smoke proof verifying RFC 9000 QUIC streams, connection migration, swarm peer scoring, and GossipSub routing.
+//
+// Setup: Exercises P2P QUIC swarm mesh standard library modules under NetCap.
+//
+// Beats:
+//   1. Verify QUIC bidirectional and unidirectional stream allocation, data transmission, and flow control.
+//   2. Verify QUIC connection migration with challenge nonce validation and path switching.
+//   3. Verify swarm peer Multiaddr parsing, reputation scoring, PeerStore state retention, and banning.
+//   4. Verify GossipSub pub/sub message propagation, deduplication, and Kademlia XOR distance.
+//   5. Verify Swarm Node mesh facade and anti-banned peer connection gating.
+// RULES.oot 1.4: Explicit &NetCap required.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+import "net/quic.oo";
+import "net/swarm_peer.oo";
+import "net/swarm_proto.oo";
+import "net/swarm.oo";
+
+pub fn main(net: &NetCap) {
+    println("===================================================================");
+    println(" openOODA Stage 15: P2P QUIC Swarm Mesh Smoke");
+    println("===================================================================");
+
+    // 1. QUIC connection and stream multiplexing
+    let mut conn: QuicConnection = quic_conn_new("scid_node_a", "dcid_node_b", "127.0.0.1:9001", "127.0.0.1:9002");
+    conn = quic_open_stream(conn, true);
+    if conn.stream_count != 1 { println("FAIL: open bidi stream"); process_exit(1); }
+
+    conn = quic_open_stream(conn, false);
+    if conn.stream_count != 2 { println("FAIL: open unidi stream"); process_exit(1); }
+
+    conn = quic_stream_write(conn, 0, "HELLO_QUIC_STREAM_0");
+    if conn.bytes_sent != 19 { println("FAIL: stream write"); process_exit(1); }
+
+    conn = quic_stream_read(conn, 0, "RECV_DATA");
+    if conn.bytes_recv != 9 { println("FAIL: stream read"); process_exit(1); }
+    println("  [PASS] 1. QUIC Stream Multiplexing & Flow Control");
+
+    // 2. QUIC connection migration
+    let mig_conn: QuicConnection = quic_migrate_path_init(conn, "192.168.1.50:9001", "192.168.1.100:9002", "NONCE_MIG_99");
+    let verified_conn: QuicConnection = quic_migrate_path_complete(mig_conn, "NONCE_MIG_99", "dcid_node_b_migrated");
+    let is_val: Bool = verified_conn.is_path_validated;
+    if !is_val { println("FAIL: migrated path not validated"); process_exit(1); }
+    println("  [PASS] 2. QUIC Path Migration & Challenge-Response");
+
+    // 3. Swarm peer identity and multiaddr parsing & PeerStore retention
+    let maddr: String = "/ip4/10.0.0.15/udp/9005/quic-v1/p2p/QmSwarmNodeAlpha77";
+    let mut peer: SwarmPeer = swarm_peer_parse_multiaddr(maddr);
+    let p_valid: Bool = peer.is_valid;
+    if !p_valid { println("FAIL: multiaddr parse"); process_exit(1); }
+    let p_id: String = peer.peer_id;
+    let p_port: Int = peer.port;
+    if !(p_id == "QmSwarmNodeAlpha77") || p_port != 9005 { println("FAIL: parsed peer mismatch"); process_exit(1); }
+
+    peer = swarm_peer_record_success(peer, 12);
+    if peer.score != 52 { println("FAIL: reputation scoring increment"); process_exit(1); }
+
+    let mut ps: PeerStore = peer_store_new();
+    ps = peer_store_add_or_update(ps, peer);
+    if peer_store_count(ps) != 1 { println("FAIL: peer store count"); process_exit(1); }
+    let stored_peer: SwarmPeer = peer_store_find(ps, "QmSwarmNodeAlpha77");
+    if stored_peer.score != 52 || stored_peer.state != "CONNECTED" { println("FAIL: peer store state/score retention"); process_exit(1); }
+
+    let banned_peer: SwarmPeer = swarm_peer_record_failure(peer, 110);
+    ps = peer_store_add_or_update(ps, banned_peer);
+    let stored_banned: SwarmPeer = peer_store_find(ps, "QmSwarmNodeAlpha77");
+    if stored_banned.state != "BANNED" || stored_banned.score != -58 { println("FAIL: banned state retention"); process_exit(1); }
+    let ps_pruned: PeerStore = peer_store_prune_banned(ps);
+    if peer_store_count(ps_pruned) != 0 { println("FAIL: peer store prune banned"); process_exit(1); }
+    println("  [PASS] 3. Swarm Peer Multiaddr, Reputation Scoring & PeerStore Retention");
+
+    // 4. Swarm Wire Protocol & GossipSub Propagation
+    let msg: SwarmMessage = swarm_msg_new(4, "msg_001", "node_a", "broadcast", "ooda-mesh", "CONSENSUS_BLOCK_42", "sig_ok");
+    let wire_encoded: String = swarm_msg_encode(msg);
+    let dec_msg: SwarmMessage = swarm_msg_decode(wire_encoded);
+    let msg_v: Bool = dec_msg.is_valid;
+    if !msg_v { println("FAIL: wire message decode"); process_exit(1); }
+    let d_topic: String = dec_msg.topic;
+    let d_pay: String = dec_msg.payload;
+    if !(d_topic == "ooda-mesh") || !(d_pay == "CONSENSUS_BLOCK_42") { println("FAIL: decoded message content"); process_exit(1); }
+
+    let mut gs: GossipState = gossip_state_new();
+    gs = gossip_subscribe(gs, "ooda-mesh");
+    let is_sub: Bool = gossip_is_subscribed(gs, "ooda-mesh");
+    if !is_sub { println("FAIL: gossip subscription"); process_exit(1); }
+    gs = gossip_mark_seen(gs, "msg_001");
+    let has_seen: Bool = gossip_has_seen(gs, "msg_001");
+    if !has_seen { println("FAIL: gossip seen cache"); process_exit(1); }
+
+    let xor_d: Int = kademlia_xor_distance("001100", "001111");
+    if xor_d != 2 { println("FAIL: kademlia xor distance"); process_exit(1); }
+    println("  [PASS] 4. GossipSub Message Propagation & Kademlia Routing");
+
+    // 5. Swarm Node Mesh Facade & Anti-Banned Peer Rejection
+    let init_node: SwarmNode = swarm_node_create(net, "node_local_1", 9001);
+    let l_res: Result[SwarmNode, String] = swarm_node_listen(net, init_node);
+    if l_res.is_err() { println("FAIL: swarm node listen"); process_exit(1); }
+    let mut active_node: SwarmNode = init_node;
+    match l_res {
+        Ok(n) => { active_node = n; },
+        Err(e) => { process_exit(1); }
+    }
+    let node_with_peer: SwarmNode = swarm_add_peer(net, active_node, peer);
+    let subbed_node: SwarmNode = swarm_subscribe(node_with_peer, "ooda-mesh");
+    let pub_res: Result[SwarmNode, String] = swarm_publish(net, subbed_node, "ooda-mesh", "msg_002", "BLOCK_DATA_NEW");
+    if pub_res.is_err() { println("FAIL: swarm publish"); process_exit(1); }
+    let mut final_node: SwarmNode = subbed_node;
+    match pub_res {
+        Ok(n) => { final_node = n; },
+        Err(e) => { process_exit(1); }
+    }
+    let has_p: Bool = swarm_has_peer(final_node, "QmSwarmNodeAlpha77");
+    if !has_p { println("FAIL: swarm has peer"); process_exit(1); }
+
+    let node_with_banned: SwarmNode = swarm_add_peer(net, final_node, banned_peer);
+    let conn_banned_res: Result[SwarmNode, String] = swarm_connect_peer(net, node_with_banned, "QmSwarmNodeAlpha77");
+    if conn_banned_res.is_ok() { println("FAIL: connected to banned peer"); process_exit(1); }
+    println("  [PASS] 5. Swarm Node Mesh Facade & Anti-Banned Rejection");
+
+    println("===================================================================");
+    println("quic_swarm_smoke: PASSED");
+}

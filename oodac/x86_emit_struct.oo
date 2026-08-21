@@ -1,0 +1,222 @@
+// # Emit x86_64 struct layout, instantiation, and field access
+//
+// Logline: Lowers struct layout (8-byte aligned), heap allocation via _alloc, field mutation (%rsi -> disp(%rdi)), and field access (disp(%rdi) -> %rax).
+//
+// Setup: tokenize_lines, x86_tok_k, x86_tok_t, and x86_emit_int_routine exist.
+//
+// Beats:
+//   1. Scan struct type definitions and record field names and 8-byte offsets.
+//   2. Lower struct instantiation to _alloc(sizeof) and field initialization.
+//   3. Lower field mutation to movq %rsi, disp(%rdi).
+//   4. Lower field access to movq disp(%rdi), %rax and integer write.
+
+import "token_fmt.oo";
+import "x86_emit_harv.oo";
+import "x86_emit_int.oo";
+import "x86_emit_sys.oo";
+
+pub fn x86_struct_field_idx(fnames_str: String, field_name: String) -> Int {
+    let n = chars_len(fnames_str);
+    let mut cur = "";
+    let mut idx = 0;
+    let mut i = 0;
+    while i <= n {
+        let mut end = false;
+        if i == n { end = true; } else if char_at(fnames_str, i) == "," { end = true; }
+        if end {
+            if cur == field_name { return idx; }
+            cur = "";
+            idx = idx + 1;
+        } else { cur = cur + char_at(fnames_str, i); }
+        i = i + 1;
+    }
+    return -1;
+}
+
+pub fn x86_struct_field_offset(fnames_str: String, field_name: String) -> Int {
+    let idx = x86_struct_field_idx(fnames_str, field_name);
+    if idx < 0 { return -1; }
+    return idx * 8;
+}
+
+pub fn x86_struct_field_count(fnames_str: String) -> Int {
+    if chars_len(fnames_str) == 0 { return 0; }
+    let n = chars_len(fnames_str);
+    let mut cnt = 1;
+    let mut i = 0;
+    while i < n {
+        if char_at(fnames_str, i) == "," { cnt = cnt + 1; }
+        i = i + 1;
+    }
+    return cnt;
+}
+
+pub fn x86_match_struct(src: String) -> List[String] {
+    let empty: List[String] = list_new();
+    if chars_len(src) == 0 { return empty; }
+    let toks: List[String] = tokenize_lines(src);
+    let n = list_len(toks);
+    let mut i = 0;
+    while i < n {
+        let k: String = x86_tok_k(toks, i);
+        let t: String = x86_tok_t(toks, i);
+        if (k == "KW_TYPE" && i + 3 < n && x86_tok_t(toks, i + 3) == "struct") || (t == "struct" && i + 2 < n && x86_tok_k(toks, i + 2) == "LBRACE") || (k == "DOT" && i + 1 < n && x86_tok_k(toks, i + 1) == "IDENT") {
+            return list_push(list_new(), "1");
+        }
+        i = i + 1;
+    }
+    return empty;
+}
+
+fn x86_extract_struct_defs(toks: List[String], n: Int) -> List[String] {
+    let mut out: List[String] = list_new();
+    let mut i = 0;
+    while i < n {
+        let k: String = x86_tok_k(toks, i);
+        let mut sname = "";
+        let mut p = 0;
+        if k == "KW_TYPE" && i + 4 < n && x86_tok_k(toks, i + 2) == "EQ" && x86_tok_t(toks, i + 3) == "struct" && x86_tok_k(toks, i + 4) == "LBRACE" {
+            sname = x86_tok_t(toks, i + 1);
+            p = i + 5;
+        } else if x86_tok_t(toks, i) == "struct" && i + 2 < n && x86_tok_k(toks, i + 2) == "LBRACE" {
+            sname = x86_tok_t(toks, i + 1);
+            p = i + 3;
+        }
+        if chars_len(sname) > 0 {
+            let mut flist = "";
+            while p < n && x86_tok_k(toks, p) != "RBRACE" {
+                if x86_tok_k(toks, p) == "IDENT" {
+                    let fnm: String = x86_tok_t(toks, p);
+                    if chars_len(flist) > 0 { flist = flist + "," + fnm; } else { flist = fnm; }
+                    p = p + 1;
+                    if p < n && x86_tok_k(toks, p) == "COLON" { p = p + 2; }
+                    if p < n && x86_tok_k(toks, p) == "COMMA" { p = p + 1; }
+                } else { p = p + 1; }
+            }
+            out = list_push(out, sname);
+            out = list_push(out, flist);
+            i = p;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn x86_emit_alloc_routine() {
+    println(".globl _alloc\n.p2align 4\n_alloc:");
+    println("    push %rbp\n    mov %rsp, %rbp\n    push %rbx\n    push %r12\n    mov %rdi, %rbx");
+    println("    mov .Lheap_start(%rip), %rax\n    test %rax, %rax\n    jnz .Lalloc_do_brk");
+    println("    mov $12, %rax\n    xor %rdi, %rdi\n    syscall\n    mov %rax, .Lheap_start(%rip)");
+    println(".Lalloc_do_brk:\n    mov .Lheap_start(%rip), %r12\n    lea (%r12, %rbx), %rdi");
+    println("    mov $12, %rax\n    syscall\n    mov %rax, .Lheap_start(%rip)\n    mov %r12, %rax");
+    println("    pop %r12\n    pop %rbx\n    pop %rbp\n    ret");
+}
+
+pub fn x86_emit_struct(src: String) {
+    let toks: List[String] = tokenize_lines(src);
+    let n = list_len(toks);
+    let sdefs: List[String] = x86_extract_struct_defs(toks, n);
+    let mut struct_names: List[String] = list_new();
+    let mut struct_fields: List[String] = list_new();
+    let mut si = 0;
+    let sn = list_len(sdefs);
+    while si + 1 < sn {
+        struct_names = list_push(struct_names, list_get(sdefs, si));
+        struct_fields = list_push(struct_fields, list_get(sdefs, si + 1));
+        si = si + 2;
+    }
+    println("# openOODA x86_64 product floor (AT&T, Linux, as+ld)");
+    println("    .section .data\n    .p2align 3\n.Lheap_start:\n    .quad 0");
+    println("    .section .text\n    .globl _start\n    .globl main");
+    x86_emit_alloc_routine();
+    x86_emit_int_routine();
+    println("main:\n_start:\n    push %rbp\n    mov %rsp, %rbp\n    sub $64, %rsp");
+    let mut var_names: List[String] = list_new();
+    let mut var_structs: List[String] = list_new();
+    let mut var_slots: List[Int] = list_new();
+    let mut p = 0;
+    while p < n {
+        if x86_tok_k(toks, p) == "KW_FN" && p + 1 < n && x86_tok_t(toks, p + 1) == "main" {
+            p = p + 2;
+            while p < n && x86_tok_k(toks, p) != "LBRACE" { p = p + 1; }
+            if p < n { p = p + 1; }
+            break;
+        }
+        p = p + 1;
+    }
+    while p < n && x86_tok_k(toks, p) != "RBRACE" {
+        if x86_tok_k(toks, p) == "KW_LET" {
+            p = p + 1;
+            if p < n && x86_tok_k(toks, p) == "KW_MUT" { p = p + 1; }
+            let vname: String = x86_tok_t(toks, p);
+            p = p + 1;
+            if p < n && x86_tok_k(toks, p) == "COLON" { p = p + 2; }
+            if p < n && x86_tok_k(toks, p) == "EQ" { p = p + 1; }
+            if p < n && x86_tok_k(toks, p) == "IDENT" {
+                let rname: String = x86_tok_t(toks, p);
+                let sidx = x86_bind_idx(struct_names, rname);
+                if sidx >= 0 && p + 1 < n && x86_tok_k(toks, p + 1) == "LBRACE" {
+                    let fnames: String = list_get(struct_fields, sidx);
+                    let nfields = x86_struct_field_count(fnames);
+                    let sz = nfields * 8;
+                    let slot = 0 - ((list_len(var_names) + 1) * 8);
+                    var_names = list_push(var_names, vname);
+                    var_structs = list_push(var_structs, rname);
+                    var_slots = list_push(var_slots, slot);
+                    println("    mov $" + sz.to_string() + ", %rdi\n    call _alloc");
+                    p = p + 2;
+                    while p < n && x86_tok_k(toks, p) != "RBRACE" {
+                        if x86_tok_k(toks, p) == "IDENT" {
+                            let fnm: String = x86_tok_t(toks, p);
+                            p = p + 1;
+                            if p < n && x86_tok_k(toks, p) == "COLON" { p = p + 1; }
+                            let fval: String = x86_tok_t(toks, p);
+                            p = p + 1;
+                            let disp = x86_struct_field_offset(fnames, fnm);
+                            println("    movq $" + fval + ", " + disp.to_string() + "(%rax)");
+                            if p < n && x86_tok_k(toks, p) == "COMMA" { p = p + 1; }
+                        } else { p = p + 1; }
+                    }
+                    if p < n && x86_tok_k(toks, p) == "RBRACE" { p = p + 1; }
+                    println("    movq %rax, " + slot.to_string() + "(%rbp)");
+                }
+            }
+            if p < n && x86_tok_k(toks, p) == "SEMI" { p = p + 1; }
+        } else if x86_tok_k(toks, p) == "IDENT" && p + 3 < n && x86_tok_k(toks, p + 1) == "DOT" && x86_tok_k(toks, p + 2) == "IDENT" && x86_tok_k(toks, p + 3) == "EQ" {
+            let vname2: String = x86_tok_t(toks, p);
+            let fname2: String = x86_tok_t(toks, p + 2);
+            p = p + 4;
+            let val_tok: String = x86_tok_t(toks, p);
+            p = p + 1;
+            if p < n && x86_tok_k(toks, p) == "SEMI" { p = p + 1; }
+            let vidx = x86_bind_idx(var_names, vname2);
+            if vidx >= 0 {
+                let st_nm: String = list_get(var_structs, vidx);
+                let st_i = x86_bind_idx(struct_names, st_nm);
+                let fnames2: String = list_get(struct_fields, st_i);
+                let disp2 = x86_struct_field_offset(fnames2, fname2);
+                let slot2: Int = list_get(var_slots, vidx);
+                println("    movq " + slot2.to_string() + "(%rbp), %rdi");
+                println("    movq $" + val_tok + ", %rsi");
+                println("    movq %rsi, " + disp2.to_string() + "(%rdi)");
+            }
+        } else if x86_tok_k(toks, p) == "IDENT" && x86_tok_t(toks, p) == "println" && p + 5 < n && x86_tok_k(toks, p + 1) == "LPAREN" && x86_tok_k(toks, p + 2) == "IDENT" && x86_tok_k(toks, p + 3) == "DOT" && x86_tok_k(toks, p + 4) == "IDENT" && x86_tok_k(toks, p + 5) == "RPAREN" {
+            let pvname: String = x86_tok_t(toks, p + 2);
+            let pfname: String = x86_tok_t(toks, p + 4);
+            p = p + 6;
+            if p < n && x86_tok_k(toks, p) == "SEMI" { p = p + 1; }
+            let pvidx = x86_bind_idx(var_names, pvname);
+            if pvidx >= 0 {
+                let pst_nm: String = list_get(var_structs, pvidx);
+                let pst_i = x86_bind_idx(struct_names, pst_nm);
+                let pfnames: String = list_get(struct_fields, pst_i);
+                let pdisp = x86_struct_field_offset(pfnames, pfname);
+                let pslot: Int = list_get(var_slots, pvidx);
+                println("    movq " + pslot.to_string() + "(%rbp), %rdi");
+                println("    movq " + pdisp.to_string() + "(%rdi), %rax");
+                println("    movq %rax, %rdi\n    call _println_int");
+            }
+        } else { p = p + 1; }
+    }
+    println("    add $64, %rsp\n    pop %rbp\n    mov $60, %rax\n    xor %rdi, %rdi\n    syscall");
+}

@@ -1,0 +1,176 @@
+// # Stage 14 Adversarial Undo-RAM Transactional Memory Stress Harness
+//
+// Logline: Adversarially tests multi-level nested checkpoints, rollback unwinding, bounds enforcement, and isolation bubble faults.
+//
+// Setup: Exercises multi-tier savepoints, state machine error modes, and fault containment under MemCap.
+//
+// Beats:
+//   1. Multi-level nested checkpoint stack (4 levels) and selective restoration.
+//   2. Transaction state machine error defense (double-begin, commit without txn, oob writes).
+//   3. Isolation bubble automatic rollback on invariant breach.
+//   4. Multi-cell overlapping mutations and reverse undo log fidelity.
+// RULES.oot 1.4: Explicit &MemCap required.
+// RULES.oot 1.7: Under 256 lines.
+
+import "mem/txn_log.oo";
+import "mem/checkpoint.oo";
+import "mem/undoram.oo";
+import "mem/isolation.oo";
+
+fn assert_true(cond: Bool, msg: String) {
+    if !cond {
+        println("FAIL: " + msg);
+        process_exit(1);
+    }
+}
+
+fn assert_eq_int(actual: Int, expected: Int, msg: String) {
+    if actual != expected {
+        println("FAIL: " + msg + " expected " + expected.to_string() + " got " + actual.to_string());
+        process_exit(1);
+    }
+}
+
+pub fn main(mem: &MemCap) {
+    println("=== Running Adversarial Undo-RAM Challenge Suite ===");
+
+    // Beat 1: Multi-level nested checkpoints (depth 4)
+    let mut ram: UndoRam = undoram_new(mem, 64);
+    let b1: Result[UndoRam, String] = undoram_begin(mem, ram);
+    assert_true(!b1.is_err(), "undoram_begin failed");
+    ram = match b1 { Ok(r) => r, Err(_) => ram };
+
+    // Level 1: cell 10 = 100
+    let w1: Result[UndoRam, String] = undoram_write(mem, ram, 10, 100);
+    ram = match w1 { Ok(r) => r, Err(_) => ram };
+    let cp1: Result[UndoRam, String] = undoram_checkpoint(mem, ram, "cp1");
+    ram = match cp1 { Ok(r) => r, Err(_) => ram };
+
+    // Level 2: cell 10 = 200, cell 20 = 222
+    let w2a: Result[UndoRam, String] = undoram_write(mem, ram, 10, 200);
+    ram = match w2a { Ok(r) => r, Err(_) => ram };
+    let w2b: Result[UndoRam, String] = undoram_write(mem, ram, 20, 222);
+    ram = match w2b { Ok(r) => r, Err(_) => ram };
+    let cp2: Result[UndoRam, String] = undoram_checkpoint(mem, ram, "cp2");
+    ram = match cp2 { Ok(r) => r, Err(_) => ram };
+
+    // Level 3: cell 10 = 300, cell 30 = 333
+    let w3a: Result[UndoRam, String] = undoram_write(mem, ram, 10, 300);
+    ram = match w3a { Ok(r) => r, Err(_) => ram };
+    let w3b: Result[UndoRam, String] = undoram_write(mem, ram, 30, 333);
+    ram = match w3b { Ok(r) => r, Err(_) => ram };
+    let cp3: Result[UndoRam, String] = undoram_checkpoint(mem, ram, "cp3");
+    ram = match cp3 { Ok(r) => r, Err(_) => ram };
+
+    // Level 4: cell 10 = 400, cell 40 = 444
+    let w4a: Result[UndoRam, String] = undoram_write(mem, ram, 10, 400);
+    ram = match w4a { Ok(r) => r, Err(_) => ram };
+    let w4b: Result[UndoRam, String] = undoram_write(mem, ram, 40, 444);
+    ram = match w4b { Ok(r) => r, Err(_) => ram };
+
+    // Rollback from Level 4 back to Level 2 (cp_id = 2)
+    let rb_to_cp2: Result[UndoRam, String] = undoram_rollback_to_checkpoint(mem, ram, 2);
+    assert_true(!rb_to_cp2.is_err(), "rollback to cp2 failed");
+    ram = match rb_to_cp2 { Ok(r) => r, Err(_) => ram };
+
+    let r_cell10: Result[Int, String] = undoram_read(ram, 10);
+    let v_cell10: Int = match r_cell10 { Ok(v) => v, Err(_) => -1 };
+    let r_cell20: Result[Int, String] = undoram_read(ram, 20);
+    let v_cell20: Int = match r_cell20 { Ok(v) => v, Err(_) => -1 };
+    let r_cell30: Result[Int, String] = undoram_read(ram, 30);
+    let v_cell30: Int = match r_cell30 { Ok(v) => v, Err(_) => -1 };
+    let r_cell40: Result[Int, String] = undoram_read(ram, 40);
+    let v_cell40: Int = match r_cell40 { Ok(v) => v, Err(_) => -1 };
+
+    assert_eq_int(v_cell10, 200, "cell 10 after rollback to cp2");
+    assert_eq_int(v_cell20, 222, "cell 20 after rollback to cp2");
+    assert_eq_int(v_cell30, 0, "cell 30 reverted to 0");
+    assert_eq_int(v_cell40, 0, "cell 40 reverted to 0");
+
+    // Commit level 2 state
+    let c1: Result[UndoRam, String] = undoram_commit(mem, ram);
+    assert_true(!c1.is_err(), "commit after cp rollback failed");
+    ram = match c1 { Ok(r) => r, Err(_) => ram };
+    println("  [PASS] 1. Deep 4-level checkpointing and selective rollback verified");
+
+    // Beat 2: Transaction State Machine Defense & Bounds Safety
+    // Test 2a: Double-begin rejected
+    let b2a: Result[UndoRam, String] = undoram_begin(mem, ram);
+    ram = match b2a { Ok(r) => r, Err(_) => ram };
+    let b2b: Result[UndoRam, String] = undoram_begin(mem, ram);
+    assert_true(b2b.is_err(), "Double begin should return error");
+
+    // Test 2b: OOB write rejected
+    let w_oob: Result[UndoRam, String] = undoram_write(mem, ram, 999, 123);
+    assert_true(w_oob.is_err(), "OOB write (addr 999 >= cap 64) should return error");
+    let w_neg: Result[UndoRam, String] = undoram_write(mem, ram, -1, 123);
+    assert_true(w_neg.is_err(), "Negative address write should return error");
+
+    // Rollback to clean state
+    let rb_clean: Result[UndoRam, String] = undoram_rollback(mem, ram);
+    ram = match rb_clean { Ok(r) => r, Err(_) => ram };
+
+    // Test 2c: Commit without active txn rejected
+    let c_no_txn: Result[UndoRam, String] = undoram_commit(mem, ram);
+    assert_true(c_no_txn.is_err(), "Commit without active txn should fail");
+
+    // Test 2d: Rollback without active txn rejected
+    let rb_no_txn: Result[UndoRam, String] = undoram_rollback(mem, ram);
+    assert_true(rb_no_txn.is_err(), "Rollback without active txn should fail");
+    println("  [PASS] 2. Transaction state machine and memory bound guards verified");
+
+    // Beat 3: Isolation Bubble Invariant Breach Rollback
+    let mut bubble: IsolationBubble = isolation_bubble_create(mem, ram, true);
+    assert_eq_int(bubble.fault_count, 0, "initial fault count");
+
+    // Execute safe transaction that succeeds
+    let s_ok: Result[IsolationBubble, String] = isolation_execute_safe(mem, bubble, 5, 555, false);
+    assert_true(!s_ok.is_err(), "isolation_execute_safe failed");
+    bubble = match s_ok { Ok(b) => b, Err(_) => bubble };
+    assert_eq_int(bubble.fault_count, 0, "fault count after success");
+    assert_true(isolation_status(bubble) == "committed", "status after success");
+
+    // Execute safe transaction with simulated fault
+    let s_fault: Result[IsolationBubble, String] = isolation_execute_safe(mem, bubble, 5, 9999, true);
+    assert_true(!s_fault.is_err(), "isolation_execute_safe with fault failed to contain");
+    bubble = match s_fault { Ok(b) => b, Err(_) => bubble };
+    assert_eq_int(bubble.fault_count, 1, "fault count after failure");
+    assert_true(isolation_status(bubble) == "fault_isolated", "status after fault");
+
+    // Verify cell 5 was preserved at 555
+    let r_cell5: Result[Int, String] = undoram_read(bubble.ram, 5);
+    let v_cell5: Int = match r_cell5 { Ok(v) => v, Err(_) => -1 };
+    assert_eq_int(v_cell5, 555, "cell 5 preserved after fault isolation");
+    println("  [PASS] 3. Micro-transactional isolation bubble fault containment verified");
+
+    // Beat 4: Multi-Cell Overlapping Mutation Rollback
+    let mut ram4: UndoRam = undoram_new(mem, 32);
+    let b4: Result[UndoRam, String] = undoram_begin(mem, ram4);
+    ram4 = match b4 { Ok(r) => r, Err(_) => ram4 };
+    let mut i: Int = 0;
+    while i < 10 {
+        let wr_i: Result[UndoRam, String] = undoram_write(mem, ram4, i, i * 10);
+        ram4 = match wr_i { Ok(r) => r, Err(_) => ram4 };
+        i = i + 1;
+    }
+    // Overwrite all 10 cells again
+    i = 0;
+    while i < 10 {
+        let wr_i2: Result[UndoRam, String] = undoram_write(mem, ram4, i, i * 100 + 7);
+        ram4 = match wr_i2 { Ok(r) => r, Err(_) => ram4 };
+        i = i + 1;
+    }
+    // Rollback entire multi-mutation transaction
+    let rb4: Result[UndoRam, String] = undoram_rollback(mem, ram4);
+    ram4 = match rb4 { Ok(r) => r, Err(_) => ram4 };
+    i = 0;
+    while i < 10 {
+        let r_val: Result[Int, String] = undoram_read(ram4, i);
+        let v: Int = match r_val { Ok(val) => val, Err(_) => -1 };
+        assert_eq_int(v, 0, "cell " + i.to_string() + " reverted to 0");
+        i = i + 1;
+    }
+    println("  [PASS] 4. Multi-cell overlapping mutations and reverse log unwinding verified");
+
+    println("stage14_adversarial_undoram: PASSED");
+}

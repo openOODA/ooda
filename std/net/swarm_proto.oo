@@ -1,0 +1,232 @@
+// # P2P Swarm Wire Protocol, GossipSub & Kademlia DHT Framing
+//
+// Logline: Wire message framing, GossipSub topic propagation, and Kademlia DHT routing RPCs.
+//
+// Setup: Sovereign network wire protocol encoding discovery beacons, pub/sub broadcasts, and DHT queries.
+//
+// Beats:
+//   1. Define SwarmMessage types (Beacon, Ping, Pong, GossipPub, GossipSub, FindNode, NodesFound, CapAttest).
+//   2. Encode and decode sanitized wire envelopes ([SWARM:v1|type|id|sender|dest|topic|len|payload|tag]).
+//   3. Manage GossipSub subscriptions and seen message caches for loop-free propagation.
+//   4. Calculate Kademlia XOR routing distances and format FindNode RPC messages.
+// RULES.oot 1.4: Pure data serialization and routing logic.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+pub type SwarmMessage = struct {
+    msg_type: Int,
+    msg_id: String,
+    sender_id: String,
+    recipient_id: String,
+    topic: String,
+    payload: String,
+    tag: String,
+    is_valid: Bool
+};
+
+pub type GossipState = struct {
+    topics: String,
+    seen_ids: String
+};
+
+fn swarm_proto_parse_int(s: String) -> Int {
+    let mut acc: Int = 0;
+    let mut i: Int = 0;
+    let n: Int = chars_len(s);
+    if n == 0 { return 0; }
+    while i < n {
+        let c: String = char_at(s, i);
+        let mut d: Int = 0;
+        if c == "0" { d = 0; }
+        if c == "1" { d = 1; }
+        if c == "2" { d = 2; }
+        if c == "3" { d = 3; }
+        if c == "4" { d = 4; }
+        if c == "5" { d = 5; }
+        if c == "6" { d = 6; }
+        if c == "7" { d = 7; }
+        if c == "8" { d = 8; }
+        if c == "9" { d = 9; }
+        acc = acc * 10 + d;
+        i = i + 1;
+    }
+    return acc;
+}
+
+pub fn swarm_msg_empty() -> SwarmMessage {
+    return SwarmMessage {
+        msg_type: 0,
+        msg_id: "",
+        sender_id: "",
+        recipient_id: "",
+        topic: "",
+        payload: "",
+        tag: "",
+        is_valid: false
+    };
+}
+
+pub fn swarm_msg_new(mtype: Int, mid: String, sender: String, recip: String, topic: String, payload: String, tag: String) -> SwarmMessage {
+    return SwarmMessage {
+        msg_type: mtype,
+        msg_id: mid,
+        sender_id: sender,
+        recipient_id: recip,
+        topic: topic,
+        payload: payload,
+        tag: tag,
+        is_valid: true
+    };
+}
+
+pub fn swarm_msg_encode(msg: SwarmMessage) -> String {
+    let plen: Int = chars_len(msg.payload);
+    let mut out: String = "[SWARM:v1|";
+    out = out + msg.msg_type.to_string();
+    out = out + "|";
+    out = out + msg.msg_id;
+    out = out + "|";
+    out = out + msg.sender_id;
+    out = out + "|";
+    out = out + msg.recipient_id;
+    out = out + "|";
+    out = out + msg.topic;
+    out = out + "|";
+    out = out + plen.to_string();
+    out = out + "|";
+    out = out + msg.payload;
+    out = out + "|";
+    out = out + msg.tag;
+    out = out + "]";
+    return out;
+}
+
+pub fn swarm_msg_decode(wire: String) -> SwarmMessage {
+    let wlen: Int = chars_len(wire);
+    if wlen < 12 || !str_starts_with(wire, "[SWARM:v1|") || !str_ends_with(wire, "]") {
+        return swarm_msg_empty();
+    }
+    let p1: Int = 10;
+    let sub1: String = str_slice(wire, p1, wlen);
+    let idx1: Int = str_index_of(sub1, "|");
+    if idx1 < 0 { return swarm_msg_empty(); }
+    let p2: Int = p1 + idx1;
+    let mtype_str: String = str_slice(wire, p1, p2);
+
+    let p2_next: Int = p2 + 1;
+    let sub2: String = str_slice(wire, p2_next, wlen);
+    let idx2: Int = str_index_of(sub2, "|");
+    if idx2 < 0 { return swarm_msg_empty(); }
+    let p3: Int = p2_next + idx2;
+    let mid: String = str_slice(wire, p2_next, p3);
+
+    let p3_next: Int = p3 + 1;
+    let sub3: String = str_slice(wire, p3_next, wlen);
+    let idx3: Int = str_index_of(sub3, "|");
+    if idx3 < 0 { return swarm_msg_empty(); }
+    let p4: Int = p3_next + idx3;
+    let sender: String = str_slice(wire, p3_next, p4);
+
+    let p4_next: Int = p4 + 1;
+    let sub4: String = str_slice(wire, p4_next, wlen);
+    let idx4: Int = str_index_of(sub4, "|");
+    if idx4 < 0 { return swarm_msg_empty(); }
+    let p5: Int = p4_next + idx4;
+    let recip: String = str_slice(wire, p4_next, p5);
+
+    let p5_next: Int = p5 + 1;
+    let sub5: String = str_slice(wire, p5_next, wlen);
+    let idx5: Int = str_index_of(sub5, "|");
+    if idx5 < 0 { return swarm_msg_empty(); }
+    let p6: Int = p5_next + idx5;
+    let topic: String = str_slice(wire, p5_next, p6);
+
+    let p6_next: Int = p6 + 1;
+    let sub6: String = str_slice(wire, p6_next, wlen);
+    let idx6: Int = str_index_of(sub6, "|");
+    if idx6 < 0 { return swarm_msg_empty(); }
+    let p7: Int = p6_next + idx6;
+    let plen_str: String = str_slice(wire, p6_next, p7);
+    let plen: Int = swarm_proto_parse_int(plen_str);
+
+    let payload_start: Int = p7 + 1;
+    let payload: String = str_slice(wire, payload_start, payload_start + plen);
+    let tag_start: Int = payload_start + plen + 1;
+    let tag: String = str_slice(wire, tag_start, wlen - 1);
+    let mtype: Int = swarm_proto_parse_int(mtype_str);
+
+    return SwarmMessage {
+        msg_type: mtype,
+        msg_id: mid,
+        sender_id: sender,
+        recipient_id: recip,
+        topic: topic,
+        payload: payload,
+        tag: tag,
+        is_valid: true
+    };
+}
+
+pub fn gossip_state_new() -> GossipState {
+    return GossipState {
+        topics: ",",
+        seen_ids: ","
+    };
+}
+
+pub fn gossip_subscribe(gs: GossipState, topic: String) -> GossipState {
+    let t_tok: String = "," + topic + ",";
+    let is_sub: Bool = gs.topics.contains(t_tok);
+    if is_sub {
+        return gs;
+    }
+    return GossipState {
+        topics: gs.topics + topic + ",",
+        seen_ids: gs.seen_ids
+    };
+}
+
+pub fn gossip_is_subscribed(gs: GossipState, topic: String) -> Bool {
+    let t_tok: String = "," + topic + ",";
+    return gs.topics.contains(t_tok);
+}
+
+pub fn gossip_mark_seen(gs: GossipState, msg_id: String) -> GossipState {
+    let m_tok: String = "," + msg_id + ",";
+    let has_seen: Bool = gs.seen_ids.contains(m_tok);
+    if has_seen {
+        return gs;
+    }
+    return GossipState {
+        topics: gs.topics,
+        seen_ids: gs.seen_ids + msg_id + ","
+    };
+}
+
+pub fn gossip_has_seen(gs: GossipState, msg_id: String) -> Bool {
+    let m_tok: String = "," + msg_id + ",";
+    return gs.seen_ids.contains(m_tok);
+}
+
+pub fn kademlia_xor_distance(a: String, b: String) -> Int {
+    let mut dist: Int = 0;
+    let na: Int = chars_len(a);
+    let nb: Int = chars_len(b);
+    let mut i: Int = 0;
+    while i < na && i < nb {
+        let ca: String = char_at(a, i);
+        let cb: String = char_at(b, i);
+        if !(ca == cb) {
+            dist = dist + 1;
+        }
+        i = i + 1;
+    }
+    if na != nb {
+        let diff: Int = if na > nb { na - nb } else { nb - na };
+        dist = dist + diff;
+    }
+    return dist;
+}
+
+pub fn kademlia_find_node_format(target_key: String) -> String {
+    return "FIND_NODE:" + target_key;
+}

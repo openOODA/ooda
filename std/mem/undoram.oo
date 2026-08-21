@@ -1,0 +1,251 @@
+// # Undo-RAM Transactional Memory Engine
+//
+// Logline: Transactional memory engine with ACID properties, rollback journaling, and checkpointing under MemCap.
+//
+// Setup: Capability-gated transactional RAM with automatic undo unwinding.
+//
+// Beats:
+//   1. Initialize UndoRam cell storage with capacity bounds under MemCap.
+//   2. Begin, commit, and abort transactional memory scopes.
+//   3. Record before-images in undo log on cell writes.
+//   4. Rollback uncommitted writes to pre-transaction or checkpoint states.
+// RULES.oot 1.4: Explicit &MemCap required.
+// RULES.oot 1.7: Under 256 lines.
+
+import "txn_log.oo";
+import "checkpoint.oo";
+
+pub type RamCell = struct {
+    address: Int,
+    value: Int,
+    version: Int,
+    locked_by_txn: Int
+};
+
+pub type UndoRam = struct {
+    cells: List[RamCell],
+    capacity: Int,
+    active_txn_id: Int,
+    next_txn_id: Int,
+    txn_log: TxnLog,
+    cp_stack: CheckpointStack,
+    is_in_txn: Bool,
+    version: Int
+};
+
+fn cell_get_at(cells: List[RamCell], addr: Int) -> RamCell {
+    let n: Int = list_len(cells);
+    let mut i: Int = 0;
+    while i < n {
+        let c: RamCell = list_get(cells, i);
+        let ca: Int = c.address;
+        if ca == addr { return c; }
+        i = i + 1;
+    }
+    return RamCell { address: addr, value: 0, version: 0, locked_by_txn: 0 };
+}
+
+fn cell_set_at(cells: List[RamCell], addr: Int, val: Int, ver: Int, txn_id: Int) -> List[RamCell] {
+    let mut out: List[RamCell] = list_new();
+    let n: Int = list_len(cells);
+    let mut i: Int = 0;
+    let mut found: Bool = false;
+    while i < n {
+        let c: RamCell = list_get(cells, i);
+        let ca: Int = c.address;
+        if ca == addr {
+            let updated = RamCell { address: addr, value: val, version: ver, locked_by_txn: txn_id };
+            out = list_push(out, updated);
+            found = true;
+        } else {
+            out = list_push(out, c);
+        }
+        i = i + 1;
+    }
+    if !found {
+        let created = RamCell { address: addr, value: val, version: ver, locked_by_txn: txn_id };
+        out = list_push(out, created);
+    }
+    return out;
+}
+
+pub fn undoram_new(mem: &AllocCap, capacity: Int) -> UndoRam {
+    let mut cap: Int = capacity;
+    if cap < 1 { cap = 64; }
+    let empty_cells: List[RamCell] = list_new();
+    return UndoRam {
+        cells: empty_cells,
+        capacity: cap,
+        active_txn_id: 0,
+        next_txn_id: 1,
+        txn_log: txn_log_new(),
+        cp_stack: checkpoint_stack_new(16),
+        is_in_txn: false,
+        version: 1
+    };
+}
+
+pub fn undoram_begin(mem: &AllocCap, ram: UndoRam) -> Result[UndoRam, String] {
+    let in_txn: Bool = ram.is_in_txn;
+    if in_txn {
+        return Err("E_TXN_ACTIVE: nested transaction already active; use checkpoint");
+    }
+    let tid: Int = ram.next_txn_id;
+    let next_id: Int = tid + 1;
+    return Ok(UndoRam {
+        cells: ram.cells,
+        capacity: ram.capacity,
+        active_txn_id: tid,
+        next_txn_id: next_id,
+        txn_log: ram.txn_log,
+        cp_stack: ram.cp_stack,
+        is_in_txn: true,
+        version: ram.version
+    });
+}
+
+pub fn undoram_write(mem: &AllocCap, ram: UndoRam, addr: Int, value: Int) -> Result[UndoRam, String] {
+    let cap: Int = ram.capacity;
+    if addr < 0 || addr >= cap {
+        return Err("E_UNDORAM_OOB: address out of allocated capacity bounds");
+    }
+    let old_cell: RamCell = cell_get_at(ram.cells, addr);
+    let old_val: Int = old_cell.value;
+    let mut cur_log: TxnLog = ram.txn_log;
+    let cur_txn: Int = ram.active_txn_id;
+    let in_txn: Bool = ram.is_in_txn;
+    if in_txn {
+        cur_log = txn_log_append(cur_log, cur_txn, addr, old_val, value, ram.version);
+    }
+    let next_ver: Int = ram.version + 1;
+    let new_cells: List[RamCell] = cell_set_at(ram.cells, addr, value, next_ver, cur_txn);
+    return Ok(UndoRam {
+        cells: new_cells,
+        capacity: cap,
+        active_txn_id: cur_txn,
+        next_txn_id: ram.next_txn_id,
+        txn_log: cur_log,
+        cp_stack: ram.cp_stack,
+        is_in_txn: in_txn,
+        version: next_ver
+    });
+}
+
+pub fn undoram_read(ram: UndoRam, addr: Int) -> Result[Int, String] {
+    let cap: Int = ram.capacity;
+    if addr < 0 || addr >= cap {
+        return Err("E_UNDORAM_OOB: read address out of bounds");
+    }
+    let c: RamCell = cell_get_at(ram.cells, addr);
+    return Ok(c.value);
+}
+
+pub fn undoram_commit(mem: &AllocCap, ram: UndoRam) -> Result[UndoRam, String] {
+    let in_txn: Bool = ram.is_in_txn;
+    if !in_txn {
+        return Err("E_NO_TXN: cannot commit without active transaction");
+    }
+    return Ok(UndoRam {
+        cells: ram.cells,
+        capacity: ram.capacity,
+        active_txn_id: 0,
+        next_txn_id: ram.next_txn_id,
+        txn_log: txn_log_clear(ram.txn_log),
+        cp_stack: checkpoint_stack_new(16),
+        is_in_txn: false,
+        version: ram.version + 1
+    });
+}
+
+pub fn undoram_rollback(mem: &AllocCap, ram: UndoRam) -> Result[UndoRam, String] {
+    let in_txn: Bool = ram.is_in_txn;
+    if !in_txn {
+        return Err("E_NO_TXN: cannot rollback without active transaction");
+    }
+    let entries: List[TxnEntry] = txn_log_get_entries_for_txn(ram.txn_log, ram.active_txn_id);
+    let n: Int = list_len(entries);
+    let mut updated_cells: List[RamCell] = ram.cells;
+    let mut i: Int = n - 1;
+    while i >= 0 {
+        let entry: TxnEntry = list_get(entries, i);
+        let ea: Int = entry.address;
+        let eov: Int = entry.old_value;
+        updated_cells = cell_set_at(updated_cells, ea, eov, ram.version, 0);
+        i = i - 1;
+    }
+    return Ok(UndoRam {
+        cells: updated_cells,
+        capacity: ram.capacity,
+        active_txn_id: 0,
+        next_txn_id: ram.next_txn_id,
+        txn_log: txn_log_clear(ram.txn_log),
+        cp_stack: checkpoint_stack_new(16),
+        is_in_txn: false,
+        version: ram.version + 1
+    });
+}
+
+pub fn undoram_checkpoint(mem: &AllocCap, ram: UndoRam, name: String) -> Result[UndoRam, String] {
+    let in_txn: Bool = ram.is_in_txn;
+    if !in_txn {
+        return Err("E_NO_TXN: checkpoint requires active transaction");
+    }
+    let offset: Int = txn_log_count(ram.txn_log);
+    let push_res: Result[CheckpointStack, String] = checkpoint_push(ram.cp_stack, ram.active_txn_id, offset, ram.version, name);
+    match push_res {
+        Ok(new_stack) => {
+            return Ok(UndoRam {
+                cells: ram.cells,
+                capacity: ram.capacity,
+                active_txn_id: ram.active_txn_id,
+                next_txn_id: ram.next_txn_id,
+                txn_log: ram.txn_log,
+                cp_stack: new_stack,
+                is_in_txn: in_txn,
+                version: ram.version
+            });
+        },
+        Err(e) => { return Err(e); }
+    }
+}
+
+pub fn undoram_rollback_to_checkpoint(mem: &AllocCap, ram: UndoRam, cp_id: Int) -> Result[UndoRam, String] {
+    let cp_res: Result[Checkpoint, String] = checkpoint_find_by_id(ram.cp_stack, cp_id);
+    match cp_res {
+        Ok(cp) => {
+            let target_offset: Int = cp.log_offset;
+            let mut updated_cells: List[RamCell] = ram.cells;
+            let total_entries: Int = txn_log_count(ram.txn_log);
+            let mut i: Int = total_entries - 1;
+            while i >= target_offset {
+                let entry: TxnEntry = list_get(ram.txn_log.entries, i);
+                let ea: Int = entry.address;
+                let eov: Int = entry.old_value;
+                updated_cells = cell_set_at(updated_cells, ea, eov, ram.version, ram.active_txn_id);
+                i = i - 1;
+            }
+            let truncated_log: TxnLog = txn_log_truncate_from(ram.txn_log, target_offset + 1);
+            return Ok(UndoRam {
+                cells: updated_cells,
+                capacity: ram.capacity,
+                active_txn_id: ram.active_txn_id,
+                next_txn_id: ram.next_txn_id,
+                txn_log: truncated_log,
+                cp_stack: ram.cp_stack,
+                is_in_txn: ram.is_in_txn,
+                version: ram.version + 1
+            });
+        },
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}
+
+pub fn undoram_is_in_transaction(ram: UndoRam) -> Bool {
+    return ram.is_in_txn;
+}
+
+pub fn undoram_cell_count(ram: UndoRam) -> Int {
+    return list_len(ram.cells);
+}

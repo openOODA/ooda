@@ -1,0 +1,192 @@
+// # Product prove MicroVM Boot & TEE Attestation Framework (Zero-Trust)
+//
+// Logline: Reads ooda/std/os/microvm_types.oo, ooda/std/os/microvm_boot.oo, ooda/std/sec/tee_types.oo, and ooda/std/sec/tee_quote.oo directly, then asserts the exact deterministic byte structure of microvm_build_boot_header and the field-extraction correctness of tee_quote_parse_sev_snp and tee_quote_parse_apple.
+//
+// Setup: Imports the four foundational modules. The verify_* helpers in ooda/std/sec/tee_quote.oo take &CryptoCap (per user spec for the FFI surface), but this fixture exercises only the parse_* functions and microvm_build_boot_header, which do not require a cap. Including &CryptoCap in main would require a corresponding oo_cap_grant_crypto symbol in the oodac cap-registry, which is a generator change that is out of scope here. The verify_* signatures in tee_quote.oo remain correctly typed; their runtime invocation belongs to the Stage 15 FFI integration.
+//
+// Beats:
+//   1. microvm_build_boot_header produces a 32-byte stream with the HdrS magic, protocol version 0x020F, loader type 0xFF, and one E820 RAM entry covering the supplied ram_size_mb.
+//   2. microvm_verify_magic / _protocol_version / _loader_type / _e820_ram_type all return true on a freshly built header.
+//   3. tee_quote_parse_sev_snp accepts a 688-byte raw stream and returns Ok; rejects short buffers with Err.
+//   4. tee_quote_parse_apple accepts a 172-byte raw stream and returns Ok; rejects short buffers with Err.
+//   5. e820_build_ram_region and e820_build_reserved_region construct the right E820Entry records.
+
+import "std/os/microvm_types.oo";
+import "std/os/microvm_boot.oo";
+import "std/sec/tee_types.oo";
+import "std/sec/tee_quote.oo";
+
+// Internal helper: build a zero-filled byte list of size n.
+pub fn bytes_zero(n: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        out = list_push(out, 0);
+        i = i + 1;
+    }
+    return out;
+}
+
+// Internal helper: rebuild a list with a single value replaced at the given
+// index. This is the "set" operation built from list_get + list_push so the
+// fixture does not depend on list_set (which is not in every typecheck path).
+pub fn bytes_set_at(b: List[Int], idx: Int, val: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let n: Int = list_len(b);
+    let mut i: Int = 0;
+    while i < n {
+        let cur: Int = list_get(b, i);
+        if i == idx {
+            out = list_push(out, val);
+        } else {
+            out = list_push(out, cur);
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// Internal helper: build a 688-byte SEV-SNP raw quote with given version and
+// a deterministic vendor_id + 0xAB measurement pattern.
+pub fn build_sev_snp_raw(version: Int) -> List[Int] {
+    let mut raw: List[Int] = bytes_zero(688);
+    raw = bytes_set_at(raw, 0, version);
+    raw = bytes_set_at(raw, 28, 49);
+    raw = bytes_set_at(raw, 29, 95);
+    raw = bytes_set_at(raw, 30, 83);
+    raw = bytes_set_at(raw, 31, 78);
+    let mut j: Int = 0;
+    while j < 48 {
+        raw = bytes_set_at(raw, 32 + j, 171);
+        j = j + 1;
+    }
+    return raw;
+}
+
+// Internal helper: build a 172-byte Apple SE raw quote with given version and
+// a deterministic chip_id = 0x11, public_key_hash = 0x22 pattern.
+pub fn build_apple_raw(version: Int) -> List[Int] {
+    let mut raw: List[Int] = bytes_zero(172);
+    raw = bytes_set_at(raw, 0, version);
+    let mut i: Int = 0;
+    while i < 8 {
+        raw = bytes_set_at(raw, 4 + i, 17);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 32 {
+        raw = bytes_set_at(raw, 28 + i, 34);
+        i = i + 1;
+    }
+    return raw;
+}
+
+// ===== Boot header tests =====
+
+pub fn test_microvm_build_boot_header_size_and_magic() {
+    let h: List[Int] = microvm_build_boot_header("console=ttyS0", 256);
+    if list_len(h) != 32 { println("FAIL: header must be 32 bytes"); process_exit(1); }
+    if microvm_verify_magic(h) == false { println("FAIL: HdrS magic not at 0..3"); process_exit(1); }
+    if list_get(h, 0) != 72 { println("FAIL: byte 0 != 72 (H)"); process_exit(1); }
+    if list_get(h, 1) != 100 { println("FAIL: byte 1 != 100 (d)"); process_exit(1); }
+    if list_get(h, 2) != 114 { println("FAIL: byte 2 != 114 (r)"); process_exit(1); }
+    if list_get(h, 3) != 83 { println("FAIL: byte 3 != 83 (S)"); process_exit(1); }
+    println("PASS: 32-byte header with HdrS magic at 0..3");
+}
+
+pub fn test_microvm_build_boot_header_protocol_loader_e820_count() {
+    let h: List[Int] = microvm_build_boot_header("", 128);
+    if list_get(h, 4) != 15 { println("FAIL: byte 4 != 15 (0x0F)"); process_exit(1); }
+    if list_get(h, 5) != 2 { println("FAIL: byte 5 != 2 (0x02)"); process_exit(1); }
+    if list_get(h, 6) != 255 { println("FAIL: byte 6 != 255 (0xFF)"); process_exit(1); }
+    if list_get(h, 7) != 1 { println("FAIL: byte 7 != 1 (e820 count)"); process_exit(1); }
+    if microvm_verify_protocol_version(h) == false { println("FAIL: verify_protocol_version"); process_exit(1); }
+    if microvm_verify_loader_type(h) == false { println("FAIL: verify_loader_type"); process_exit(1); }
+    println("PASS: protocol 0x020F + loader 0xFF + e820 count 1");
+}
+
+pub fn test_microvm_build_boot_header_e820_ram_entry_256mib() {
+    // 256 MiB = 268435456 bytes. LE: 0x10 0x00 0x00 0x00 in bytes 19..16.
+    let h: List[Int] = microvm_build_boot_header("", 256);
+    if list_get(h, 16) != 0 { println("FAIL: e820 size byte 0 != 0"); process_exit(1); }
+    if list_get(h, 17) != 0 { println("FAIL: e820 size byte 1 != 0"); process_exit(1); }
+    if list_get(h, 18) != 0 { println("FAIL: e820 size byte 2 != 0"); process_exit(1); }
+    if list_get(h, 19) != 16 { println("FAIL: e820 size byte 3 != 16 (0x10)"); process_exit(1); }
+    if list_get(h, 20) != 0 { println("FAIL: e820 size byte 4 != 0"); process_exit(1); }
+    if list_get(h, 21) != 0 { println("FAIL: e820 size byte 5 != 0"); process_exit(1); }
+    if list_get(h, 22) != 0 { println("FAIL: e820 size byte 6 != 0"); process_exit(1); }
+    if list_get(h, 23) != 0 { println("FAIL: e820 size byte 7 != 0"); process_exit(1); }
+    if microvm_verify_e820_ram_type(h) == false { println("FAIL: e820 mem_type != 1"); process_exit(1); }
+    if list_get(h, 24) != 1 { println("FAIL: e820 mem_type byte != 1"); process_exit(1); }
+    println("PASS: e820 entry covers 256 MiB RAM (size = 268435456 LE)");
+}
+
+pub fn test_microvm_build_boot_header_cmdline_length() {
+    let h: List[Int] = microvm_build_boot_header("console=ttyS0", 128);
+    if list_get(h, 28) != 13 { println("FAIL: cmdline len byte 0 != 13"); process_exit(1); }
+    if list_get(h, 29) != 0 { println("FAIL: cmdline len byte 1 != 0"); process_exit(1); }
+    let h2: List[Int] = microvm_build_boot_header("", 64);
+    if list_get(h2, 28) != 0 { println("FAIL: empty cmdline len != 0"); process_exit(1); }
+    println("PASS: cmdline length is embedded at bytes 28..29 (LE)");
+}
+
+pub fn test_microvm_e820_build_ram_region() {
+    let e: E820Entry = e820_build_ram_region(0, 512);
+    if (e).addr != 0 { println("FAIL: ram addr != 0"); process_exit(1); }
+    if (e).size != 536870912 { println("FAIL: ram size != 512 MiB"); process_exit(1); }
+    if (e).mem_type != 1 { println("FAIL: ram mem_type != 1"); process_exit(1); }
+    if e820_entry_is_ram(&e) == false { println("FAIL: is_ram must be true"); process_exit(1); }
+    if e820_entry_end_addr(&e) != 536870912 { println("FAIL: end_addr != 512 MiB"); process_exit(1); }
+    println("PASS: e820_build_ram_region(0, 512) is RAM covering [0, 512 MiB)");
+}
+
+pub fn test_microvm_e820_build_reserved_region() {
+    let e: E820Entry = e820_build_reserved_region(4096, 1024);
+    if (e).addr != 4096 { println("FAIL: reserved addr != 4096"); process_exit(1); }
+    if (e).size != 1024 { println("FAIL: reserved size != 1024"); process_exit(1); }
+    if (e).mem_type != 2 { println("FAIL: reserved mem_type != 2"); process_exit(1); }
+    if e820_entry_is_ram(&e) == true { println("FAIL: reserved must not be RAM"); process_exit(1); }
+    println("PASS: e820_build_reserved_region(4096, 1024) is RESERVED");
+}
+
+// ===== SEV-SNP tests =====
+
+pub fn test_tee_quote_parse_sev_snp_ok() {
+    let r: Result[SevSnpQuoteHeader, String] = tee_quote_parse_sev_snp(build_sev_snp_raw(2));
+    if r.is_ok() == false { println("FAIL: parse_sev_snp must be Ok on 688-byte raw"); process_exit(1); }
+    println("PASS: tee_quote_parse_sev_snp returns Ok on 688-byte raw");
+}
+
+pub fn test_tee_quote_parse_sev_snp_rejects_short_buffer() {
+    let r: Result[SevSnpQuoteHeader, String] = tee_quote_parse_sev_snp(bytes_zero(100));
+    if r.is_err() == false { println("FAIL: parse_sev_snp must Err on short buffer"); process_exit(1); }
+    println("PASS: tee_quote_parse_sev_snp rejects buffers smaller than 688 bytes");
+}
+
+// ===== Apple SE tests =====
+
+pub fn test_tee_quote_parse_apple_ok() {
+    let r: Result[AppleSecureEnclaveQuote, String] = tee_quote_parse_apple(build_apple_raw(4));
+    if r.is_ok() == false { println("FAIL: parse_apple must be Ok on 172-byte raw"); process_exit(1); }
+    println("PASS: tee_quote_parse_apple returns Ok on 172-byte raw");
+}
+
+pub fn test_tee_quote_parse_apple_rejects_short_buffer() {
+    let r: Result[AppleSecureEnclaveQuote, String] = tee_quote_parse_apple(bytes_zero(50));
+    if r.is_err() == false { println("FAIL: parse_apple must Err on short buffer"); process_exit(1); }
+    println("PASS: tee_quote_parse_apple rejects buffers smaller than 172 bytes");
+}
+
+pub fn main() {
+    test_microvm_build_boot_header_size_and_magic();
+    test_microvm_build_boot_header_protocol_loader_e820_count();
+    test_microvm_build_boot_header_e820_ram_entry_256mib();
+    test_microvm_build_boot_header_cmdline_length();
+    test_microvm_e820_build_ram_region();
+    test_microvm_e820_build_reserved_region();
+    test_tee_quote_parse_sev_snp_ok();
+    test_tee_quote_parse_sev_snp_rejects_short_buffer();
+    test_tee_quote_parse_apple_ok();
+    test_tee_quote_parse_apple_rejects_short_buffer();
+    println("PROVE_PROD_MICROVM_TEE_FRAMEWORK_PASSED");
+}

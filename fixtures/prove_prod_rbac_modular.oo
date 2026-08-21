@@ -1,0 +1,156 @@
+// # Product prove RBAC Modular Permission Library
+//
+// Logline: Verify the modular RBAC library builds permissions and roles, matches wildcards, and the engine state-machine helpers drive default-deny strict mode and field setters correctly.
+//
+// Setup: Imports std/enterprise/rbac.oo for the public surface, std/enterprise/rbac_ops.oo for engine mutators, and std/enterprise/rbac_rules.oo for rule evaluation. Pure value-returning helpers, no IO.
+//
+// Beats:
+//   1. permission_create and permission_matches honor wildcards, exact, and allowed=false.
+//   2. role_create, role_add_permission, and role_set_active compose a usable Role.
+//   3. rbac_engine_init and rbac_set_strict_mode default to strict, wildcards-enabled.
+//   4. rbac_has_role on an empty engine returns false, rbac_get_eval_count and rbac_do_work return Int.
+
+import "std/enterprise/rbac.oo";
+import "std/enterprise/rbac_ops.oo";
+import "std/enterprise/rbac_rules.oo";
+
+pub fn test_permission_matches_wildcards() {
+    let p_star: Permission = permission_create("*", "*", true);
+    if permission_matches(p_star, "users", "read", true) == false {
+        println("FAIL: wildcard resource and action must match");
+        process_exit(1);
+    }
+    let p_exact: Permission = permission_create("users", "read", true);
+    if permission_matches(p_exact, "users", "read", true) == false {
+        println("FAIL: exact match must succeed");
+        process_exit(1);
+    }
+    if permission_matches(p_exact, "users", "write", true) == true {
+        println("FAIL: exact action must not match a different action");
+        process_exit(1);
+    }
+    let p_disallow: Permission = permission_create("users", "read", false);
+    if permission_matches(p_disallow, "users", "read", true) == true {
+        println("FAIL: allowed=false must never match");
+        process_exit(1);
+    }
+    let p_no_wild: Permission = permission_create("users", "read", true);
+    if permission_matches(p_no_wild, "users", "read", false) == false {
+        println("FAIL: exact match must succeed without wildcards");
+        process_exit(1);
+    }
+    if permission_matches(p_no_wild, "*", "read", false) == true {
+        println("FAIL: literal resource must not match when wildcards are off");
+        process_exit(1);
+    }
+    println("PASS: permission_matches wildcard and exact and disallow");
+}
+
+pub fn test_role_compose_and_inspect() {
+    let p: Permission = permission_create("users", "read", true);
+    let mut r: Role = role_create("reader", "");
+    r = role_add_permission(r, p);
+    r = role_set_active(r, true);
+    let r_inactive: Role = role_set_active(r, false);
+    let active_flag: Bool = (r_inactive).is_active;
+    if active_flag == true {
+        println("FAIL: role_set_active(false) must flip is_active");
+        process_exit(1);
+    }
+    let r_name: String = (r).name;
+    if r_name != "reader" {
+        println("FAIL: role name mismatch");
+        process_exit(1);
+    }
+    println("PASS: role composition and role_set_active");
+}
+
+pub fn test_user_assignment_create_and_dedup() {
+    let u1: UserAssignment = user_assignment_create("alice");
+    let u1_active: Bool = (u1).is_active;
+    if u1_active == false {
+        println("FAIL: user_assignment_create must default is_active=true");
+        process_exit(1);
+    }
+    let u1_id: String = (u1).user_id;
+    if u1_id != "alice" {
+        println("FAIL: user_assignment_create must carry the user id");
+        process_exit(1);
+    }
+    let u2: UserAssignment = user_assignment_add_role(u1, "reader");
+    let u3: UserAssignment = user_assignment_add_role(u2, "admin");
+    let u4: UserAssignment = user_assignment_add_role(u3, "reader");
+    let u_inactive: UserAssignment = user_assignment_set_active(u4, false);
+    let active: Bool = (u_inactive).is_active;
+    if active == true {
+        println("FAIL: user_assignment_set_active(false) must flip is_active");
+        process_exit(1);
+    }
+    println("PASS: user_assignment create and dedup");
+}
+
+pub fn test_rbac_engine_init_and_counters() {
+    let eng: RbacEngine = rbac_engine_init();
+    let strict: Bool = (eng).strict_mode;
+    if strict == false {
+        println("FAIL: rbac_engine_init must default strict_mode=true");
+        process_exit(1);
+    }
+    let wildcards: Bool = (eng).wildcards_enabled;
+    if wildcards == false {
+        println("FAIL: rbac_engine_init must default wildcards_enabled=true");
+        process_exit(1);
+    }
+    let evals: Int = rbac_get_eval_count(&eng);
+    if evals != 0 {
+        println("FAIL: rbac_get_eval_count must start at 0");
+        process_exit(1);
+    }
+    let denied: Int = rbac_get_denied_count(&eng);
+    if denied != 0 {
+        println("FAIL: rbac_get_denied_count must start at 0");
+        process_exit(1);
+    }
+    let allowed: Int = rbac_get_allowed_count(&eng);
+    if allowed != 0 {
+        println("FAIL: rbac_get_allowed_count must start at 0");
+        process_exit(1);
+    }
+    let work: Int = rbac_do_work(&eng);
+    if work < 0 {
+        println("FAIL: rbac_do_work must not return negative");
+        process_exit(1);
+    }
+    let has_user: Bool = rbac_has_role(&eng, "ghost");
+    if has_user == true {
+        println("FAIL: empty engine must not have any role");
+        process_exit(1);
+    }
+    println("PASS: rbac_engine_init and counters");
+}
+
+pub fn test_rbac_set_strict_and_wildcards() {
+    let eng: RbacEngine = rbac_engine_init();
+    rbac_set_strict_mode(&mut eng, false);
+    rbac_set_wildcards_enabled(&mut eng, false);
+    let strict: Bool = (eng).strict_mode;
+    if strict == true {
+        println("FAIL: rbac_set_strict_mode(false) must flip strict_mode");
+        process_exit(1);
+    }
+    let wildcards: Bool = (eng).wildcards_enabled;
+    if wildcards == true {
+        println("FAIL: rbac_set_wildcards_enabled(false) must flip wildcards_enabled");
+        process_exit(1);
+    }
+    println("PASS: rbac_set_strict_mode and rbac_set_wildcards_enabled");
+}
+
+pub fn main() {
+    test_permission_matches_wildcards();
+    test_role_compose_and_inspect();
+    test_user_assignment_create_and_dedup();
+    test_rbac_engine_init_and_counters();
+    test_rbac_set_strict_and_wildcards();
+    println("PROVE_PROD_RBAC_MODULAR_PASSED");
+}

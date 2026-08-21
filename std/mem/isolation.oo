@@ -1,0 +1,131 @@
+// # Micro-Transactional Memory Isolation Bubble
+//
+// Logline: Zero-crash memory isolation bubble with automatic rollback on error or capability violation.
+//
+// Setup: Wraps UndoRam execution boundaries to prevent state corruption during invariant failure.
+//
+// Beats:
+//   1. Construct IsolationBubble encapsulating UndoRam state.
+//   2. Execute speculative mutations within protected transaction scope.
+//   3. Intercept errors and invariant breaches, triggering automatic undo rollback.
+//   4. Commit validated state transitions to persistent memory pool.
+// RULES.oot 1.4: Explicit &MemCap required.
+// RULES.oot 1.7: Under 256 lines.
+
+import "undoram.oo";
+
+pub type IsolationBubble = struct {
+    bubble_id: Int,
+    ram: UndoRam,
+    status: String,
+    auto_rollback_on_err: Bool,
+    fault_count: Int
+};
+
+pub fn isolation_bubble_create(mem: &MemCap, ram: UndoRam, auto_rollback: Bool) -> IsolationBubble {
+    return IsolationBubble {
+        bubble_id: 1,
+        ram: ram,
+        status: "clean",
+        auto_rollback_on_err: auto_rollback,
+        fault_count: 0
+    };
+}
+
+pub fn isolation_execute_safe(
+    mem: &MemCap,
+    bubble: IsolationBubble,
+    target_addr: Int,
+    new_val: Int,
+    should_fail: Bool
+) -> Result[IsolationBubble, String] {
+    let cur_ram: UndoRam = bubble.ram;
+    let auto_rb: Bool = bubble.auto_rollback_on_err;
+    let b_ram_res: Result[UndoRam, String] = undoram_begin(mem, cur_ram);
+    if b_ram_res.is_err() {
+        return Err("E_ISOLATION_BEGIN_FAILED");
+    }
+    let mut txn_ram: UndoRam = match b_ram_res {
+        Ok(r) => r,
+        Err(_) => cur_ram
+    };
+    let w_res: Result[UndoRam, String] = undoram_write(mem, txn_ram, target_addr, new_val);
+    if w_res.is_err() {
+        if auto_rb {
+            let _rb: Result[UndoRam, String] = undoram_rollback(mem, txn_ram);
+        }
+        return Err("E_ISOLATION_WRITE_FAILED");
+    }
+    txn_ram = match w_res {
+        Ok(r) => r,
+        Err(_) => txn_ram
+    };
+    if should_fail {
+        let rb_res: Result[UndoRam, String] = undoram_rollback(mem, txn_ram);
+        if rb_res.is_err() {
+            return Err("E_ISOLATION_ROLLBACK_FAILED");
+        }
+        let restored_ram: UndoRam = match rb_res {
+            Ok(r) => r,
+            Err(_) => txn_ram
+        };
+        let next_fc: Int = bubble.fault_count + 1;
+        return Ok(IsolationBubble {
+            bubble_id: bubble.bubble_id,
+            ram: restored_ram,
+            status: "fault_isolated",
+            auto_rollback_on_err: auto_rb,
+            fault_count: next_fc
+        });
+    }
+    let c_res: Result[UndoRam, String] = undoram_commit(mem, txn_ram);
+    if c_res.is_err() {
+        return Err("E_ISOLATION_COMMIT_FAILED");
+    }
+    let committed_ram: UndoRam = match c_res {
+        Ok(r) => r,
+        Err(_) => txn_ram
+    };
+    return Ok(IsolationBubble {
+        bubble_id: bubble.bubble_id,
+        ram: committed_ram,
+        status: "committed",
+        auto_rollback_on_err: auto_rb,
+        fault_count: bubble.fault_count
+    });
+}
+
+pub fn isolation_assert_invariant(
+    mem: &MemCap,
+    bubble: IsolationBubble,
+    condition: Bool,
+    err_msg: String
+) -> Result[IsolationBubble, String] {
+    if !condition {
+        let auto_rb: Bool = bubble.auto_rollback_on_err;
+        let is_in: Bool = undoram_is_in_transaction(bubble.ram);
+        if auto_rb && is_in {
+            let rb_res: Result[UndoRam, String] = undoram_rollback(mem, bubble.ram);
+            if rb_res.is_err() {
+                return Err("E_INVARIANT_ROLLBACK_FAILED");
+            }
+            let restored: UndoRam = match rb_res {
+                Ok(r) => r,
+                Err(_) => bubble.ram
+            };
+            return Ok(IsolationBubble {
+                bubble_id: bubble.bubble_id,
+                ram: restored,
+                status: "invariant_breach_rolled_back",
+                auto_rollback_on_err: auto_rb,
+                fault_count: bubble.fault_count + 1
+            });
+        }
+        return Err("E_INVARIANT_VIOLATION: " + err_msg);
+    }
+    return Ok(bubble);
+}
+
+pub fn isolation_status(bubble: IsolationBubble) -> String {
+    return bubble.status;
+}

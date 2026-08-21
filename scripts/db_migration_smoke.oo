@@ -1,0 +1,83 @@
+// # Smoke Test for Reversible Database Schema Migrations Engine
+//
+// Logline: Verify schema migration up, down, rollback, redo, and status reporting workflows.
+//
+// Setup: Uses std/database migration types and runner under FsCap and SysCap.
+//
+// Beats:
+//   1. Initialize runner with isolated test journal.
+//   2. Apply forward schema migration (up) and verify version state.
+//   3. Test redo workflow and journal updates.
+//   4. Apply reverse schema migration (rollback) and verify version state.
+//   5. Verify machine-readable JSON status diagnostics.
+
+import "std/database/migration_types.oo";
+import "std/database/migration_runner.oo";
+
+fn fail_smoke(msg: String) {
+    println("FAIL: " + msg);
+    process_exit(1);
+}
+
+pub fn main(fs: &FsCap, sys: &SysCap) {
+    let test_journal: String = ".ooda-cache/test_migrations/journal.txt";
+    // Ensure clean test environment
+    let cr0: Result[String, String] = sys_exec(sys, "sh", "-c", "rm -rf .ooda-cache/test_migrations");
+    if cr0.is_err() {
+        fail_smoke("failed to clear test directory");
+    }
+
+    let mut state: MigrationState = migration_runner_init(fs, test_journal);
+    if migration_state_cnt(&state) != 0 {
+        fail_smoke("initial migration count should be 0");
+    }
+
+    // 1. Up migration
+    let step1: MigrationStep = migration_types_step("1", "create_users_table", "SELECT * FROM users;", "SELECT * FROM users;");
+    let res_up: MigrationResult = migration_apply_up(fs, sys, &mut state, step1);
+    if !migration_result_is_ok(&res_up) {
+        fail_smoke("migration up failed: " + migration_result_msg(&res_up));
+    }
+    if migration_state_cnt(&state) != 1 {
+        fail_smoke("state count should be 1 after up");
+    }
+    if migration_state_ver(&state) != "1" {
+        fail_smoke("current version should be 1 after up");
+    }
+
+    // 2. Status report & JSON
+    let status_rep: String = migration_status_report(&state);
+    if str_index_of(status_rep, "Current Version: 1") < 0 {
+        fail_smoke("status report missing Current Version: 1");
+    }
+    let status_json: String = migration_status_json(&state);
+    if str_index_of(status_json, "\"current_version\":\"1\"") < 0 {
+        fail_smoke("status json missing current_version 1");
+    }
+
+    // 3. Redo migration
+    let res_redo: MigrationResult = migration_redo(fs, sys, &mut state, step1);
+    if !migration_result_is_ok(&res_redo) {
+        fail_smoke("migration redo failed: " + migration_result_msg(&res_redo));
+    }
+    if migration_state_ver(&state) != "1" {
+        fail_smoke("current version should remain 1 after redo");
+    }
+
+    // 4. Rollback migration
+    let res_down: MigrationResult = migration_rollback(fs, sys, &mut state, step1);
+    if !migration_result_is_ok(&res_down) {
+        fail_smoke("migration rollback failed: " + migration_result_msg(&res_down));
+    }
+    if migration_state_cnt(&state) != 0 {
+        fail_smoke("state count should be 0 after rollback");
+    }
+
+    // Clean up test journal
+    let cr1: Result[String, String] = sys_exec(sys, "sh", "-c", "rm -rf .ooda-cache/test_migrations");
+    if cr1.is_err() {
+        fail_smoke("failed to cleanup test directory");
+    }
+
+    println("OK: DB_MIGRATION_SMOKE_PASSED");
+}

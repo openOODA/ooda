@@ -1,0 +1,130 @@
+// # Contract Theorem Prover Engine
+//
+// Logline: Computes Dijkstra WP by backwards substitution and decides P implies WP via DPLL on a bounded integer encoding.
+//
+// Setup: Imports contract_prover_types, wp_calculus_evaluator, and sat_dpll_clause_solver. No external solver.
+//
+// Beats:
+//   1. Walk assignments backwards, substitute into Q, and form VC = P implies WP(S, Q).
+//   2. Encode P and not WP as CNF over a finite integer domain using shipped SAT types.
+//   3. Run DPLL with unit propagation and pure literals; UNSAT is Ok(ProofCert), SAT is Err(Counterexample).
+
+import "./contract_prover_types.oo";
+import "./wp_calculus_evaluator.oo";
+import "./sat_dpll_clause_solver.oo";
+
+fn lo() -> Int { return -16; }
+fn hi() -> Int { return 16; }
+fn nv() -> Int { return 33; }
+fn xv(v: Int) -> Int { return v - lo() + 1; }
+fn yv(v: Int) -> Int { return nv() + v - lo() + 1; }
+
+fn lit_pack(s: SatLiteral) -> Int {
+    if (s).is_negated { return 0 - (s).variable; }
+    return (s).variable;
+}
+
+fn add_or2(f: &mut SatFormula, flat: List[Int], a: SatLiteral, b: SatLiteral) -> List[Int] {
+    let mut c: SatClause = sat_clause_new();
+    let _a: Bool = sat_clause_add(&c, a);
+    let _b: Bool = sat_clause_add(&c, b);
+    let _add: Bool = sat_formula_add_clause(f, c);
+    let mut out: List[Int] = list_push(flat, lit_pack(a));
+    out = list_push(out, lit_pack(b));
+    return list_push(out, 0);
+}
+
+fn vid(is_x: Bool, v: Int) -> Int {
+    if is_x { return xv(v); }
+    return yv(v);
+}
+
+fn exactly_one(f: &mut SatFormula, flat: List[Int], is_x: Bool) -> List[Int] {
+    let mut out: List[Int] = flat;
+    let mut atleast: SatClause = sat_clause_new();
+    let mut v: Int = lo();
+    while v <= hi() {
+        let id: Int = vid(is_x, v);
+        let _p: Bool = sat_clause_add(&atleast, sat_lit_pos(id));
+        let mut w: Int = v + 1;
+        while w <= hi() {
+            out = add_or2(f, out, sat_lit_neg(id), sat_lit_neg(vid(is_x, w)));
+            w = w + 1;
+        }
+        v = v + 1;
+    }
+    v = lo();
+    while v <= hi() {
+        out = list_push(out, vid(is_x, v));
+        v = v + 1;
+    }
+    out = list_push(out, 0);
+    let _al: Bool = sat_formula_add_clause(f, atleast);
+    return out;
+}
+
+fn encode_flat(pre: RelAtom, not_wp: RelAtom) -> List[Int] {
+    let mut f: SatFormula = sat_formula_new(nv() + nv());
+    let mut flat: List[Int] = list_new();
+    flat = exactly_one(&f, flat, true);
+    flat = exactly_one(&f, flat, false);
+    let mut x: Int = lo();
+    while x <= hi() {
+        let mut y: Int = lo();
+        while y <= hi() {
+            let keep: Bool = rel_holds(pre, x, y) && rel_holds(not_wp, x, y);
+            if keep == false {
+                flat = add_or2(&f, flat, sat_lit_neg(xv(x)), sat_lit_neg(yv(y)));
+            }
+            y = y + 1;
+        }
+        x = x + 1;
+    }
+    return flat;
+}
+
+fn decode_val(assigns: List[Int], is_x: Bool) -> Int {
+    let mut v: Int = lo();
+    while v <= hi() {
+        if list_get(assigns, vid(is_x, v)) == 1 { return v; }
+        v = v + 1;
+    }
+    return 0;
+}
+
+pub fn wp_backwards(steps: List[AssignStep], post: RelAtom) -> RelAtom {
+    let mut r: RelAtom = post;
+    let n: Int = list_len(steps);
+    let mut i: Int = n - 1;
+    while i >= 0 {
+        let st: AssignStep = list_get(steps, i);
+        let mut nm: String = "y";
+        if (st).dst == 0 { nm = "x"; }
+        let expr_s: String = lin_text((st).rhs);
+        let _shown: String = wp_eval_assign(nm, expr_s, rel_text(r));
+        let _cmd: WpCommand = wp_cmd_assign(nm, expr_s);
+        r = rel_subst(r, st);
+        i = i - 1;
+    }
+    return r;
+}
+
+pub fn contract_prover_engine_prove(
+    name: String,
+    pre: RelAtom,
+    steps: List[AssignStep],
+    post: RelAtom
+) -> ProveOutcome {
+    let wp: RelAtom = wp_backwards(steps, post);
+    let not_wp: RelAtom = rel_negate(wp);
+    let vc: String = rel_text(pre) + " => " + rel_text(wp);
+    let nvars: Int = nv() + nv();
+    let flat: List[Int] = encode_flat(pre, not_wp);
+    let model: List[Int] = cnf_dpll(flat, nvars, blank_assigns(nvars));
+    if list_len(model) == 0 {
+        return prove_ok(proof_cert_new(name, rel_text(wp), vc));
+    }
+    let xv2: Int = decode_val(model, true);
+    let yv2: Int = decode_val(model, false);
+    return prove_err(cex_new(xv2, yv2, model, "SAT model of P and not WP"));
+}

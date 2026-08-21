@@ -1,0 +1,119 @@
+// # Reversible Database Schema Migration CLI Command
+//
+// Logline: Execute up, down, rollback, redo, and status migration commands from CLI.
+//
+// Setup: Uses std/database migration runner under &FsCap and &SysCap.
+//
+// Beats:
+//   1. Parse migrate subcommands (up, down, rollback, redo, status).
+//   2. Run migration step actions and update journal.
+//   3. Support machine-readable --json status output for autonomous tooling.
+
+import "database/migration_types.oo";
+import "database/migration_runner.oo";
+
+pub fn cmd_migrate_run(fs: &FsCap, sys: &SysCap, args: List[String]) {
+    let journal_path: String = ".ooda-cache/migrations/journal.txt";
+    let mut state: MigrationState = migration_runner_init(fs, journal_path);
+
+    let mut subcmd: String = "status";
+    let mut json_out: Bool = false;
+    let mut target_name: String = "schema_step";
+
+    let mut i: Int = 1;
+    while i < list_len(args) {
+        let a: String = list_get(args, i);
+        if a == "--json" || a == "-json" {
+            json_out = true;
+        } else if a == "up" || a == "down" || a == "rollback" || a == "redo" || a == "status" {
+            subcmd = a;
+        } else if str_slice(a, 0, 1) != "-" {
+            target_name = a;
+        }
+        i = i + 1;
+    }
+
+    if subcmd == "status" {
+        if json_out {
+            let js: String = migration_status_json(&state);
+            println(js);
+        } else {
+            let rpt: String = migration_status_report(&state);
+            println(rpt);
+        }
+        return;
+    }
+
+    let default_up: String = "SELECT * FROM users;";
+    let default_down: String = "SELECT * FROM users;";
+    let count_val: Int = migration_state_cnt(&state);
+    let next_id_num: Int = count_val + 1;
+    let next_id: String = next_id_num.to_string();
+    let step: MigrationStep = migration_step_new(next_id, target_name, default_up, default_down);
+
+    if subcmd == "up" {
+        let r_up: MigrationResult = migration_apply_up(fs, sys, &mut state, step);
+        let ok_up: Bool = migration_result_is_ok(&r_up);
+        let ver_up: String = migration_result_ver(&r_up);
+        let msg_up: String = migration_result_msg(&r_up);
+        if ok_up {
+            if json_out {
+                println("{\"ok\":true,\"action\":\"up\",\"version\":\"" + ver_up + "\"}");
+            } else {
+                println("ooda migrate: applied up version " + ver_up + " (" + target_name + ")");
+            }
+            return;
+        }
+        if json_out {
+            println("{\"ok\":false,\"action\":\"up\",\"error\":\"" + msg_up + "\"}");
+        } else {
+            println("ERR\tmigrate\t" + msg_up);
+        }
+        process_exit(1);
+    }
+
+    if subcmd == "down" || subcmd == "rollback" {
+        let r_down: MigrationResult = migration_rollback(fs, sys, &mut state, step);
+        let ok_dn: Bool = migration_result_is_ok(&r_down);
+        let ver_dn: String = migration_result_ver(&r_down);
+        let msg_dn: String = migration_result_msg(&r_down);
+        if ok_dn {
+            if json_out {
+                println("{\"ok\":true,\"action\":\"down\",\"version\":\"" + ver_dn + "\"}");
+            } else {
+                println("ooda migrate: rolled back version " + ver_dn);
+            }
+            return;
+        }
+        if json_out {
+            println("{\"ok\":false,\"action\":\"down\",\"error\":\"" + msg_dn + "\"}");
+        } else {
+            println("ERR\tmigrate\t" + msg_dn);
+        }
+        process_exit(1);
+    }
+
+    if subcmd == "redo" {
+        let r_redo: MigrationResult = migration_redo(fs, sys, &mut state, step);
+        let ok_rd: Bool = migration_result_is_ok(&r_redo);
+        let ver_rd: String = migration_result_ver(&r_redo);
+        let msg_rd: String = migration_result_msg(&r_redo);
+        if ok_rd {
+            if json_out {
+                println("{\"ok\":true,\"action\":\"redo\",\"version\":\"" + ver_rd + "\"}");
+            } else {
+                println("ooda migrate: redone version " + ver_rd);
+            }
+            return;
+        }
+        if json_out {
+            println("{\"ok\":false,\"action\":\"redo\",\"error\":\"" + msg_rd + "\"}");
+        } else {
+            println("ERR\tmigrate\t" + msg_rd);
+        }
+        process_exit(1);
+    }
+
+    println("ERR\tmigrate\tunknown subcommand: " + subcmd);
+    process_exit(2);
+}

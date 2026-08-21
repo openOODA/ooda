@@ -1,0 +1,153 @@
+// # SCADA / ICS Firewall Match, Engine Inspection, and Residual Stubs
+//
+// Logline: Match SCADA rules against ScadaFlow by protocol, address, and port; inspect flows through the ScadaEngine, tally anomalies, and expose the residual nft and AF_PACKET stubs.
+//
+// Setup: Imports scada_fw.oo for ScadaRule, ScadaFlow, ScadaEngine, and ScadaAnomaly types and constructors. RULES.oot 1.4 default-deny; CAP-G6 AF_PACKET stays &NetCap residual. RULES.oot 1.3 fail-closed residual.
+//
+// Beats:
+//   1. scada_match_protocol / scada_match_addr / scada_match_port / scada_rule_matches.
+//   2. scada_engine_add_rule, scada_engine_inspect, scada_engine_record_anomaly, scada_engine_do_work.
+//   3. Residual process_exit stubs for nft rule install and AF_PACKET capture.
+
+import "./scada_fw.oo";
+
+pub fn scada_match_protocol(rule: &ScadaRule, proto: Int) -> Bool {
+    let rule_proto = (rule).protocol;
+    if rule_proto == 0  { return true; }
+    return rule_proto == proto;
+}
+
+pub fn scada_match_addr(rule: &ScadaRule, src: String, dst: String) -> Bool {
+    let rule_src = (rule).src_addr_pattern;
+    let rule_dst = (rule).dst_addr_pattern;
+    if rule_src == "*" {
+        if rule_dst == "*"  { return true; }
+        return rule_dst == dst;
+    }
+    if rule_dst == "*"  { return rule_src == src; }
+    if rule_src == src {
+        if rule_dst == dst  { return true; }
+    }
+    return false;
+}
+
+pub fn scada_match_port(rule: &ScadaRule, src_port_v: Int, dst_port_v: Int) -> Bool {
+    let rule_src = (rule).src_port;
+    let rule_dst = (rule).dst_port;
+    if rule_src == 0 {
+        if rule_dst == 0  { return true; }
+        return rule_dst == dst_port_v;
+    }
+    if rule_dst == 0  { return rule_src == src_port_v; }
+    if rule_src == src_port_v {
+        if rule_dst == dst_port_v  { return true; }
+    }
+    return false;
+}
+
+pub fn scada_rule_matches(rule: &ScadaRule, flow: &ScadaFlow) -> Bool {
+    let enabled = (rule).is_enabled;
+    if enabled == false  { return false; }
+    let flow_proto = (flow).protocol;
+    if scada_match_protocol(rule, flow_proto) == false  { return false; }
+    let flow_src = (flow).src_addr;
+    let flow_dst = (flow).dst_addr;
+    if scada_match_addr(rule, flow_src, flow_dst) == false  { return false; }
+    let flow_sp = (flow).src_port;
+    let flow_dp = (flow).dst_port;
+    return scada_match_port(rule, flow_sp, flow_dp);
+}
+
+pub fn scada_engine_add_rule(engine: &mut ScadaEngine, r: ScadaRule) {
+    let mut eng: ScadaEngine = engine;
+    let old = eng.rules;
+    let mut updated: List[ScadaRule] = list_new();
+    let n = list_len(old);
+    let mut i = 0;
+    while i < n {
+        let cur = list_get(old, i);
+        updated = list_push(updated, cur);
+        i = i + 1;
+    }
+    updated = list_push(updated, r);
+    eng.rules = updated;
+}
+
+pub fn scada_engine_inspect(engine: &mut ScadaEngine, flow: &ScadaFlow) -> ScadaDecision {
+    let mut eng: ScadaEngine = engine;
+    let halted = eng.is_halted;
+    let mut action: Int = 0;
+    let mut matched_rule: Int = 0;
+    let mut is_anomaly_v: Bool = false;
+    let mut anomaly_code: Int = 0;
+    let mut reason: String = "";
+    if halted == true {
+        return ScadaDecision {
+            decision_id: 0, flow_id: (flow).flow_id, matched_rule_id: 0,
+            action: 2, is_anomaly: true, anomaly_code: scada_anom_excessive_drops(),
+            reason: "Engine halted"
+        };
+    }
+    let mut cur_t = eng.total_flows_inspected;
+    let one: Int = 1;
+    cur_t = cur_t + one;
+    eng.total_flows_inspected = cur_t;
+    let rules = eng.rules;
+    let n = list_len(rules);
+    let mut i = 0;
+    let mut found: Bool = false;
+    while i < n {
+        if found == false {
+            let cur = list_get(rules, i);
+            if scada_rule_matches(&cur, flow) {
+                let en = (cur).is_enabled;
+                if en {
+                    matched_rule = (cur).rule_id;
+                    action = (cur).action;
+                    reason = (cur).name;
+                    found = true;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return ScadaDecision {
+        decision_id: cur_t, flow_id: (flow).flow_id, matched_rule_id: matched_rule,
+        action: action, is_anomaly: is_anomaly_v, anomaly_code: anomaly_code, reason: reason
+    };
+}
+
+pub fn scada_engine_record_anomaly(engine: &mut ScadaEngine, a: ScadaAnomaly) {
+    let mut eng: ScadaEngine = engine;
+    let old = eng.anomalies;
+    let mut updated: List[ScadaAnomaly] = list_new();
+    let n = list_len(old);
+    let mut i = 0;
+    while i < n {
+        let cur = list_get(old, i);
+        updated = list_push(updated, cur);
+        i = i + 1;
+    }
+    updated = list_push(updated, a);
+    eng.anomalies = updated;
+    let inc: Int = 1;
+    let cur_t = eng.total_anomalies;
+    eng.total_anomalies = cur_t + inc;
+}
+
+pub fn scada_engine_do_work(engine: &ScadaEngine) -> Int {
+    let r_n = list_len((engine).rules);
+    let d_n = list_len((engine).decisions);
+    let a_n = list_len((engine).anomalies);
+    return r_n + d_n + a_n;
+}
+
+pub fn scada_install_nft(net: &SysCap, rule_blob: String) -> Result[Bool, String] {
+    process_exit(1);
+    return Err("Unimplemented: SCADA / ICS firewall live rule install requires &SysCap");
+}
+
+pub fn scada_open_capture(net: &NetCap, interface: String) -> Result[Int, String] {
+    process_exit(1);
+    return Err("Unimplemented: SCADA / ICS AF_PACKET capture requires &NetCap");
+}

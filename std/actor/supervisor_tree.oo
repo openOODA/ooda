@@ -1,0 +1,252 @@
+// # OTP Actor Supervision Tree Engine
+//
+// Logline: Supervision tree data structures, child restart dispatching, and crash recovery under ThreadCap.
+//
+// Setup: Coordinates child actor monitoring, health state tracking, and sub-millisecond recovery under ThreadCap.
+//
+// Beats:
+//   1. Construct SupervisorTree with strategy, child specifications, and restart limits.
+//   2. Register and start child workers.
+//   3. Handle child crash events applying OneForOne, OneForAll, or RestForOne policies.
+//   4. Enforce restart intensity limits and escalate unrecoverable failures.
+// RULES.oot 1.4: Explicit &ThreadCap required.
+// RULES.oot 1.7: Under 256 lines.
+
+import "strategy.oo";
+import "worker.oo";
+
+pub type SupervisedChild = struct {
+    spec: ChildSpec,
+    worker: Worker,
+    status: String
+};
+
+pub type SupervisorTree = struct {
+    name: String,
+    strategy: RestartStrategy,
+    children: List[SupervisedChild],
+    child_count: Int,
+    history: RestartHistory,
+    is_active: Bool
+};
+
+pub fn supervisor_create(name: String, strategy: RestartStrategy) -> SupervisorTree {
+    let empty: List[SupervisedChild] = list_new();
+    return SupervisorTree {
+        name: name,
+        strategy: strategy,
+        children: empty,
+        child_count: 0,
+        history: restart_history_new(),
+        is_active: true
+    };
+}
+
+pub fn supervisor_add_worker(
+    sup: SupervisorTree,
+    spec: ChildSpec,
+    init_state: String
+) -> SupervisorTree {
+    let sid: String = spec.id;
+    let w: Worker = worker_new(sid, sid, init_state);
+    let child = SupervisedChild { spec: spec, worker: w, status: "registered" };
+    let new_children: List[SupervisedChild] = list_push(sup.children, child);
+    let next_c: Int = sup.child_count + 1;
+    return SupervisorTree {
+        name: sup.name,
+        strategy: sup.strategy,
+        children: new_children,
+        child_count: next_c,
+        history: sup.history,
+        is_active: sup.is_active
+    };
+}
+
+pub fn supervisor_start_all(
+    thread: &ThreadCap,
+    sup: SupervisorTree
+) -> Result[SupervisorTree, String] {
+    let mut updated: List[SupervisedChild] = list_new();
+    let n: Int = sup.child_count;
+    let mut i: Int = 0;
+    while i < n {
+        let child: SupervisedChild = list_get(sup.children, i);
+        let start_res: Result[Worker, String] = worker_start(thread, child.worker);
+        match start_res {
+            Ok(started_w) => {
+                let sc = SupervisedChild { spec: child.spec, worker: started_w, status: "running" };
+                updated = list_push(updated, sc);
+            },
+            Err(e) => {
+                return Err(e);
+            }
+        }
+        i = i + 1;
+    }
+    return Ok(SupervisorTree {
+        name: sup.name,
+        strategy: sup.strategy,
+        children: updated,
+        child_count: n,
+        history: sup.history,
+        is_active: true
+    });
+}
+
+pub fn supervisor_restart_one(
+    thread: &ThreadCap,
+    sup: SupervisorTree,
+    child_id: String,
+    now: Int
+) -> Result[SupervisorTree, String] {
+    let mut updated: List[SupervisedChild] = list_new();
+    let n: Int = sup.child_count;
+    let mut i: Int = 0;
+    while i < n {
+        let child: SupervisedChild = list_get(sup.children, i);
+        let cid: String = child.spec.id;
+        if cid == child_id {
+            let r_res: Result[Worker, String] = worker_restart(thread, child.worker, now);
+            match r_res {
+                Ok(rw) => {
+                    let sc = SupervisedChild { spec: child.spec, worker: rw, status: "running" };
+                    updated = list_push(updated, sc);
+                },
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        } else {
+            updated = list_push(updated, child);
+        }
+        i = i + 1;
+    }
+    let new_hist: RestartHistory = restart_history_record(sup.history, now);
+    return Ok(SupervisorTree {
+        name: sup.name,
+        strategy: sup.strategy,
+        children: updated,
+        child_count: n,
+        history: new_hist,
+        is_active: true
+    });
+}
+
+pub fn supervisor_restart_all_children(
+    thread: &ThreadCap,
+    sup: SupervisorTree,
+    now: Int
+) -> Result[SupervisorTree, String] {
+    let mut updated: List[SupervisedChild] = list_new();
+    let n: Int = sup.child_count;
+    let mut i: Int = 0;
+    while i < n {
+        let child: SupervisedChild = list_get(sup.children, i);
+        let r_res: Result[Worker, String] = worker_restart(thread, child.worker, now);
+        match r_res {
+            Ok(rw) => {
+                let sc = SupervisedChild { spec: child.spec, worker: rw, status: "running" };
+                updated = list_push(updated, sc);
+            },
+            Err(e) => {
+                return Err(e);
+            }
+        }
+        i = i + 1;
+    }
+    let new_hist: RestartHistory = restart_history_record(sup.history, now);
+    return Ok(SupervisorTree {
+        name: sup.name,
+        strategy: sup.strategy,
+        children: updated,
+        child_count: n,
+        history: new_hist,
+        is_active: true
+    });
+}
+
+pub fn supervisor_restart_rest(
+    thread: &ThreadCap,
+    sup: SupervisorTree,
+    crashed_id: String,
+    now: Int
+) -> Result[SupervisorTree, String] {
+    let mut crashed_order: Int = -1;
+    let n: Int = sup.child_count;
+    let mut i: Int = 0;
+    while i < n {
+        let child: SupervisedChild = list_get(sup.children, i);
+        let cid: String = child.spec.id;
+        if cid == crashed_id { crashed_order = child.spec.order_index; }
+        i = i + 1;
+    }
+    let mut updated: List[SupervisedChild] = list_new();
+    i = 0;
+    while i < n {
+        let child: SupervisedChild = list_get(sup.children, i);
+        let ord: Int = child.spec.order_index;
+        if ord >= crashed_order && crashed_order >= 0 {
+            let r_res: Result[Worker, String] = worker_restart(thread, child.worker, now);
+            match r_res {
+                Ok(rw) => {
+                    let sc = SupervisedChild { spec: child.spec, worker: rw, status: "running" };
+                    updated = list_push(updated, sc);
+                },
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        } else {
+            updated = list_push(updated, child);
+        }
+        i = i + 1;
+    }
+    let new_hist: RestartHistory = restart_history_record(sup.history, now);
+    return Ok(SupervisorTree {
+        name: sup.name,
+        strategy: sup.strategy,
+        children: updated,
+        child_count: n,
+        history: new_hist,
+        is_active: true
+    });
+}
+
+pub fn supervisor_handle_crash(
+    thread: &ThreadCap,
+    sup: SupervisorTree,
+    child_id: String,
+    reason: String,
+    now: Int
+) -> Result[SupervisorTree, String] {
+    let max_r: Int = sup.strategy.max_restarts;
+    let max_s: Int = sup.strategy.max_seconds;
+    let within_limits: Bool = restart_history_check_intensity(sup.history, max_r, max_s, now);
+    if !within_limits {
+        return Err("E_SUPERVISOR_ESCALATE: restart intensity exceeded for supervisor " + sup.name);
+    }
+    let st: Int = sup.strategy.strategy_type;
+    if st == 0 { return supervisor_restart_one(thread, sup, child_id, now); }
+    if st == 1 { return supervisor_restart_all_children(thread, sup, now); }
+    return supervisor_restart_rest(thread, sup, child_id, now);
+}
+
+pub fn supervisor_get_child_status(sup: SupervisorTree, child_id: String) -> String {
+    let n: Int = sup.child_count;
+    let mut i: Int = 0;
+    while i < n {
+        let child: SupervisedChild = list_get(sup.children, i);
+        let cid: String = child.spec.id;
+        if cid == child_id { return child.worker.status; }
+        i = i + 1;
+    }
+    return "unknown";
+}
+
+pub fn supervisor_tree_is_healthy(sup: SupervisorTree) -> Bool {
+    return sup.is_active;
+}
+
+pub fn supervisor_tree_child_count(sup: SupervisorTree) -> Int {
+    return sup.child_count;
+}

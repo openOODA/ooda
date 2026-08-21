@@ -1,0 +1,162 @@
+// # Test Env and ARC Scope Exit Adversarial Harness
+//
+// Logline: Stress-test c_emit_env and c_emit_arc with prefix collisions, shadowing, deep nesting, and ARC releases.
+//
+// Setup: cwd is ooda/. Drive oodac run fixtures/test_env_arc_adversarial.oo.
+//
+// Beats:
+//   1. Verify prefix collisions and precision in c_env_get, c_env_put, and c_env_put_last.
+//   2. Verify shadowed variable resolution and deep nesting (50+ frames).
+//   3. Verify large symbol environment (200+ variables) lookup precision.
+//   4. Verify scope push, exit, frame popping, and ARC kind release strings.
+
+import "oodac/tc_parse_int.oo";
+import "oodac/c_emit_env.oo";
+import "oodac/c_emit_arc.oo";
+
+fn assert_eq_str(a: String, b: String, label: String) {
+    if a != b {
+        println("FAIL [" + label + "]: expected '" + b + "', got '" + a + "'");
+        process_exit(1);
+    }
+}
+
+fn assert_true(cond: Bool, label: String) {
+    if !cond {
+        println("FAIL [" + label + "]: assertion failed");
+        process_exit(1);
+    }
+}
+
+fn test_prefix_collisions() {
+    let mut env = "foo=T;foobar=S;foobaz=I;f=LF;fool=T;barfoo=S;";
+    assert_eq_str(c_env_get(env, "foo"), "T", "get foo");
+    assert_eq_str(c_env_get(env, "foobar"), "S", "get foobar");
+    assert_eq_str(c_env_get(env, "foobaz"), "I", "get foobaz");
+    assert_eq_str(c_env_get(env, "f"), "LF", "get f");
+    assert_eq_str(c_env_get(env, "fool"), "T", "get fool");
+    assert_eq_str(c_env_get(env, "barfoo"), "S", "get barfoo");
+    assert_eq_str(c_env_get(env, "bar"), "", "get nonexistent bar");
+    assert_eq_str(c_env_get(env, "fo"), "", "get nonexistent fo");
+
+    // Put replacement with prefix collisions in same frame
+    env = c_env_put(env, "foo", "I");
+    assert_eq_str(c_env_get(env, "foo"), "I", "put overwrite foo");
+    assert_eq_str(c_env_get(env, "foobar"), "S", "put preserve foobar");
+    assert_eq_str(c_env_get(env, "foobaz"), "I", "put preserve foobaz");
+
+    env = c_env_put(env, "foobar", "LF");
+    assert_eq_str(c_env_get(env, "foo"), "I", "put preserve foo after foobar put");
+    assert_eq_str(c_env_get(env, "foobar"), "LF", "put overwrite foobar");
+
+    // Put_last with prefix collisions
+    env = c_env_put_last(env, "foo", "S");
+    assert_eq_str(c_env_get(env, "foo"), "S", "put_last foo");
+    assert_eq_str(c_env_get(env, "foobar"), "LF", "put_last preserve foobar");
+    println("PASS: test_prefix_collisions");
+}
+
+fn test_shadowing_and_nesting() {
+    let mut env = "x=T;y=S;";
+    env = c_env_push_scope(env); // {;
+    env = c_env_put(env, "x", "I"); // shadow x with I
+    assert_eq_str(c_env_get(env, "x"), "I", "nested shadow x");
+    assert_eq_str(c_env_get(env, "y"), "S", "outer y accessible");
+
+    env = c_env_push_scope(env); // {;
+    env = c_env_put(env, "x", "LF"); // shadow x with LF
+    env = c_env_put(env, "z", "T");
+    assert_eq_str(c_env_get(env, "x"), "LF", "innermost shadow x");
+    assert_eq_str(c_env_get(env, "z"), "T", "innermost z");
+
+    // Pop innermost scope
+    env = c_emit_scope_exit(env);
+    assert_eq_str(c_env_get(env, "x"), "I", "after pop 1, x is I");
+    assert_eq_str(c_env_get(env, "z"), "", "after pop 1, z is gone");
+
+    // Pop middle scope
+    env = c_emit_scope_exit(env);
+    assert_eq_str(c_env_get(env, "x"), "T", "after pop 2, x is T");
+    assert_eq_str(c_env_get(env, "y"), "S", "after pop 2, y is S");
+    println("PASS: test_shadowing_and_nesting");
+}
+
+fn test_deep_nesting() {
+    let mut env = "root=T;";
+    let mut depth = 0;
+    while depth < 60 {
+        env = c_env_push_scope(env);
+        let var_name = "v_" + depth.to_string();
+        env = c_env_put(env, var_name, depth.to_string());
+        depth = depth + 1;
+    }
+    // Verify all 60 nested variables are accessible
+    let mut check_d = 0;
+    while check_d < 60 {
+        let vname = "v_" + check_d.to_string();
+        assert_eq_str(c_env_get(env, vname), check_d.to_string(), "deep get " + vname);
+        check_d = check_d + 1;
+    }
+    assert_eq_str(c_env_get(env, "root"), "T", "deep get root");
+
+    // Pop all 60 frames and verify unwinding
+    let mut unwind = 59;
+    while unwind >= 0 {
+        let vname = "v_" + unwind.to_string();
+        assert_eq_str(c_env_get(env, vname), unwind.to_string(), "before unwind " + vname);
+        env = c_emit_scope_exit(env);
+        assert_eq_str(c_env_get(env, vname), "", "after unwind " + vname);
+        unwind = unwind - 1;
+    }
+    assert_eq_str(c_env_get(env, "root"), "T", "after all unwinds root is intact");
+    println("PASS: test_deep_nesting");
+}
+
+fn test_large_environment() {
+    let mut env = "";
+    let mut count = 0;
+    while count < 250 {
+        let k = "var_" + count.to_string();
+        let val = "val_" + count.to_string();
+        env = c_env_put(env, k, val);
+        count = count + 1;
+    }
+    // Verify precision: var_1 must not match var_10, var_100, etc.
+    let mut check_c = 0;
+    while check_c < 250 {
+        let k = "var_" + check_c.to_string();
+        let expected = "val_" + check_c.to_string();
+        assert_eq_str(c_env_get(env, k), expected, "large env lookup " + k);
+        check_c = check_c + 1;
+    }
+    assert_eq_str(c_env_get(env, "var_250"), "", "large env nonexistent var_250");
+    assert_eq_str(c_env_get(env, "var_"), "", "large env nonexistent var_");
+    println("PASS: test_large_environment");
+}
+
+fn test_arc_releases() {
+    assert_eq_str(c_arc_kind_release("T", "s"), "oo_str_release(s); ", "arc release T");
+    assert_eq_str(c_arc_kind_release("S", "xs"), "oo_slist_release(xs); ", "arc release S");
+    assert_eq_str(c_arc_kind_release("I", "nums"), "oo_ilist_release(nums); ", "arc release I");
+    assert_eq_str(c_arc_kind_release("LF", "flts"), "oo_flist_release(flts); ", "arc release LF");
+    assert_eq_str(c_arc_kind_release("F", "num"), "", "arc release F scalar");
+    assert_eq_str(c_arc_kind_release("LL_MyNode", "nodes"), "oo_ll_MyNode_release(nodes); ", "arc release LL_MyNode");
+
+    // Test formal param suppression
+    let mut env = "__formal__arg1=1;arg1=T;local1=S;{;local2=I;";
+    assert_true(c_is_formal_param(env, "arg1") == 1, "is_formal arg1");
+    assert_true(c_is_formal_param(env, "local1") == 0, "not formal local1");
+    assert_true(c_is_formal_param(env, "local2") == 0, "not formal local2");
+
+    println("PASS: test_arc_releases");
+}
+
+pub fn main() {
+    println("Running Env & ARC Adversarial Tests...");
+    test_prefix_collisions();
+    test_shadowing_and_nesting();
+    test_deep_nesting();
+    test_large_environment();
+    test_arc_releases();
+    println("ALL_ENV_ARC_ADVERSARIAL_TESTS_PASSED");
+}

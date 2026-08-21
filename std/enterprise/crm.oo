@@ -1,317 +1,42 @@
-// # Customer Relationship Management Domain
+// # Customer Relationship Management Engine
 //
-// Logline: Track Contact, Deal, and Interaction records; advance deal stages and score activity.
+// Logline: Initializes the CrmEngine, configures strict mode, and exposes pipeline value, weighted pipeline, win rate, and export helpers.
 //
-// Setup: Self-contained domain module. RULES.oot 1.4 default-deny; RULES.oot 1.3 fail-closed residual.
+// Setup: Imports crm_types.oo for CrmEngine and record types and crm_deal.oo for deal helpers. RULES.oot 1.4 default-deny; RULES.oot 1.3 fail-closed residual.
 //
 // Beats:
-//   1. contact_init: bind name, email, phone, and status fields.
-//   2. deal_init: bind stage, amount, probability, and close flags.
-//   3. interaction_init: record customer touchpoint and channel.
-//   4. deal_advance_stage: walk stage counter and refresh probability.
-//
-// residual: not a real CRM; integrate vetted CRM platform.
+//   1. crm_engine_init, crm_set_strict_mode.
+//   2. crm_calculate_pipeline_value, crm_calculate_weighted_pipeline.
+//   3. crm_get_win_rate, crm_export_data with capability token.
+//   4. Residual process_exit stubs for raw-pointer batch import and dynamic rule evaluation.
 
-// RULES.oot 1.4: Default-deny for privileged effects. Explicit &SysCap required.
-// RULES.oot 1.3: Fail-closed residual for unimplemented builtins.
+import "./crm_types.oo";
+import "./crm_deal.oo";
 
-pub type Contact = struct {
-    id: Int,
-    name: String,
-    email: String,
-    phone: String,
-    company_id: Int,
-    status: Int,
-    score: Int,
-    is_active: Bool,
+type Contact = struct {
+    id: Int, name: String, email: String, phone: String, company_id: Int,
+    status: Int, score: Int, is_active: Bool
 };
 
-pub type Deal = struct {
-    id: Int,
-    customer_id: Int,
-    title: String,
-    amount: Int,
-    stage: Int,
-    probability: Int,
-    is_closed: Bool,
-    is_won: Bool,
+type Deal = struct {
+    id: Int, customer_id: Int, title: String, amount: Int, stage: Int,
+    probability: Int, is_closed: Bool, is_won: Bool
 };
 
-pub type Interaction = struct {
-    id: Int,
-    customer_id: Int,
-    deal_id: Int,
-    interaction_type: Int,
-    summary: String,
-    timestamp: Int,
+type Interaction = struct {
+    id: Int, customer_id: Int, deal_id: Int, interaction_type: Int,
+    summary: String, timestamp: Int
 };
 
-pub type Campaign = struct {
-    id: Int,
-    name: String,
-    budget: Int,
-    spent: Int,
-    leads_generated: Int,
-    conversions: Int,
-    is_active: Bool,
+type Campaign = struct {
+    id: Int, name: String, budget: Int, spent: Int, leads_generated: Int,
+    conversions: Int, is_active: Bool
 };
 
-pub type CrmEngine = struct {
-    customers: List[Contact],
-    deals: List[Deal],
-    interactions: List[Interaction],
-    campaigns: List[Campaign],
-    strict_mode: Bool,
-    total_deals_won: Int,
-    total_deals_lost: Int,
+type CrmEngine = struct {
+    customers: List[Contact], deals: List[Deal], interactions: List[Interaction], campaigns: List[Campaign],
+    strict_mode: Bool, total_deals_won: Int, total_deals_lost: Int
 };
-
-// -------------------------------------------------------------------
-// Contact / Lead Management
-// -------------------------------------------------------------------
-
-pub fn contact_create(id: Int, name: String, email: String, phone: String, company_id: Int) -> Contact {
-    return Contact {
-        id: id,
-        name: name,
-        email: email,
-        phone: phone,
-        company_id: company_id,
-        status: 0,
-        score: 0,
-        is_active: true,
-    };
-}
-
-pub fn contact_update_score(contact: &mut Contact, delta: Int) -> Bool {
-    let active: Bool = (contact).is_active;
-    if active == false {
-        return false;
-    }
-    let cur_score: Int = (contact).score;
-    let mut new_score: Int = cur_score + delta;
-    if new_score < 0 {
-        new_score = 0;
-    }
-    (contact).score = new_score;
-    return true;
-}
-
-pub fn contact_change_status(contact: &mut Contact, new_status: Int) -> Bool {
-    let active: Bool = (contact).is_active;
-    if active == false {
-        return false;
-    }
-    if new_status < 0 {
-        return false;
-    }
-    if new_status > 3 {
-        return false;
-    }
-    (contact).status = new_status;
-    return true;
-}
-
-pub fn contact_qualify_lead(contact: &mut Contact) -> Bool {
-    let active: Bool = (contact).is_active;
-    if active == false {
-        return false;
-    }
-    let st: Int = (contact).status;
-    if st != 0 {
-        return false;
-    }
-    let sc: Int = (contact).score;
-    if sc < 50 {
-        return false;
-    }
-    (contact).status = 1;
-    return true;
-}
-
-pub fn contact_set_active(contact: &mut Contact, active: Bool) {
-    (contact).is_active = active;
-}
-
-// -------------------------------------------------------------------
-// Deal / Opportunity Management
-// -------------------------------------------------------------------
-
-pub fn deal_create(id: Int, customer_id: Int, title: String, amount: Int) -> Deal {
-    return Deal {
-        id: id,
-        customer_id: customer_id,
-        title: title,
-        amount: amount,
-        stage: 0,
-        probability: 10,
-        is_closed: false,
-        is_won: false,
-    };
-}
-
-pub fn deal_advance_stage(deal: &mut Deal, new_stage: Int, new_probability: Int) -> Bool {
-    let closed: Bool = (deal).is_closed;
-    if closed == true {
-        return false;
-    }
-    if new_stage < 0 {
-        return false;
-    }
-    if new_stage > 5 {
-        return false;
-    }
-    if new_probability < 0 {
-        return false;
-    }
-    if new_probability > 100 {
-        return false;
-    }
-
-    (deal).stage = new_stage;
-    (deal).probability = new_probability;
-
-    if new_stage == 4 {
-        (deal).is_closed = true;
-        (deal).is_won = true;
-        (deal).probability = 100;
-    } else if new_stage == 5 {
-        (deal).is_closed = true;
-        (deal).is_won = false;
-        (deal).probability = 0;
-    }
-
-    return true;
-}
-
-pub fn deal_close_won(deal: &mut Deal) -> Bool {
-    let closed: Bool = (deal).is_closed;
-    if closed == true {
-        return false;
-    }
-    (deal).stage = 4;
-    (deal).probability = 100;
-    (deal).is_closed = true;
-    (deal).is_won = true;
-    return true;
-}
-
-pub fn deal_close_lost(deal: &mut Deal) -> Bool {
-    let closed: Bool = (deal).is_closed;
-    if closed == true {
-        return false;
-    }
-    (deal).stage = 5;
-    (deal).probability = 0;
-    (deal).is_closed = true;
-    (deal).is_won = false;
-    return true;
-}
-
-pub fn deal_weighted_value(deal: &Deal) -> Int {
-    let closed: Bool = (deal).is_closed;
-    let won: Bool = (deal).is_won;
-    let amt: Int = (deal).amount;
-    let prob: Int = (deal).probability;
-    if closed == true {
-        if won == true {
-            return amt;
-        }
-        return 0;
-    }
-    return (amt * prob) / 100;
-}
-
-// -------------------------------------------------------------------
-// Interaction / Activity Tracking
-// -------------------------------------------------------------------
-
-pub fn interaction_create(id: Int, customer_id: Int, deal_id: Int, itype: Int, summary: String, ts: Int) -> Interaction {
-    return Interaction {
-        id: id,
-        customer_id: customer_id,
-        deal_id: deal_id,
-        interaction_type: itype,
-        summary: summary,
-        timestamp: ts,
-    };
-}
-
-// -------------------------------------------------------------------
-// Campaign & Marketing Analytics
-// -------------------------------------------------------------------
-
-pub fn campaign_create(id: Int, name: String, budget: Int) -> Campaign {
-    return Campaign {
-        id: id,
-        name: name,
-        budget: budget,
-        spent: 0,
-        leads_generated: 0,
-        conversions: 0,
-        is_active: true,
-    };
-}
-
-pub fn campaign_record_spend(campaign: &mut Campaign, amount: Int) -> Bool {
-    let active: Bool = (campaign).is_active;
-    if active == false {
-        return false;
-    }
-    if amount <= 0 {
-        return false;
-    }
-    let cur_spent: Int = (campaign).spent;
-    let new_spent: Int = cur_spent + amount;
-    let max_budget: Int = (campaign).budget;
-    if new_spent > max_budget {
-        return false;
-    }
-    (campaign).spent = new_spent;
-    return true;
-}
-
-pub fn campaign_record_lead(campaign: &mut Campaign) -> Bool {
-    let active: Bool = (campaign).is_active;
-    if active == false {
-        return false;
-    }
-    let cur_leads: Int = (campaign).leads_generated;
-    (campaign).leads_generated = cur_leads + 1;
-    return true;
-}
-
-pub fn campaign_record_conversion(campaign: &mut Campaign) -> Bool {
-    let active: Bool = (campaign).is_active;
-    if active == false {
-        return false;
-    }
-    let cur_conv: Int = (campaign).conversions;
-    (campaign).conversions = cur_conv + 1;
-    return true;
-}
-
-pub fn campaign_calculate_cost_per_lead(campaign: &Campaign) -> Int {
-    let leads: Int = (campaign).leads_generated;
-    if leads == 0 {
-        return 0;
-    }
-    let cur_spent: Int = (campaign).spent;
-    return cur_spent / leads;
-}
-
-pub fn campaign_calculate_roi(campaign: &Campaign, revenue_generated: Int) -> Int {
-    let cur_spent: Int = (campaign).spent;
-    if cur_spent == 0 {
-        return 0;
-    }
-    let net_return: Int = revenue_generated - cur_spent;
-    return (net_return * 100) / cur_spent;
-}
-
-// -------------------------------------------------------------------
-// CRM Engine Implementation
-// -------------------------------------------------------------------
 
 pub fn crm_engine_init() -> CrmEngine {
     let custs: List[Contact] = list_new();
@@ -319,117 +44,14 @@ pub fn crm_engine_init() -> CrmEngine {
     let inters: List[Interaction] = list_new();
     let camps: List[Campaign] = list_new();
     return CrmEngine {
-        customers: custs,
-        deals: dls,
-        interactions: inters,
-        campaigns: camps,
-        strict_mode: true,
-        total_deals_won: 0,
-        total_deals_lost: 0,
+        customers: custs, deals: dls, interactions: inters, campaigns: camps,
+        strict_mode: true, total_deals_won: 0, total_deals_lost: 0
     };
 }
 
 pub fn crm_set_strict_mode(engine: &mut CrmEngine, strict: Bool) {
+    let mut engine: CrmEngine = engine;
     (engine).strict_mode = strict;
-}
-
-pub fn crm_add_customer(engine: &mut CrmEngine, c_item: Contact) {
-    let mut new_custs: List[Contact] = list_new();
-    let old_custs = (engine).customers;
-    let n = list_len(old_custs);
-    let mut i = 0;
-    let mut replaced = false;
-    let target_id: Int = c_item.id;
-    while i < n {
-        let c = list_get(old_custs, i);
-        let c_id: Int = c.id;
-        if c_id == target_id {
-            new_custs = list_push(new_custs, c_item);
-            replaced = true;
-        } else {
-            new_custs = list_push(new_custs, c);
-        }
-        i = i + 1;
-    }
-    if replaced == false {
-        new_custs = list_push(new_custs, c_item);
-    }
-    (engine).customers = new_custs;
-}
-
-pub fn crm_add_deal(engine: &mut CrmEngine, d_item: Deal) {
-    let mut new_deals: List[Deal] = list_new();
-    let old_deals = (engine).deals;
-    let n = list_len(old_deals);
-    let mut i = 0;
-    let mut replaced = false;
-    let target_id: Int = d_item.id;
-    while i < n {
-        let d = list_get(old_deals, i);
-        let d_id: Int = d.id;
-        if d_id == target_id {
-            new_deals = list_push(new_deals, d_item);
-            replaced = true;
-        } else {
-            new_deals = list_push(new_deals, d);
-        }
-        i = i + 1;
-    }
-    if replaced == false {
-        new_deals = list_push(new_deals, d_item);
-    }
-    (engine).deals = new_deals;
-
-    let closed: Bool = d_item.is_closed;
-    let won: Bool = d_item.is_won;
-    if closed {
-        if won {
-            let mut won_c = (engine).total_deals_won;
-            won_c = won_c + 1;
-            (engine).total_deals_won = won_c;
-        } else {
-            let mut lost_c = (engine).total_deals_lost;
-            lost_c = lost_c + 1;
-            (engine).total_deals_lost = lost_c;
-        }
-    }
-}
-
-pub fn crm_add_interaction(engine: &mut CrmEngine, interaction: Interaction) {
-    let mut new_inters: List[Interaction] = list_new();
-    let old_inters = (engine).interactions;
-    let n = list_len(old_inters);
-    let mut i = 0;
-    while i < n {
-        new_inters = list_push(new_inters, list_get(old_inters, i));
-        i = i + 1;
-    }
-    new_inters = list_push(new_inters, interaction);
-    (engine).interactions = new_inters;
-}
-
-pub fn crm_add_campaign(engine: &mut CrmEngine, camp_item: Campaign) {
-    let mut new_camps: List[Campaign] = list_new();
-    let old_camps = (engine).campaigns;
-    let n = list_len(old_camps);
-    let mut i = 0;
-    let mut replaced = false;
-    let target_id: Int = camp_item.id;
-    while i < n {
-        let c = list_get(old_camps, i);
-        let c_id: Int = c.id;
-        if c_id == target_id {
-            new_camps = list_push(new_camps, camp_item);
-            replaced = true;
-        } else {
-            new_camps = list_push(new_camps, c);
-        }
-        i = i + 1;
-    }
-    if replaced == false {
-        new_camps = list_push(new_camps, camp_item);
-    }
-    (engine).campaigns = new_camps;
 }
 
 pub fn crm_calculate_pipeline_value(engine: &CrmEngine) -> Int {
@@ -441,9 +63,7 @@ pub fn crm_calculate_pipeline_value(engine: &CrmEngine) -> Int {
         let d = list_get(dls, i);
         let d_closed: Bool = d.is_closed;
         let d_amt: Int = d.amount;
-        if d_closed == false {
-            total = total + d_amt;
-        }
+        if d_closed == false  { total = total + d_amt; }
         i = i + 1;
     }
     return total;
@@ -457,21 +77,29 @@ pub fn crm_calculate_weighted_pipeline(engine: &CrmEngine) -> Int {
     while i < n {
         let d = list_get(dls, i);
         let d_closed: Bool = d.is_closed;
-        if d_closed == false {
-            total = total + deal_weighted_value(&d);
-        }
+        if d_closed == false  { total = total + crm_internal_weighted_value(&d); }
         i = i + 1;
     }
     return total;
+}
+
+pub fn crm_internal_weighted_value(deal: &Deal) -> Int {
+    let closed: Bool = (deal).is_closed;
+    let won: Bool = (deal).is_won;
+    let amt: Int = (deal).amount;
+    let prob: Int = (deal).probability;
+    if closed == true {
+        if won == true  { return amt; }
+        return 0;
+    }
+    return (amt * prob) / 100;
 }
 
 pub fn crm_get_win_rate(engine: &CrmEngine) -> Int {
     let won = (engine).total_deals_won;
     let lost = (engine).total_deals_lost;
     let total = won + lost;
-    if total == 0 {
-        return 0;
-    }
+    if total == 0  { return 0; }
     return (won * 100) / total;
 }
 
@@ -480,27 +108,17 @@ pub fn crm_export_data(sys: &SysCap, engine: &CrmEngine) -> Result[Bool, String]
     let num_deals = list_len((engine).deals);
     let is_strict: Bool = (engine).strict_mode;
     if is_strict {
-        if num_custs == 0 {
-            return Err("CRM_EXPORT_FAILED: No customer data to export");
-        }
+        if num_custs == 0  { return Err("CRM_EXPORT_FAILED: No customer data to export"); }
     }
     return Ok(true);
 }
 
-// -------------------------------------------------------------------
-// Hard Compiler Limitations (Stubbed functions with process_exit(1))
-// -------------------------------------------------------------------
-
 pub fn crm_batch_import_raw_pointers(ptr: Int, count: Int) -> Int {
-    // COMPILER LIMITATION: lack of language features like arrays/pointers
-    // Cannot safely iterate over raw dynamic memory pointers in openOODA.
     process_exit(1);
     return 0;
 }
 
 pub fn crm_eval_dynamic_segmentation_rules(rule_ptr: Int) -> Bool {
-    // COMPILER LIMITATION: lack of language features like arrays/pointers
-    // Cannot evaluate dynamic AST rule pointers at runtime.
     process_exit(1);
     return false;
 }

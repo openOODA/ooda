@@ -1,0 +1,159 @@
+// # openOODA Stage 17 Master Integration Smoke Suite
+//
+// Logline: Comprehensive end-to-end integration proof verifying Sovereign Capability Microkernel Operating System (OODAX).
+//
+// Setup: Exercises full OODAX stack under ProcessCap with single-address-space domain verification.
+//
+// Beats:
+//   1. Capability Space & Rights Attenuation: minting, rights masks, and hierarchical revocation.
+//   2. Zero-Copy Synchronous IPC: rendezvous message passing, endpoint queues, and badging.
+//   3. Preemptive Multi-Level Priority Scheduler: time slices, thread contexts, and preemption.
+//   4. User-Space VirtIO Drivers & System Calls: block read/write, network RX/TX, and trap dispatch.
+// RULES.oot 1.4: Pure capability-gated execution.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+import "oodax/cap_table.oo";
+import "oodax/ipc.oo";
+import "oodax/sched.oo";
+import "oodax/virtio_blk.oo";
+import "oodax/virtio_net.oo";
+import "oodax/syscall.oo";
+import "oodax/kernel.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("===================================================================");
+    println(" openOODA Stage 17: Sovereign Capability Microkernel (OODAX) Master");
+    println("===================================================================");
+
+    // -------------------------------------------------------------
+    // Part I: Capability Space & Attenuation Trees
+    // -------------------------------------------------------------
+    let mut table: CapTable = cap_table_new(101);
+    let root_cap: CapEntry = cap_entry_new(0, cap_type_endpoint(), 500, cap_right_all(), 999);
+    table = cap_table_set(table, 0, root_cap);
+
+    let read_only_rights: Int = cap_right_read();
+    let mint_res: Result[CapTable, String] = cap_mint(table, 0, 1, read_only_rights, 777);
+    if mint_res.is_err() { println("FAIL: cap_mint failed"); process_exit(1); }
+    match mint_res {
+        Ok(t) => { table = t; },
+        Err(e) => { process_exit(1); }
+    }
+
+    let child_cap: CapEntry = cap_table_get(table, 1);
+    let has_read: Bool = cap_has_rights(child_cap, cap_right_read());
+    let has_write: Bool = cap_has_rights(child_cap, cap_right_write());
+    if !has_read || has_write { println("FAIL: rights attenuation invalid"); process_exit(1); }
+
+    let revoked_table: CapTable = cap_revoke(table, 0);
+    let child_after: CapEntry = cap_table_get(revoked_table, 1);
+    let child_valid: Bool = cap_entry_is_valid(child_after);
+    if child_valid { println("FAIL: child cap not revoked on parent revoke"); process_exit(1); }
+    println("  [PASS] 1. Capability Space, Rights Attenuation & Hierarchical Revocation");
+
+    // -------------------------------------------------------------
+    // Part II: Zero-Copy Synchronous Rendezvous IPC
+    // -------------------------------------------------------------
+    let mut ep: IpcEndpoint = ipc_endpoint_new(500, 101);
+    let send_cap: CapEntry = cap_entry_new(0, cap_type_endpoint(), 500, cap_right_call(), 42);
+    let recv_cap: CapEntry = cap_entry_new(1, cap_type_endpoint(), 500, cap_right_call(), 42);
+
+    let send_msg: IpcMessage = ipc_msg_new(1, 10, 1, "OODAX_ZERO_COPY_PAYLOAD_TOKEN", 0);
+    let s_res: Result[IpcTransferResult, String] = ipc_send_rendezvous(ep, 1, send_msg, send_cap);
+    if s_res.is_err() { println("FAIL: initial ipc send failed"); process_exit(1); }
+    match s_res {
+        Ok(res) => {
+            ep = res.endpoint;
+            if res.rendezvous_completed { println("FAIL: send should block when no receiver"); process_exit(1); }
+        },
+        Err(e) => { process_exit(1); }
+    }
+
+    let r_res: Result[IpcTransferResult, String] = ipc_recv_rendezvous(ep, 2, recv_cap);
+    if r_res.is_err() { println("FAIL: ipc recv rendezvous failed"); process_exit(1); }
+    match r_res {
+        Ok(res) => {
+            ep = res.endpoint;
+            if !res.rendezvous_completed { println("FAIL: rendezvous should complete"); process_exit(1); }
+            if res.unblocked_tid != 1 { println("FAIL: sender tid not unblocked"); process_exit(1); }
+            if res.delivered_msg.payload != "OODAX_ZERO_COPY_PAYLOAD_TOKEN" { println("FAIL: payload corrupted"); process_exit(1); }
+        },
+        Err(e) => { process_exit(1); }
+    }
+    println("  [PASS] 2. Zero-Copy Synchronous Rendezvous IPC Channels");
+
+    // -------------------------------------------------------------
+    // Part III: Preemptive Multi-Level Priority Scheduler
+    // -------------------------------------------------------------
+    let mut sched: Scheduler = sched_new(2);
+    let t1: ThreadControlBlock = tcb_new(1, 101, 5, 2);
+    let t2: ThreadControlBlock = tcb_new(2, 102, 10, 2);
+    sched = sched_add_thread(sched, t1);
+    sched = sched_add_thread(sched, t2);
+
+    let tick1: SchedTickResult = sched_tick(sched);
+    if tick1.active_tid != 2 { println("FAIL: highest priority thread not scheduled"); process_exit(1); }
+    let tick2: SchedTickResult = sched_tick(tick1.scheduler);
+    let tick3: SchedTickResult = sched_tick(tick2.scheduler);
+    if !tick3.preempted { println("FAIL: time-slice quantum did not trigger preemption"); process_exit(1); }
+    println("  [PASS] 3. Preemptive Multi-Level Priority Scheduler & Time Slicing");
+
+    // -------------------------------------------------------------
+    // Part IV: User-Space VirtIO Drivers & System Call Dispatch
+    // -------------------------------------------------------------
+    let mut blk_dev: VirtioBlkDevice = virtio_blk_init(1, 1024);
+    let blk_cap: CapEntry = cap_entry_new(2, cap_type_device(), 1, cap_right_all(), 88);
+    let w_req: VirtioBlkReq = virtio_blk_req_new(virtio_blk_op_write(), 42, "OODAX_PERSISTENT_SECTOR_BLOCK");
+    let w_res: Result[BlkOpResult, String] = virtio_blk_submit(blk_dev, w_req, blk_cap);
+    if w_res.is_err() { println("FAIL: virtio blk write failed"); process_exit(1); }
+    match w_res {
+        Ok(r) => { blk_dev = r.device; },
+        Err(e) => { process_exit(1); }
+    }
+
+    let r_req: VirtioBlkReq = virtio_blk_req_new(virtio_blk_op_read(), 42, "");
+    let r_res_blk: Result[BlkOpResult, String] = virtio_blk_submit(blk_dev, r_req, blk_cap);
+    if r_res_blk.is_err() { println("FAIL: virtio blk read failed"); process_exit(1); }
+    match r_res_blk {
+        Ok(r) => {
+            if r.req.data != "OODAX_PERSISTENT_SECTOR_BLOCK" { println("FAIL: blk read data mismatch"); process_exit(1); }
+        },
+        Err(e) => { process_exit(1); }
+    }
+
+    let mut net_dev: VirtioNetDevice = virtio_net_init(2, "52:54:00:12:34:56");
+    let net_cap: CapEntry = cap_entry_new(3, cap_type_device(), 2, cap_right_all(), 89);
+    let pkt: NetPacket = net_packet_new("52:54:00:12:34:56", "FF:FF:FF:FF:FF:FF", 2048, "OODAX_ETHERNET_FRAME");
+    let tx_res: Result[NetTxResult, String] = virtio_net_tx(net_dev, pkt, net_cap);
+    if tx_res.is_err() { println("FAIL: virtio net tx failed"); process_exit(1); }
+    match tx_res {
+        Ok(r) => { net_dev = r.device; },
+        Err(e) => { process_exit(1); }
+    }
+    if net_dev.tx_packets != 1 { println("FAIL: net tx packet count invalid"); process_exit(1); }
+
+    let sys_args: SyscallArgs = syscall_args_new(1, 101, sys_cap_mint(), 0, 1, 1, "");
+    let mut sys_table: CapTable = cap_table_new(101);
+    let root_sc: CapEntry = cap_entry_new(0, cap_type_endpoint(), 1, cap_right_all(), 1);
+    sys_table = cap_table_set(sys_table, 0, root_sc);
+    let sys_ret: SyscallReturn = syscall_dispatch(sys_args, sys_table);
+    if !sys_ret.success { println("FAIL: syscall dispatch failed"); process_exit(1); }
+    println("  [PASS] 4. User-Space VirtIO Drivers & Capability-Gated System Calls");
+
+    // -------------------------------------------------------------
+    // Part V: Microkernel Supervisor Boot & Domain State Machine
+    // -------------------------------------------------------------
+    let mut kernel: OodaxKernel = oodax_kernel_init("OODAX_SOVEREIGN_MICROKERNEL");
+    let spawn_res: Result[OodaxKernel, String] = oodax_spawn_domain_thread(kernel, 1, 2, 8, 4);
+    if spawn_res.is_err() { println("FAIL: kernel domain spawn failed"); process_exit(1); }
+    match spawn_res {
+        Ok(k) => { kernel = k; },
+        Err(e) => { process_exit(1); }
+    }
+    kernel = oodax_step_tick(kernel);
+    if !kernel.is_booted || kernel.domain_count < 2 { println("FAIL: kernel boot state invalid"); process_exit(1); }
+    println("  [PASS] 5. Sovereign Microkernel Domain Supervisor State Machine");
+
+    println("===================================================================");
+    println("stage17_oodax_microkernel_smoke: PASSED");
+}

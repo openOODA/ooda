@@ -56,8 +56,11 @@ collect() {
   if [[ -n "${STACK[$abs]:-}" ]]; then echo "ERR_IMPORT_CYCLE $abs" >&2; exit 1; fi
   if [[ -n "${SEEN[$abs]:-}" ]]; then return 0; fi
   if [[ ! -f "$abs" ]]; then
+    local rel="${path#$dir/}"
     local fname="$(basename "$abs")"
-    if [[ -n "${OODA_STD:-}" && -f "${OODA_STD}/$fname" ]]; then abs="${OODA_STD}/$fname"
+    if [[ -f "$ROOT/$rel" ]]; then abs="$ROOT/$rel"
+    elif [[ -f "$ROOT/std/$rel" ]]; then abs="$ROOT/std/$rel"
+    elif [[ -n "${OODA_STD:-}" && -f "${OODA_STD}/$fname" ]]; then abs="${OODA_STD}/$fname"
     elif [[ -f "$ROOT/std/$fname" ]]; then abs="$ROOT/std/$fname"
     elif [[ -f "std/$fname" ]]; then abs="$(pwd)/std/$fname"
     elif [[ -f "../std/$fname" ]]; then abs="$(pwd)/../std/$fname"
@@ -175,66 +178,121 @@ for src in "${MODS[@]}"; do
 done
 echo "pure_build: emit_cache skip=$emit_skip of ${#MODS[@]}"
 
-awk "/$FN_DEF/{exit} {print}" "${MCS[0]}" >"$TMP/preamble.c"
+awk '/^(#line 1 "|#ifndef OO_FN_)/{exit} {print}' "${MCS[0]}" >"$TMP/preamble.c"
 # First definition of each symbol wins (import doubles).
 python3 - "$TMP" "${MCS[@]}" <<'PY'
 import re, sys
 from pathlib import Path
 tmp = Path(sys.argv[1])
 mcs = [Path(p) for p in sys.argv[2:]]
-fn_start = re.compile(
-    r"^(void|int|long long|double|float|bool|char|OoStr|OoSList|OoIList|OoFList|OoResS|OoResV|OoResI|OoResB|OoResF|CapToken|[A-Za-z_][A-Za-z0-9_]*)\s+([A-Za-z0-9_]+)\s*\(.*\)\s*\{\s*$"
-)
 protos: list[str] = []
 bodies: list[str] = []
 seen: set[str] = set()
-for mc in mcs:
+for mc in sorted(mcs):
     text = mc.read_text(errors="replace").splitlines(keepends=True)
     i = 0
     n = len(text)
     while i < n:
-        m = fn_start.match(text[i].rstrip("\n"))
-        if not m:
+        if text[i].lstrip().startswith("#ifndef OO_FN_"):
+            name = text[i].rstrip().split("OO_FN_")[1]
+            j = i + 1
+            if_depth = 1
+            while j < n and if_depth > 0:
+                l = text[j].lstrip()
+                if l.startswith("#ifndef ") or l.startswith("#ifdef ") or l.startswith("#if "):
+                    if_depth += 1
+                elif l.startswith("#endif"):
+                    if_depth -= 1
+                j += 1
+            body_lines = [re.sub(r"\b\d+__", "", l) for l in text[i+2:j-1]]
+            if name not in seen and len(body_lines) > 0:
+                seen.add(name)
+                sig_line = ""
+                for bl in body_lines:
+                    if bl.lstrip().startswith("#") or bl.lstrip().startswith("//"):
+                        continue
+                    sig_line = bl
+                    break
+                if sig_line:
+                    protos.append(re.sub(r"\b\d+__", "", sig_line.rstrip()[:-1].rstrip()) + ";\n")
+                    bodies.extend(body_lines)
+                    bodies.append("\n\n")
+            i = j
+        elif text[i].lstrip().startswith("int main(") or text[i].lstrip().startswith("int main ("):
+            if "main" not in seen:
+                seen.add("main")
+                protos.append("int main(int argc, char **argv);\n")
+                bodies.extend([re.sub(r"\b\d+__", "", l) for l in text[i:]])
+                bodies.append("\n\n")
+            break
+        else:
             i += 1
-            continue
-        name = re.sub(r"^\d+__", "", m.group(2))
-        j = i + 1
-        while j < n and not fn_start.match(text[j].rstrip("\n")):
-            j += 1
-        chunk = [
-            re.sub(r"\b\d+__", "", line)
-            for line in text[i:j]
-            if not line.startswith("#ifndef OO_FN_")
-            and not line.startswith("#define OO_FN_")
-            and line.rstrip() != "#endif"
-        ]
-        if name not in seen:
-            seen.add(name)
-            line = re.sub(r"\b\d+__", "", text[i].rstrip())
-            if line.endswith("{"):
-                line = line[:-1].rstrip() + ";"
-            protos.append(line + "\n")
-            bodies.extend(chunk)
-        i = j
 (tmp / "protos.c").write_text("".join(protos))
-MAX_LINES = 200
-bodies_c_content = []
-part = 0
-lines = 0
-chunk = []
-for line in bodies:
-    chunk.append(line)
-    lines += 1
-    if lines >= MAX_LINES and line.rstrip() == "}":
-        (tmp / f"bodies_{part}.c").write_text("".join(chunk))
-        bodies_c_content.append(f'#include "bodies_{part}.c"\n')
-        part += 1
-        chunk = []
-        lines = 0
-if chunk:
-    (tmp / f"bodies_{part}.c").write_text("".join(chunk))
-    bodies_c_content.append(f'#include "bodies_{part}.c"\n')
-(tmp / "bodies.c").write_text("".join(bodies_c_content))
+
+# Inject full struct definitions and list helpers into preamble
+real_structs = {}
+real_retains = {}
+for mc in mcs:
+    content = mc.read_text(errors="replace")
+    for m in re.finditer(r'typedef struct (\w+) \{ (?!long long _pad;)(.*?)\} \1;', content, re.DOTALL):
+        ty = m.group(1)
+        if ty not in real_structs:
+            real_structs[ty] = m.group(0)
+    for m in re.finditer(r'static void oo_retain_(\w+)\(\1 v\) \{(.*?)\}', content, re.DOTALL):
+        ty = m.group(1)
+        if ty not in real_retains:
+            real_retains[ty] = m.group(0)
+
+preamble_file = tmp / "preamble.c"
+preamble_text = preamble_file.read_text(errors="replace")
+
+# Strip stubs from preamble_text
+for ty in real_structs:
+    preamble_text = re.sub(r'#ifndef OO_TY_' + ty + r'.*?#endif\s+#endif\s*', '', preamble_text, flags=re.DOTALL)
+    preamble_text = re.sub(r'#ifndef OO_TY_' + ty + r'.*?#endif\s*', '', preamble_text, flags=re.DOTALL)
+    preamble_text = re.sub(r'#ifndef OO_FWD_' + ty + r'.*?#endif\s*', '', preamble_text, flags=re.DOTALL)
+    preamble_text = re.sub(r'#ifndef OO_HAVE_OoL_' + ty + r'.*?#endif\s*', '', preamble_text, flags=re.DOTALL)
+    preamble_text = re.sub(r'#ifndef OO_FNS_OoL_' + ty + r'.*?#endif\s*', '', preamble_text, flags=re.DOTALL)
+    preamble_text = re.sub(r'typedef struct ' + ty + r' \{ long long _pad; \} ' + ty + r';\s*', '', preamble_text)
+    preamble_text = re.sub(r'typedef struct ' + ty + r' ' + ty + r';\s*', '', preamble_text)
+    preamble_text = re.sub(r'static void oo_retain_' + ty + r'\(' + ty + r' v\) \{ \}\s*', '', preamble_text)
+
+# Build type section in correct dependency order
+fwd_decls = []
+list_decls = []
+struct_defs = []
+list_fns = []
+
+for ty in real_structs:
+    fwd_decls.append(f"#ifndef OO_FWD_{ty}\n#define OO_FWD_{ty}\ntypedef struct {ty} {ty};\n#endif")
+
+for ty in real_structs:
+    list_decls.append(f"#ifndef OO_HAVE_OoL_{ty}\n#define OO_HAVE_OoL_{ty}\ntypedef struct {{ {ty} *data; long long len; long long cap; }} OoL_{ty};\n#endif")
+
+for ty, sdef in real_structs.items():
+    struct_defs.append(f"#ifndef OO_TY_{ty}\n#define OO_TY_{ty}\n#define OO_TY_RES_{ty}\n{sdef}\n")
+    if ty in real_retains:
+        struct_defs.append(f"{real_retains[ty]}\n")
+    else:
+        struct_defs.append(f"static inline void oo_retain_{ty}({ty} v) {{ }}\n")
+    struct_defs.append(f"typedef struct {{ int ok; {ty} val; OoStr err; }} OoRes_{ty};\n#endif\n")
+
+for ty in real_structs:
+    list_fns.append(f"#ifndef OO_FNS_OoL_{ty}\n#define OO_FNS_OoL_{ty}\n")
+    list_fns.append(f"static inline OoL_{ty} oo_l_{ty}_new(void) {{ OoL_{ty} l; l.data=0; l.len=0; l.cap=0; return l; }}\n")
+    list_fns.append(f"static inline long long oo_l_{ty}_len(OoL_{ty} l) {{ return l.len; }}\n")
+    list_fns.append(f"static inline {ty} oo_l_{ty}_get(OoL_{ty} l, long long i) {{ if (i<0||i>=l.len) {{ fprintf(stderr,\"ERR\\tolist_get OOB\\n\"); exit(1); }} return l.data[i]; }}\n")
+    list_fns.append(f"static inline OoL_{ty} oo_l_{ty}_set(OoL_{ty} l, long long i, {ty} v) {{ if (i<0||i>=l.len) {{ fprintf(stderr,\"ERR\\tolist_set OOB\\n\"); exit(1); }} l.data[i] = v; return l; }}\n")
+    list_fns.append(f"static inline OoL_{ty} oo_l_{ty}_push(OoL_{ty} l, {ty} v) {{ OoL_{ty} n; long long ncap = l.cap ? l.cap : 8; while (ncap < l.len + 1) ncap = ncap * 2; n.data = ({ty}*)malloc(sizeof({ty})*(size_t)ncap); if (!n.data) {{ fprintf(stderr, \"ERR\\tc_emit\\theap allocation failed\\n\"); exit(1); }} if (l.data && l.len > 0) memcpy(n.data, l.data, (size_t)l.len*sizeof({ty})); n.data[l.len] = v; n.len = l.len + 1; n.cap = ncap; return n; }}\n")
+    list_fns.append(f"static inline void oo_retain_OoL_{ty}(OoL_{ty} v) {{ }}\n")
+    list_fns.append("#endif\n")
+
+type_section = "\n".join(fwd_decls) + "\n\n" + "\n".join(list_decls) + "\n\n" + "\n".join(struct_defs) + "\n\n" + "\n".join(list_fns)
+
+preamble_text = preamble_text + "\n" + type_section + "\n"
+preamble_file.write_text(preamble_text)
+
+(tmp / "bodies.c").write_text("".join(bodies))
 print(f"pure_build: unique_fns={len(seen)} from_modules={len(mcs)}", flush=True)
 PY
 
@@ -317,7 +375,9 @@ echo "OoStr oo_int_to_str(long long); OoStr str_trim(OoStr); OoStr oo_str_to_low
 echo "OoStr oo_str_to_uppercase(OoStr); int oo_str_starts_with(OoStr,OoStr); int oo_str_ends_with(OoStr,OoStr);" >> "$TMP/preamble.c"
 echo "long long oo_str_index_of(OoStr,OoStr); OoStr oo_str_repeat(OoStr,long long);" >> "$TMP/preamble.c"
 echo "void x86_emit_stream(OoStr); void x86_emit_linux64(OoSList);" >> "$TMP/preamble.c"
-echo "static inline void oo_process_exit(long long c) { exit((int)c); }" >> "$TMP/preamble.c"
+if ! grep -q 'void oo_process_exit' "$TMP/preamble.c"; then
+  echo "static inline void oo_process_exit(long long c) { exit((int)c); }" >> "$TMP/preamble.c"
+fi
 echo "long long oo_import_c(OoStr); long long oo_ffi_gen(OoStr); long long oo_lto_xlang_link(OoStr,OoStr);" >> "$TMP/preamble.c"
 sed -i 's/OoResS oo_write_file/OoResV oo_write_file/g' "$TMP/preamble.c"
 cat "$TMP/preamble.c" "$TMP/protos.c" "$TMP/bodies.c" >"$TMP/all.c"

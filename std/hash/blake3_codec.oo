@@ -1,0 +1,169 @@
+// # BLAKE3 Chunk Tree & Hex Codec
+//
+// Logline: Loads 64-byte blocks, compresses chunks, merges parents, and runs the hex codec for the chunk tree.
+//
+// Setup: Pure Int 32-bit words. Sibling of blake3_core.oo, called by blake3.oo.
+//
+// Beats:
+//   1. b3_word / b3_load: pack 16 little-endian words from a byte buffer.
+//   2. b3_chunk / b3_parent: compress one chunk or merge two chaining values.
+//   3. b3_hex / b3_parse / b3_substr: hex codec for the chunk-tree stack.
+
+import "./blake3_core.oo";
+
+pub fn b3_word(data: String, n: Int, off: Int) -> Int {
+    let mut v: Int = 0;
+    let mut i: Int = 0;
+    while i < 4 {
+        if off + i < n {
+            v = v + (byte_at(data, off + i) << (i * 8));
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+pub fn b3_load(data: String, n: Int, base: Int) -> B16 {
+    return B16 {
+        s0: b3_word(data, n, base),
+        s1: b3_word(data, n, base + 4),
+        s2: b3_word(data, n, base + 8),
+        s3: b3_word(data, n, base + 12),
+        s4: b3_word(data, n, base + 16),
+        s5: b3_word(data, n, base + 20),
+        s6: b3_word(data, n, base + 24),
+        s7: b3_word(data, n, base + 28),
+        s8: b3_word(data, n, base + 32),
+        s9: b3_word(data, n, base + 36),
+        s10: b3_word(data, n, base + 40),
+        s11: b3_word(data, n, base + 44),
+        s12: b3_word(data, n, base + 48),
+        s13: b3_word(data, n, base + 52),
+        s14: b3_word(data, n, base + 56),
+        s15: b3_word(data, n, base + 60)
+    };
+}
+
+pub fn b3_chunk(data: String, n: Int, chunk_i: Int, extra: Int) -> B16 {
+    let start: Int = chunk_i * 1024;
+    let mut clen: Int = n - start;
+    if clen > 1024 {
+        clen = 1024;
+    }
+    if clen < 0 {
+        clen = 0;
+    }
+    let mut nblocks: Int = (clen + 63) / 64;
+    if clen == 0 {
+        nblocks = 1;
+    }
+    let mut cv: B16 = b3_iv();
+    let mut bi: Int = 0;
+    while bi < nblocks {
+        let base: Int = start + bi * 64;
+        let mut blen: Int = n - base;
+        if blen > 64 {
+            blen = 64;
+        }
+        if blen < 0 {
+            blen = 0;
+        }
+        if clen == 0 {
+            blen = 0;
+        }
+        let mut flags: Int = extra;
+        if bi == 0 {
+            flags = flags + 1;
+        }
+        if bi == nblocks - 1 {
+            flags = flags + 2;
+        }
+        let m: B16 = b3_load(data, n, base);
+        cv = b3_compress(cv, m, b3_mask(chunk_i), b3_mask(chunk_i >> 32), blen, flags);
+        bi = bi + 1;
+    }
+    return cv;
+}
+
+pub fn b3_parent(left: B16, right: B16, extra: Int) -> B16 {
+    let m: B16 = B16 {
+        s0: left.s0,
+        s1: left.s1,
+        s2: left.s2,
+        s3: left.s3,
+        s4: left.s4,
+        s5: left.s5,
+        s6: left.s6,
+        s7: left.s7,
+        s8: right.s0,
+        s9: right.s1,
+        s10: right.s2,
+        s11: right.s3,
+        s12: right.s4,
+        s13: right.s5,
+        s14: right.s6,
+        s15: right.s7
+    };
+    return b3_compress(b3_iv(), m, 0, 0, 64, 4 + extra);
+}
+
+pub fn b3_hexb(v: Int) -> String {
+    let hx: String = "0123456789abcdef";
+    let b: Int = v & 255;
+    return char_at(hx, (b >> 4) & 15) + char_at(hx, b & 15);
+}
+
+pub fn b3_hexw(w: Int) -> String {
+    let v: Int = b3_mask(w);
+    return b3_hexb(v) + b3_hexb(v >> 8) + b3_hexb(v >> 16) + b3_hexb(v >> 24);
+}
+
+pub fn b3_hex(cv: B16) -> String {
+    return b3_hexw(cv.s0) + b3_hexw(cv.s1) + b3_hexw(cv.s2) + b3_hexw(cv.s3) + b3_hexw(cv.s4) + b3_hexw(cv.s5) + b3_hexw(cv.s6) + b3_hexw(cv.s7);
+}
+
+pub fn b3_nib(c: Int) -> Int {
+    if c >= 97 {
+        return c - 87;
+    }
+    return c - 48;
+}
+
+pub fn b3_parsew(s: String, off: Int) -> Int {
+    let b0: Int = (b3_nib(byte_at(s, off)) << 4) + b3_nib(byte_at(s, off + 1));
+    let b1: Int = (b3_nib(byte_at(s, off + 2)) << 4) + b3_nib(byte_at(s, off + 3));
+    let b2: Int = (b3_nib(byte_at(s, off + 4)) << 4) + b3_nib(byte_at(s, off + 5));
+    let b3: Int = (b3_nib(byte_at(s, off + 6)) << 4) + b3_nib(byte_at(s, off + 7));
+    return b0 + (b1 << 8) + (b2 << 16) + (b3 << 24);
+}
+
+pub fn b3_parse(s: String, off: Int) -> B16 {
+    return B16 {
+        s0: b3_parsew(s, off),
+        s1: b3_parsew(s, off + 8),
+        s2: b3_parsew(s, off + 16),
+        s3: b3_parsew(s, off + 24),
+        s4: b3_parsew(s, off + 32),
+        s5: b3_parsew(s, off + 40),
+        s6: b3_parsew(s, off + 48),
+        s7: b3_parsew(s, off + 56),
+        s8: 0,
+        s9: 0,
+        s10: 0,
+        s11: 0,
+        s12: 0,
+        s13: 0,
+        s14: 0,
+        s15: 0
+    };
+}
+
+pub fn b3_substr(s: String, start: Int, end: Int) -> String {
+    let mut o: String = "";
+    let mut i: Int = start;
+    while i < end {
+        o = o + char_at(s, i);
+        i = i + 1;
+    }
+    return o;
+}

@@ -1,0 +1,175 @@
+// # OODAX Zero-Copy Synchronous IPC Subsystem
+//
+// Logline: Implements synchronous rendezvous messaging, capability-gated endpoint queues, and zero-copy data transfer.
+//
+// Setup: Single-address-space microkernel IPC layer for low-latency thread coordination.
+//
+// Beats:
+//   1. Define IpcMessage and IpcEndpoint structures.
+//   2. Manage synchronous rendezvous state machine (IDLE, SEND_BLOCKED, RECV_BLOCKED).
+//   3. Implement zero-copy atomic message handoff between sender and receiver.
+//   4. Validate endpoint capability tokens and badges before message delivery.
+// RULES.oot 1.4: Strict capability authorization for IPC channels.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+import "oodax/cap_table.oo";
+
+pub fn ipc_state_idle() -> Int { return 0; }
+pub fn ipc_state_send_blocked() -> Int { return 1; }
+pub fn ipc_state_recv_blocked() -> Int { return 2; }
+
+pub type IpcMessage = struct {
+    tag: Int,
+    label: Int,
+    sender_tid: Int,
+    payload: String,
+    badge: Int,
+    cap_transfer_cptr: Int,
+    is_valid: Bool
+};
+
+pub type IpcEndpoint = struct {
+    ep_id: Int,
+    owner_domain: Int,
+    state: Int,
+    waiting_tid: Int,
+    pending_msg: IpcMessage
+};
+
+pub fn ipc_msg_empty() -> IpcMessage {
+    return IpcMessage {
+        tag: 0,
+        label: 0,
+        sender_tid: 0,
+        payload: "",
+        badge: 0,
+        cap_transfer_cptr: 0,
+        is_valid: false
+    };
+}
+
+pub fn ipc_msg_new(tag: Int, label: Int, sender_tid: Int, payload: String, badge: Int) -> IpcMessage {
+    return IpcMessage {
+        tag: tag,
+        label: label,
+        sender_tid: sender_tid,
+        payload: payload,
+        badge: badge,
+        cap_transfer_cptr: 0,
+        is_valid: true
+    };
+}
+
+pub fn ipc_endpoint_new(ep_id: Int, owner_domain: Int) -> IpcEndpoint {
+    return IpcEndpoint {
+        ep_id: ep_id,
+        owner_domain: owner_domain,
+        state: ipc_state_idle(),
+        waiting_tid: 0,
+        pending_msg: ipc_msg_empty()
+    };
+}
+
+pub type IpcTransferResult = struct {
+    endpoint: IpcEndpoint,
+    delivered_msg: IpcMessage,
+    rendezvous_completed: Bool,
+    unblocked_tid: Int
+};
+
+pub fn ipc_send_rendezvous(ep: IpcEndpoint, sender_tid: Int, msg: IpcMessage, cap: CapEntry) -> Result[IpcTransferResult, String] {
+    let call_ok: Bool = cap_has_rights(cap, cap_right_call());
+    let write_ok: Bool = cap_has_rights(cap, cap_right_write());
+    if !call_ok && !write_ok {
+        return Err("Capability lacks CALL or WRITE rights on endpoint");
+    }
+    let cap_target: Int = cap_entry_get_target_id(cap);
+    let ep_target: Int = ep.ep_id;
+    if cap_target != ep_target {
+        return Err("Capability target ID mismatch with endpoint");
+    }
+    let st: Int = ep.state;
+    if st == ipc_state_recv_blocked() {
+        let recver: Int = ep.waiting_tid;
+        let next_ep: IpcEndpoint = IpcEndpoint {
+            ep_id: ep.ep_id,
+            owner_domain: ep.owner_domain,
+            state: ipc_state_idle(),
+            waiting_tid: 0,
+            pending_msg: ipc_msg_empty()
+        };
+        let mut out_msg: IpcMessage = msg;
+        out_msg.badge = cap_entry_get_badge(cap);
+        return Ok(IpcTransferResult {
+            endpoint: next_ep,
+            delivered_msg: out_msg,
+            rendezvous_completed: true,
+            unblocked_tid: recver
+        });
+    }
+    if st == ipc_state_send_blocked() {
+        return Err("Endpoint queue full: another sender is blocked");
+    }
+    let mut stored_msg: IpcMessage = msg;
+    stored_msg.badge = cap_entry_get_badge(cap);
+    let blocked_ep: IpcEndpoint = IpcEndpoint {
+        ep_id: ep.ep_id,
+        owner_domain: ep.owner_domain,
+        state: ipc_state_send_blocked(),
+        waiting_tid: sender_tid,
+        pending_msg: stored_msg
+    };
+    return Ok(IpcTransferResult {
+        endpoint: blocked_ep,
+        delivered_msg: ipc_msg_empty(),
+        rendezvous_completed: false,
+        unblocked_tid: 0
+    });
+}
+
+pub fn ipc_recv_rendezvous(ep: IpcEndpoint, recver_tid: Int, cap: CapEntry) -> Result[IpcTransferResult, String] {
+    let read_ok: Bool = cap_has_rights(cap, cap_right_read());
+    let call_ok: Bool = cap_has_rights(cap, cap_right_call());
+    if !read_ok && !call_ok {
+        return Err("Capability lacks READ or CALL rights on endpoint");
+    }
+    let cap_target: Int = cap_entry_get_target_id(cap);
+    let ep_target: Int = ep.ep_id;
+    if cap_target != ep_target {
+        return Err("Capability target ID mismatch with endpoint");
+    }
+    let st: Int = ep.state;
+    if st == ipc_state_send_blocked() {
+        let sender: Int = ep.waiting_tid;
+        let delivered: IpcMessage = ep.pending_msg;
+        let next_ep: IpcEndpoint = IpcEndpoint {
+            ep_id: ep.ep_id,
+            owner_domain: ep.owner_domain,
+            state: ipc_state_idle(),
+            waiting_tid: 0,
+            pending_msg: ipc_msg_empty()
+        };
+        return Ok(IpcTransferResult {
+            endpoint: next_ep,
+            delivered_msg: delivered,
+            rendezvous_completed: true,
+            unblocked_tid: sender
+        });
+    }
+    if st == ipc_state_recv_blocked() {
+        return Err("Endpoint queue full: another receiver is blocked");
+    }
+    let blocked_ep: IpcEndpoint = IpcEndpoint {
+        ep_id: ep.ep_id,
+        owner_domain: ep.owner_domain,
+        state: ipc_state_recv_blocked(),
+        waiting_tid: recver_tid,
+        pending_msg: ipc_msg_empty()
+    };
+    return Ok(IpcTransferResult {
+        endpoint: blocked_ep,
+        delivered_msg: ipc_msg_empty(),
+        rendezvous_completed: false,
+        unblocked_tid: 0
+    });
+}

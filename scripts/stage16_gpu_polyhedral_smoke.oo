@@ -1,0 +1,145 @@
+// # Stage 16 GPU & Polyhedral Compilation Smoke Test
+//
+// Logline: Verifies direct sovereign GPU kernel emitters (Metal MSL, SPIR-V binary, CUDA PTX) and auto-polyhedral tensor passes.
+//
+// Setup: FsCap, SysCap, and GpuCap granted for kernel emission and verification.
+//
+// Beats:
+//   1. Verify Metal MSL shader text generation and argument buffer bindings.
+//   2. Verify SPIR-V binary 32-bit word stream and compute opcodes.
+//   3. Verify CUDA PTX ISA text emission targeting sm_90.
+//   4. Verify polyhedral iteration domains, Farkas affine scheduling, and cache tiling.
+
+import "oodac/gpu_metal.oo";
+import "oodac/gpu_spirv.oo";
+import "oodac/gpu_ptx.oo";
+import "oodac/gpu_driver.oo";
+import "oodac/poly_domain.oo";
+import "oodac/poly_schedule.oo";
+import "oodac/poly_tile.oo";
+
+pub fn main(fs: &FsCap, sys: &SysCap, gpu: &GpuCap) {
+    println("=== Running Stage 16 GPU & Polyhedral Smoke Test ===");
+
+    // 1. Metal MSL Emitter Verification
+    println("[1/4] Testing Apple Metal MSL Emitter...");
+    let msl_add: String = metal_emit_vec_add_kernel("metal_vec_add");
+    if str_index_of(msl_add, "#include <metal_stdlib>") < 0 {
+        println("FAIL: Metal header missing");
+        process_exit(1);
+    }
+    if str_index_of(msl_add, "[[buffer(0)]]") < 0 || str_index_of(msl_add, "[[thread_position_in_grid]]") < 0 {
+        println("FAIL: Metal buffer binding or thread attribute missing");
+        process_exit(1);
+    }
+    let msl_mm: String = metal_emit_matmul_kernel("metal_matmul", 16);
+    if str_index_of(msl_mm, "threadgroup float ashare[16][16]") < 0 {
+        println("FAIL: Metal threadgroup shared memory missing");
+        process_exit(1);
+    }
+    println("  -> Metal MSL generator OK.");
+
+    // 2. Vulkan SPIR-V Binary Builder Verification
+    println("[2/4] Testing Vulkan SPIR-V Binary Builder...");
+    let spv_words: List[Int] = spirv_build_vector_add_kernel();
+    if list_len(spv_words) < 20 {
+        println("FAIL: SPIR-V word stream too short");
+        process_exit(1);
+    }
+    if list_get(spv_words, 0) != spirv_magic() {
+        println("FAIL: SPIR-V magic header mismatch");
+        process_exit(1);
+    }
+    let spv_hex: String = spirv_words_to_hex(spv_words);
+    if chars_len(spv_hex) < 80 {
+        println("FAIL: SPIR-V hex string generation failed");
+        process_exit(1);
+    }
+    let spv_mm_words: List[Int] = spirv_build_matmul_kernel();
+    if list_len(spv_mm_words) < 25 {
+        println("FAIL: SPIR-V matmul word stream failed");
+        process_exit(1);
+    }
+    println("  -> Vulkan SPIR-V binary bytecode builder OK.");
+
+    // 3. NVIDIA CUDA PTX Emitter Verification
+    println("[3/4] Testing NVIDIA CUDA PTX Assembly Emitter...");
+    let ptx_add: String = ptx_emit_vec_add_kernel("ptx_vec_add", "sm_90");
+    if str_index_of(ptx_add, ".version 8.0") < 0 || str_index_of(ptx_add, ".target sm_90") < 0 {
+        println("FAIL: PTX header version or target sm_90 missing");
+        process_exit(1);
+    }
+    if str_index_of(ptx_add, ".visible .entry ptx_vec_add") < 0 || str_index_of(ptx_add, "mad.lo.s32") < 0 {
+        println("FAIL: PTX entry kernel or instruction sequence missing");
+        process_exit(1);
+    }
+    let ptx_mm: String = ptx_emit_matmul_kernel("ptx_matmul", "sm_90");
+    if str_index_of(ptx_mm, "fma.rn.f32") < 0 || str_index_of(ptx_mm, ".shared") < 0 {
+        println("FAIL: PTX matmul shared memory or FMA instruction missing");
+        process_exit(1);
+    }
+    println("  -> CUDA PTX assembly generator OK.");
+
+    // 4. Auto-Polyhedral Tensor Passes Verification
+    println("[4/4] Testing Auto-Polyhedral Iteration Domains, Schedules & Tiling...");
+    let mut vnames: List[String] = list_new();
+    vnames = list_push(vnames, "i");
+    vnames = list_push(vnames, "j");
+    let mut lbs: List[Int] = list_new();
+    lbs = list_push(lbs, 0);
+    lbs = list_push(lbs, 0);
+    let mut ubs: List[Int] = list_new();
+    ubs = list_push(ubs, 16);
+    ubs = list_push(ubs, 16);
+    let domain: PolyDomain = poly_domain_from_bounds(vnames, lbs, ubs);
+
+    let mut pt_in: List[Int] = list_new();
+    pt_in = list_push(pt_in, 5);
+    pt_in = list_push(pt_in, 10);
+    if !poly_domain_contains(&domain, pt_in) {
+        println("FAIL: Polyhedral domain failed point containment");
+        process_exit(1);
+    }
+
+    let mut pt_out: List[Int] = list_new();
+    pt_out = list_push(pt_out, 20);
+    pt_out = list_push(pt_out, 5);
+    if poly_domain_contains(&domain, pt_out) {
+        println("FAIL: Polyhedral domain false positive point containment");
+        process_exit(1);
+    }
+
+    // Dependence analysis & Farkas scheduling
+    let mut dist: List[Int] = list_new();
+    dist = list_push(dist, 1);
+    dist = list_push(dist, 0);
+    let dep: DependenceVector = dep_vector_create("S1", "S2", dist, true);
+    if !dep_distance_is_valid(&dep) {
+        println("FAIL: Dependence distance validity check failed");
+        process_exit(1);
+    }
+
+    let mut deps: List[DependenceVector] = list_new();
+    deps = list_push(deps, dep);
+    let sched_res: Result[AffineSchedule, String] = affine_schedule_farkas_solve(deps, 2);
+    if !sched_res.is_ok() {
+        println("FAIL: Farkas affine scheduler solver failed");
+        process_exit(1);
+    }
+
+    // Multi-level cache tiling & kernel fusion
+    let tile_bounds: List[TileBound] = poly_compute_tile_bounds(128, 16);
+    if list_len(tile_bounds) != 8 {
+        println("FAIL: Tile bounds calculation mismatch");
+        process_exit(1);
+    }
+
+    let fused_plan: FusedPolyhedralPlan = poly_create_fused_gemm_activation_plan("fused_gemm_silu", 32, 32, 32, "silu");
+    if fused_plan.is_legal == false || fused_plan.memory_saved_bytes != 4096 {
+        println("FAIL: Polyhedral kernel fusion legality or memory savings mismatch");
+        process_exit(1);
+    }
+
+    println("  -> Auto-Polyhedral tensor optimization passes OK.");
+    println("Stage 16 GPU & Polyhedral Smoke Test PASSED.");
+}

@@ -1,0 +1,194 @@
+// # OODAX Capability Space & Rights Table
+//
+// Logline: Manages capability pointers, rights bitmasks, and authorization tokens for the OODAX microkernel.
+//
+// Setup: Single-address-space capability resolution and rights attenuation subsystem.
+//
+// Beats:
+//   1. Define CapRights constants and CapEntry structure.
+//   2. Define CapTable storage array for thread capability slots.
+//   3. Implement capability minting with attenuated rights masks.
+//   4. Implement capability lookup, validation, and revocation.
+// RULES.oot 1.4: Strict capability authorization.
+// RULES.oot 1.7: Strictly under 256 lines.
+
+pub fn cap_right_read() -> Int { return 1; }
+pub fn cap_right_write() -> Int { return 2; }
+pub fn cap_right_grant() -> Int { return 4; }
+pub fn cap_right_call() -> Int { return 8; }
+pub fn cap_right_map() -> Int { return 16; }
+pub fn cap_right_all() -> Int { return 31; }
+
+pub fn cap_type_endpoint() -> Int { return 1; }
+pub fn cap_type_thread() -> Int { return 2; }
+pub fn cap_type_memory() -> Int { return 3; }
+pub fn cap_type_device() -> Int { return 4; }
+pub fn cap_type_irq() -> Int { return 5; }
+
+pub type CapEntry = struct {
+    cptr: Int,
+    cap_type: Int,
+    target_id: Int,
+    rights: Int,
+    badge: Int,
+    parent_cptr: Int,
+    is_valid: Bool
+};
+
+pub type CapTable = struct {
+    domain_id: Int,
+    size: Int,
+    e0: CapEntry,
+    e1: CapEntry,
+    e2: CapEntry,
+    e3: CapEntry,
+    e4: CapEntry,
+    e5: CapEntry,
+    e6: CapEntry,
+    e7: CapEntry
+};
+
+pub fn cap_entry_get_target_id(c: CapEntry) -> Int { return c.target_id; }
+pub fn cap_entry_get_rights(c: CapEntry) -> Int { return c.rights; }
+pub fn cap_entry_get_badge(c: CapEntry) -> Int { return c.badge; }
+pub fn cap_entry_is_valid(c: CapEntry) -> Bool { return c.is_valid; }
+pub fn cap_entry_get_cptr(c: CapEntry) -> Int { return c.cptr; }
+
+pub fn cap_entry_null() -> CapEntry {
+    return CapEntry {
+        cptr: 0,
+        cap_type: 0,
+        target_id: 0,
+        rights: 0,
+        badge: 0,
+        parent_cptr: 0,
+        is_valid: false
+    };
+}
+
+pub fn cap_entry_new(cptr: Int, ctype: Int, target: Int, rights: Int, badge: Int) -> CapEntry {
+    return CapEntry {
+        cptr: cptr,
+        cap_type: ctype,
+        target_id: target,
+        rights: rights,
+        badge: badge,
+        parent_cptr: 0,
+        is_valid: true
+    };
+}
+
+pub fn cap_table_new(domain_id: Int) -> CapTable {
+    let null_e: CapEntry = cap_entry_null();
+    return CapTable {
+        domain_id: domain_id,
+        size: 0,
+        e0: null_e,
+        e1: null_e,
+        e2: null_e,
+        e3: null_e,
+        e4: null_e,
+        e5: null_e,
+        e6: null_e,
+        e7: null_e
+    };
+}
+
+pub fn cap_table_get(table: CapTable, cptr: Int) -> CapEntry {
+    if cptr == 0 { return table.e0; }
+    if cptr == 1 { return table.e1; }
+    if cptr == 2 { return table.e2; }
+    if cptr == 3 { return table.e3; }
+    if cptr == 4 { return table.e4; }
+    if cptr == 5 { return table.e5; }
+    if cptr == 6 { return table.e6; }
+    if cptr == 7 { return table.e7; }
+    return cap_entry_null();
+}
+
+pub fn cap_table_set(table: CapTable, cptr: Int, entry: CapEntry) -> CapTable {
+    let mut t: CapTable = table;
+    if cptr == 0 { t.e0 = entry; }
+    if cptr == 1 { t.e1 = entry; }
+    if cptr == 2 { t.e2 = entry; }
+    if cptr == 3 { t.e3 = entry; }
+    if cptr == 4 { t.e4 = entry; }
+    if cptr == 5 { t.e5 = entry; }
+    if cptr == 6 { t.e6 = entry; }
+    if cptr == 7 { t.e7 = entry; }
+    if cptr >= table.size {
+        t.size = cptr + 1;
+    }
+    return t;
+}
+
+pub fn cap_has_rights(entry: CapEntry, required_mask: Int) -> Bool {
+    let valid: Bool = entry.is_valid;
+    if !valid {
+        return false;
+    }
+    let r: Int = entry.rights;
+    if required_mask == 1 && (r == 1 || r == 3 || r == 5 || r == 7 || r == 9 || r == 11 || r == 15 || r == 31) {
+        return true;
+    }
+    if required_mask == 2 && (r == 2 || r == 3 || r == 6 || r == 7 || r == 10 || r == 11 || r == 15 || r == 31) {
+        return true;
+    }
+    if required_mask == 4 && (r == 4 || r == 5 || r == 6 || r == 7 || r == 12 || r == 15 || r == 31) {
+        return true;
+    }
+    if required_mask == 8 && (r == 8 || r == 9 || r == 10 || r == 11 || r == 12 || r == 15 || r == 31) {
+        return true;
+    }
+    if required_mask == 16 && (r == 16 || r == 31) {
+        return true;
+    }
+    if required_mask == 31 && r == 31 {
+        return true;
+    }
+    return false;
+}
+
+pub fn cap_mint(table: CapTable, src_cptr: Int, dest_cptr: Int, new_rights: Int, new_badge: Int) -> Result[CapTable, String] {
+    let src: CapEntry = cap_table_get(table, src_cptr);
+    let s_val: Bool = src.is_valid;
+    if !s_val {
+        return Err("Source capability is invalid");
+    }
+    let grant_ok: Bool = cap_has_rights(src, cap_right_grant());
+    if !grant_ok {
+        return Err("Source capability lacks GRANT permission");
+    }
+    let dest_entry: CapEntry = CapEntry {
+        cptr: dest_cptr,
+        cap_type: src.cap_type,
+        target_id: src.target_id,
+        rights: new_rights,
+        badge: new_badge,
+        parent_cptr: src_cptr,
+        is_valid: true
+    };
+    let updated: CapTable = cap_table_set(table, dest_cptr, dest_entry);
+    return Ok(updated);
+}
+
+pub fn cap_revoke(table: CapTable, cptr: Int) -> CapTable {
+    let mut t: CapTable = table;
+    let null_e: CapEntry = cap_entry_null();
+    let target: CapEntry = cap_table_get(table, cptr);
+    let t_val: Bool = target.is_valid;
+    if !t_val {
+        return t;
+    }
+    t = cap_table_set(t, cptr, null_e);
+    let mut i: Int = 0;
+    while i < 8 {
+        let child: CapEntry = cap_table_get(t, i);
+        let c_val: Bool = child.is_valid;
+        if c_val && child.parent_cptr == cptr {
+            t = cap_table_set(t, i, null_e);
+        }
+        i = i + 1;
+    }
+    return t;
+}

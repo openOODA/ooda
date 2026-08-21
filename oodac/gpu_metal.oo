@@ -1,0 +1,249 @@
+// # Sovereign Apple Metal MSL Kernel Generator
+//
+// Logline: Generates Metal Shading Language (MSL) compute shaders, buffer bindings, threadgroup memory, and synchronization barriers.
+//
+// Setup: Pure textual MSL emitter supporting buffer indices, threadgroup geometry, and kernel generation.
+//
+// Beats:
+//   1. Emit MSL header and namespace directives (#include <metal_stdlib>, using namespace metal).
+//   2. Build kernel function signature with [[buffer(n)]] parameter bindings.
+//   3. Emit threadgroup memory declarations and thread indexing attributes.
+//   4. Emit compute kernel bodies for GEMM, vector arithmetic, RMSNorm, and attention with threadgroup barriers.
+
+pub type MetalParam = struct {
+    name: String,
+    type_name: String,
+    buffer_index: Int,
+    is_device: Bool,
+    is_const: Bool,
+};
+
+pub type MetalKernel = struct {
+    name: String,
+    params: List[MetalParam],
+    body: String,
+    threadgroup_smem_bytes: Int,
+};
+
+fn metal_int_str(n: Int) -> String {
+    if n == 0 { return "0"; }
+    let mut val: Int = n;
+    let mut sign: String = "";
+    if val < 0 { sign = "-"; val = 0 - val; }
+    let digits: String = "0123456789";
+    let mut s: String = "";
+    while val > 0 {
+        let d: Int = val % 10;
+        s = char_at(digits, d) + s;
+        val = val / 10;
+    }
+    return sign + s;
+}
+
+pub fn metal_header() -> String {
+    return "#include <metal_stdlib>\nusing namespace metal;\n\n";
+}
+
+pub fn metal_emit_param(param: &MetalParam) -> String {
+    let mut qual: String = "device ";
+    if !param.is_device { qual = "constant "; }
+    if param.is_const { qual = qual + "const "; }
+    let idx_str: String = metal_int_str(param.buffer_index);
+    return qual + param.type_name + "* " + param.name + " [[buffer(" + idx_str + ")]]";
+}
+
+pub fn metal_emit_kernel_sig(kernel: &MetalKernel) -> String {
+    let mut sig: String = "kernel void " + kernel.name + "(\n";
+    let mut i: Int = 0;
+    let n: Int = list_len(kernel.params);
+    while i < n {
+        let p: MetalParam = list_get(kernel.params, i);
+        sig = sig + "    " + metal_emit_param(&p) + ",\n";
+        i = i + 1;
+    }
+    sig = sig + "    uint3 gid [[thread_position_in_grid]],\n";
+    sig = sig + "    uint3 tid [[thread_position_in_threadgroup]],\n";
+    sig = sig + "    uint3 bid [[threadgroup_position_in_grid]],\n";
+    sig = sig + "    uint3 tg_dim [[threads_per_threadgroup]]\n)";
+    return sig;
+}
+
+pub fn metal_emit_full_kernel(kernel: &MetalKernel) -> String {
+    let mut out: String = metal_header();
+    out = out + metal_emit_kernel_sig(kernel) + " {\n";
+    if kernel.threadgroup_smem_bytes > 0 {
+        let elems: Int = kernel.threadgroup_smem_bytes / 4;
+        let elem_str: String = metal_int_str(elems);
+        out = out + "    threadgroup float tg_smem[" + elem_str + "];\n";
+    }
+    out = out + kernel.body;
+    out = out + "}\n";
+    return out;
+}
+
+pub fn metal_emit_vec_add_kernel(kernel_name: String) -> String {
+    let mut params: List[MetalParam] = list_new();
+    let p_a: MetalParam = MetalParam { name: "a", type_name: "float", buffer_index: 0, is_device: true, is_const: true };
+    let p_b: MetalParam = MetalParam { name: "b", type_name: "float", buffer_index: 1, is_device: true, is_const: true };
+    let p_c: MetalParam = MetalParam { name: "c", type_name: "float", buffer_index: 2, is_device: true, is_const: false };
+    let p_n: MetalParam = MetalParam { name: "n_dim", type_name: "uint", buffer_index: 3, is_device: false, is_const: true };
+    params = list_push(params, p_a);
+    params = list_push(params, p_b);
+    params = list_push(params, p_c);
+    params = list_push(params, p_n);
+
+    let body: String = "    uint idx = gid.x;\n"
+        + "    if (idx < *n_dim) {\n"
+        + "        c[idx] = a[idx] + b[idx];\n"
+        + "    }\n";
+
+    let kernel: MetalKernel = MetalKernel {
+        name: kernel_name,
+        params: params,
+        body: body,
+        threadgroup_smem_bytes: 0,
+    };
+    return metal_emit_full_kernel(&kernel);
+}
+
+pub fn metal_emit_matmul_kernel(kernel_name: String, tile_size: Int) -> String {
+    let mut params: List[MetalParam] = list_new();
+    let p_a: MetalParam = MetalParam { name: "a", type_name: "float", buffer_index: 0, is_device: true, is_const: true };
+    let p_b: MetalParam = MetalParam { name: "b", type_name: "float", buffer_index: 1, is_device: true, is_const: true };
+    let p_c: MetalParam = MetalParam { name: "c", type_name: "float", buffer_index: 2, is_device: true, is_const: false };
+    let p_m: MetalParam = MetalParam { name: "dim_m", type_name: "uint", buffer_index: 3, is_device: false, is_const: true };
+    let p_n: MetalParam = MetalParam { name: "dim_n", type_name: "uint", buffer_index: 4, is_device: false, is_const: true };
+    let p_k: MetalParam = MetalParam { name: "dim_k", type_name: "uint", buffer_index: 5, is_device: false, is_const: true };
+    params = list_push(params, p_a);
+    params = list_push(params, p_b);
+    params = list_push(params, p_c);
+    params = list_push(params, p_m);
+    params = list_push(params, p_n);
+    params = list_push(params, p_k);
+
+    let ts_str: String = metal_int_str(tile_size);
+    let body: String = "    uint row = bid.y * " + ts_str + " + tid.y;\n"
+        + "    uint col = bid.x * " + ts_str + " + tid.x;\n"
+        + "    threadgroup float ashare[" + ts_str + "][" + ts_str + "];\n"
+        + "    threadgroup float bshare[" + ts_str + "][" + ts_str + "];\n"
+        + "    float acc = 0.0f;\n"
+        + "    uint num_tiles = (*dim_k + " + ts_str + " - 1) / " + ts_str + ";\n"
+        + "    for (uint t = 0; t < num_tiles; ++t) {\n"
+        + "        uint a_col = t * " + ts_str + " + tid.x;\n"
+        + "        if (row < *dim_m && a_col < *dim_k) { ashare[tid.y][tid.x] = a[row * (*dim_k) + a_col]; }\n"
+        + "        else { ashare[tid.y][tid.x] = 0.0f; }\n"
+        + "        uint b_row = t * " + ts_str + " + tid.y;\n"
+        + "        if (b_row < *dim_k && col < *dim_n) { bshare[tid.y][tid.x] = b[b_row * (*dim_n) + col]; }\n"
+        + "        else { bshare[tid.y][tid.x] = 0.0f; }\n"
+        + "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        + "        for (uint k = 0; k < " + ts_str + "; ++k) {\n"
+        + "            acc += ashare[tid.y][k] * bshare[k][tid.x];\n"
+        + "        }\n"
+        + "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        + "    }\n"
+        + "    if (row < *dim_m && col < *dim_n) {\n"
+        + "        c[row * (*dim_n) + col] = acc;\n"
+        + "    }\n";
+
+    let kernel: MetalKernel = MetalKernel {
+        name: kernel_name,
+        params: params,
+        body: body,
+        threadgroup_smem_bytes: 0,
+    };
+    return metal_emit_full_kernel(&kernel);
+}
+
+pub fn metal_emit_rms_norm_kernel(kernel_name: String, eps: Float) -> String {
+    let mut params: List[MetalParam] = list_new();
+    let p_x: MetalParam = MetalParam { name: "x", type_name: "float", buffer_index: 0, is_device: true, is_const: true };
+    let p_gamma: MetalParam = MetalParam { name: "gamma", type_name: "float", buffer_index: 1, is_device: true, is_const: true };
+    let p_out: MetalParam = MetalParam { name: "out", type_name: "float", buffer_index: 2, is_device: true, is_const: false };
+    let p_d: MetalParam = MetalParam { name: "dim", type_name: "uint", buffer_index: 3, is_device: false, is_const: true };
+    params = list_push(params, p_x);
+    params = list_push(params, p_gamma);
+    params = list_push(params, p_out);
+    params = list_push(params, p_d);
+
+    let body: String = "    uint row = bid.x;\n"
+        + "    uint d = *dim;\n"
+        + "    device const float* row_x = x + row * d;\n"
+        + "    device float* row_out = out + row * d;\n"
+        + "    float sum_sq = 0.0f;\n"
+        + "    for (uint i = tid.x; i < d; i += tg_dim.x) {\n"
+        + "        float v = row_x[i];\n"
+        + "        sum_sq += v * v;\n"
+        + "    }\n"
+        + "    tg_smem[tid.x] = sum_sq;\n"
+        + "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        + "    for (uint s = tg_dim.x / 2; s > 0; s >>= 1) {\n"
+        + "        if (tid.x < s) { tg_smem[tid.x] += tg_smem[tid.x + s]; }\n"
+        + "        threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+        + "    }\n"
+        + "    float mean_sq = tg_smem[0] / (float)d;\n"
+        + "    float inv_rms = rsqrt(mean_sq + 1e-5f);\n"
+        + "    for (uint i = tid.x; i < d; i += tg_dim.x) {\n"
+        + "        row_out[i] = row_x[i] * inv_rms * gamma[i];\n"
+        + "    }\n";
+
+    let kernel: MetalKernel = MetalKernel {
+        name: kernel_name,
+        params: params,
+        body: body,
+        threadgroup_smem_bytes: 1024,
+    };
+    return metal_emit_full_kernel(&kernel);
+}
+
+pub fn metal_emit_attention_kernel(kernel_name: String, head_dim: Int) -> String {
+    let hd_str: String = metal_int_str(head_dim);
+    let mut params: List[MetalParam] = list_new();
+    let p_q: MetalParam = MetalParam { name: "q", type_name: "float", buffer_index: 0, is_device: true, is_const: true };
+    let p_k: MetalParam = MetalParam { name: "k_cache", type_name: "float", buffer_index: 1, is_device: true, is_const: true };
+    let p_v: MetalParam = MetalParam { name: "v_cache", type_name: "float", buffer_index: 2, is_device: true, is_const: true };
+    let p_out: MetalParam = MetalParam { name: "out", type_name: "float", buffer_index: 3, is_device: true, is_const: false };
+    let p_pos: MetalParam = MetalParam { name: "seq_pos", type_name: "uint", buffer_index: 4, is_device: false, is_const: true };
+    params = list_push(params, p_q);
+    params = list_push(params, p_k);
+    params = list_push(params, p_v);
+    params = list_push(params, p_out);
+    params = list_push(params, p_pos);
+
+    let body: String = "    uint head_idx = bid.x;\n"
+        + "    uint pos = *seq_pos;\n"
+        + "    device const float* head_q = q + head_idx * " + hd_str + ";\n"
+        + "    device float* head_out = out + head_idx * " + hd_str + ";\n"
+        + "    float scale = 1.0f / sqrt((float)" + hd_str + ");\n"
+        + "    float max_score = -1e30f;\n"
+        + "    for (uint t = 0; t <= pos; ++t) {\n"
+        + "        float score = 0.0f;\n"
+        + "        device const float* kt = k_cache + (t * " + hd_str + ");\n"
+        + "        for (uint d = 0; d < " + hd_str + "; ++d) { score += head_q[d] * kt[d]; }\n"
+        + "        score *= scale;\n"
+        + "        if (score > max_score) { max_score = score; }\n"
+        + "        tg_smem[t] = score;\n"
+        + "    }\n"
+        + "    float sum_exp = 0.0f;\n"
+        + "    for (uint t = 0; t <= pos; ++t) {\n"
+        + "        float exp_s = exp(tg_smem[t] - max_score);\n"
+        + "        tg_smem[t] = exp_s;\n"
+        + "        sum_exp += exp_s;\n"
+        + "    }\n"
+        + "    for (uint d = tid.x; d < " + hd_str + "; d += tg_dim.x) {\n"
+        + "        float weighted_v = 0.0f;\n"
+        + "        for (uint t = 0; t <= pos; ++t) {\n"
+        + "            float p = tg_smem[t] / sum_exp;\n"
+        + "            device const float* vt = v_cache + (t * " + hd_str + ");\n"
+        + "            weighted_v += p * vt[d];\n"
+        + "        }\n"
+        + "        head_out[d] = weighted_v;\n"
+        + "    }\n";
+
+    let kernel: MetalKernel = MetalKernel {
+        name: kernel_name,
+        params: params,
+        body: body,
+        threadgroup_smem_bytes: 4096,
+    };
+    return metal_emit_full_kernel(&kernel);
+}

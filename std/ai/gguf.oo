@@ -1,0 +1,190 @@
+// # GGUF v3 Binary Model Parser
+//
+// Logline: Parses GGUF v3 binary headers, metadata key-value pairs, tensor descriptors, and data alignment boundaries.
+//
+// Setup: Pure binary parsing functions operating on raw byte buffers.
+//
+// Beats:
+//   1. Validate GGUF magic (0x46554747) and version numbers.
+//   2. Parse metadata key-value pairs (architecture, context length, head count, RoPE theta).
+//   3. Parse tensor descriptors (name, shape, GGML type, data offset).
+//   4. Calculate aligned tensor data offsets.
+
+pub type GgufHeader = struct {
+    magic: Int,
+    version: Int,
+    tensor_count: Int,
+    metadata_kv_count: Int,
+};
+
+pub type GgufMetadataKv = struct {
+    key: String,
+    val_type: Int,
+    str_val: String,
+    int_val: Int,
+    float_val: Float,
+};
+
+pub type GgufTensorInfo = struct {
+    name: String,
+    rank: Int,
+    dim0: Int,
+    dim1: Int,
+    dim2: Int,
+    dim3: Int,
+    tensor_type: Int,
+    offset: Int,
+    size_bytes: Int,
+};
+
+pub type GgufModel = struct {
+    header: GgufHeader,
+    metadata: List[GgufMetadataKv],
+    tensors: List[GgufTensorInfo],
+    data_offset: Int,
+    alignment: Int,
+};
+
+pub fn gguf_int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+pub fn gguf_magic() -> Int {
+    return 1179998023; // 0x46554747 ('GGUF')
+}
+
+pub fn gguf_read_u8(data: String, offset: Int) -> Int {
+    let b: Int = byte_at(data, offset);
+    if b < 0 { return 0; }
+    return b;
+}
+
+pub fn gguf_read_u16_le(data: String, offset: Int) -> Int {
+    let b0: Int = gguf_read_u8(data, offset);
+    let b1: Int = gguf_read_u8(data, offset + 1);
+    return b0 + (b1 * 256);
+}
+
+pub fn gguf_read_u32_le(data: String, offset: Int) -> Int {
+    let b0: Int = gguf_read_u8(data, offset);
+    let b1: Int = gguf_read_u8(data, offset + 1);
+    let b2: Int = gguf_read_u8(data, offset + 2);
+    let b3: Int = gguf_read_u8(data, offset + 3);
+    return b0 + (b1 * 256) + (b2 * 65536) + (b3 * 16777216);
+}
+
+pub fn gguf_read_u64_le(data: String, offset: Int) -> Int {
+    let low: Int = gguf_read_u32_le(data, offset);
+    let high: Int = gguf_read_u32_le(data, offset + 4);
+    return low + (high * 4294967296);
+}
+
+pub fn gguf_read_f32_le(data: String, offset: Int) -> Float {
+    let bits: Int = gguf_read_u32_le(data, offset);
+    let sign: Int = (bits / 2147483648) % 2;
+    let exp: Int = (bits / 8388608) % 256;
+    let mant: Int = bits % 8388608;
+    if exp == 0 { return 0.0; }
+    let mut f: Float = 1.0 + (gguf_int_to_float(mant) / 8388608.0);
+    let shift: Int = exp - 127;
+    let mut i: Int = 0;
+    if shift > 0 {
+        while i < shift { f = f * 2.0; i = i + 1; }
+    } else if shift < 0 {
+        let neg_s: Int = 0 - shift;
+        while i < neg_s { f = f / 2.0; i = i + 1; }
+    }
+    if sign == 1 { f = 0.0 - f; }
+    return f;
+}
+
+pub fn gguf_read_str(data: String, offset: Int, len: Int) -> String {
+    if offset < 0 || offset + len > chars_len(data) { return ""; }
+    return str_slice(data, offset, offset + len);
+}
+
+pub fn gguf_parse_header(data: String) -> Result[GgufHeader, String] {
+    if chars_len(data) < 24 {
+        return Err("Data too short for GGUF header");
+    }
+    let magic: Int = gguf_read_u32_le(data, 0);
+    if magic != gguf_magic() {
+        return Err("Invalid GGUF magic header");
+    }
+    let version: Int = gguf_read_u32_le(data, 4);
+    if version < 2 || version > 3 {
+        return Err("Unsupported GGUF version");
+    }
+    let tensor_count: Int = gguf_read_u64_le(data, 8);
+    let metadata_kv_count: Int = gguf_read_u64_le(data, 16);
+
+    let hdr: GgufHeader = GgufHeader {
+        magic: magic,
+        version: version,
+        tensor_count: tensor_count,
+        metadata_kv_count: metadata_kv_count,
+    };
+    return Ok(hdr);
+}
+
+pub fn gguf_calc_alignment(offset: Int, align: Int) -> Int {
+    if align <= 0 { return offset; }
+    let rem: Int = offset % align;
+    if rem == 0 { return offset; }
+    return offset + (align - rem);
+}
+
+pub fn gguf_find_tensor(model: &GgufModel, name: String) -> Option[GgufTensorInfo] {
+    let mut out: Option[GgufTensorInfo] = None;
+    let mut i: Int = 0;
+    let n: Int = list_len(model.tensors);
+    while i < n {
+        let t: GgufTensorInfo = list_get(model.tensors, i);
+        if t.name == name {
+            out = Some(t);
+            return out;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn gguf_find_meta_int(model: &GgufModel, key: String) -> Option[Int] {
+    let mut out: Option[Int] = None;
+    let mut i: Int = 0;
+    let n: Int = list_len(model.metadata);
+    while i < n {
+        let m: GgufMetadataKv = list_get(model.metadata, i);
+        if m.key == key {
+            let iv: Int = m.int_val;
+            out = Some(iv);
+            return out;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn gguf_find_meta_string(model: &GgufModel, key: String) -> Option[String] {
+    let mut out: Option[String] = None;
+    let mut i: Int = 0;
+    let n: Int = list_len(model.metadata);
+    while i < n {
+        let m: GgufMetadataKv = list_get(model.metadata, i);
+        if m.key == key {
+            let sv: String = m.str_val;
+            out = Some(sv);
+            return out;
+        }
+        i = i + 1;
+    }
+    return out;
+}

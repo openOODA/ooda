@@ -1,0 +1,208 @@
+// # Stage 16 Adversarial GPU Emitters & Polyhedral Scheduler Challenge
+//
+// Logline: Adversarially tests SPIR-V binary opcodes, Metal MSL syntax, CUDA PTX assembly, Farkas scheduling, and loop tiling boundaries.
+//
+// Setup: FsCap, SysCap, and GpuCap granted for empirical verification.
+//
+// Beats:
+//   1. Adversarially verify SPIR-V binary 32-bit word stream, magic 0x07230203, and little-endian hex serialization.
+//   2. Adversarially inspect Metal MSL threadgroup memory attributes and CUDA PTX virtual register allocations.
+//   3. Adversarially test Farkas schedule legality, causality violation rejection, and unimodular loop interchange checks.
+//   4. Adversarially test polyhedral loop tiling boundary calculations on odd and prime iteration spaces.
+
+import "oodac/gpu_metal.oo";
+import "oodac/gpu_spirv.oo";
+import "oodac/gpu_ptx.oo";
+import "oodac/gpu_driver.oo";
+import "oodac/poly_domain.oo";
+import "oodac/poly_schedule.oo";
+import "oodac/poly_tile.oo";
+
+pub fn main(fs: &FsCap, sys: &SysCap, gpu: &GpuCap) {
+    println("=== Running Stage 16 Adversarial GPU & Polyhedral Challenge ===");
+
+    // 1. Adversarial SPIR-V Binary Word & Opcode Verification
+    println("[Adv 1/4] Adversarial SPIR-V Binary Verification...");
+    if spirv_magic() != 119734787 { // 0x07230203
+        println("FAIL: SPIR-V magic word is not 0x07230203");
+        process_exit(1);
+    }
+    if spirv_version_1_5() != 66816 { // 0x00010500
+        println("FAIL: SPIR-V version word is not 0x00010500");
+        process_exit(1);
+    }
+    if spirv_gen_id() != 5197636 { // 0x004F4F44 ('OODA')
+        println("FAIL: SPIR-V generator id mismatch");
+        process_exit(1);
+    }
+
+    // Verify word packing: spirv_word(count=2, opcode=1) -> 2*65536 + 1 = 131073
+    let cap_word: Int = spirv_word(2, 1);
+    if cap_word != 131073 {
+        println("FAIL: SPIR-V word bit-packing calculation mismatch");
+        process_exit(1);
+    }
+
+    // Verify little-endian hex formatting
+    let hex_magic: String = spirv_hex_word_le(119734787);
+    if hex_magic != "03022307" {
+        println("FAIL: SPIR-V little-endian hex mismatch for magic word: " + hex_magic);
+        process_exit(1);
+    }
+
+    let spv_vec: List[Int] = spirv_build_vector_add_kernel();
+    if list_get(spv_vec, 0) != 119734787 || list_get(spv_vec, 1) != 66816 {
+        println("FAIL: SPIR-V vector add header corrupted");
+        process_exit(1);
+    }
+    let spv_dot: List[Int] = spirv_build_dot_product_kernel();
+    if list_len(spv_dot) < 20 {
+        println("FAIL: SPIR-V dot product kernel length too short");
+        process_exit(1);
+    }
+    let spv_mm: List[Int] = spirv_build_matmul_kernel();
+    if list_len(spv_mm) < 25 {
+        println("FAIL: SPIR-V matmul kernel length too short");
+        process_exit(1);
+    }
+    println("  -> SPIR-V binary words and opcodes VERIFIED.");
+
+    // 2. Adversarial Metal MSL & CUDA PTX Inspection
+    println("[Adv 2/4] Adversarial Metal MSL & CUDA PTX Inspection...");
+    let msl_mm: String = metal_emit_matmul_kernel("k_gemm_adv", 16);
+    if str_index_of(msl_mm, "kernel void k_gemm_adv(") < 0 {
+        println("FAIL: Metal MSL entry signature missing");
+        process_exit(1);
+    }
+    if str_index_of(msl_mm, "threadgroup float ashare[16][16];") < 0 {
+        println("FAIL: Metal MSL ashare threadgroup matrix missing");
+        process_exit(1);
+    }
+    if str_index_of(msl_mm, "threadgroup_barrier(mem_flags::mem_threadgroup);") < 0 {
+        println("FAIL: Metal MSL threadgroup barrier missing");
+        process_exit(1);
+    }
+
+    let msl_attn: String = metal_emit_attention_kernel("k_attn_adv", 64);
+    if str_index_of(msl_attn, "rsqrt") < 0 && str_index_of(msl_attn, "sqrt") < 0 {
+        println("FAIL: Metal MSL attention scale missing sqrt calculation");
+        process_exit(1);
+    }
+
+    let ptx_mm: String = ptx_emit_matmul_kernel("k_ptx_gemm", "sm_90");
+    if str_index_of(ptx_mm, ".target sm_90") < 0 || str_index_of(ptx_mm, ".address_size 64") < 0 {
+        println("FAIL: PTX header directive missing");
+        process_exit(1);
+    }
+    if str_index_of(ptx_mm, "fma.rn.f32 %f1, %f2, %f3, %f1;") < 0 {
+        println("FAIL: PTX FMA instruction missing or malformed");
+        process_exit(1);
+    }
+    let ptx_norm: String = ptx_emit_rms_norm_kernel("k_ptx_norm", "sm_80");
+    if str_index_of(ptx_norm, ".target sm_80") < 0 || str_index_of(ptx_norm, "rsqrt.approx.f32") < 0 {
+        println("FAIL: PTX RMSNorm kernel missing rsqrt or target sm_80");
+        process_exit(1);
+    }
+    println("  -> Metal MSL and CUDA PTX assembly syntax VERIFIED.");
+
+    // 3. Adversarial Farkas Affine Scheduler & Causality
+    println("[Adv 3/4] Adversarial Farkas Affine Scheduling & Dependence Analysis...");
+    let mut d_pos: List[Int] = list_new();
+    d_pos = list_push(d_pos, 2);
+    d_pos = list_push(d_pos, 1);
+    let dep_valid: DependenceVector = dep_vector_create("S1", "S2", d_pos, true);
+    if !dep_distance_is_valid(&dep_valid) {
+        println("FAIL: Positive dependence distance marked invalid");
+        process_exit(1);
+    }
+
+    let mut d_neg: List[Int] = list_new();
+    d_neg = list_push(d_neg, 0 - 1);
+    d_neg = list_push(d_neg, 2);
+    let dep_invalid: DependenceVector = dep_vector_create("S1", "S2", d_neg, true);
+    if dep_distance_is_valid(&dep_invalid) {
+        println("FAIL: Negative backward dependence distance marked valid");
+        process_exit(1);
+    }
+
+    let mut dep_list_invalid: List[DependenceVector] = list_new();
+    dep_list_invalid = list_push(dep_list_invalid, dep_invalid);
+    let sched_invalid: Result[AffineSchedule, String] = affine_schedule_farkas_solve(dep_list_invalid, 2);
+    if sched_invalid.is_ok() {
+        println("FAIL: Farkas solver accepted invalid backward dependence");
+        process_exit(1);
+    }
+
+    // Unimodular interchange legality check
+    let mut d_illegal_swap: List[Int] = list_new();
+    d_illegal_swap = list_push(d_illegal_swap, 1);
+    d_illegal_swap = list_push(d_illegal_swap, 0 - 2);
+    let dep_swap_check: DependenceVector = dep_vector_create("S1", "S1", d_illegal_swap, true);
+    if unimodular_interchange_legal(&dep_swap_check, &dep_swap_check) {
+        println("FAIL: Unimodular interchange accepted illegal direction vector (1, -2)");
+        process_exit(1);
+    }
+    println("  -> Farkas causality and dependence analysis VERIFIED.");
+
+    // 4. Adversarial Polyhedral Loop Tiling & Domain Intersection
+    println("[Adv 4/4] Adversarial Polyhedral Domains & Loop Tiling Edge Cases...");
+    let mut vnames: List[String] = list_new();
+    vnames = list_push(vnames, "i");
+    let mut lb1: List[Int] = list_new(); lb1 = list_push(lb1, 0);
+    let mut ub1: List[Int] = list_new(); ub1 = list_push(ub1, 10);
+    let dom1: PolyDomain = poly_domain_from_bounds(vnames, lb1, ub1);
+
+    let mut lb2: List[Int] = list_new(); lb2 = list_push(lb2, 20);
+    let mut ub2: List[Int] = list_new(); ub2 = list_push(ub2, 30);
+    let dom2: PolyDomain = poly_domain_from_bounds(vnames, lb2, ub2);
+
+    let dom_empty: PolyDomain = poly_domain_intersect(&dom1, &dom2);
+    if !poly_domain_is_empty(&dom_empty) {
+        println("FAIL: Disjoint polyhedral domain intersection failed emptiness check");
+        process_exit(1);
+    }
+
+    // Test loop tiling with prime loop length
+    let prime_tiles: List[TileBound] = poly_compute_tile_bounds(37, 16);
+    if list_len(prime_tiles) != 3 {
+        println("FAIL: Loop tiling for length 37 / tile 16 did not produce 3 tiles");
+        process_exit(1);
+    }
+    let t0: TileBound = list_get(prime_tiles, 0);
+    let t1: TileBound = list_get(prime_tiles, 1);
+    let t2: TileBound = list_get(prime_tiles, 2);
+    if t0.start_idx != 0 || t0.end_idx != 16 {
+        println("FAIL: Tile 0 bounds incorrect");
+        process_exit(1);
+    }
+    if t1.start_idx != 16 || t1.end_idx != 32 {
+        println("FAIL: Tile 1 bounds incorrect");
+        process_exit(1);
+    }
+    if t2.start_idx != 32 || t2.end_idx != 37 {
+        println("FAIL: Tile 2 boundary clamping incorrect");
+        process_exit(1);
+    }
+
+    // Test sub-tile loop length
+    let sub_tiles: List[TileBound] = poly_compute_tile_bounds(5, 16);
+    if list_len(sub_tiles) != 1 {
+        println("FAIL: Sub-tile loop did not produce 1 tile");
+        process_exit(1);
+    }
+    let st0: TileBound = list_get(sub_tiles, 0);
+    if st0.start_idx != 0 || st0.end_idx != 5 {
+        println("FAIL: Sub-tile boundary clamping incorrect");
+        process_exit(1);
+    }
+
+    // Kernel fusion memory limit overflow test
+    let is_overflow_fuse: Bool = poly_fuse_producer_consumer_legal("T1", "T1", 1024, 4096);
+    if is_overflow_fuse {
+        println("FAIL: Producer-consumer fusion accepted intermediate exceeding shared memory limit");
+        process_exit(1);
+    }
+    println("  -> Polyhedral domain intersection, loop tiling, and fusion bounds VERIFIED.");
+
+    println("Stage 16 Adversarial GPU & Polyhedral Challenge PASSED.");
+}

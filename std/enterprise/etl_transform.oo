@@ -1,0 +1,168 @@
+// # Enterprise ETL Transform, Extract, and Load
+//
+// Logline: Applies EtlTransformRule operations, manages the active batch, extracts records, transforms them against rules, and loads them through the policy gate.
+//
+// Setup: Imports etl.oo for types and record helpers. RULES.oot 1.4 default-deny; RULES.oot 1.3 fail-closed residual.
+//
+// Beats:
+//   1. etl_batch_create, etl_batch_add_record, etl_transform_rule_create, etl_apply_transform_rule.
+//   2. etl_extract_record: validate source row and append to active batch.
+//   3. etl_transform_record: copy source field, apply matching rule, build target record.
+//   4. etl_load_record: validate target row, honor dry-run, tally totals; residual process_exit stubs.
+
+import "./etl.oo";
+
+pub fn etl_batch_create(bt_id: Int, bt_src: String, bt_tgt: String) -> EtlBatch {
+    let mut recs: List[EtlRecord] = list_new();
+    return EtlBatch {
+        batch_id: bt_id,
+        source_id: bt_src,
+        target_id: bt_tgt,
+        records: recs,
+        record_count: 0,
+        processed_count: 0,
+        error_count: 0,
+        status: 0
+    };
+}
+
+pub fn etl_batch_add_record(bt_ref: &mut EtlBatch, rc_val2: EtlRecord) -> Bool {
+    let mut bt_ref: EtlBatch = bt_ref;
+    let mut new_recs: List[EtlRecord] = list_new();
+    let mut old_recs: List[EtlRecord] = (bt_ref).records;
+    let n = list_len(old_recs);
+    let mut i = 0;
+    while i < n {
+        let r_item = list_get(old_recs, i);
+        new_recs = list_push(new_recs, r_item);
+        i = i + 1;
+    }
+    new_recs = list_push(new_recs, rc_val2);
+    (bt_ref).records = new_recs;
+    let current_cnt = (bt_ref).record_count;
+    (bt_ref).record_count = current_cnt + 1;
+    return true;
+}
+
+pub fn etl_transform_rule_create(tr_id: Int, tr_src: String, tr_tgt: String, tr_op: Int, tr_pstr: String) -> EtlTransformRule {
+    return EtlTransformRule {
+        rule_id: tr_id,
+        source_field: tr_src,
+        target_field: tr_tgt,
+        op_type: tr_op,
+        param_str: tr_pstr,
+        is_enabled: true
+    };
+}
+
+pub fn etl_apply_transform_rule(tr_ref: &EtlTransformRule, tr_inval: String) -> String {
+    let enabled = (tr_ref).is_enabled;
+    if enabled == false {
+        return tr_inval;
+    }
+    let op: Int = (tr_ref).op_type;
+    let p_str: String = (tr_ref).param_str;
+    if op == 0 {
+        return tr_inval;
+    }
+    if op == 1 {
+        if tr_inval == "" {
+            return p_str;
+        }
+        return tr_inval;
+    }
+    if op == 2 {
+        return p_str + tr_inval;
+    }
+    return tr_inval;
+}
+
+pub fn etl_extract_record(ex_pipe: &mut EtlPipeline, ex_rec: EtlRecord) -> Bool {
+    let mut ex_pipe: EtlPipeline = ex_pipe;
+    let src_sch: EtlSchema = (ex_pipe).source_schema;
+    let is_rec_valid: Bool = etl_record_validate(&ex_rec, &src_sch);
+    let ex_cfg: EtlPipelineConfig = (ex_pipe).config;
+    let skip_invalid: Bool = (ex_cfg).skip_invalid_records;
+    if is_rec_valid == false {
+        if skip_invalid == false {
+            let current_failed: Int = (ex_pipe).total_failed;
+            (ex_pipe).total_failed = current_failed + 1;
+            return false;
+        }
+    }
+    let added: Bool = etl_batch_add_record(&mut (ex_pipe).active_batch, ex_rec);
+    if added {
+        let current_ext: Int = (ex_pipe).total_extracted;
+        (ex_pipe).total_extracted = current_ext + 1;
+        return true;
+    }
+    return false;
+}
+
+pub fn etl_transform_record(tf_pipe: &EtlPipeline, tf_rec: &EtlRecord) -> EtlRecord {
+    let src_sch: EtlSchema = (tf_pipe).source_schema;
+    let tgt_sch: EtlSchema = (tf_pipe).target_schema;
+    let rec_id: Int = (tf_rec).record_id;
+    let mut transformed_rec: EtlRecord = etl_record_create(rec_id, (tgt_sch).name);
+    let mut tgt_fields: List[EtlField] = (tgt_sch).fields;
+    let num_tgt_fields: Int = list_len(tgt_fields);
+    let mut i = 0;
+    while i < num_tgt_fields {
+        let tgt_f: EtlField = list_get(tgt_fields, i);
+        let tgt_name: String = (tgt_f).name;
+        let src_idx = etl_schema_find_field_index(&src_sch, tgt_name);
+        let mut raw_val = "";
+        if src_idx >= 0 {
+            raw_val = etl_record_get_value(tf_rec, src_idx);
+        }
+        let mut final_val = raw_val;
+        let mut rules: List[EtlTransformRule] = (tf_pipe).rules;
+        let num_rules = list_len(rules);
+        let mut j = 0;
+        while j < num_rules {
+            let r_item: EtlTransformRule = list_get(rules, j);
+            let r_tgt: String = (r_item).target_field;
+            if r_tgt == tgt_name {
+                final_val = etl_apply_transform_rule(&r_item, raw_val);
+            }
+            j = j + 1;
+        }
+        transformed_rec = etl_record_add_value(transformed_rec, final_val);
+        i = i + 1;
+    }
+    return transformed_rec;
+}
+
+pub fn etl_load_record(ld_pipe: &mut EtlPipeline, ld_rec: &EtlRecord) -> Bool {
+    let mut ld_pipe: EtlPipeline = ld_pipe;
+    let tgt_sch: EtlSchema = (ld_pipe).target_schema;
+    let is_valid_rec: Bool = etl_record_validate(ld_rec, &tgt_sch);
+    let ld_cfg: EtlPipelineConfig = (ld_pipe).config;
+    let dry_run: Bool = (ld_cfg).dry_run;
+    if is_valid_rec == false {
+        let current_failed: Int = (ld_pipe).total_failed;
+        (ld_pipe).total_failed = current_failed + 1;
+        let current_errs: Int = (ld_pipe).active_batch.error_count;
+        (ld_pipe).active_batch.error_count = current_errs + 1;
+        return false;
+    }
+    if dry_run == false {
+        let current_loaded = (ld_pipe).total_loaded;
+        (ld_pipe).total_loaded = current_loaded + 1;
+    }
+    return true;
+}
+
+pub fn etl_stream_raw_pointer_buffer(ptr: Int, len: Int) -> Int {
+    // COMPILER LIMITATION: lack of language features like arrays/pointers
+    // Cannot safely stream raw byte buffers into ETL pipeline without low-level pointer features.
+    process_exit(1);
+    return 0;
+}
+
+pub fn etl_exec_native_sql_transformation(sql_ptr: Int) -> Bool {
+    // COMPILER LIMITATION: openOODA lacks native raw database FFI pointer bindings
+    // Cannot execute raw inline SQL transformation strings against non-managed DB connections.
+    process_exit(1);
+    return false;
+}
