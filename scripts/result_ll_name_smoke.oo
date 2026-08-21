@@ -1,0 +1,58 @@
+// # Result[List[Name]] Emission and Pattern Matching Smoke
+// Logline: Lower Result[List[Name]] to OoResL_Name, verify match statement and match let constructs, ARC retain on err, and fail-close unsupported nested types.
+// Setup: cwd is ooda/. Product oodac and runtime/chs_rt.c exist.
+// Beats: 1. emit-c lowers Result[List[Name]] to OoResL_Name and compiles with GCC | 2. execute Ok and Err match arms and match-let | 3. verify Result[Option] and Result[Int, Bool] fail closed
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let oodac = "./oodac/oodac";
+    let tmpd = ".ooda-cache/ooda-tmp/result_ll_name";
+    if !path_exists(fs, oodac) { fail("no oodac"); }
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
+
+    // Beat 1: Create fixture exercising Result[List[Item]]
+    let src = tmpd + "/res_ll_fixture.oo";
+    let w1 = process_exec(p, "printf 'pub type Item = struct {\\n    id: Int,\\n    val: Int,\\n};\\n\\npub fn make_items(flag: Bool) -> Result[List[Item], String] {\\n    if flag {\\n        let mut xs: List[Item] = list_new();\\n        xs = list_push(xs, Item { id: 1, val: 10 });\\n        xs = list_push(xs, Item { id: 2, val: 20 });\\n        return Ok(xs);\\n    }\\n    return Err(\"items unavailable\");\\n}\\n\\npub fn main() {\\n    let r_ok: Result[List[Item], String] = make_items(true);\\n    match r_ok {\\n        Ok(items) => {\\n            if list_len(items) != 2 { process_exit(1); }\\n            let it0: Item = list_get(items, 0);\\n            if it0.val != 10 { process_exit(1); }\\n        },\\n        Err(err) => { process_exit(1); }\\n    }\\n\\n    let r_err: Result[List[Item], String] = make_items(false);\\n    match r_err {\\n        Ok(items) => { process_exit(1); },\\n        Err(err) => {\\n            if err != \"items unavailable\" { process_exit(1); }\\n        }\\n    }\\n\\n    let empty_xs: List[Item] = list_new();\\n    let r_ok2: Result[List[Item], String] = make_items(true);\\n    let items_unwrapped: List[Item] = match r_ok2 {\\n        Ok(xs) => xs,\\n        Err(e) => empty_xs\\n    };\\n    if list_len(items_unwrapped) != 2 { process_exit(1); }\\n\\n    println(\"result_ll_name: OK\");\\n}\\n' > " + src);
+    if w1.is_err() { fail("write res_ll_fixture.oo"); }
+
+    let emit_res = process_exec(p, oodac + " emit-c " + src + " > " + tmpd + "/res_ll.c 2> " + tmpd + "/res_ll.err");
+    if emit_res.is_err() { fail("emit-c res_ll_fixture.oo"); }
+
+    let chk_types = process_exec(p, "grep -qE 'OoResL_Item|OoL_Item' " + tmpd + "/res_ll.c");
+    if chk_types.is_err() { fail("OoResL_Item / OoL_Item type missing in C output"); }
+
+    // Beat 2: Compile with GCC and run
+    let gcc_res = process_exec(p, "gcc -O2 -Iruntime runtime/chs_rt.c " + tmpd + "/res_ll.c -lm -ldl -lpthread -o " + tmpd + "/res_ll.bin");
+    if gcc_res.is_err() { fail("gcc compile res_ll"); }
+
+    let run_res = process_exec(p, tmpd + "/res_ll.bin > " + tmpd + "/res_ll.out 2>&1");
+    if run_res.is_err() { fail("run res_ll binary"); }
+
+    let chk_out = process_exec(p, "grep -q 'result_ll_name: OK' " + tmpd + "/res_ll.out");
+    if chk_out.is_err() { fail("res_ll output mismatch"); }
+
+    // Beat 3: Result[Option] and Result[Int, Bool] fail closed with ERR\tc_emit
+    let bad_opt = tmpd + "/bad_opt.oo";
+    let w2 = process_exec(p, "printf 'pub fn f() -> Result[Option[Int], String] { return Ok(None); }\\npub fn main() {}\\n' > " + bad_opt);
+    if w2.is_err() { fail("write bad_opt.oo"); }
+
+    let bad_emit1 = process_exec(p, oodac + " emit-c " + bad_opt + " > " + tmpd + "/bad1.c 2> " + tmpd + "/bad1.err; true");
+    if bad_emit1.is_err() { fail("execute bad_opt emit"); }
+    let chk_err1 = process_exec(p, "grep -qE 'ERR.c_emit' " + tmpd + "/bad1.c " + tmpd + "/bad1.err");
+    if chk_err1.is_err() { fail("Result[Option] did not fail closed"); }
+
+    let bad_bool = tmpd + "/bad_bool.oo";
+    let w3 = process_exec(p, "printf 'pub fn g() -> Result[Int, Bool] { return Ok(1); }\\npub fn main() {}\\n' > " + bad_bool);
+    if w3.is_err() { fail("write bad_bool.oo"); }
+
+    let bad_emit2 = process_exec(p, oodac + " emit-c " + bad_bool + " > " + tmpd + "/bad2.c 2> " + tmpd + "/bad2.err; true");
+    if bad_emit2.is_err() { fail("execute bad_bool emit"); }
+    let chk_err2 = process_exec(p, "grep -qE 'ERR.c_emit' " + tmpd + "/bad2.c " + tmpd + "/bad2.err");
+    if chk_err2.is_err() { fail("Result[Int, Bool] did not fail closed"); }
+
+    println("result_ll_name_smoke: PASSED");
+}

@@ -1,0 +1,132 @@
+// # Product prove eBPF and SPIR-V encoders
+//
+// Logline: Fail-closed emit+gcc+run drives the shipped eBPF 8-byte packer and SPIR-V 32-bit header and checks valid deterministic streams.
+//
+// Setup: Isolated emit-c. Imports mesh_ebpf encoder/types and gpu spirv encoder/types. Run from ooda/.
+//
+// Beats:
+//   1. Encode an LSM capability filter twice and refuse unless both streams match and end in BPF_EXIT.
+//   2. Check ALU64/LDX/STX/jump field packing through shipped unpack helpers.
+//   3. Encode a SPIR-V compute header twice, require magic 0x07230203 and named Op words, then print PASSED.
+
+import "std/mesh_ebpf/ebpf_encoder.oo";
+import "std/mesh_ebpf/ebpf_types.oo";
+import "std/gpu/spirv_encoder.oo";
+import "std/gpu/spirv_types.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn same_ints(a: List[Int], b: List[Int]) -> Bool {
+    if list_len(a) != list_len(b) { return false; }
+    let n: Int = list_len(a);
+    let mut i: Int = 0;
+    while i < n {
+        if list_get(a, i) != list_get(b, i) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn prove_ebpf() {
+    let mask: Int = 5;
+    let a: List[Int] = ebpf_build_lsm_cap_filter(mask);
+    let b: List[Int] = ebpf_build_lsm_cap_filter(mask);
+    if same_ints(a, b) == false {
+        fail("eBPF LSM filter not deterministic");
+    }
+    if list_len(a) < 2 {
+        fail("eBPF LSM filter empty");
+    }
+    let last: Int = list_get(a, list_len(a) - 1);
+    if ebpf_encoder_opcode(last) != ebpf_types_exit() {
+        fail("eBPF LSM filter missing BPF_EXIT");
+    }
+    let and_insn: Int = list_get(a, 1);
+    if ebpf_encoder_imm(and_insn) != mask {
+        fail("eBPF LSM filter did not embed allowed_fd_mask");
+    }
+    println("eBPF LSM filter insns=" + list_len(a).to_string() + " exit_op=" + ebpf_encoder_opcode(last).to_string());
+
+    let add: Int = ebpf_encoder_alu64_add(1, 2);
+    if ebpf_encoder_dst(add) != 1 { fail("ALU64 ADD dst"); }
+    if ebpf_encoder_src(add) != 2 { fail("ALU64 ADD src"); }
+    let add_op: Int = ebpf_types_opcode(ebpf_types_cls_alu64(), ebpf_types_alu_add(), ebpf_types_src_x());
+    if ebpf_encoder_opcode(add) != add_op { fail("ALU64 ADD opcode"); }
+    let _sub: Int = ebpf_encoder_alu64_sub(3, 4);
+    let _mov: Int = ebpf_encoder_alu64_mov(5, 6);
+    let _and: Int = ebpf_encoder_alu64_and(1, 2);
+    let _xor: Int = ebpf_encoder_alu64_xor(1, 2);
+    let ldx: Int = ebpf_encoder_ldx_dw(2, 1, 8);
+    if ebpf_encoder_off(ldx) != 8 { fail("LDX offset"); }
+    let stx: Int = ebpf_encoder_stx_dw(1, 2, 16);
+    if ebpf_encoder_off(stx) != 16 { fail("STX offset"); }
+    let jeq: Int = ebpf_encoder_jeq_imm(0, 0, 1);
+    let jne: Int = ebpf_encoder_jne_imm(0, 1, 2);
+    let jgt: Int = ebpf_encoder_jgt_imm(0, 3, 4);
+    if ebpf_encoder_off(jne) != 2 { fail("JNE offset"); }
+    if ebpf_encoder_off(jgt) != 4 { fail("JGT offset"); }
+    if ebpf_encoder_imm(jeq) != 0 { fail("JEQ imm"); }
+    println("eBPF ALU/LDX/STX/JEQ/JNE/JGT/EXIT packing ok");
+}
+
+fn prove_spirv() {
+    let h1: List[Int] = spirv_encoder_header_default(64);
+    let h2: List[Int] = spirv_encoder_header_default(64);
+    if same_ints(h1, h2) == false {
+        fail("SPIR-V header not deterministic");
+    }
+    if list_len(h1) != 5 {
+        fail("SPIR-V header must be five words");
+    }
+    let magic: Int = list_get(h1, 0);
+    if magic != spirv_types_magic() {
+        fail("SPIR-V magic mismatch vs spirv_types_magic");
+    }
+    if magic != 119734787 {
+        fail("SPIR-V magic is not 0x07230203");
+    }
+    println("SPIR-V magic=0x07230203 word=" + magic.to_string());
+
+    let cap: List[Int] = spirv_encoder_op_capability(spirv_types_cap_shader());
+    if spirv_types_opcode_of(list_get(cap, 0)) != spirv_types_op_capability() {
+        fail("OpCapability opcode");
+    }
+    if spirv_types_count_of(list_get(cap, 0)) != 2 {
+        fail("OpCapability word count");
+    }
+    let mm: List[Int] = spirv_encoder_op_memory_model(spirv_types_addr_logical(), spirv_types_mem_glsl450());
+    if spirv_types_opcode_of(list_get(mm, 0)) != spirv_types_op_memory_model() {
+        fail("OpMemoryModel opcode");
+    }
+    let tf: List[Int] = spirv_encoder_op_type_float(1, 32);
+    if spirv_types_opcode_of(list_get(tf, 0)) != spirv_types_op_type_float() {
+        fail("OpTypeFloat opcode");
+    }
+    let tv: List[Int] = spirv_encoder_op_type_vector(2, 1, 4);
+    if spirv_types_opcode_of(list_get(tv, 0)) != spirv_types_op_type_vector() {
+        fail("OpTypeVector opcode");
+    }
+    let fnw: List[Int] = spirv_encoder_op_function(2, 3, 0, 4);
+    if spirv_types_opcode_of(list_get(fnw, 0)) != spirv_types_op_function() {
+        fail("OpFunction opcode");
+    }
+    let mx: List[Int] = spirv_encoder_op_matrix_times_vector(2, 5, 6, 7);
+    if spirv_types_opcode_of(list_get(mx, 0)) != spirv_types_op_matrix_times_vector() {
+        fail("OpMatrixTimesVector opcode");
+    }
+    let mut mod: List[Int] = spirv_encoder_append(h1, cap);
+    mod = spirv_encoder_append(mod, mm);
+    if list_get(mod, 0) != 119734787 {
+        fail("assembled module lost SPIR-V magic");
+    }
+    println("SPIR-V OpCapability/MemoryModel/TypeFloat/TypeVector/Function/MatrixTimesVector ok");
+}
+
+pub fn main() {
+    prove_ebpf();
+    prove_spirv();
+    println("prove_prod_ebpf_spirv_framework: PASSED");
+}

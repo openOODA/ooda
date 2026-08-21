@@ -1,0 +1,52 @@
+// # User Method Calls on Imported Structs Smoke
+// Logline: User method calls on imported structs lower to valid C calls, compile with GCC, run, and unresolved methods fail closed.
+// Setup: cwd is ooda/. Product oodac and runtime/chs_rt.c exist.
+// Beats: 1. emit-c and GCC compile & run imported struct method calls | 2. unresolvable method fails closed with ERR c_emit
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let oodac = "./oodac/oodac";
+    let tmpd = ".ooda-cache/ooda-tmp/import_call";
+    if !path_exists(fs, oodac) { fail("no oodac"); }
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
+
+    // Beat 1: Create imported struct fixture and importing caller
+    let mod_src = tmpd + "/point_mod.oo";
+    let call_src = tmpd + "/import_call.oo";
+
+    let w1 = process_exec(p, "printf 'pub type Point = struct {\\n    x: Int,\\n    y: Int,\\n};\\n\\npub fn point_scale(p: Point, factor: Int) -> Point {\\n    return Point { x: p.x * factor, y: p.y * factor };\\n}\\n\\npub fn point_sum(p: Point) -> Int {\\n    return p.x + p.y;\\n}\\n' > " + mod_src);
+    if w1.is_err() { fail("write point_mod.oo"); }
+
+    let w2 = process_exec(p, "printf 'import \"" + mod_src + "\";\\n\\npub fn main() {\\n    let p: Point = Point { x: 5, y: 7 };\\n    let p2: Point = p.point_scale(4);\\n    let s: Int = p2.point_sum();\\n    if s == 48 {\\n        println(\"import_call: OK\");\\n    } else {\\n        process_exit(1);\\n    }\\n}\\n' > " + call_src);
+    if w2.is_err() { fail("write import_call.oo"); }
+
+    // Emit C, compile with GCC, run and verify
+    let emit_res = process_exec(p, oodac + " emit-c " + call_src + " > " + tmpd + "/call.c 2> " + tmpd + "/call.err");
+    if emit_res.is_err() { fail("emit-c import_call.oo"); }
+
+    let gcc_res = process_exec(p, "gcc -O2 -Iruntime runtime/chs_rt.c " + tmpd + "/call.c -lm -ldl -lpthread -o " + tmpd + "/call.bin");
+    if gcc_res.is_err() { fail("gcc compile import_call"); }
+
+    let run_res = process_exec(p, tmpd + "/call.bin > " + tmpd + "/call.out 2>&1");
+    if run_res.is_err() { fail("run import_call binary"); }
+
+    let chk = process_exec(p, "grep -q 'import_call: OK' " + tmpd + "/call.out");
+    if chk.is_err() { fail("import_call output mismatch"); }
+
+    // Beat 2: Verify unresolvable method fails closed with ERR\tc_emit
+    let bad_src = tmpd + "/bad_call.oo";
+    let w3 = process_exec(p, "printf 'pub type Point = struct { x: Int, y: Int };\\npub fn main() {\\n    let p: Point = Point { x: 1, y: 2 };\\n    p.nonexistent_method();\\n}\\n' > " + bad_src);
+    if w3.is_err() { fail("write bad_call.oo"); }
+
+    let bad_emit = process_exec(p, oodac + " emit-c " + bad_src + " > " + tmpd + "/bad.c 2> " + tmpd + "/bad.err; true");
+    if bad_emit.is_err() { fail("execute bad_emit"); }
+
+    let chk_err = process_exec(p, "grep -qE 'ERR.c_emit.unresolved method' " + tmpd + "/bad.c " + tmpd + "/bad.err");
+    if chk_err.is_err() { fail("unresolved method did not emit ERR c_emit"); }
+
+    println("import_call_gcc_smoke: PASSED");
+}

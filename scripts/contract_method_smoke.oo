@@ -1,0 +1,56 @@
+// # Contract Method DOT Lowering Smoke
+// Logline: Verify contract requires s.len() > 0 lowers to oo_chars_len, checks valid pass and empty-string trap, and non-len methods fail closed.
+// Setup: cwd is ooda/. Product oodac and runtime/chs_rt.c exist.
+// Beats: 1. emit-c lowers requires s.len() to oo_chars_len | 2. GCC compile & run verifies valid pass and empty-string runtime trap | 3. non-len contract method fails closed with ERR c_emit requires residual
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let oodac = "./oodac/oodac";
+    let tmpd = ".ooda-cache/ooda-tmp/contract_method";
+    if !path_exists(fs, oodac) { fail("no oodac"); }
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
+
+    // Beat 1: Create fixture with requires s.len() > 0
+    let contract_src = tmpd + "/contract_fixture.oo";
+    let w1 = process_exec(p, "printf 'pub fn validate_str(s: String) -> Int\\n    requires s.len() > 0\\n{\\n    return s.len();\\n}\\n\\npub fn main(args: List[String]) {\\n    if list_len(args) > 0 {\\n        let empty_val: String = \"\";\\n        let _r: Int = validate_str(empty_val);\\n    } else {\\n        let valid_val: String = \"OpenOODA\";\\n        let r: Int = validate_str(valid_val);\\n        if r == 8 {\\n            println(\"contract_pass: OK\");\\n        } else {\\n            process_exit(1);\\n        }\\n    }\\n}\\n' > " + contract_src);
+    if w1.is_err() { fail("write contract_fixture.oo"); }
+
+    let emit_res = process_exec(p, oodac + " emit-c " + contract_src + " > " + tmpd + "/contract.c 2> " + tmpd + "/contract.err");
+    if emit_res.is_err() { fail("emit-c contract_fixture.oo"); }
+
+    // Verify emitted C contains oo_chars_len in precondition
+    let chk_c = process_exec(p, "grep -q 'oo_chars_len(s) > 0' " + tmpd + "/contract.c");
+    if chk_c.is_err() { fail("oo_chars_len lowering missing in emitted C"); }
+
+    // Beat 2: Compile with GCC and run pass and fail paths
+    let gcc_res = process_exec(p, "gcc -O2 -Iruntime runtime/chs_rt.c " + tmpd + "/contract.c -lm -ldl -lpthread -o " + tmpd + "/contract.bin");
+    if gcc_res.is_err() { fail("gcc compile contract"); }
+
+    // Test valid string passes
+    let run_pass = process_exec(p, tmpd + "/contract.bin > " + tmpd + "/pass.out 2>&1");
+    if run_pass.is_err() { fail("contract pass execution failed"); }
+    let chk_pass = process_exec(p, "grep -q 'contract_pass: OK' " + tmpd + "/pass.out");
+    if chk_pass.is_err() { fail("contract pass output mismatch"); }
+
+    // Test empty string triggers runtime contract requires error
+    let run_fail = process_exec(p, tmpd + "/contract.bin trigger_fail > " + tmpd + "/fail.out 2> " + tmpd + "/fail.err; true");
+    if run_fail.is_err() { fail("execute fail path"); }
+    let chk_fail = process_exec(p, "grep -qE 'ERR.contract.requires' " + tmpd + "/fail.out " + tmpd + "/fail.err");
+    if chk_fail.is_err() { fail("runtime contract trap missing on empty string"); }
+
+    // Beat 3: Non-len contract method fails closed with ERR\tc_emit\trequires residual
+    let bad_src = tmpd + "/bad_contract.oo";
+    let w2 = process_exec(p, "printf 'pub fn check_bad(s: String) -> Int\\n    requires s.unknown_fn() > 0\\n{\\n    return 1;\\n}\\npub fn main() {}\\n' > " + bad_src);
+    if w2.is_err() { fail("write bad_contract.oo"); }
+
+    let bad_emit = process_exec(p, oodac + " emit-c " + bad_src + " > " + tmpd + "/bad.c 2> " + tmpd + "/bad.err; true");
+    if bad_emit.is_err() { fail("execute bad contract emit"); }
+    let chk_bad = process_exec(p, "grep -qE 'ERR.c_emit.requires residual' " + tmpd + "/bad.c " + tmpd + "/bad.err");
+    if chk_bad.is_err() { fail("non-len method did not produce requires residual"); }
+
+    println("contract_method_smoke: PASSED");
+}

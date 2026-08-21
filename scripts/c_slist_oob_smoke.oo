@@ -1,0 +1,74 @@
+// # String List Out-of-Bounds and Heap Abort Fail-Closed Smoke
+// Logline: Verify slist out-of-bounds indexing and struct list heap allocations fail closed with structured ERR diagnostics and exit code 1 without process abort (exit 134).
+// Setup: cwd is ooda/. Product oodac and runtime/chs_rt.c exist.
+// Beats: 1. out-of-bounds slist_get outputs ERR slist_get OOB and exits 1 (not exit 134) | 2. negative index slist_get fails closed with exit 1 | 3. olist helpers emit named ERR c_emit heap allocation failed and exit(1)
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+pub fn main(p: &ProcessCap, fs: &FsReadCap) {
+    let oodac = "./oodac/oodac";
+    let tmpd = ".ooda-cache/ooda-tmp/slist_oob";
+
+    if !path_exists(fs, oodac) { fail("no oodac"); }
+    if process_exec(p, "mkdir -p " + tmpd).is_err() { fail("mkdir"); }
+
+    // Beat 1: Slist OOB access on index > len
+    let oob_src = tmpd + "/slist_oob_fixture.oo";
+    let w1 = process_exec(p, "printf 'pub fn main(args: List[String]) {\\n    let mut xs: List[String] = list_new();\\n    xs = list_push(xs, \"alpha\");\\n    xs = list_push(xs, \"beta\");\\n    if list_len(args) > 0 {\\n        let _v: String = list_get(xs, 99);\\n    } else {\\n        let v0: String = list_get(xs, 0);\\n        if v0 == \"alpha\" { println(\"slist_valid: OK\"); } else { process_exit(1); }\\n    }\\n}\\n' > " + oob_src);
+    if w1.is_err() { fail("write slist_oob_fixture.oo"); }
+
+    let emit1 = process_exec(p, oodac + " emit-c " + oob_src + " > " + tmpd + "/oob.c 2> " + tmpd + "/oob.err");
+    if emit1.is_err() { fail("emit-c slist_oob_fixture.oo"); }
+
+    let gcc1 = process_exec(p, "gcc -O2 -Iruntime runtime/chs_rt.c " + tmpd + "/oob.c -lm -ldl -lpthread -o " + tmpd + "/oob.bin");
+    if gcc1.is_err() { fail("gcc compile slist_oob"); }
+
+    // Run valid pass
+    let run_pass = process_exec(p, tmpd + "/oob.bin > " + tmpd + "/pass.out 2>&1");
+    if run_pass.is_err() { fail("slist valid execution failed"); }
+    let chk_pass = process_exec(p, "grep -q 'slist_valid: OK' " + tmpd + "/pass.out");
+    if chk_pass.is_err() { fail("slist valid output mismatch"); }
+
+    // Run OOB fail
+    let run_fail = process_exec(p, tmpd + "/oob.bin trigger_oob > " + tmpd + "/oob.out 2> " + tmpd + "/oob.err; echo rc=$? > " + tmpd + "/oob.rc");
+    if run_fail.is_err() { fail("execute slist oob"); }
+
+    let chk_diag = process_exec(p, "grep -qE 'ERR.slist_get OOB' " + tmpd + "/oob.out " + tmpd + "/oob.err");
+    if chk_diag.is_err() { fail("slist OOB diagnostic missing"); }
+
+    let chk_rc1 = process_exec(p, "grep -q 'rc=1' " + tmpd + "/oob.rc");
+    if chk_rc1.is_err() { fail("slist OOB exit code was not 1"); }
+
+    // Beat 2: Negative index OOB access
+    let neg_src = tmpd + "/neg_oob_fixture.oo";
+    let w2 = process_exec(p, "printf 'pub fn main() {\\n    let mut xs: List[String] = list_new();\\n    xs = list_push(xs, \"item\");\\n    let _v: String = list_get(xs, 0 - 1);\\n}\\n' > " + neg_src);
+    if w2.is_err() { fail("write neg_oob_fixture.oo"); }
+
+    let emit2 = process_exec(p, oodac + " emit-c " + neg_src + " > " + tmpd + "/neg.c 2> " + tmpd + "/neg.err");
+    if emit2.is_err() { fail("emit-c neg_oob_fixture.oo"); }
+
+    let gcc2 = process_exec(p, "gcc -O2 -Iruntime runtime/chs_rt.c " + tmpd + "/neg.c -lm -ldl -lpthread -o " + tmpd + "/neg.bin");
+    if gcc2.is_err() { fail("gcc compile neg_oob"); }
+
+    let run_neg = process_exec(p, tmpd + "/neg.bin > " + tmpd + "/neg.out 2> " + tmpd + "/neg.err; echo rc=$? > " + tmpd + "/neg.rc");
+    if run_neg.is_err() { fail("execute negative slist oob"); }
+
+    let chk_neg_rc = process_exec(p, "grep -q 'rc=1' " + tmpd + "/neg.rc");
+    if chk_neg_rc.is_err() { fail("negative slist OOB exit code was not 1"); }
+
+    // Beat 3: Verify struct olist helpers emit named ERR\tc_emit\theap allocation failed (no abort())
+    let olist_src = tmpd + "/olist_fixture.oo";
+    let w3 = process_exec(p, "printf 'pub type Node = struct { id: Int };\\npub fn main() {\\n    let mut xs: List[Node] = list_new();\\n    xs = list_push(xs, Node { id: 1 });\\n}\\n' > " + olist_src);
+    if w3.is_err() { fail("write olist_fixture.oo"); }
+
+    let emit3 = process_exec(p, oodac + " emit-c " + olist_src + " > " + tmpd + "/olist.c 2> " + tmpd + "/olist.err");
+    if emit3.is_err() { fail("emit-c olist_fixture.oo"); }
+
+    let chk_heap = process_exec(p, "grep -q 'heap allocation failed' " + tmpd + "/olist.c && ! grep -q 'abort' " + tmpd + "/olist.c");
+    if chk_heap.is_err() { fail("olist heap failure check missing or still uses abort()"); }
+
+    println("c_slist_oob_smoke: PASSED");
+}
