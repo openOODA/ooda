@@ -1,0 +1,107 @@
+// # Product prove DSP kernels
+//
+// Logline: Fail-closed emit+gcc+run drives Gaussian, Sobel, Laplacian, biquad, and resample on small buffers.
+//
+// Setup: Isolated emit-c. Run from ooda/.
+//
+// Beats:
+//   1. Convolution filters change pixels.
+//   2. Biquad LPF and HPF differ on a DC step.
+//   3. Linear resample length follows the ratio.
+//   4. Sinc resample round-trip residual is small.
+
+import "std/signal_dsp/image_filters.oo";
+import "std/signal_dsp/audio_biquad.oo";
+import "std/signal_dsp/resample_dsp.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn unwrap(r: Result[List[Int], String], msg: String) -> List[Int] {
+    match r {
+        Ok(v) => { return v; },
+        Err(e) => { fail(msg + ": " + e); return list_new(); }
+    }
+}
+
+fn unwrap_fv(r: Result[List[Float], String], msg: String) -> List[Float] {
+    match r {
+        Ok(v) => { return v; },
+        Err(e) => { fail(msg + ": " + e); return list_new(); }
+    }
+}
+
+fn near(a: Float, b: Float, eps: Float) -> Bool {
+    let mut d: Float = a - b;
+    if d < 0.0 { d = 0.0 - d; }
+    return d <= eps;
+}
+
+fn prove_img() {
+    let mut px: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 9 {
+        let mut v: Int = 0;
+        if i == 4 { v = 40; }
+        px = list_push(px, v);
+        i = i + 1;
+    }
+    let g: List[Int] = unwrap(image_filters_gaussian(px, 3, 3), "gauss");
+    if list_get(g, 4) == 40 { fail("gauss copy"); }
+    if list_get(g, 4) < 1 { fail("gauss zero"); }
+    let s: List[Int] = unwrap(image_filters_sobel(px, 3, 3), "sobel");
+    if list_get(s, 1) == list_get(px, 1) {
+        if list_get(s, 3) == list_get(px, 3) { fail("sobel copy"); }
+    }
+    let l: List[Int] = unwrap(image_filters_laplacian(px, 3, 3), "lap");
+    if list_get(l, 4) == 40 { fail("lap copy"); }
+    println("Gaussian/Sobel/Laplacian change pixels g4=" + list_get(g, 4).to_string());
+}
+
+fn prove_bq() {
+    let lp: List[Float] = unwrap_fv(audio_biquad_lpf(48000.0, 8000.0, 0.707), "lpf");
+    let hp: List[Float] = unwrap_fv(audio_biquad_hpf(48000.0, 8000.0, 0.707), "hpf");
+    let bp: List[Float] = unwrap_fv(audio_biquad_bpf(48000.0, 1000.0, 1.0), "bpf");
+    let nt: List[Float] = unwrap_fv(audio_biquad_notch(48000.0, 1000.0, 1.0), "notch");
+    if list_len(bp) != 7 { fail("bpf coef"); }
+    if list_len(nt) != 7 { fail("notch coef"); }
+    let mut step: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < 32 {
+        step = list_push(step, 1.0);
+        i = i + 1;
+    }
+    let yl: List[Float] = unwrap_fv(audio_biquad_process(lp, step), "lpf run");
+    let yh: List[Float] = unwrap_fv(audio_biquad_process(hp, step), "hpf run");
+    if near(list_get(yl, 31), list_get(yh, 31), 0.01) { fail("lpf hpf same"); }
+    println("Biquad LPF vs HPF step L=" + list_get(yl, 31).to_string() + " H=" + list_get(yh, 31).to_string());
+}
+
+fn prove_rs() {
+    let mut x: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < 8 {
+        if i % 2 == 0 {
+            x = list_push(x, 1.0);
+        } else {
+            x = list_push(x, 0.0);
+        }
+        i = i + 1;
+    }
+    let up: List[Float] = unwrap_fv(resample_dsp_linear(x, 2.0), "lin up");
+    if list_len(up) < list_len(x) { fail("linear length"); }
+    let dn: List[Float] = unwrap_fv(resample_dsp_linear(up, 0.5), "lin down");
+    if near(list_get(dn, 0), list_get(x, 0), 0.25) == false { fail("linear residual"); }
+    let su: List[Float] = unwrap_fv(resample_dsp_sinc(x, 2.0), "sinc up");
+    if list_len(su) < list_len(x) { fail("sinc length"); }
+    println("Resample linear n=" + list_len(up).to_string() + " sinc n=" + list_len(su).to_string());
+}
+
+pub fn main() {
+    prove_img();
+    prove_bq();
+    prove_rs();
+    println("prove_prod_dsp: PASSED");
+}

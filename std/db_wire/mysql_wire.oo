@@ -1,0 +1,184 @@
+// # MySQL handshake v10 and packets
+//
+// Logline: Packs and unpacks MySQL handshake v10, COM_QUERY, OK_Packet, ERR_Packet, ResultSetHeader, and ColumnDefinition41.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. Length is 3-byte little-endian. No sockets.
+//
+// Beats:
+//   1. Wrap a payload with a 3-byte length and a sequence byte.
+//   2. Build handshake v10, COM_QUERY, OK, ERR, result header, and column definition.
+//   3. Parse the first payload byte as the packet kind.
+//   4. Recover those fields; ERR is not OK.
+
+fn my_le24(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, n & 255);
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, (n >> 16) & 255);
+    return b;
+}
+
+fn my_le16(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, n & 255);
+    b = list_push(b, (n >> 8) & 255);
+    return b;
+}
+
+fn my_le32(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, n & 255);
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, (n >> 16) & 255);
+    b = list_push(b, (n >> 24) & 255);
+    return b;
+}
+
+fn my_cat(o: List[Int], s: List[Int]) -> List[Int] {
+    let mut b: List[Int] = o;
+    let mut i: Int = 0;
+    while i < list_len(s) {
+        b = list_push(b, list_get(s, i) & 255);
+        i = i + 1;
+    }
+    return b;
+}
+
+fn my_wrap(seq: Int, payload: List[Int]) -> List[Int] {
+    let mut o: List[Int] = my_le24(list_len(payload));
+    o = list_push(o, seq & 255);
+    o = my_cat(o, payload);
+    return o;
+}
+
+pub fn mysql_wire_handshake(version: List[Int], conn_id: Int) -> Result[List[Int], String] {
+    if list_len(version) < 1 { return Err("mysql version"); }
+    let mut p: List[Int] = list_new();
+    p = list_push(p, 10);
+    p = my_cat(p, version);
+    p = list_push(p, 0);
+    p = my_cat(p, my_le32(conn_id));
+    let mut i: Int = 0;
+    while i < 8 {
+        p = list_push(p, i + 1);
+        i = i + 1;
+    }
+    p = list_push(p, 0);
+    p = my_cat(p, my_le16(512));
+    p = list_push(p, 33);
+    p = my_cat(p, my_le16(2));
+    p = my_cat(p, my_le16(0));
+    p = list_push(p, 21);
+    i = 0;
+    while i < 10 {
+        p = list_push(p, 0);
+        i = i + 1;
+    }
+    i = 0;
+    while i < 13 {
+        p = list_push(p, 10 + i);
+        i = i + 1;
+    }
+    return Ok(my_wrap(0, p));
+}
+
+pub fn mysql_wire_query(sql: List[Int]) -> Result[List[Int], String] {
+    if list_len(sql) < 1 { return Err("mysql query empty"); }
+    let mut p: List[Int] = list_new();
+    p = list_push(p, 3);
+    p = my_cat(p, sql);
+    return Ok(my_wrap(0, p));
+}
+
+pub fn mysql_wire_ok(affected: Int) -> Result[List[Int], String] {
+    if affected < 0 { return Err("mysql affected"); }
+    let mut p: List[Int] = list_new();
+    p = list_push(p, 0);
+    p = list_push(p, affected & 255);
+    p = list_push(p, 0);
+    p = my_cat(p, my_le16(2));
+    p = my_cat(p, my_le16(0));
+    return Ok(my_wrap(1, p));
+}
+
+pub fn mysql_wire_err(code: Int, msg: List[Int]) -> Result[List[Int], String] {
+    if code < 1 { return Err("mysql err code"); }
+    let mut p: List[Int] = list_new();
+    p = list_push(p, 255);
+    p = my_cat(p, my_le16(code));
+    p = list_push(p, 35);
+    p = list_push(p, 72);
+    p = list_push(p, 89);
+    p = list_push(p, 48);
+    p = list_push(p, 48);
+    p = list_push(p, 48);
+    p = my_cat(p, msg);
+    return Ok(my_wrap(1, p));
+}
+
+pub fn mysql_wire_result_header(cols: Int) -> Result[List[Int], String] {
+    if cols < 1 { return Err("mysql cols"); }
+    let mut p: List[Int] = list_new();
+    p = list_push(p, cols & 255);
+    return Ok(my_wrap(1, p));
+}
+
+pub fn mysql_wire_column_def(name: List[Int]) -> Result[List[Int], String] {
+    if list_len(name) < 1 { return Err("mysql column"); }
+    let mut p: List[Int] = list_new();
+    p = list_push(p, 3);
+    p = list_push(p, 100);
+    p = list_push(p, 101);
+    p = list_push(p, 102);
+    p = list_push(p, 0);
+    p = list_push(p, 0);
+    p = list_push(p, 0);
+    p = list_push(p, list_len(name) & 255);
+    p = my_cat(p, name);
+    p = list_push(p, list_len(name) & 255);
+    p = my_cat(p, name);
+    p = list_push(p, 12);
+    p = my_cat(p, my_le16(33));
+    p = my_cat(p, my_le32(64));
+    p = list_push(p, 253);
+    p = my_cat(p, my_le16(0));
+    p = list_push(p, 0);
+    p = my_cat(p, my_le16(0));
+    return Ok(my_wrap(2, p));
+}
+
+pub fn mysql_wire_parse(buf: List[Int]) -> Result[List[Int], String] {
+    if list_len(buf) < 5 { return Err("mysql short"); }
+    let n: Int = list_get(buf, 0) + list_get(buf, 1) * 256 + list_get(buf, 2) * 65536;
+    if 4 + n > list_len(buf) { return Err("mysql length"); }
+    let seq: Int = list_get(buf, 3);
+    let kind: Int = list_get(buf, 4);
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, kind);
+    rec = list_push(rec, seq);
+    rec = list_push(rec, n);
+    if kind == 10 {
+        rec = list_push(rec, 10);
+        let mut i: Int = 5;
+        while i < list_len(buf) {
+            if list_get(buf, i) == 0 {
+                rec = list_push(rec, list_get(buf, i + 1));
+                rec = list_push(rec, list_get(buf, i + 2));
+                rec = list_push(rec, list_get(buf, i + 3));
+                rec = list_push(rec, list_get(buf, i + 4));
+                break;
+            }
+            i = i + 1;
+        }
+    }
+    if kind == 0 {
+        rec = list_push(rec, list_get(buf, 5));
+    }
+    if kind == 255 {
+        rec = list_push(rec, list_get(buf, 5) + list_get(buf, 6) * 256);
+    }
+    if kind == 3 {
+        rec = list_push(rec, n - 1);
+    }
+    return Ok(rec);
+}

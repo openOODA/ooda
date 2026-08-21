@@ -1,0 +1,148 @@
+// # Product prove database wire and SQL lexer
+//
+// Logline: Fail-closed emit+gcc+run drives Postgres, MySQL, RESP, and SQL lexer and checks pack then unpack recover.
+//
+// Setup: Isolated emit-c. Run from ooda/.
+//
+// Beats:
+//   1. Postgres named messages recover type and payload.
+//   2. MySQL handshake, COM_QUERY, OK versus ERR recover.
+//   3. RESP plus, minus, colon, dollar, and star recover.
+//   4. SQL lexer emits SELECT and WHERE and refuses garbage.
+
+import "std/db_wire/postgres_wire.oo";
+import "std/db_wire/mysql_wire.oo";
+import "std/db_wire/redis_resp.oo";
+import "std/db_wire/sql_lexer.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn unwrap(r: Result[List[Int], String], msg: String) -> List[Int] {
+    match r {
+        Ok(v) => { return v; },
+        Err(e) => { fail(msg + ": " + e); return list_new(); }
+    }
+}
+
+fn bytes(s: String) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < bytes_len(s) {
+        o = list_push(o, byte_at(s, i));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn prove_pg() {
+    let st: List[Int] = unwrap(postgres_wire_startup(bytes("u"), bytes("d")), "pg startup");
+    let ps: List[Int] = unwrap(postgres_wire_parse(st), "pg parse startup");
+    if list_get(ps, 0) != 0 { fail("pg startup type"); }
+    if list_get(ps, 1) != 196608 { fail("pg proto"); }
+    let q: List[Int] = unwrap(postgres_wire_query(bytes("SELECT 1")), "pg query");
+    let pq: List[Int] = unwrap(postgres_wire_parse(q), "pg parse query");
+    if list_get(pq, 0) != 81 { fail("pg query type"); }
+    let z: List[Int] = unwrap(postgres_wire_ready(73), "pg ready");
+    let pz: List[Int] = unwrap(postgres_wire_parse(z), "pg parse ready");
+    if list_get(pz, 0) != 90 { fail("pg ready type"); }
+    if list_get(pz, 2) != 73 { fail("pg ready idle"); }
+    let mut fld: List[Int] = list_new();
+    fld = list_push(fld, 65);
+    let d: List[Int] = unwrap(postgres_wire_datarow(fld), "pg datarow");
+    let pd: List[Int] = unwrap(postgres_wire_parse(d), "pg parse datarow");
+    if list_get(pd, 0) != 68 { fail("pg datarow type"); }
+    let c: List[Int] = unwrap(postgres_wire_command_complete(bytes("SELECT 1")), "pg complete");
+    let pc: List[Int] = unwrap(postgres_wire_parse(c), "pg parse complete");
+    if list_get(pc, 0) != 67 { fail("pg complete type"); }
+    let a: List[Int] = unwrap(postgres_wire_auth_sasl(bytes("SCRAM")), "pg sasl");
+    let pa: List[Int] = unwrap(postgres_wire_parse(a), "pg parse sasl");
+    if list_get(pa, 0) != 82 { fail("pg sasl type"); }
+    if list_get(pa, 2) != 10 { fail("pg sasl auth"); }
+    println("Postgres named messages recover startup=" + list_get(ps, 0).to_string() + " query=" + list_get(pq, 0).to_string());
+}
+
+fn prove_my() {
+    let hs: List[Int] = unwrap(mysql_wire_handshake(bytes("5.7.0"), 7), "my hs");
+    let ph: List[Int] = unwrap(mysql_wire_parse(hs), "my parse hs");
+    if list_get(ph, 0) != 10 { fail("my handshake"); }
+    let q: List[Int] = unwrap(mysql_wire_query(bytes("SELECT 1")), "my query");
+    let pq: List[Int] = unwrap(mysql_wire_parse(q), "my parse query");
+    if list_get(pq, 0) != 3 { fail("my COM_QUERY"); }
+    let ok: List[Int] = unwrap(mysql_wire_ok(1), "my ok");
+    let po: List[Int] = unwrap(mysql_wire_parse(ok), "my parse ok");
+    if list_get(po, 0) != 0 { fail("my OK"); }
+    let er: List[Int] = unwrap(mysql_wire_err(1064, bytes("bad")), "my err");
+    let pe: List[Int] = unwrap(mysql_wire_parse(er), "my parse err");
+    if list_get(pe, 0) != 255 { fail("my ERR"); }
+    if list_get(pe, 0) == list_get(po, 0) { fail("my ERR is OK"); }
+    let rh: List[Int] = unwrap(mysql_wire_result_header(2), "my header");
+    let pr: List[Int] = unwrap(mysql_wire_parse(rh), "my parse header");
+    if list_get(pr, 2) != 1 { fail("my result header len"); }
+    let col: List[Int] = unwrap(mysql_wire_column_def(bytes("id")), "my col");
+    let pc: List[Int] = unwrap(mysql_wire_parse(col), "my parse col");
+    if list_get(pc, 2) < 1 { fail("my col def"); }
+    println("MySQL handshake COM_QUERY OK vs ERR recover err=" + list_get(pe, 0).to_string());
+}
+
+fn prove_resp() {
+    let p: List[Int] = unwrap(redis_resp_simple(bytes("OK")), "resp +");
+    let a: List[Int] = unwrap(redis_resp_parse(p), "resp parse +");
+    if list_get(a, 0) != 43 { fail("resp simple"); }
+    let e: List[Int] = unwrap(redis_resp_error(bytes("ERR")), "resp -");
+    let b: List[Int] = unwrap(redis_resp_parse(e), "resp parse -");
+    if list_get(b, 0) != 45 { fail("resp error"); }
+    let i: List[Int] = unwrap(redis_resp_int(123), "resp :");
+    let c: List[Int] = unwrap(redis_resp_parse(i), "resp parse :");
+    if list_get(c, 0) != 58 { fail("resp int type"); }
+    if list_get(c, 1) != 123 { fail("resp int val"); }
+    let u: List[Int] = unwrap(redis_resp_bulk(bytes("foobar")), "resp $");
+    let d: List[Int] = unwrap(redis_resp_parse(u), "resp parse $");
+    if list_get(d, 0) != 36 { fail("resp bulk"); }
+    if list_get(d, 1) != 6 { fail("resp bulk len"); }
+    let mut items: List[Int] = list_new();
+    items = list_push(items, 65);
+    items = list_push(items, 66);
+    let ar: List[Int] = unwrap(redis_resp_array(items), "resp *");
+    let f: List[Int] = unwrap(redis_resp_parse(ar), "resp parse *");
+    if list_get(f, 0) != 42 { fail("resp array"); }
+    if list_get(f, 1) != 2 { fail("resp array n"); }
+    println("RESP + - : $ * recover n=" + list_get(f, 1).to_string());
+}
+
+fn prove_sql() {
+    let toks: List[Int] = unwrap(sql_lexer_scan(bytes("SELECT a FROM t WHERE id = 'x'")), "sql scan");
+    if list_get(toks, 0) != sql_lexer_kw_select() { fail("sql SELECT"); }
+    let mut saw_where: Int = 0;
+    let mut saw_eq: Int = 0;
+    let mut saw_str: Int = 0;
+    let mut saw_id: Int = 0;
+    let mut i: Int = 0;
+    while i < list_len(toks) {
+        let k: Int = list_get(toks, i);
+        if k == sql_lexer_kw_where() { saw_where = 1; }
+        if k == sql_lexer_eq() { saw_eq = 1; }
+        if k == sql_lexer_string() { saw_str = 1; }
+        if k == sql_lexer_ident() { saw_id = 1; }
+        i = i + 3;
+    }
+    if saw_where != 1 { fail("sql WHERE"); }
+    if saw_eq != 1 { fail("sql eq"); }
+    if saw_str != 1 { fail("sql string"); }
+    if saw_id != 1 { fail("sql ident"); }
+    let bad: Result[List[Int], String] = sql_lexer_scan(bytes("@"));
+    match bad {
+        Ok(v) => { fail("sql garbage accepted n=" + list_len(v).to_string()); },
+        Err(e) => { println("SQL lexer SELECT WHERE refuse garbage " + e); }
+    }
+}
+
+pub fn main() {
+    prove_pg();
+    prove_my();
+    prove_resp();
+    prove_sql();
+    println("prove_prod_db_wire: PASSED");
+}

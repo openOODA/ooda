@@ -1,0 +1,183 @@
+// # Redis RESP2/RESP3 streaming parser
+//
+// Logline: Encodes and parses RESP Simple Strings, Errors, Integers, Bulk Strings, and Arrays.
+//
+// Setup: Pure. Bytes are List[Int]. CRLF is 13 then 10.
+//
+// Beats:
+//   1. Encode a value with a type prefix and CRLF.
+//   2. Scan to CRLF for line types.
+//   3. Read bulk length then that many bytes.
+//   4. Parse arrays by repeating the same rules.
+
+fn resp_crlf(o: List[Int]) -> List[Int] {
+    let mut b: List[Int] = o;
+    b = list_push(b, 13);
+    b = list_push(b, 10);
+    return b;
+}
+
+fn resp_cat(o: List[Int], s: List[Int]) -> List[Int] {
+    let mut b: List[Int] = o;
+    let mut i: Int = 0;
+    while i < list_len(s) {
+        b = list_push(b, list_get(s, i) & 255);
+        i = i + 1;
+    }
+    return b;
+}
+
+fn resp_digits(n: Int) -> List[Int] {
+    if n == 0 {
+        let mut z: List[Int] = list_new();
+        z = list_push(z, 48);
+        return z;
+    }
+    let mut x: Int = n;
+    let mut neg: Int = 0;
+    if x < 0 {
+        neg = 1;
+        x = 0 - x;
+    }
+    let mut tmp: List[Int] = list_new();
+    while x > 0 {
+        tmp = list_push(tmp, 48 + (x % 10));
+        x = x / 10;
+    }
+    let mut o: List[Int] = list_new();
+    if neg == 1 { o = list_push(o, 45); }
+    let mut i: Int = list_len(tmp) - 1;
+    while i >= 0 {
+        o = list_push(o, list_get(tmp, i));
+        i = i - 1;
+    }
+    return o;
+}
+
+pub fn redis_resp_simple(s: List[Int]) -> Result[List[Int], String] {
+    if list_len(s) < 1 { return Err("resp simple empty"); }
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 43);
+    o = resp_cat(o, s);
+    return Ok(resp_crlf(o));
+}
+
+pub fn redis_resp_error(s: List[Int]) -> Result[List[Int], String] {
+    if list_len(s) < 1 { return Err("resp error empty"); }
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 45);
+    o = resp_cat(o, s);
+    return Ok(resp_crlf(o));
+}
+
+pub fn redis_resp_int(n: Int) -> Result[List[Int], String] {
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 58);
+    o = resp_cat(o, resp_digits(n));
+    return Ok(resp_crlf(o));
+}
+
+pub fn redis_resp_bulk(s: List[Int]) -> Result[List[Int], String] {
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 36);
+    o = resp_cat(o, resp_digits(list_len(s)));
+    o = resp_crlf(o);
+    o = resp_cat(o, s);
+    return Ok(resp_crlf(o));
+}
+
+pub fn redis_resp_array(items: List[Int]) -> Result[List[Int], String] {
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 42);
+    o = resp_cat(o, resp_digits(list_len(items)));
+    o = resp_crlf(o);
+    let mut i: Int = 0;
+    while i < list_len(items) {
+        let mut one: List[Int] = list_new();
+        one = list_push(one, list_get(items, i) & 255);
+        let br: Result[List[Int], String] = redis_resp_bulk(one);
+        match br {
+            Ok(enc) => { o = resp_cat(o, enc); },
+            Err(e) => { return Err(e); }
+        }
+        i = i + 1;
+    }
+    return Ok(o);
+}
+
+fn resp_line(buf: List[Int], start: Int) -> Result[List[Int], String] {
+    let mut i: Int = start;
+    while i + 1 < list_len(buf) {
+        if list_get(buf, i) == 13 {
+            if list_get(buf, i + 1) == 10 {
+                let mut rec: List[Int] = list_new();
+                rec = list_push(rec, i);
+                rec = list_push(rec, i + 2);
+                return Ok(rec);
+            }
+        }
+        i = i + 1;
+    }
+    return Err("resp crlf");
+}
+
+fn resp_num(buf: List[Int], a: Int, b: Int) -> Int {
+    let mut n: Int = 0;
+    let mut i: Int = a;
+    let mut sgn: Int = 1;
+    if i < b {
+        if list_get(buf, i) == 45 {
+            sgn = 0 - 1;
+            i = i + 1;
+        }
+    }
+    while i < b {
+        n = n * 10 + (list_get(buf, i) - 48);
+        i = i + 1;
+    }
+    return n * sgn;
+}
+
+pub fn redis_resp_parse(buf: List[Int]) -> Result[List[Int], String] {
+    if list_len(buf) < 3 { return Err("resp short"); }
+    let t: Int = list_get(buf, 0);
+    let lr: Result[List[Int], String] = resp_line(buf, 1);
+    match lr {
+        Ok(sp) => {
+            let end: Int = list_get(sp, 0);
+            let next: Int = list_get(sp, 1);
+            let mut rec: List[Int] = list_new();
+            rec = list_push(rec, t);
+            if t == 43 {
+                rec = list_push(rec, end - 1);
+                rec = list_push(rec, list_get(buf, 1));
+                return Ok(rec);
+            }
+            if t == 45 {
+                rec = list_push(rec, end - 1);
+                rec = list_push(rec, list_get(buf, 1));
+                return Ok(rec);
+            }
+            if t == 58 {
+                rec = list_push(rec, resp_num(buf, 1, end));
+                return Ok(rec);
+            }
+            if t == 36 {
+                let n: Int = resp_num(buf, 1, end);
+                if n < 0 { return Err("resp bulk null"); }
+                if next + n + 2 > list_len(buf) { return Err("resp bulk short"); }
+                rec = list_push(rec, n);
+                rec = list_push(rec, list_get(buf, next));
+                return Ok(rec);
+            }
+            if t == 42 {
+                let n: Int = resp_num(buf, 1, end);
+                rec = list_push(rec, n);
+                rec = list_push(rec, next);
+                return Ok(rec);
+            }
+            return Err("resp type");
+        },
+        Err(e) => { return Err(e); }
+    }
+}

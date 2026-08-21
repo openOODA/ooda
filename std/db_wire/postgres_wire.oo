@@ -1,0 +1,160 @@
+// # PostgreSQL v3 frontend/backend wire
+//
+// Logline: Packs and unpacks PostgreSQL v3.0 StartupMessage, Query, ReadyForQuery, DataRow, CommandComplete, and AuthenticationSASL.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. No sockets.
+//
+// Beats:
+//   1. Write big-endian lengths and the protocol version 196608.
+//   2. Build named frontend and backend messages.
+//   3. Parse the type byte or startup length prefix.
+//   4. Recover type and payload fields after encode then decode.
+
+fn pg_be32(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 24) & 255);
+    b = list_push(b, (n >> 16) & 255);
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+fn pg_be16(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+fn pg_u32(b: List[Int], o: Int) -> Int {
+    let b0: Int = list_get(b, o);
+    let b1: Int = list_get(b, o + 1);
+    let b2: Int = list_get(b, o + 2);
+    let b3: Int = list_get(b, o + 3);
+    let hi: Int = b0 * 256 + b1;
+    let lo: Int = b2 * 256 + b3;
+    return hi * 65536 + lo;
+}
+
+fn pg_cat(o: List[Int], s: List[Int]) -> List[Int] {
+    let mut b: List[Int] = o;
+    let mut i: Int = 0;
+    while i < list_len(s) {
+        b = list_push(b, list_get(s, i) & 255);
+        i = i + 1;
+    }
+    return b;
+}
+
+fn pg_cstr(o: List[Int], s: List[Int]) -> List[Int] {
+    let mut b: List[Int] = pg_cat(o, s);
+    b = list_push(b, 0);
+    return b;
+}
+
+fn pg_msg(typ: Int, payload: List[Int]) -> List[Int] {
+    let n: Int = list_len(payload) + 4;
+    let mut o: List[Int] = list_new();
+    o = list_push(o, typ & 255);
+    o = pg_cat(o, pg_be32(n));
+    o = pg_cat(o, payload);
+    return o;
+}
+
+pub fn postgres_wire_startup(user: List[Int], database: List[Int]) -> Result[List[Int], String] {
+    if list_len(user) < 1 { return Err("postgres user"); }
+    let mut body: List[Int] = pg_be32(196608);
+    let mut uk: List[Int] = list_new();
+    uk = list_push(uk, 117);
+    uk = list_push(uk, 115);
+    uk = list_push(uk, 101);
+    uk = list_push(uk, 114);
+    body = pg_cstr(body, uk);
+    body = pg_cstr(body, user);
+    let mut dk: List[Int] = list_new();
+    dk = list_push(dk, 100);
+    dk = list_push(dk, 97);
+    dk = list_push(dk, 116);
+    dk = list_push(dk, 97);
+    dk = list_push(dk, 98);
+    dk = list_push(dk, 97);
+    dk = list_push(dk, 115);
+    dk = list_push(dk, 101);
+    body = pg_cstr(body, dk);
+    body = pg_cstr(body, database);
+    body = list_push(body, 0);
+    let n: Int = list_len(body) + 4;
+    let mut out: List[Int] = pg_be32(n);
+    out = pg_cat(out, body);
+    return Ok(out);
+}
+
+pub fn postgres_wire_query(sql: List[Int]) -> Result[List[Int], String] {
+    if list_len(sql) < 1 { return Err("postgres query empty"); }
+    let mut p: List[Int] = pg_cstr(list_new(), sql);
+    return Ok(pg_msg(81, p));
+}
+
+pub fn postgres_wire_ready(status: Int) -> Result[List[Int], String] {
+    let mut p: List[Int] = list_new();
+    p = list_push(p, status & 255);
+    return Ok(pg_msg(90, p));
+}
+
+pub fn postgres_wire_datarow(fields: List[Int]) -> Result[List[Int], String] {
+    let n: Int = list_len(fields);
+    let mut p: List[Int] = pg_be16(n);
+    let mut i: Int = 0;
+    while i < n {
+        p = pg_cat(p, pg_be32(1));
+        p = list_push(p, list_get(fields, i) & 255);
+        i = i + 1;
+    }
+    return Ok(pg_msg(68, p));
+}
+
+pub fn postgres_wire_command_complete(tag: List[Int]) -> Result[List[Int], String] {
+    if list_len(tag) < 1 { return Err("postgres tag"); }
+    return Ok(pg_msg(67, pg_cstr(list_new(), tag)));
+}
+
+pub fn postgres_wire_auth_sasl(mech: List[Int]) -> Result[List[Int], String] {
+    if list_len(mech) < 1 { return Err("postgres sasl"); }
+    let mut p: List[Int] = pg_be32(10);
+    p = pg_cstr(p, mech);
+    p = list_push(p, 0);
+    return Ok(pg_msg(82, p));
+}
+
+pub fn postgres_wire_parse(buf: List[Int]) -> Result[List[Int], String] {
+    if list_len(buf) < 5 { return Err("postgres short"); }
+    let b0: Int = list_get(buf, 0);
+    if b0 == 0 {
+        if list_len(buf) < 8 { return Err("postgres short"); }
+        let n: Int = pg_u32(buf, 0);
+        if n > list_len(buf) { return Err("postgres startup length"); }
+        let ver: Int = pg_u32(buf, 4);
+        let mut rec: List[Int] = list_new();
+        rec = list_push(rec, 0);
+        rec = list_push(rec, ver);
+        rec = list_push(rec, n);
+        return Ok(rec);
+    }
+    let n: Int = pg_u32(buf, 1);
+    if 1 + n > list_len(buf) { return Err("postgres length"); }
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, b0);
+    rec = list_push(rec, n);
+    if b0 == 90 {
+        rec = list_push(rec, list_get(buf, 5));
+    }
+    if b0 == 68 {
+        let nf: Int = list_get(buf, 5) * 256 + list_get(buf, 6);
+        rec = list_push(rec, nf);
+        if n >= 10 { rec = list_push(rec, list_get(buf, 11)); }
+    }
+    if b0 == 82 {
+        rec = list_push(rec, pg_u32(buf, 5));
+    }
+    return Ok(rec);
+}
