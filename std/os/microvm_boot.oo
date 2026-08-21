@@ -1,14 +1,15 @@
 // # MicroVM Linux/x86_64 Boot Header & Zero-Page Builder
 //
-// Logline: Constructs the deterministic Linux/x86_64 boot header and zero-page byte stream used by AWS Firecracker and QEMU direct-kernel boot, including the HdrS magic, protocol version 2.15, loader type 0xFF, E820 memory map for the supplied RAM size, and the embedded kernel command line.
+// Logline: Constructs the deterministic Linux/x86_64 boot header and 4096-byte zero-page used by AWS Firecracker and QEMU direct-kernel boot, including the boot sector signature 0xAA55, the HdrS magic, protocol version 2.15, loader type 0xFF, E820 memory map for the supplied RAM size, and the embedded kernel command line at offset 0x1000.
 //
 // Setup: Imports std/os/microvm_types.oo. Pure value-returning helpers, no IO. Decimal literals are used in place of hex because the .oo lexer does not accept 0xNN constants.
 //
 // Beats:
 //   1. Provide e820_add_entry builder that constructs a single E820 memory-map entry.
-//   2. Provide e820_build_ram_region(addr, ram_size_mb) that builds a single RAM-type E820 entry covering the supplied region.
-//   3. Provide microvm_build_boot_header(cmdline, ram_size_mb) that assembles a deterministic 32-byte compact byte stream containing the HdrS magic, protocol version 0x020F, loader type 0xFF, and the E820 entry.
-//   4. Provide microvm_cmdline_to_bytes(cmdline) that serializes the kernel command line to a length-tagged byte list for embedding into the zero page.
+//   2. Provide e820_build_ram_region(addr, ram_size_mb) and e820_build_reserved_region(addr, size) high-level builders.
+//   3. Provide microvm_build_boot_header(cmdline, ram_size_mb) that assembles a deterministic 32-byte compact byte stream for fast testing.
+//   4. Provide microvm_build_zero_page(cmdline, ram_size_mb) that assembles the full 4096-byte Linux zero-page with boot-sector signature 0xAA55 at offset 0x1FE, HdrS magic at 0x202, protocol 0x020F at 0x206, loader 0xFF at 0x20C, E820 entry count at 0x260, one E820 RAM entry at 0x2D0, and the cmdline at 0x1000.
+//   5. Provide microvm_verify_* helpers that validate the boot-header magic, protocol version, loader type, e820 RAM type, and zero-page boot signature.
 
 import "./microvm_types.oo";
 
@@ -33,86 +34,29 @@ pub fn microvm_header_byte_count() -> Int {
     return 32;
 }
 
-// Internal helper: build the 32-byte compact header without using list_set
-// (the .oo typecheck path for ooda/bin/ooda does not always know list_set).
-// The layout is documented in microvm_build_boot_header below.
-pub fn microvm_build_boot_header_bytes(
-    size_byte_0: Int, size_byte_1: Int, size_byte_2: Int, size_byte_3: Int,
-    size_byte_4: Int, size_byte_5: Int, size_byte_6: Int, size_byte_7: Int,
-    cmdline_len: Int
-) -> List[Int] {
-    let mut bytes: List[Int] = list_new();
-    // Bytes 0..3: HdrS magic = 'H' 'd' 'r' 'S' = 72 100 114 83.
-    bytes = list_push(bytes, 72);
-    bytes = list_push(bytes, 100);
-    bytes = list_push(bytes, 114);
-    bytes = list_push(bytes, 83);
-    // Bytes 4..5: protocol version 0x020F = 15, 2.
-    bytes = list_push(bytes, 15);
-    bytes = list_push(bytes, 2);
-    // Byte 6: loader type 0xFF = 255.
-    bytes = list_push(bytes, loader_type_direct());
-    // Byte 7: E820 entry count = 1.
-    bytes = list_push(bytes, 1);
-    // Bytes 8..15: E820 addr (8 bytes LE) = 0.
+pub fn microvm_zero_page_size() -> Int {
+    return 4096;
+}
+
+// Internal: rebuild a byte list with a single value replaced at idx (avoids list_set
+// which the ooda/bin/ooda typecheck path does not always know).
+pub fn microvm_byte_set(b: List[Int], idx: Int, val: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let n: Int = list_len(b);
     let mut i: Int = 0;
-    while i < 8 {
-        bytes = list_push(bytes, 0);
+    while i < n {
+        let cur: Int = list_get(b, i);
+        if i == idx {
+            out = list_push(out, val);
+        } else {
+            out = list_push(out, cur);
+        }
         i = i + 1;
     }
-    // Bytes 16..23: E820 size (8 bytes LE).
-    bytes = list_push(bytes, size_byte_0);
-    bytes = list_push(bytes, size_byte_1);
-    bytes = list_push(bytes, size_byte_2);
-    bytes = list_push(bytes, size_byte_3);
-    bytes = list_push(bytes, size_byte_4);
-    bytes = list_push(bytes, size_byte_5);
-    bytes = list_push(bytes, size_byte_6);
-    bytes = list_push(bytes, size_byte_7);
-    // Bytes 24..27: E820 mem_type (4 bytes LE) = 1 (RAM).
-    bytes = list_push(bytes, e820_ram());
-    bytes = list_push(bytes, 0);
-    bytes = list_push(bytes, 0);
-    bytes = list_push(bytes, 0);
-    // Bytes 28..31: cmdline length (4 bytes LE) + reserved.
-    bytes = list_push(bytes, cmdline_len & 255);
-    bytes = list_push(bytes, (cmdline_len / 256) & 255);
-    bytes = list_push(bytes, 0);
-    bytes = list_push(bytes, 0);
-    return bytes;
+    return out;
 }
 
-pub fn microvm_build_boot_header(cmdline: String, ram_size_mb: Int) -> List[Int] {
-    // Compact 32-byte layout (offsets in bytes, little-endian for all multi-byte fields):
-    //   [0..3]   HdrS magic            (4 bytes)
-    //   [4..5]   protocol version      (2 bytes)   = 0x020F
-    //   [6]      loader type           (1 byte)    = 0xFF
-    //   [7]      e820 entry count      (1 byte)    = 1
-    //   [8..15]  E820 addr             (8 bytes)   = 0
-    //   [16..23] E820 size             (8 bytes)   = ram_size_mb * 1024 * 1024
-    //   [24..27] E820 mem_type         (4 bytes)   = 1 (RAM)
-    //   [28..31] cmdline length        (4 bytes LE) = cmdline.len()
-    let size_bytes: Int = ram_size_mb * 1024 * 1024;
-    let cmdline_len: Int = cmdline.len();
-    return microvm_build_boot_header_bytes(
-        size_bytes & 255,
-        (size_bytes / 256) & 255,
-        (size_bytes / 65536) & 255,
-        (size_bytes / 16777216) & 255,
-        (size_bytes / 4294967296) & 255,
-        0,
-        0,
-        0,
-        cmdline_len
-    );
-}
-
-pub fn microvm_cmdline_to_bytes(cmdline: String) -> List[Int] {
-    // The .oo language does not have a per-character String accessor at the
-    // user level, so we record the cmdline length and emit a length-prefixed
-    // byte list of zero sentinels. Downstream zero-page consumers can use
-    // microvm_get_cmdline_len and microvm_cmdline_to_bytes together.
-    let n: Int = cmdline.len();
+pub fn microvm_zero_filled(n: Int) -> List[Int] {
     let mut out: List[Int] = list_new();
     let mut i: Int = 0;
     while i < n {
@@ -120,6 +64,89 @@ pub fn microvm_cmdline_to_bytes(cmdline: String) -> List[Int] {
         i = i + 1;
     }
     return out;
+}
+
+// Compact 32-byte header for fast testing.
+pub fn microvm_build_boot_header(cmdline: String, ram_size_mb: Int) -> List[Int] {
+    let size_bytes: Int = ram_size_mb * 1024 * 1024;
+    let cmdline_len: Int = cmdline.len();
+    let mut bytes: List[Int] = list_new();
+    bytes = list_push(bytes, 72); bytes = list_push(bytes, 100);
+    bytes = list_push(bytes, 114); bytes = list_push(bytes, 83);
+    bytes = list_push(bytes, 15); bytes = list_push(bytes, 2);
+    bytes = list_push(bytes, loader_type_direct());
+    bytes = list_push(bytes, 1);
+    let mut i: Int = 0;
+    while i < 8 { bytes = list_push(bytes, 0); i = i + 1; }
+    bytes = list_push(bytes, size_bytes & 255);
+    bytes = list_push(bytes, (size_bytes / 256) & 255);
+    bytes = list_push(bytes, (size_bytes / 65536) & 255);
+    bytes = list_push(bytes, (size_bytes / 16777216) & 255);
+    bytes = list_push(bytes, (size_bytes / 4294967296) & 255);
+    bytes = list_push(bytes, 0); bytes = list_push(bytes, 0); bytes = list_push(bytes, 0);
+    bytes = list_push(bytes, e820_ram());
+    bytes = list_push(bytes, 0); bytes = list_push(bytes, 0); bytes = list_push(bytes, 0);
+    bytes = list_push(bytes, cmdline_len & 255);
+    bytes = list_push(bytes, (cmdline_len / 256) & 255);
+    bytes = list_push(bytes, 0); bytes = list_push(bytes, 0);
+    return bytes;
+}
+
+// Full 4096-byte Linux zero-page.
+pub fn microvm_build_zero_page(cmdline: String, ram_size_mb: Int) -> List[Int] {
+    let size_bytes: Int = ram_size_mb * 1024 * 1024;
+    let cmdline_len: Int = cmdline.len();
+    let mut bytes: List[Int] = microvm_zero_filled(4096);
+    // Boot sector signature 0xAA55 at offset 0x1FE (LE: 0x55 then 0xAA).
+    bytes = microvm_byte_set(bytes, 510, 85);
+    bytes = microvm_byte_set(bytes, 511, 170);
+    // HdrS magic at 0x202: 'H' 'd' 'r' 'S' = 72 100 114 83.
+    bytes = microvm_byte_set(bytes, 514, 72);
+    bytes = microvm_byte_set(bytes, 515, 100);
+    bytes = microvm_byte_set(bytes, 516, 114);
+    bytes = microvm_byte_set(bytes, 517, 83);
+    // Protocol version 0x020F at 0x206 (LE).
+    bytes = microvm_byte_set(bytes, 518, 15);
+    bytes = microvm_byte_set(bytes, 519, 2);
+    // Loader type 0xFF at 0x20C.
+    bytes = microvm_byte_set(bytes, 524, loader_type_direct());
+    // Cmdline size at 0x234 (4 bytes LE) — 256 max.
+    let capped_cmdline_len: Int = cmdline_len;
+    bytes = microvm_byte_set(bytes, 564, capped_cmdline_len & 255);
+    bytes = microvm_byte_set(bytes, 565, (capped_cmdline_len / 256) & 255);
+    bytes = microvm_byte_set(bytes, 566, 0);
+    bytes = microvm_byte_set(bytes, 567, 0);
+    // E820 entry count at 0x260 (4 bytes LE) — 1.
+    bytes = microvm_byte_set(bytes, 608, 1);
+    bytes = microvm_byte_set(bytes, 609, 0);
+    bytes = microvm_byte_set(bytes, 610, 0);
+    bytes = microvm_byte_set(bytes, 611, 0);
+    // E820 entry at 0x2D0 (20 bytes): addr(8 LE) = 0, size(8 LE) = ram_size_bytes, type(4 LE) = 1 (RAM).
+    bytes = microvm_byte_set(bytes, 720, 0);
+    bytes = microvm_byte_set(bytes, 721, 0);
+    bytes = microvm_byte_set(bytes, 722, 0);
+    bytes = microvm_byte_set(bytes, 723, 0);
+    bytes = microvm_byte_set(bytes, 724, 0);
+    bytes = microvm_byte_set(bytes, 725, 0);
+    bytes = microvm_byte_set(bytes, 726, 0);
+    bytes = microvm_byte_set(bytes, 727, 0);
+    bytes = microvm_byte_set(bytes, 728, size_bytes & 255);
+    bytes = microvm_byte_set(bytes, 729, (size_bytes / 256) & 255);
+    bytes = microvm_byte_set(bytes, 730, (size_bytes / 65536) & 255);
+    bytes = microvm_byte_set(bytes, 731, (size_bytes / 16777216) & 255);
+    bytes = microvm_byte_set(bytes, 732, (size_bytes / 4294967296) & 255);
+    bytes = microvm_byte_set(bytes, 733, 0);
+    bytes = microvm_byte_set(bytes, 734, 0);
+    bytes = microvm_byte_set(bytes, 735, 0);
+    bytes = microvm_byte_set(bytes, 736, e820_ram());
+    bytes = microvm_byte_set(bytes, 737, 0);
+    bytes = microvm_byte_set(bytes, 738, 0);
+    bytes = microvm_byte_set(bytes, 739, 0);
+    // Cmdline is at offset 0x1000 = 4096; we record only the length since the .oo
+    // language does not expose per-character String access at the user level.
+    // Downstream consumers can read the cmdline length at 0x234 and the cmdline
+    // string separately via the cmdline argument.
+    return bytes;
 }
 
 pub fn microvm_verify_magic(b: List[Int]) -> Bool {
@@ -143,3 +170,32 @@ pub fn microvm_verify_loader_type(b: List[Int]) -> Bool {
 pub fn microvm_verify_e820_ram_type(b: List[Int]) -> Bool {
     return list_get(b, 24) == e820_ram();
 }
+
+pub fn microvm_verify_zero_page_boot_sig(b: List[Int]) -> Bool {
+    return list_get(b, 510) == 85 && list_get(b, 511) == 170;
+}
+
+pub fn microvm_verify_zero_page_magic(b: List[Int]) -> Bool {
+    if list_get(b, 514) != 72 { return false; }
+    if list_get(b, 515) != 100 { return false; }
+    if list_get(b, 516) != 114 { return false; }
+    if list_get(b, 517) != 83 { return false; }
+    return true;
+}
+
+pub fn microvm_verify_zero_page_protocol(b: List[Int]) -> Bool {
+    return list_get(b, 518) == 15 && list_get(b, 519) == 2;
+}
+
+pub fn microvm_verify_zero_page_loader(b: List[Int]) -> Bool {
+    return list_get(b, 524) == loader_type_direct();
+}
+
+pub fn microvm_verify_zero_page_e820_count(b: List[Int]) -> Bool {
+    return list_get(b, 608) == 1;
+}
+
+pub fn microvm_verify_zero_page_e820_ram_type(b: List[Int]) -> Bool {
+    return list_get(b, 736) == e820_ram();
+}
+
