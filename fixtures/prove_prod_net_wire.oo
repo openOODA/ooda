@@ -1,0 +1,162 @@
+// # Product prove net wire codecs
+//
+// Logline: Fail-closed emit+gcc+run drives shipped HTTP/2, WebSocket, DNS, and MQTT packers and checks encode then decode recover.
+//
+// Setup: Isolated emit-c. Run from ooda/.
+//
+// Beats:
+//   1. HTTP/2 9-byte header and 24-bit length recover.
+//   2. WebSocket mask XOR plus 126 and 127 extended lengths recover.
+//   3. DNS QNAME, txid, and A/AAAA recover.
+//   4. MQTT remaining-length and named packet types recover.
+
+import "std/net_wire/http2_frame.oo";
+import "std/net_wire/websocket_frame.oo";
+import "std/net_wire/dns_packet.oo";
+import "std/net_wire/mqtt_packet.oo";
+
+fn fail(msg: String) {
+    println("FAIL " + msg);
+    process_exit(1);
+}
+
+fn same_ints(a: List[Int], b: List[Int]) -> Bool {
+    if list_len(a) != list_len(b) { return false; }
+    let mut i: Int = 0;
+    while i < list_len(a) {
+        if list_get(a, i) != list_get(b, i) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn unwrap(r: Result[List[Int], String], msg: String) -> List[Int] {
+    match r {
+        Ok(v) => { return v; },
+        Err(e) => { fail(msg + ": " + e); return list_new(); }
+    }
+}
+
+fn unwrap_i(r: Result[Int, String], msg: String) -> Int {
+    match r {
+        Ok(v) => { return v; },
+        Err(e) => { fail(msg + ": " + e); return 0; }
+    }
+}
+
+fn fill(n: Int, v: Int) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        o = list_push(o, v);
+        i = i + 1;
+    }
+    return o;
+}
+
+fn prove_http2() {
+    let mut pay: List[Int] = list_new();
+    pay = list_push(pay, 1);
+    pay = list_push(pay, 2);
+    pay = list_push(pay, 3);
+    pay = list_push(pay, 4);
+    let fr: List[Int] = unwrap(http2_frame_build(http2_frame_type_data(), 1, 7, pay), "http2 build");
+    let rec: List[Int] = unwrap(http2_frame_parse(fr), "http2 parse");
+    if list_get(rec, 0) != http2_frame_type_data() { fail("http2 type"); }
+    if list_get(rec, 1) != 1 { fail("http2 flags"); }
+    if list_get(rec, 2) != 7 { fail("http2 stream"); }
+    if list_get(rec, 3) != 4 { fail("http2 24-bit length"); }
+    if list_get(rec, 4) != 1 { fail("http2 payload"); }
+    if list_len(fr) != 13 { fail("http2 9-byte header plus payload"); }
+    let ping: List[Int] = unwrap(http2_frame_build(http2_frame_type_ping(), 0, 0, fill(8, 9)), "http2 ping");
+    let pr: List[Int] = unwrap(http2_frame_parse(ping), "http2 ping parse");
+    if list_get(pr, 0) != http2_frame_type_ping() { fail("http2 ping type"); }
+    println("HTTP/2 9-byte header 24-bit length recover type=" + list_get(rec, 0).to_string() + " stream=" + list_get(rec, 2).to_string());
+}
+
+fn prove_ws() {
+    let mut key: List[Int] = list_new();
+    key = list_push(key, 1);
+    key = list_push(key, 2);
+    key = list_push(key, 3);
+    key = list_push(key, 4);
+    let p126: List[Int] = fill(126, 65);
+    let f126: List[Int] = unwrap(websocket_frame_build(websocket_frame_op_bin(), true, key, p126), "ws 126 build");
+    let r126: List[Int] = unwrap(websocket_frame_parse(f126), "ws 126 parse");
+    if list_get(r126, 0) != websocket_frame_op_bin() { fail("ws 126 opcode"); }
+    if list_get(r126, 1) != 1 { fail("ws 126 mask bit"); }
+    if list_get(r126, 2) != 126 { fail("ws 126 length"); }
+    let mut i: Int = 0;
+    while i < 126 {
+        if list_get(r126, 3 + i) != 65 { fail("ws 126 payload"); }
+        i = i + 1;
+    }
+    let p127: List[Int] = fill(65536, 66);
+    let f127: List[Int] = unwrap(websocket_frame_build(websocket_frame_op_text(), true, key, p127), "ws 127 build");
+    let r127: List[Int] = unwrap(websocket_frame_parse(f127), "ws 127 parse");
+    if list_get(r127, 0) != websocket_frame_op_text() { fail("ws 127 opcode"); }
+    if list_get(r127, 2) != 65536 { fail("ws 127 length"); }
+    if list_get(r127, 3) != 66 { fail("ws 127 payload"); }
+    println("WebSocket mask XOR 126/127 lengths recover n126=" + list_get(r126, 2).to_string() + " n127=" + list_get(r127, 2).to_string());
+}
+
+fn prove_dns() {
+    let mut l0: List[Int] = list_new();
+    l0 = list_push(l0, 101);
+    l0 = list_push(l0, 120);
+    let mut l1: List[Int] = list_new();
+    l1 = list_push(l1, 99);
+    l1 = list_push(l1, 111);
+    l1 = list_push(l1, 109);
+    let mut labels: List[List[Int]] = list_new();
+    labels = list_push(labels, l0);
+    labels = list_push(labels, l1);
+    let qn: List[Int] = unwrap(dns_packet_qname(labels), "dns qname");
+    let q: List[Int] = unwrap(dns_packet_query(4660, qn, dns_packet_type_a()), "dns query");
+    let rec: List[Int] = unwrap(dns_packet_parse_question(q), "dns parse");
+    if list_get(rec, 0) != 4660 { fail("dns txid"); }
+    if list_get(rec, 1) != 101 { fail("dns qname e"); }
+    let mut addr: List[Int] = list_new();
+    addr = list_push(addr, 1);
+    addr = list_push(addr, 2);
+    addr = list_push(addr, 3);
+    addr = list_push(addr, 4);
+    let ans: List[Int] = unwrap(dns_packet_answer(4660, qn, dns_packet_type_a(), addr), "dns answer");
+    if unwrap_i(dns_packet_parse_id(ans), "dns ans id") != 4660 { fail("dns answer id"); }
+    let mut aaaa: List[Int] = fill(16, 7);
+    let a6: List[Int] = unwrap(dns_packet_answer(9, qn, dns_packet_type_aaaa(), aaaa), "dns aaaa");
+    if unwrap_i(dns_packet_parse_id(a6), "dns aaaa id") != 9 { fail("dns aaaa id"); }
+    println("DNS QNAME txid A/AAAA recover id=" + list_get(rec, 0).to_string());
+}
+
+fn prove_mqtt() {
+    let mut client: List[Int] = list_new();
+    client = list_push(client, 97);
+    client = list_push(client, 98);
+    let c: List[Int] = unwrap(mqtt_packet_build_connect(client), "mqtt connect");
+    let pc: List[Int] = unwrap(mqtt_packet_parse(c), "mqtt parse connect");
+    if list_get(pc, 0) != mqtt_packet_connect() { fail("mqtt connect type"); }
+    if list_get(pc, 1) < 1 { fail("mqtt remaining length"); }
+    let ack: List[Int] = unwrap(mqtt_packet_build_connack(0, 0), "mqtt connack");
+    if list_get(unwrap(mqtt_packet_parse(ack), "mqtt parse connack"), 0) != mqtt_packet_connack() { fail("mqtt connack type"); }
+    let mut topic: List[Int] = list_new();
+    topic = list_push(topic, 97);
+    let pubp: List[Int] = unwrap(mqtt_packet_build_publish(topic, fill(3, 1)), "mqtt publish");
+    if list_get(unwrap(mqtt_packet_parse(pubp), "mqtt parse publish"), 0) != mqtt_packet_publish() { fail("mqtt publish type"); }
+    let pa: List[Int] = unwrap(mqtt_packet_build_puback(7), "mqtt puback");
+    if list_get(unwrap(mqtt_packet_parse(pa), "mqtt parse puback"), 0) != mqtt_packet_puback() { fail("mqtt puback type"); }
+    let sub: List[Int] = unwrap(mqtt_packet_build_subscribe(3, topic), "mqtt subscribe");
+    if list_get(unwrap(mqtt_packet_parse(sub), "mqtt parse subscribe"), 0) != mqtt_packet_subscribe() { fail("mqtt subscribe type"); }
+    let vbi: List[Int] = unwrap(mqtt_packet_encode_len(128), "mqtt vbi");
+    let dec: List[Int] = unwrap(mqtt_packet_decode_len(vbi, 0), "mqtt vbi decode");
+    if list_get(dec, 0) != 128 { fail("mqtt vbi 128"); }
+    println("MQTT remaining-length named types recover connect=" + list_get(pc, 0).to_string() + " rem=" + list_get(pc, 1).to_string());
+}
+
+pub fn main() {
+    prove_http2();
+    prove_ws();
+    prove_dns();
+    prove_mqtt();
+    println("prove_prod_net_wire: PASSED");
+}

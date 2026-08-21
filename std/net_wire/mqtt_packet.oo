@@ -1,0 +1,165 @@
+// # MQTT remaining-length packets
+//
+// Logline: Encodes MQTT CONNECT, CONNACK, PUBLISH, PUBACK, and SUBSCRIBE packets with variable-byte remaining length.
+//
+// Setup: Pure. MQTT 3.1.1 packet types. Bytes are List[Int] 0..255.
+//
+// Beats:
+//   1. Encode remaining length as a variable-byte integer (base 128).
+//   2. Decode that integer and refuse a truncated or overlong encoding.
+//   3. Build CONNECT, CONNACK, PUBLISH, PUBACK, and SUBSCRIBE frames.
+//   4. Parse the packet type and remaining length from the first bytes.
+
+pub fn mqtt_packet_connect() -> Int { return 1; }
+pub fn mqtt_packet_connack() -> Int { return 2; }
+pub fn mqtt_packet_publish() -> Int { return 3; }
+pub fn mqtt_packet_puback() -> Int { return 4; }
+pub fn mqtt_packet_subscribe() -> Int { return 8; }
+
+pub fn mqtt_packet_encode_len(n: Int) -> Result[List[Int], String] {
+    if n < 0 { return Err("mqtt length negative"); }
+    if n > 268435455 { return Err("mqtt length too large"); }
+    let mut x: Int = n;
+    let mut out: List[Int] = list_new();
+    if x == 0 {
+        out = list_push(out, 0);
+        return Ok(out);
+    }
+    while x > 0 {
+        let mut b: Int = x % 128;
+        x = x / 128;
+        if x > 0 { b = b + 128; }
+        out = list_push(out, b);
+    }
+    return Ok(out);
+}
+
+pub fn mqtt_packet_decode_len(buf: List[Int], start: Int) -> Result[List[Int], String] {
+    let mut mul: Int = 1;
+    let mut value: Int = 0;
+    let mut pos: Int = start;
+    let mut steps: Int = 0;
+    while steps < 4 {
+        if pos >= list_len(buf) { return Err("mqtt remaining length short"); }
+        let b: Int = list_get(buf, pos);
+        pos = pos + 1;
+        value = value + (b & 127) * mul;
+        if (b & 128) == 0 {
+            let mut rec: List[Int] = list_new();
+            rec = list_push(rec, value);
+            rec = list_push(rec, pos);
+            return Ok(rec);
+        }
+        mul = mul * 128;
+        steps = steps + 1;
+    }
+    return Err("mqtt remaining length overlong");
+}
+
+fn mqtt_packet_wrap(typ: Int, flags: Int, body: List[Int]) -> Result[List[Int], String] {
+    let lr: Result[List[Int], String] = mqtt_packet_encode_len(list_len(body));
+    match lr {
+        Ok(rb) => {
+            let mut out: List[Int] = list_new();
+            out = list_push(out, ((typ & 15) * 16) + (flags & 15));
+            let mut i: Int = 0;
+            while i < list_len(rb) {
+                out = list_push(out, list_get(rb, i));
+                i = i + 1;
+            }
+            i = 0;
+            while i < list_len(body) {
+                out = list_push(out, list_get(body, i) & 255);
+                i = i + 1;
+            }
+            return Ok(out);
+        },
+        Err(e) => { return Err(e); }
+    }
+}
+
+pub fn mqtt_packet_build_connect(client: List[Int]) -> Result[List[Int], String] {
+    let mut body: List[Int] = list_new();
+    body = list_push(body, 0);
+    body = list_push(body, 4);
+    body = list_push(body, 77);
+    body = list_push(body, 81);
+    body = list_push(body, 84);
+    body = list_push(body, 84);
+    body = list_push(body, 4);
+    body = list_push(body, 2);
+    body = list_push(body, 0);
+    body = list_push(body, 60);
+    body = list_push(body, (list_len(client) >> 8) & 255);
+    body = list_push(body, list_len(client) & 255);
+    let mut i: Int = 0;
+    while i < list_len(client) {
+        body = list_push(body, list_get(client, i) & 255);
+        i = i + 1;
+    }
+    return mqtt_packet_wrap(mqtt_packet_connect(), 0, body);
+}
+
+pub fn mqtt_packet_build_connack(session: Int, code: Int) -> Result[List[Int], String] {
+    let mut body: List[Int] = list_new();
+    body = list_push(body, session & 1);
+    body = list_push(body, code & 255);
+    return mqtt_packet_wrap(mqtt_packet_connack(), 0, body);
+}
+
+pub fn mqtt_packet_build_publish(topic: List[Int], payload: List[Int]) -> Result[List[Int], String] {
+    let mut body: List[Int] = list_new();
+    body = list_push(body, (list_len(topic) >> 8) & 255);
+    body = list_push(body, list_len(topic) & 255);
+    let mut i: Int = 0;
+    while i < list_len(topic) {
+        body = list_push(body, list_get(topic, i) & 255);
+        i = i + 1;
+    }
+    i = 0;
+    while i < list_len(payload) {
+        body = list_push(body, list_get(payload, i) & 255);
+        i = i + 1;
+    }
+    return mqtt_packet_wrap(mqtt_packet_publish(), 0, body);
+}
+
+pub fn mqtt_packet_build_puback(id: Int) -> Result[List[Int], String] {
+    let mut body: List[Int] = list_new();
+    body = list_push(body, (id >> 8) & 255);
+    body = list_push(body, id & 255);
+    return mqtt_packet_wrap(mqtt_packet_puback(), 0, body);
+}
+
+pub fn mqtt_packet_build_subscribe(id: Int, topic: List[Int]) -> Result[List[Int], String] {
+    let mut body: List[Int] = list_new();
+    body = list_push(body, (id >> 8) & 255);
+    body = list_push(body, id & 255);
+    body = list_push(body, (list_len(topic) >> 8) & 255);
+    body = list_push(body, list_len(topic) & 255);
+    let mut i: Int = 0;
+    while i < list_len(topic) {
+        body = list_push(body, list_get(topic, i) & 255);
+        i = i + 1;
+    }
+    body = list_push(body, 0);
+    return mqtt_packet_wrap(mqtt_packet_subscribe(), 2, body);
+}
+
+pub fn mqtt_packet_parse(buf: List[Int]) -> Result[List[Int], String] {
+    if list_len(buf) < 2 { return Err("mqtt short"); }
+    let typ: Int = (list_get(buf, 0) >> 4) & 15;
+    let lr: Result[List[Int], String] = mqtt_packet_decode_len(buf, 1);
+    match lr {
+        Ok(v) => {
+            let rem: Int = list_get(v, 0);
+            let pos: Int = list_get(v, 1);
+            let mut rec: List[Int] = list_new();
+            rec = list_push(rec, typ);
+            rec = list_push(rec, rem);
+            rec = list_push(rec, pos);
+            return Ok(rec);
+        },
+        Err(e) => { return Err(e); }
+    }
+}

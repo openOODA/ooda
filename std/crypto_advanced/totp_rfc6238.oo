@@ -1,0 +1,103 @@
+// # RFC 6238 TOTP
+//
+// Logline: Builds 6-digit and 8-digit TOTP codes from HMAC-SHA256 dynamic truncation on 30-second steps.
+//
+// Setup: Pure. crypto_hmac_sha256_internal returns 64 lowercase hex chars. Counter is 8 bytes, big-endian.
+//
+// Beats:
+//   1. Divide Unix time by 30 to get the step.
+//   2. HMAC-SHA256 the 8-byte counter under the key.
+//   3. Dynamic-truncate the digest and reduce modulo 10^digits.
+//   4. Return a zero-padded decimal string.
+
+fn totp_rfc6238_nibble(ch: Int) -> Int {
+    if ch >= 48 {
+        if ch <= 57 { return ch - 48; }
+    }
+    if ch >= 97 {
+        if ch <= 102 { return ch - 87; }
+    }
+    return -1;
+}
+
+fn totp_rfc6238_hex_bytes(hex: String) -> Result[List[Int], String] {
+    let n: Int = hex.len();
+    if n != 64 { return Err("totp hmac length"); }
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 64 {
+        let hi: Int = totp_rfc6238_nibble(byte_at(hex, i));
+        let lo: Int = totp_rfc6238_nibble(byte_at(hex, i + 1));
+        if hi < 0 { return Err("totp hex"); }
+        if lo < 0 { return Err("totp hex"); }
+        out = list_push(out, hi * 16 + lo);
+        i = i + 2;
+    }
+    return Ok(out);
+}
+
+fn totp_rfc6238_pow10(d: Int) -> Int {
+    let mut p: Int = 1;
+    let mut i: Int = 0;
+    while i < d {
+        p = p * 10;
+        i = i + 1;
+    }
+    return p;
+}
+
+fn totp_rfc6238_pad(n: Int, d: Int) -> String {
+    let mut s: String = n.to_string();
+    while s.len() < d {
+        s = "0" + s;
+    }
+    return s;
+}
+
+pub fn totp_rfc6238_at(key: String, unix_time: Int, digits: Int) -> Result[String, String] {
+    if unix_time < 0 { return Err("totp time"); }
+    if digits != 6 {
+        if digits != 8 { return Err("totp digits"); }
+    }
+    let step: Int = unix_time / 30;
+    let mut ctr: List[Int] = list_new();
+    let mut i: Int = 7;
+    let mut x: Int = step;
+    while i >= 0 {
+        ctr = list_push(ctr, 0);
+        i = i - 1;
+    }
+    i = 7;
+    while i >= 0 {
+        ctr = list_set(ctr, i, x & 255);
+        x = x >> 8;
+        i = i - 1;
+    }
+    let msg: String = bytes_to_str(ctr);
+    let hex: String = crypto_hmac_sha256_internal(key, msg);
+    let br: Result[List[Int], String] = totp_rfc6238_hex_bytes(hex);
+    match br {
+        Ok(dig) => {
+            let off: Int = list_get(dig, 31) & 15;
+            let b0: Int = (list_get(dig, off) & 127) * 16777216;
+            let b1: Int = list_get(dig, off + 1) * 65536;
+            let b2: Int = list_get(dig, off + 2) * 256;
+            let b3: Int = list_get(dig, off + 3);
+            let mut bin: Int = b0 + b1;
+            bin = bin + b2;
+            bin = bin + b3;
+            let modn: Int = totp_rfc6238_pow10(digits);
+            let code: Int = bin - (bin / modn) * modn;
+            return Ok(totp_rfc6238_pad(code, digits));
+        },
+        Err(e) => { return Err(e); }
+    }
+}
+
+pub fn totp_rfc6238_code6(key: String, unix_time: Int) -> Result[String, String] {
+    return totp_rfc6238_at(key, unix_time, 6);
+}
+
+pub fn totp_rfc6238_code8(key: String, unix_time: Int) -> Result[String, String] {
+    return totp_rfc6238_at(key, unix_time, 8);
+}

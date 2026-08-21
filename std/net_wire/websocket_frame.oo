@@ -1,0 +1,155 @@
+// # RFC 6455 WebSocket frame
+//
+// Logline: Builds and parses WebSocket frames with 4-byte client XOR masking and 16-bit or 64-bit extended payload length.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. Opcode 1 is text. Opcode 2 is binary.
+//
+// Beats:
+//   1. Write FIN, opcode, MASK bit, and 7-bit length or 126/127 extended length.
+//   2. XOR payload with a repeating 4-byte mask when the client bit is set.
+//   3. Parse the header, unmask, and refuse a truncated buffer.
+//   4. Encode then decode recovers opcode, mask, and payload bytes.
+
+pub fn websocket_frame_op_text() -> Int { return 1; }
+pub fn websocket_frame_op_bin() -> Int { return 2; }
+
+fn websocket_frame_be16(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+fn websocket_frame_be64(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 56) & 255);
+    b = list_push(b, (n >> 48) & 255);
+    b = list_push(b, (n >> 40) & 255);
+    b = list_push(b, (n >> 32) & 255);
+    b = list_push(b, (n >> 24) & 255);
+    b = list_push(b, (n >> 16) & 255);
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+pub fn websocket_frame_mask(payload: List[Int], key: List[Int]) -> Result[List[Int], String] {
+    if list_len(key) != 4 { return Err("websocket mask must be 4 bytes"); }
+    let n: Int = list_len(payload);
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let k: Int = list_get(key, i % 4);
+        out = list_push(out, (list_get(payload, i) & 255) ^ (k & 255));
+        i = i + 1;
+    }
+    return Ok(out);
+}
+
+pub fn websocket_frame_build(opcode: Int, masked: Bool, key: List[Int], payload: List[Int]) -> Result[List[Int], String] {
+    let n: Int = list_len(payload);
+    let mut out: List[Int] = list_new();
+    out = list_push(out, 128 + (opcode & 15));
+    let mut len7: Int = n;
+    if n < 126 {
+        len7 = n;
+    } else {
+        if n < 65536 { len7 = 126; } else { len7 = 127; }
+    }
+    let mut b1: Int = len7;
+    if masked { b1 = b1 + 128; }
+    out = list_push(out, b1);
+    if len7 == 126 {
+        let e: List[Int] = websocket_frame_be16(n);
+        out = list_push(out, list_get(e, 0));
+        out = list_push(out, list_get(e, 1));
+    }
+    if len7 == 127 {
+        let e8: List[Int] = websocket_frame_be64(n);
+        let mut j: Int = 0;
+        while j < 8 {
+            out = list_push(out, list_get(e8, j));
+            j = j + 1;
+        }
+    }
+    let mut body: List[Int] = payload;
+    if masked {
+        if list_len(key) != 4 { return Err("websocket mask must be 4 bytes"); }
+        let mut k: Int = 0;
+        while k < 4 {
+            out = list_push(out, list_get(key, k) & 255);
+            k = k + 1;
+        }
+        let mr: Result[List[Int], String] = websocket_frame_mask(payload, key);
+        match mr {
+            Ok(m) => { body = m; },
+            Err(e) => { return Err(e); }
+        }
+    }
+    let mut i: Int = 0;
+    while i < list_len(body) {
+        out = list_push(out, list_get(body, i) & 255);
+        i = i + 1;
+    }
+    return Ok(out);
+}
+
+pub fn websocket_frame_parse(buf: List[Int]) -> Result[List[Int], String] {
+    if list_len(buf) < 2 { return Err("websocket short"); }
+    let b0: Int = list_get(buf, 0);
+    let b1: Int = list_get(buf, 1);
+    let opcode: Int = b0 & 15;
+    let mut mbit: Int = 0;
+    if (b1 & 128) != 0 { mbit = 1; }
+    let mut len: Int = b1 & 127;
+    let mut pos: Int = 2;
+    if len == 126 {
+        if list_len(buf) < 4 { return Err("websocket 16-bit length short"); }
+        len = list_get(buf, 2) * 256 + list_get(buf, 3);
+        pos = 4;
+    } else {
+        if len == 127 {
+            if list_len(buf) < 10 { return Err("websocket 64-bit length short"); }
+            len = 0;
+            let mut t: Int = 2;
+            while t < 10 {
+                len = len * 256 + list_get(buf, t);
+                t = t + 1;
+            }
+            pos = 10;
+        }
+    }
+    let mut key: List[Int] = list_new();
+    if mbit == 1 {
+        if list_len(buf) < pos + 4 { return Err("websocket mask short"); }
+        key = list_push(key, list_get(buf, pos));
+        key = list_push(key, list_get(buf, pos + 1));
+        key = list_push(key, list_get(buf, pos + 2));
+        key = list_push(key, list_get(buf, pos + 3));
+        pos = pos + 4;
+    }
+    if list_len(buf) < pos + len { return Err("websocket payload short"); }
+    let mut pay: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < len {
+        pay = list_push(pay, list_get(buf, pos + i));
+        i = i + 1;
+    }
+    if mbit == 1 {
+        let ur: Result[List[Int], String] = websocket_frame_mask(pay, key);
+        match ur {
+            Ok(u) => { pay = u; },
+            Err(e) => { return Err(e); }
+        }
+    }
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, opcode);
+    rec = list_push(rec, mbit);
+    rec = list_push(rec, len);
+    i = 0;
+    while i < list_len(pay) {
+        rec = list_push(rec, list_get(pay, i));
+        i = i + 1;
+    }
+    return Ok(rec);
+}

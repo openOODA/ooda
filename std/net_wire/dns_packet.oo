@@ -1,0 +1,159 @@
+// # RFC 1035 DNS wire packet
+//
+// Logline: Builds DNS query and response bytes with length-prefixed QNAME labels, a 16-bit transaction id, and A/AAAA resource records.
+//
+// Setup: Pure. Labels are ASCII bytes in List[Int]. No UDP.
+//
+// Beats:
+//   1. Encode QNAME as length-prefixed labels ended by a zero octet.
+//   2. Write a 12-byte header with id, flags, and counts.
+//   3. Append A (type 1) or AAAA (type 28) resource records.
+//   4. Parse id, QNAME, type, and address bytes back from the packet.
+
+pub fn dns_packet_type_a() -> Int { return 1; }
+pub fn dns_packet_type_aaaa() -> Int { return 28; }
+
+fn dns_packet_be16(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+pub fn dns_packet_qname(labels: List[List[Int]]) -> Result[List[Int], String] {
+    let mut out: List[Int] = list_new();
+    let n: Int = list_len(labels);
+    let mut i: Int = 0;
+    while i < n {
+        let lab: List[Int] = list_get(labels, i);
+        let ln: Int = list_len(lab);
+        if ln < 1 { return Err("dns empty label"); }
+        if ln > 63 { return Err("dns label longer than 63"); }
+        out = list_push(out, ln);
+        let mut j: Int = 0;
+        while j < ln {
+            out = list_push(out, list_get(lab, j) & 255);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    out = list_push(out, 0);
+    return Ok(out);
+}
+
+pub fn dns_packet_query(txid: Int, qname: List[Int], qtype: Int) -> Result[List[Int], String] {
+    if list_len(qname) < 2 { return Err("dns qname short"); }
+    let mut out: List[Int] = list_new();
+    let idb: List[Int] = dns_packet_be16(txid & 65535);
+    out = list_push(out, list_get(idb, 0));
+    out = list_push(out, list_get(idb, 1));
+    out = list_push(out, 1);
+    out = list_push(out, 0);
+    let one: List[Int] = dns_packet_be16(1);
+    out = list_push(out, list_get(one, 0));
+    out = list_push(out, list_get(one, 1));
+    out = list_push(out, 0);
+    out = list_push(out, 0);
+    out = list_push(out, 0);
+    out = list_push(out, 0);
+    out = list_push(out, 0);
+    out = list_push(out, 0);
+    let mut i: Int = 0;
+    while i < list_len(qname) {
+        out = list_push(out, list_get(qname, i));
+        i = i + 1;
+    }
+    let tb: List[Int] = dns_packet_be16(qtype);
+    out = list_push(out, list_get(tb, 0));
+    out = list_push(out, list_get(tb, 1));
+    out = list_push(out, 0);
+    out = list_push(out, 1);
+    return Ok(out);
+}
+
+pub fn dns_packet_answer(txid: Int, qname: List[Int], qtype: Int, addr: List[Int]) -> Result[List[Int], String] {
+    let qr: Result[List[Int], String] = dns_packet_query(txid, qname, qtype);
+    match qr {
+        Ok(q) => {
+            let mut out: List[Int] = q;
+            out = list_set(out, 2, 129);
+            out = list_set(out, 3, 128);
+            out = list_set(out, 6, 0);
+            out = list_set(out, 7, 1);
+            let mut i: Int = 0;
+            while i < list_len(qname) {
+                out = list_push(out, list_get(qname, i));
+                i = i + 1;
+            }
+            let tb: List[Int] = dns_packet_be16(qtype);
+            out = list_push(out, list_get(tb, 0));
+            out = list_push(out, list_get(tb, 1));
+            out = list_push(out, 0);
+            out = list_push(out, 1);
+            out = list_push(out, 0);
+            out = list_push(out, 0);
+            out = list_push(out, 0);
+            out = list_push(out, 60);
+            let rd: List[Int] = dns_packet_be16(list_len(addr));
+            out = list_push(out, list_get(rd, 0));
+            out = list_push(out, list_get(rd, 1));
+            i = 0;
+            while i < list_len(addr) {
+                out = list_push(out, list_get(addr, i) & 255);
+                i = i + 1;
+            }
+            return Ok(out);
+        },
+        Err(e) => { return Err(e); }
+    }
+}
+
+pub fn dns_packet_parse_id(buf: List[Int]) -> Result[Int, String] {
+    if list_len(buf) < 12 { return Err("dns header short"); }
+    return Ok(list_get(buf, 0) * 256 + list_get(buf, 1));
+}
+
+pub fn dns_packet_parse_qname(buf: List[Int], start: Int) -> Result[List[Int], String] {
+    if start >= list_len(buf) { return Err("dns qname start"); }
+    let mut pos: Int = start;
+    let mut name: List[Int] = list_new();
+    while pos < list_len(buf) {
+        let ln: Int = list_get(buf, pos);
+        pos = pos + 1;
+        if ln == 0 { return Ok(name); }
+        if ln > 63 { return Err("dns label too long"); }
+        if pos + ln > list_len(buf) { return Err("dns qname truncated"); }
+        if list_len(name) > 0 { name = list_push(name, 46); }
+        let mut j: Int = 0;
+        while j < ln {
+            name = list_push(name, list_get(buf, pos + j));
+            j = j + 1;
+        }
+        pos = pos + ln;
+    }
+    return Err("dns qname no terminator");
+}
+
+pub fn dns_packet_parse_question(buf: List[Int]) -> Result[List[Int], String] {
+    if list_len(buf) < 12 { return Err("dns header short"); }
+    let idr: Result[Int, String] = dns_packet_parse_id(buf);
+    match idr {
+        Ok(id) => {
+            let nr: Result[List[Int], String] = dns_packet_parse_qname(buf, 12);
+            match nr {
+                Ok(name) => {
+                    let mut rec: List[Int] = list_new();
+                    rec = list_push(rec, id);
+                    let mut i: Int = 0;
+                    while i < list_len(name) {
+                        rec = list_push(rec, list_get(name, i));
+                        i = i + 1;
+                    }
+                    return Ok(rec);
+                },
+                Err(e) => { return Err(e); }
+            }
+        },
+        Err(e) => { return Err(e); }
+    }
+}

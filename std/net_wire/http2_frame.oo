@@ -1,0 +1,121 @@
+// # HTTP/2 9-byte frame header
+//
+// Logline: Packs and unpacks HTTP/2 frame headers with 24-bit big-endian length and a 31-bit stream id.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. No sockets.
+//
+// Beats:
+//   1. Pack length, type, flags, and stream id into nine bytes.
+//   2. Unpack those fields and refuse a short buffer.
+//   3. Build DATA, HEADERS, SETTINGS, PING, and RST_STREAM frames with payload.
+//   4. Recover type, flags, stream, and payload after encode then decode.
+
+pub fn http2_frame_type_data() -> Int { return 0; }
+pub fn http2_frame_type_headers() -> Int { return 1; }
+pub fn http2_frame_type_rst() -> Int { return 3; }
+pub fn http2_frame_type_settings() -> Int { return 4; }
+pub fn http2_frame_type_ping() -> Int { return 6; }
+
+fn http2_frame_push3(out: List[Int], n: Int) -> List[Int] {
+    let mut b: List[Int] = out;
+    b = list_push(b, (n >> 16) & 255);
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+pub fn http2_frame_header(len: Int, typ: Int, flags: Int, stream: Int) -> Result[List[Int], String] {
+    if len < 0 { return Err("http2 length negative"); }
+    if len > 16777215 { return Err("http2 length exceeds 24 bits"); }
+    if stream < 0 { return Err("http2 stream negative"); }
+    let sid: Int = stream & 2147483647;
+    let mut h: List[Int] = list_new();
+    h = http2_frame_push3(h, len);
+    h = list_push(h, typ & 255);
+    h = list_push(h, flags & 255);
+    h = list_push(h, (sid >> 24) & 127);
+    h = list_push(h, (sid >> 16) & 255);
+    h = list_push(h, (sid >> 8) & 255);
+    h = list_push(h, sid & 255);
+    return Ok(h);
+}
+
+pub fn http2_frame_len(h: List[Int]) -> Result[Int, String] {
+    if list_len(h) < 9 { return Err("http2 header short"); }
+    let n: Int = (list_get(h, 0) * 65536) + (list_get(h, 1) * 256) + list_get(h, 2);
+    return Ok(n);
+}
+
+pub fn http2_frame_kind(h: List[Int]) -> Result[Int, String] {
+    if list_len(h) < 9 { return Err("http2 header short"); }
+    return Ok(list_get(h, 3));
+}
+
+pub fn http2_frame_flags(h: List[Int]) -> Result[Int, String] {
+    if list_len(h) < 9 { return Err("http2 header short"); }
+    return Ok(list_get(h, 4));
+}
+
+pub fn http2_frame_stream(h: List[Int]) -> Result[Int, String] {
+    if list_len(h) < 9 { return Err("http2 header short"); }
+    let a: Int = list_get(h, 5) & 127;
+    let sid: Int = (a * 16777216) + (list_get(h, 6) * 65536) + (list_get(h, 7) * 256) + list_get(h, 8);
+    return Ok(sid);
+}
+
+pub fn http2_frame_build(typ: Int, flags: Int, stream: Int, payload: List[Int]) -> Result[List[Int], String] {
+    let hr: Result[List[Int], String] = http2_frame_header(list_len(payload), typ, flags, stream);
+    match hr {
+        Ok(h) => {
+            let mut out: List[Int] = h;
+            let n: Int = list_len(payload);
+            let mut i: Int = 0;
+            while i < n {
+                out = list_push(out, list_get(payload, i) & 255);
+                i = i + 1;
+            }
+            return Ok(out);
+        },
+        Err(e) => { return Err(e); }
+    }
+}
+
+pub fn http2_frame_parse(buf: List[Int]) -> Result[List[Int], String] {
+    if list_len(buf) < 9 { return Err("http2 frame short"); }
+    let lr: Result[Int, String] = http2_frame_len(buf);
+    match lr {
+        Ok(n) => {
+            if list_len(buf) < 9 + n { return Err("http2 payload short"); }
+            let tr: Result[Int, String] = http2_frame_kind(buf);
+            match tr {
+                Ok(typ) => {
+                    let fr: Result[Int, String] = http2_frame_flags(buf);
+                    match fr {
+                        Ok(flags) => {
+                            let sr: Result[Int, String] = http2_frame_stream(buf);
+                            match sr {
+                                Ok(stream) => {
+                                    let mut rec: List[Int] = list_new();
+                                    rec = list_push(rec, typ);
+                                    rec = list_push(rec, flags);
+                                    rec = list_push(rec, stream);
+                                    rec = list_push(rec, n);
+                                    let mut i: Int = 0;
+                                    while i < n {
+                                        rec = list_push(rec, list_get(buf, 9 + i));
+                                        i = i + 1;
+                                    }
+                                    return Ok(rec);
+                                },
+                                Err(e) => { return Err(e); }
+                            }
+                        },
+                        Err(e) => { return Err(e); }
+                    }
+                },
+                Err(e) => { return Err(e); }
+            }
+        },
+        Err(e) => { return Err(e); }
+    }
+}

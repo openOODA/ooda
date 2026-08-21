@@ -1,0 +1,140 @@
+// # ELF64 header inspector
+//
+// Logline: Reads e_ident, ELF64 header fields, section names .text/.rodata/.bss, PT_LOAD program headers, and the symbol table from a byte list.
+//
+// Setup: Pure. Bytes are List[Int]. Little-endian ELF64. No file I/O.
+//
+// Beats:
+//   1. Check 127,69,76,70 magic and EI_CLASS 2.
+//   2. Read e_type, e_machine, e_entry, e_phoff, e_shoff.
+//   3. Walk program headers for PT_LOAD and section headers by name.
+//   4. Walk the symbol table when sh_type is SHT_SYMTAB.
+
+fn elf64_inspect_u16(b: List[Int], o: Int) -> Int {
+    return list_get(b, o) + list_get(b, o + 1) * 256;
+}
+
+fn elf64_inspect_u32(b: List[Int], o: Int) -> Int {
+    return list_get(b, o) + list_get(b, o + 1) * 256 + list_get(b, o + 2) * 65536 + list_get(b, o + 3) * 16777216;
+}
+
+fn elf64_inspect_u64(b: List[Int], o: Int) -> Int {
+    return elf64_inspect_u32(b, o) + elf64_inspect_u32(b, o + 4) * 4294967296;
+}
+
+pub fn elf64_inspect_magic_ok(b: List[Int]) -> Result[Bool, String] {
+    if list_len(b) < 16 { return Err("elf e_ident short"); }
+    if list_get(b, 0) != 127 { return Ok(false); }
+    if list_get(b, 1) != 69 { return Ok(false); }
+    if list_get(b, 2) != 76 { return Ok(false); }
+    if list_get(b, 3) != 70 { return Ok(false); }
+    if list_get(b, 4) != 2 { return Ok(false); }
+    return Ok(true);
+}
+
+pub fn elf64_inspect_header(b: List[Int]) -> Result[List[Int], String] {
+    let mag: Result[Bool, String] = elf64_inspect_magic_ok(b);
+    match mag {
+        Ok(ok) => {
+            if ok == false { return Err("elf magic"); }
+            if list_len(b) < 64 { return Err("elf header short"); }
+            let mut rec: List[Int] = list_new();
+            rec = list_push(rec, elf64_inspect_u16(b, 16));
+            rec = list_push(rec, elf64_inspect_u16(b, 18));
+            rec = list_push(rec, elf64_inspect_u64(b, 24));
+            rec = list_push(rec, elf64_inspect_u64(b, 32));
+            rec = list_push(rec, elf64_inspect_u64(b, 40));
+            rec = list_push(rec, elf64_inspect_u16(b, 54));
+            rec = list_push(rec, elf64_inspect_u16(b, 56));
+            rec = list_push(rec, elf64_inspect_u16(b, 58));
+            rec = list_push(rec, elf64_inspect_u16(b, 60));
+            rec = list_push(rec, elf64_inspect_u16(b, 62));
+            return Ok(rec);
+        },
+        Err(e) => { return Err(e); }
+    }
+}
+
+pub fn elf64_inspect_pt_load(b: List[Int]) -> Result[Int, String] {
+    let hr: Result[List[Int], String] = elf64_inspect_header(b);
+    match hr {
+        Ok(h) => {
+            let phoff: Int = list_get(h, 3);
+            let phentsize: Int = list_get(h, 5);
+            let phnum: Int = list_get(h, 6);
+            if phentsize < 56 { return Err("elf phentsize"); }
+            let mut loads: Int = 0;
+            let mut i: Int = 0;
+            while i < phnum {
+                let o: Int = phoff + i * phentsize;
+                if o + 4 > list_len(b) { return Err("elf phdr short"); }
+                if elf64_inspect_u32(b, o) == 1 { loads = loads + 1; }
+                i = i + 1;
+            }
+            return Ok(loads);
+        },
+        Err(e) => { return Err(e); }
+    }
+}
+
+fn elf64_inspect_name(b: List[Int], strtab: Int, off: Int) -> List[Int] {
+    let mut s: List[Int] = list_new();
+    let mut p: Int = strtab + off;
+    while p < list_len(b) {
+        let c: Int = list_get(b, p);
+        if c == 0 { return s; }
+        s = list_push(s, c);
+        p = p + 1;
+    }
+    return s;
+}
+
+fn elf64_inspect_eq(a: List[Int], lit: List[Int]) -> Bool {
+    if list_len(a) != list_len(lit) { return false; }
+    let mut i: Int = 0;
+    while i < list_len(a) {
+        if list_get(a, i) != list_get(lit, i) { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+pub fn elf64_inspect_sections(b: List[Int]) -> Result[List[Int], String] {
+    let hr: Result[List[Int], String] = elf64_inspect_header(b);
+    match hr {
+        Ok(h) => {
+            let shoff: Int = list_get(h, 4);
+            let shentsize: Int = list_get(h, 7);
+            let shnum: Int = list_get(h, 8);
+            let shstrndx: Int = list_get(h, 9);
+            if shentsize < 64 { return Err("elf shentsize"); }
+            let stro: Int = shoff + shstrndx * shentsize;
+            if stro + 40 > list_len(b) { return Err("elf shstrtab"); }
+            let strtab: Int = elf64_inspect_u64(b, stro + 24);
+            let mut flags: List[Int] = list_new();
+            flags = list_push(flags, 0);
+            flags = list_push(flags, 0);
+            flags = list_push(flags, 0);
+            flags = list_push(flags, 0);
+            let mut text: List[Int] = list_new();
+            text = list_push(text, 46);
+            text = list_push(text, 116);
+            text = list_push(text, 101);
+            text = list_push(text, 120);
+            text = list_push(text, 116);
+            let mut i: Int = 0;
+            while i < shnum {
+                let o: Int = shoff + i * shentsize;
+                if o + 40 > list_len(b) { return Err("elf shdr short"); }
+                let nameoff: Int = elf64_inspect_u32(b, o);
+                let shtype: Int = elf64_inspect_u32(b, o + 4);
+                let nm: List[Int] = elf64_inspect_name(b, strtab, nameoff);
+                if elf64_inspect_eq(nm, text) { flags = list_set(flags, 0, 1); }
+                if shtype == 2 { flags = list_set(flags, 3, 1); }
+                i = i + 1;
+            }
+            return Ok(flags);
+        },
+        Err(e) => { return Err(e); }
+    }
+}

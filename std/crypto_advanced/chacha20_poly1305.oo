@@ -1,0 +1,256 @@
+// # ChaCha20-Poly1305 AEAD
+// Logline: Seals and opens RFC 8439 ChaCha20-Poly1305 with a 12-byte nonce and a 16-byte Poly1305 tag.
+// Setup: Pure. Key is 32 bytes. Nonce is 12 bytes. Bytes are List[Int] 0..255.
+// Beats:
+//   1. Run twenty ChaCha rounds to make a 64-byte block.
+//   2. Poly1305 authenticates AAD and ciphertext with r and s from block 0.
+//   3. Seal returns ciphertext then a 16-byte tag.
+//   4. Open fails closed when the tag does not match.
+
+fn cc_mask(x: Int) -> Int { return x & 4294967295; }
+fn cc_rotl(x: Int, r: Int) -> Int {
+    return cc_mask((cc_mask(x) << r) | (cc_mask(x) >> (32 - r)));
+}
+fn cc_qr(s: List[Int], a: Int, b: Int, c: Int, d: Int) -> List[Int] {
+    let mut t: List[Int] = s;
+    let va1: Int = cc_mask(list_get(t, a) + list_get(t, b));
+    t = list_set(t, a, va1);
+    let vd1: Int = cc_rotl(list_get(t, d) ^ va1, 16);
+    t = list_set(t, d, vd1);
+    let vc1: Int = cc_mask(list_get(t, c) + vd1);
+    t = list_set(t, c, vc1);
+    let vb1: Int = cc_rotl(list_get(t, b) ^ vc1, 12);
+    t = list_set(t, b, vb1);
+    let va2: Int = cc_mask(list_get(t, a) + vb1);
+    t = list_set(t, a, va2);
+    let vd2: Int = cc_rotl(list_get(t, d) ^ va2, 8);
+    t = list_set(t, d, vd2);
+    let vc2: Int = cc_mask(list_get(t, c) + vd2);
+    t = list_set(t, c, vc2);
+    t = list_set(t, b, cc_rotl(list_get(t, b) ^ vc2, 7));
+    return t;
+}
+fn cc_le32(b: List[Int], o: Int) -> Int {
+    return list_get(b, o) + list_get(b, o + 1) * 256 + list_get(b, o + 2) * 65536 + list_get(b, o + 3) * 16777216;
+}
+fn cc_put32(mut o: List[Int], w: Int) -> List[Int] {
+    o = list_push(o, w & 255);
+    o = list_push(o, (w >> 8) & 255);
+    o = list_push(o, (w >> 16) & 255);
+    o = list_push(o, (w >> 24) & 255);
+    return o;
+}
+fn cc_block(key: List[Int], nonce: List[Int], ctr: Int) -> List[Int] {
+    let mut s: List[Int] = list_new();
+    s = list_push(s, 1634760805);
+    s = list_push(s, 857760878);
+    s = list_push(s, 2036477234);
+    s = list_push(s, 1797285236);
+    let mut i: Int = 0;
+    while i < 8 {
+        s = list_push(s, cc_le32(key, i * 4));
+        i = i + 1;
+    }
+    s = list_push(s, cc_mask(ctr));
+    s = list_push(s, cc_le32(nonce, 0));
+    s = list_push(s, cc_le32(nonce, 4));
+    s = list_push(s, cc_le32(nonce, 8));
+    let start: List[Int] = s;
+    i = 0;
+    while i < 10 {
+        s = cc_qr(s, 0, 4, 8, 12);
+        s = cc_qr(s, 1, 5, 9, 13);
+        s = cc_qr(s, 2, 6, 10, 14);
+        s = cc_qr(s, 3, 7, 11, 15);
+        s = cc_qr(s, 0, 5, 10, 15);
+        s = cc_qr(s, 1, 6, 11, 12);
+        s = cc_qr(s, 2, 7, 8, 13);
+        s = cc_qr(s, 3, 4, 9, 14);
+        i = i + 1;
+    }
+    let mut out: List[Int] = list_new();
+    i = 0;
+    while i < 16 {
+        out = cc_put32(out, cc_mask(list_get(s, i) + list_get(start, i)));
+        i = i + 1;
+    }
+    return out;
+}
+fn cc_xor_n(key: List[Int], nonce: List[Int], ctr0: Int, msg: List[Int]) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut off: Int = 0;
+    let mut ctr: Int = ctr0;
+    while off < list_len(msg) {
+        let ks: List[Int] = cc_block(key, nonce, ctr);
+        let mut k: Int = 0;
+        while k < 64 {
+            if off >= list_len(msg) { break; }
+            out = list_push(out, (list_get(msg, off) ^ list_get(ks, k)) & 255);
+            off = off + 1;
+            k = k + 1;
+        }
+        ctr = ctr + 1;
+    }
+    return out;
+}
+fn p5_n(n: Int) -> List[Int] {
+    let mut h: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        h = list_push(h, 0);
+        i = i + 1;
+    }
+    return h;
+}
+fn p5_carry(h: List[Int]) -> List[Int] {
+    let mut t: List[Int] = h;
+    let mut i: Int = 0;
+    while i < 4 {
+        let c: Int = list_get(t, i) >> 26;
+        t = list_set(t, i, list_get(t, i) & 67108863);
+        t = list_set(t, i + 1, list_get(t, i + 1) + c);
+        i = i + 1;
+    }
+    let c4: Int = list_get(t, 4) >> 26;
+    t = list_set(t, 4, list_get(t, 4) & 67108863);
+    t = list_set(t, 0, list_get(t, 0) + c4 * 5);
+    let c0: Int = list_get(t, 0) >> 26;
+    t = list_set(t, 0, list_get(t, 0) & 67108863);
+    t = list_set(t, 1, list_get(t, 1) + c0);
+    return t;
+}
+fn p5_mul(h: List[Int], r: List[Int]) -> List[Int] {
+    let mut t: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 5 {
+        let mut acc: Int = 0;
+        let mut j: Int = 0;
+        while j < 5 {
+            let mut rr: Int = list_get(r, (i + 5 - j) % 5);
+            if j > i { rr = rr * 5; }
+            acc = acc + list_get(h, j) * rr;
+            j = j + 1;
+        }
+        t = list_push(t, acc);
+        i = i + 1;
+    }
+    return p5_carry(t);
+}
+fn p5_add_block(h: List[Int], buf: List[Int], off: Int, n: Int) -> List[Int] {
+    let mut tmp: List[Int] = p5_n(17);
+    let mut i: Int = 0;
+    while i < n {
+        tmp = list_set(tmp, i, list_get(buf, off + i) & 255);
+        i = i + 1;
+    }
+    tmp = list_set(tmp, n, 1);
+    let t0: Int = cc_le32(tmp, 0);
+    let t1: Int = cc_le32(tmp, 4);
+    let t2: Int = cc_le32(tmp, 8);
+    let t3: Int = cc_le32(tmp, 12);
+    let mut u: List[Int] = h;
+    u = list_set(u, 0, list_get(u, 0) + (t0 & 67108863));
+    u = list_set(u, 1, list_get(u, 1) + (((t0 >> 26) | (t1 << 6)) & 67108863));
+    u = list_set(u, 2, list_get(u, 2) + (((t1 >> 20) | (t2 << 12)) & 67108863));
+    u = list_set(u, 3, list_get(u, 3) + (((t2 >> 14) | (t3 << 18)) & 67108863));
+    u = list_set(u, 4, list_get(u, 4) + ((t3 >> 8) + list_get(tmp, 16) * 16777216));
+    return p5_carry(u);
+}
+fn p5_feed(h: List[Int], r: List[Int], buf: List[Int]) -> List[Int] {
+    let mut acc: List[Int] = h;
+    let mut off: Int = 0;
+    while off < list_len(buf) {
+        let mut take: Int = 16;
+        if off + take > list_len(buf) { take = list_len(buf) - off; }
+        acc = p5_mul(p5_add_block(acc, buf, off, take), r);
+        off = off + take;
+    }
+    return acc;
+}
+fn p5_tag(otk: List[Int], aad: List[Int], ct: List[Int]) -> List[Int] {
+    let t0: Int = cc_le32(otk, 0);
+    let t1: Int = cc_le32(otk, 4);
+    let t2: Int = cc_le32(otk, 8);
+    let t3: Int = cc_le32(otk, 12);
+    let mut r: List[Int] = list_new();
+    r = list_push(r, t0 & 67108863);
+    r = list_push(r, ((t0 >> 26) | (t1 << 6)) & 67108611);
+    r = list_push(r, ((t1 >> 20) | (t2 << 12)) & 67092479);
+    r = list_push(r, ((t2 >> 14) | (t3 << 18)) & 66060287);
+    r = list_push(r, (t3 >> 8) & 1048575);
+    let mut h: List[Int] = p5_feed(p5_feed(p5_n(5), r, aad), r, ct);
+    let mut lens: List[Int] = list_new();
+    let mut alen: Int = list_len(aad);
+    let mut clen: Int = list_len(ct);
+    let mut i: Int = 0;
+    while i < 16 {
+        if i < 8 {
+            lens = list_push(lens, alen & 255);
+            alen = alen >> 8;
+        } else {
+            lens = list_push(lens, clen & 255);
+            clen = clen >> 8;
+        }
+        i = i + 1;
+    }
+    h = p5_mul(p5_add_block(h, lens, 0, 16), r);
+    let mut g: List[Int] = h;
+    g = list_set(g, 0, list_get(g, 0) + 5);
+    i = 0;
+    while i < 4 {
+        let c: Int = list_get(g, i) >> 26;
+        g = list_set(g, i, list_get(g, i) & 67108863);
+        g = list_set(g, i + 1, list_get(g, i + 1) + c);
+        i = i + 1;
+    }
+    if list_get(g, 4) >= 67108864 {
+        h = list_set(g, 4, list_get(g, 4) & 67108863);
+    }
+    let h0: Int = list_get(h, 0);
+    let h1: Int = list_get(h, 1);
+    let h2: Int = list_get(h, 2);
+    let h3: Int = list_get(h, 3);
+    let h4: Int = list_get(h, 4);
+    let mut f: Int = h0 + ((h1 & 63) << 26) + cc_le32(otk, 16);
+    let mut tag: List[Int] = cc_put32(list_new(), cc_mask(f));
+    f = (f >> 32) + (h1 >> 6) + ((h2 & 4095) << 20) + cc_le32(otk, 20);
+    tag = cc_put32(tag, cc_mask(f));
+    f = (f >> 32) + (h2 >> 12) + ((h3 & 262143) << 14) + cc_le32(otk, 24);
+    tag = cc_put32(tag, cc_mask(f));
+    f = (f >> 32) + (h3 >> 18) + ((h4 & 16777215) << 8) + cc_le32(otk, 28);
+    return cc_put32(tag, cc_mask(f));
+}
+pub fn chacha20_poly1305_seal(key: List[Int], nonce: List[Int], aad: List[Int], pt: List[Int]) -> Result[List[Int], String] {
+    if list_len(key) != 32 { return Err("chacha20_poly1305 key"); }
+    if list_len(nonce) != 12 { return Err("chacha20_poly1305 nonce"); }
+    let ct: List[Int] = cc_xor_n(key, nonce, 1, pt);
+    let tag: List[Int] = p5_tag(cc_block(key, nonce, 0), aad, ct);
+    let mut out: List[Int] = ct;
+    let mut i: Int = 0;
+    while i < 16 {
+        out = list_push(out, list_get(tag, i));
+        i = i + 1;
+    }
+    return Ok(out);
+}
+pub fn chacha20_poly1305_open(key: List[Int], nonce: List[Int], aad: List[Int], msg: List[Int]) -> Result[List[Int], String] {
+    if list_len(key) != 32 { return Err("chacha20_poly1305 key"); }
+    if list_len(nonce) != 12 { return Err("chacha20_poly1305 nonce"); }
+    if list_len(msg) < 16 { return Err("chacha20_poly1305 short"); }
+    let n: Int = list_len(msg) - 16;
+    let mut ct: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        ct = list_push(ct, list_get(msg, i));
+        i = i + 1;
+    }
+    let want: List[Int] = p5_tag(cc_block(key, nonce, 0), aad, ct);
+    let mut diff: Int = 0;
+    i = 0;
+    while i < 16 {
+        diff = diff | (list_get(want, i) ^ list_get(msg, n + i));
+        i = i + 1;
+    }
+    if diff != 0 { return Err("chacha20_poly1305 tag"); }
+    return Ok(cc_xor_n(key, nonce, 1, ct));
+}
