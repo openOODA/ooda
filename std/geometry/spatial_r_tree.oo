@@ -1,48 +1,193 @@
 // # R-tree bounding-box index
 //
-// Logline: Inserts 2D boxes into an R-tree and answers overlap and nearest-neighbor queries.
+// Logline: Inserts 2D boxes into an R-tree with node split and answers spatial queries.
 //
-// Setup: Pure. Items pack as xmin,ymin,xmax,ymax. One leaf holds at most 8 boxes.
+// Setup: Pure. A node holds at most 4 children. Pack is List[Float]. Height grows when root splits.
 //
 // Beats:
-//   1. Pack boxes as xmin,ymin,xmax,ymax after a six-float header.
-//   2. Copy the tree, then enlarge the root box to cover an insert.
-//   3. Query overlap by walking packed boxes.
-//   4. Query nearest by center distance. Choose the least area growth.
+//   1. Allocate and pack leaf and internal nodes on a flat Float list.
+//   2. Linear split on x-coordinate when node exceeds maximum capacity.
+//   3. Bottom-up MBR adjustment and parent tree re-balancing.
+//   4. Insert bounding boxes with fail-closed Result error handling.
 
-fn rt_area(x0: Float, y0: Float, x1: Float, y1: Float) -> Float {
-    return (x1 - x0) * (y1 - y0);
+import "std/geometry/spatial_r_tree_query.oo";
+
+fn rt_if(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut i: Int = 0;
+    while i < n { f = f + 1.0; i = i + 1; }
+    return f;
 }
 
-fn rt_n(tree: List[Float]) -> Int {
-    let x: Float = list_get(tree, 5);
-    if x < 0.5 { return 0; }
-    if x < 1.5 { return 1; }
-    if x < 2.5 { return 2; }
-    if x < 3.5 { return 3; }
-    if x < 4.5 { return 4; }
-    if x < 5.5 { return 5; }
-    if x < 6.5 { return 6; }
-    if x < 7.5 { return 7; }
-    return 8;
-}
-
-fn rt_ov(ax0: Float, ay0: Float, ax1: Float, ay1: Float, bx0: Float, by0: Float, bx1: Float, by1: Float) -> Bool {
-    if ax1 < bx0 { return false; }
-    if bx1 < ax0 { return false; }
-    if ay1 < by0 { return false; }
-    if by1 < ay0 { return false; }
-    return true;
+fn rt_u(t: List[Float], ni: Int, off: Int, v: Float) -> List[Float] {
+    return list_set(t, 3 + ni * 26 + off, v);
 }
 
 fn rt_copy(tree: List[Float]) -> List[Float] {
     let mut o: List[Float] = list_new();
     let mut i: Int = 0;
-    while i < list_len(tree) {
-        o = list_push(o, list_get(tree, i));
+    while i < list_len(tree) { o = list_push(o, list_get(tree, i)); i = i + 1; }
+    return o;
+}
+
+fn rt_alloc(t: List[Float]) -> List[Float] {
+    let mut o: List[Float] = rt_copy(t);
+    let mut k: Int = 0;
+    while k < 26 { o = list_push(o, 0.0); k = k + 1; }
+    o = list_set(o, 1, list_get(o, 1) + 1.0);
+    let ni: Int = spatial_r_tree_fi(list_get(o, 1)) - 1;
+    o = rt_u(o, ni, 4, 1.0);
+    return o;
+}
+
+fn rt_fix(t: List[Float], ni: Int) -> List[Float] {
+    let n: Int = spatial_r_tree_n(t, ni);
+    if n < 1 { return t; }
+    let mut o: List[Float] = rt_copy(t);
+    let mut i: Int = 0;
+    while i < n {
+        let x0: Float = spatial_r_tree_comp(o, ni, i, 0);
+        let y0: Float = spatial_r_tree_comp(o, ni, i, 1);
+        let x1: Float = spatial_r_tree_comp(o, ni, i, 2);
+        let y1: Float = spatial_r_tree_comp(o, ni, i, 3);
+        if i < 1 {
+            o = rt_u(o, ni, 0, x0);
+            o = rt_u(o, ni, 1, y0);
+            o = rt_u(o, ni, 2, x1);
+            o = rt_u(o, ni, 3, y1);
+        } else {
+            if x0 < spatial_r_tree_g(o, ni, 0) { o = rt_u(o, ni, 0, x0); }
+            if y0 < spatial_r_tree_g(o, ni, 1) { o = rt_u(o, ni, 1, y0); }
+            if x1 > spatial_r_tree_g(o, ni, 2) { o = rt_u(o, ni, 2, x1); }
+            if y1 > spatial_r_tree_g(o, ni, 3) { o = rt_u(o, ni, 3, y1); }
+        }
         i = i + 1;
     }
     return o;
+}
+
+fn rt_put(t: List[Float], ni: Int, x0: Float, y0: Float, x1: Float, y1: Float, pay: Float) -> List[Float] {
+    let n: Int = spatial_r_tree_n(t, ni);
+    let off: Int = spatial_r_tree_e(n);
+    let mut o: List[Float] = rt_copy(t);
+    o = rt_u(o, ni, off, x0);
+    o = rt_u(o, ni, off + 1, y0);
+    o = rt_u(o, ni, off + 2, x1);
+    o = rt_u(o, ni, off + 3, y1);
+    o = rt_u(o, ni, off + 4, pay);
+    o = rt_u(o, ni, 5, spatial_r_tree_g(o, ni, 5) + 1.0);
+    return rt_fix(o, ni);
+}
+
+fn rt_split(t: List[Float], ni: Int, rec: List[Float]) -> List[Float] {
+    let mut idx: List[Int] = list_new();
+    let mut a: Int = 0;
+    while a < 5 { idx = list_push(idx, a); a = a + 1; }
+    let mut i: Int = 0;
+    while i < 5 {
+        let mut j: Int = i + 1;
+        while j < 5 {
+            let ii: Int = list_get(idx, i);
+            let jj: Int = list_get(idx, j);
+            if list_get(rec, jj * 5) < list_get(rec, ii * 5) {
+                idx = list_set(idx, i, jj);
+                idx = list_set(idx, j, ii);
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    let lf: Float = spatial_r_tree_g(t, ni, 4);
+    let mut o: List[Float] = rt_alloc(t);
+    let z: Int = spatial_r_tree_fi(list_get(o, 1)) - 1;
+    o = rt_u(o, ni, 5, 0.0);
+    o = rt_u(o, z, 5, 0.0);
+    o = rt_u(o, z, 4, lf);
+    i = 0;
+    while i < 5 {
+        let k: Int = list_get(idx, i);
+        let b: Int = k * 5;
+        let mut dest: Int = ni;
+        if i >= 2 { dest = z; }
+        o = rt_put(o, dest, list_get(rec, b), list_get(rec, b + 1), list_get(rec, b + 2), list_get(rec, b + 3), list_get(rec, b + 4));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn rt_parent(t: List[Float], child: Int) -> Int {
+    let nn: Int = spatial_r_tree_fi(list_get(t, 1));
+    let mut p: Int = 0;
+    while p < nn {
+        if spatial_r_tree_leaf(t, p) == false {
+            let n: Int = spatial_r_tree_n(t, p);
+            let mut j: Int = 0;
+            while j < n {
+                if spatial_r_tree_ch(t, p, j) == child { return p; }
+                j = j + 1;
+            }
+        }
+        p = p + 1;
+    }
+    return 0 - 1;
+}
+
+fn rt_pack(t: List[Float], ni: Int, x0: Float, y0: Float, x1: Float, y1: Float, pay: Float) -> List[Float] {
+    let mut rec: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < 4 {
+        rec = list_push(rec, spatial_r_tree_g(t, ni, spatial_r_tree_e(i)));
+        rec = list_push(rec, spatial_r_tree_g(t, ni, spatial_r_tree_e(i) + 1));
+        rec = list_push(rec, spatial_r_tree_g(t, ni, spatial_r_tree_e(i) + 2));
+        rec = list_push(rec, spatial_r_tree_g(t, ni, spatial_r_tree_e(i) + 3));
+        rec = list_push(rec, spatial_r_tree_g(t, ni, spatial_r_tree_e(i) + 4));
+        i = i + 1;
+    }
+    rec = list_push(rec, x0);
+    rec = list_push(rec, y0);
+    rec = list_push(rec, x1);
+    rec = list_push(rec, y1);
+    rec = list_push(rec, pay);
+    return rt_split(t, ni, rec);
+}
+
+fn rt_adjust(t: List[Float], left: Int, right: Int) -> List[Float] {
+    let mut o: List[Float] = rt_copy(t);
+    let mut a: Int = left;
+    let mut b: Int = right;
+    while true {
+        let p: Int = rt_parent(o, a);
+        if p < 0 {
+            o = rt_alloc(o);
+            let r: Int = spatial_r_tree_fi(list_get(o, 1)) - 1;
+            o = rt_u(o, r, 4, 0.0);
+            o = rt_u(o, r, 5, 0.0);
+            o = rt_put(o, r, spatial_r_tree_g(o, a, 0), spatial_r_tree_g(o, a, 1), spatial_r_tree_g(o, a, 2), spatial_r_tree_g(o, a, 3), rt_if(a));
+            o = rt_put(o, r, spatial_r_tree_g(o, b, 0), spatial_r_tree_g(o, b, 1), spatial_r_tree_g(o, b, 2), spatial_r_tree_g(o, b, 3), rt_if(b));
+            o = list_set(o, 0, rt_if(r));
+            return o;
+        }
+        if spatial_r_tree_n(o, p) < 4 {
+            o = rt_put(o, p, spatial_r_tree_g(o, b, 0), spatial_r_tree_g(o, b, 1), spatial_r_tree_g(o, b, 2), spatial_r_tree_g(o, b, 3), rt_if(b));
+            o = rt_u(o, p, 4, 0.0);
+            return rt_fix(o, p);
+        }
+        o = rt_pack(o, p, spatial_r_tree_g(o, b, 0), spatial_r_tree_g(o, b, 1), spatial_r_tree_g(o, b, 2), spatial_r_tree_g(o, b, 3), rt_if(b));
+        a = p;
+        b = spatial_r_tree_fi(list_get(o, 1)) - 1;
+        o = rt_u(o, a, 4, 0.0);
+        o = rt_u(o, b, 4, 0.0);
+    }
+    return o;
+}
+
+fn rt_find(t: List[Float], x0: Float, y0: Float, x1: Float, y1: Float) -> Int {
+    let mut ni: Int = spatial_r_tree_fi(list_get(t, 0));
+    while spatial_r_tree_leaf(t, ni) == false {
+        let c: Int = spatial_r_tree_pick_child(t, ni, x0, y0, x1, y1);
+        ni = spatial_r_tree_ch(t, ni, c);
+    }
+    return ni;
 }
 
 pub fn spatial_r_tree_new() -> List[Float] {
@@ -50,9 +195,7 @@ pub fn spatial_r_tree_new() -> List[Float] {
     t = list_push(t, 0.0);
     t = list_push(t, 0.0);
     t = list_push(t, 0.0);
-    t = list_push(t, 0.0);
-    t = list_push(t, 1.0);
-    t = list_push(t, 0.0);
+    t = rt_alloc(t);
     return t;
 }
 
@@ -60,98 +203,27 @@ pub fn spatial_r_tree_insert(tree: List[Float], x0: Float, y0: Float, x1: Float,
     if x1 < x0 { return Err("rtree box"); }
     if y1 < y0 { return Err("rtree box"); }
     let mut o: List[Float] = rt_copy(tree);
-    let n: Int = rt_n(o);
-    if n >= 8 {
-        return Err("rtree full leaf");
+    let idf: Float = list_get(o, 2);
+    o = list_set(o, 2, idf + 1.0);
+    let ni: Int = rt_find(o, x0, y0, x1, y1);
+    if spatial_r_tree_n(o, ni) < 4 {
+        o = rt_put(o, ni, x0, y0, x1, y1, idf);
+        return Ok(o);
     }
-    if n < 1 {
-        o = list_set(o, 0, x0);
-        o = list_set(o, 1, y0);
-        o = list_set(o, 2, x1);
-        o = list_set(o, 3, y1);
-    } else {
-        if x0 < list_get(o, 0) { o = list_set(o, 0, x0); }
-        if y0 < list_get(o, 1) { o = list_set(o, 1, y0); }
-        if x1 > list_get(o, 2) { o = list_set(o, 2, x1); }
-        if y1 > list_get(o, 3) { o = list_set(o, 3, y1); }
-    }
-    o = list_push(o, x0);
-    o = list_push(o, y0);
-    o = list_push(o, x1);
-    o = list_push(o, y1);
-    o = list_set(o, 5, list_get(o, 5) + 1.0);
+    o = rt_pack(o, ni, x0, y0, x1, y1, idf);
+    let z: Int = spatial_r_tree_fi(list_get(o, 1)) - 1;
+    o = rt_adjust(o, ni, z);
     return Ok(o);
 }
 
 pub fn spatial_r_tree_overlap(tree: List[Float], x0: Float, y0: Float, x1: Float, y1: Float) -> Result[Int, String] {
-    if list_len(tree) < 6 { return Err("rtree empty"); }
-    let n: Int = rt_n(tree);
-    let mut i: Int = 0;
-    while i < n {
-        let b: Int = 6 + i * 4;
-        let bx0: Float = list_get(tree, b);
-        let by0: Float = list_get(tree, b + 1);
-        let bx1: Float = list_get(tree, b + 2);
-        let by1: Float = list_get(tree, b + 3);
-        if rt_ov(x0, y0, x1, y1, bx0, by0, bx1, by1) {
-            return Ok(i);
-        }
-        i = i + 1;
-    }
-    return Err("rtree no overlap");
+    return spatial_r_tree_query_overlap(tree, x0, y0, x1, y1);
 }
 
 pub fn spatial_r_tree_nearest(tree: List[Float], x: Float, y: Float) -> Result[Int, String] {
-    if list_len(tree) < 6 { return Err("rtree empty"); }
-    let n: Int = rt_n(tree);
-    if n < 1 { return Err("rtree empty"); }
-    let mut best: Int = 0;
-    let mut bd: Float = 1000000000.0;
-    let mut i: Int = 0;
-    while i < n {
-        let b: Int = 6 + i * 4;
-        let cx: Float = 0.5 * (list_get(tree, b) + list_get(tree, b + 2));
-        let cy: Float = 0.5 * (list_get(tree, b + 1) + list_get(tree, b + 3));
-        let dx: Float = cx - x;
-        let dy: Float = cy - y;
-        let d: Float = dx * dx + dy * dy;
-        if d < bd {
-            bd = d;
-            best = i;
-        }
-        i = i + 1;
-    }
-    return Ok(best);
+    return spatial_r_tree_query_nearest(tree, x, y);
 }
 
 pub fn spatial_r_tree_choose(tree: List[Float], x0: Float, y0: Float, x1: Float, y1: Float) -> Result[Int, String] {
-    if list_len(tree) < 6 { return Err("rtree empty"); }
-    let n: Int = rt_n(tree);
-    if n < 1 { return Err("rtree empty"); }
-    let mut best: Int = 0;
-    let mut bg: Float = 1000000000.0;
-    let mut i: Int = 0;
-    while i < n {
-        let b: Int = 6 + i * 4;
-        let ax0: Float = list_get(tree, b);
-        let ay0: Float = list_get(tree, b + 1);
-        let ax1: Float = list_get(tree, b + 2);
-        let ay1: Float = list_get(tree, b + 3);
-        let a0: Float = rt_area(ax0, ay0, ax1, ay1);
-        let mut nx0: Float = ax0;
-        let mut ny0: Float = ay0;
-        let mut nx1: Float = ax1;
-        let mut ny1: Float = ay1;
-        if x0 < nx0 { nx0 = x0; }
-        if y0 < ny0 { ny0 = y0; }
-        if x1 > nx1 { nx1 = x1; }
-        if y1 > ny1 { ny1 = y1; }
-        let g: Float = rt_area(nx0, ny0, nx1, ny1) - a0;
-        if g < bg {
-            bg = g;
-            best = i;
-        }
-        i = i + 1;
-    }
-    return Ok(best);
+    return spatial_r_tree_query_choose(tree, x0, y0, x1, y1);
 }
