@@ -61,7 +61,6 @@ return r;
 }
 int oo_untrusted_hit(const char *data, size_t n);
 int oo_is_policy_path(const char *p);
-int oo_policy_write_on(void);
 static int policy_locked(const char *p) {
 return oo_is_policy_path(p) && !oo_policy_write_on();
 }
