@@ -1,0 +1,251 @@
+// # Block C quant and market smoke
+//
+// Logline: Drives L3 matching conservation, FIX checksum, Black-Scholes parity, SBE, GBM, EVM, pacs.008, and Nelson-Siegel.
+//
+// Setup: Pure. Imports named Block C modules. Run from ooda/.
+//
+// Beats:
+//   1. Match buy and sell FIFO and keep matched+remaining conservation.
+//   2. Verify FIX checksum and put-call parity within 1e-6.
+//   3. Recover an SBE field and step an antithetic GBM path.
+//   4. Reject EVM OOB, dt <= 0, and tau <= 0.
+
+import "std/fin_trading/l3_orderbook.oo";
+import "std/fin_trading/fix_tag_streamer.oo";
+import "std/fin_quant/black_scholes_greeks.oo";
+import "std/fin_trading/sbe_decoder.oo";
+import "std/fin_quant/monte_carlo_paths.oo";
+import "std/fin_blockchain/evm_bytecode_core.oo";
+import "std/fin_wire/iso20022_codec.oo";
+import "std/fin_quant/nelson_siegel_curve.oo";
+
+fn must(flag: Int, err: String, msg: String) {
+    if flag < 1 {
+        println("FAIL " + msg + " " + err);
+        process_exit(1);
+    }
+}
+
+fn pushs(o: List[Int], s: String) -> List[Int] {
+    let mut n: List[Int] = o;
+    let mut i: Int = 0;
+    while i < bytes_len(s) {
+        n = list_push(n, byte_at(s, i));
+        i = i + 1;
+    }
+    return n;
+}
+
+pub fn main() {
+    let mut opx: List[Int] = list_new();
+    let mut oqy: List[Int] = list_new();
+    opx = list_push(opx, 100);
+    opx = list_push(opx, 100);
+    oqy = list_push(oqy, 2);
+    oqy = list_push(oqy, 8);
+    let m: BookOut = l3_orderbook_fifo(opx, oqy, 0, 101, 4);
+    must(l3_orderbook_flag(m), l3_orderbook_err(m), "fifo");
+    if l3_orderbook_matched(m) != 4 {
+        println("FAIL matched");
+        process_exit(1);
+    }
+    if l3_orderbook_remaining(m) != 0 {
+        println("FAIL rem");
+        process_exit(1);
+    }
+    if l3_orderbook_rest_sum(m) != 6 {
+        println("FAIL rest");
+        process_exit(1);
+    }
+    if l3_orderbook_matched(m) + l3_orderbook_remaining(m) != 4 {
+        println("FAIL cons in");
+        process_exit(1);
+    }
+    if l3_orderbook_rest_sum(m) + l3_orderbook_matched(m) != 10 {
+        println("FAIL cons book");
+        process_exit(1);
+    }
+    let mut bp: List[Int] = list_new();
+    let mut bq: List[Int] = list_new();
+    let mut ap: List[Int] = list_new();
+    let mut aq: List[Int] = list_new();
+    bp = list_push(bp, 101);
+    bq = list_push(bq, 10);
+    ap = list_push(ap, 102);
+    aq = list_push(aq, 5);
+    let bb: BookOut = l3_orderbook_bbo(bp, bq, ap, aq);
+    must(l3_orderbook_flag(bb), l3_orderbook_err(bb), "bbo");
+    if l3_orderbook_bbo_bid(bb) != 101 {
+        println("FAIL bid");
+        process_exit(1);
+    }
+    if l3_orderbook_bbo_ask(bb) != 102 {
+        println("FAIL ask");
+        process_exit(1);
+    }
+    let mut ids: List[Int] = list_new();
+    ids = list_push(ids, 7);
+    ids = list_push(ids, 8);
+    let mut cq: List[Int] = list_new();
+    cq = list_push(cq, 3);
+    cq = list_push(cq, 5);
+    let cn: BookOut = l3_orderbook_cancel(cq, ids, 7);
+    must(l3_orderbook_flag(cn), l3_orderbook_err(cn), "cancel");
+    if l3_orderbook_remaining(cn) != 0 {
+        println("FAIL cancel qty");
+        process_exit(1);
+    }
+    if l3_orderbook_rest_sum(cn) != 5 {
+        println("FAIL cancel rest");
+        process_exit(1);
+    }
+    println("LOB FIFO match + cancel + BBO");
+    println("matched-share conservation");
+    let mut fx: List[Int] = list_new();
+    fx = pushs(fx, "8=FIX");
+    fx = list_push(fx, 1);
+    fx = pushs(fx, "35=0");
+    fx = list_push(fx, 1);
+    let mut sum: Int = 0;
+    let mut j: Int = 0;
+    while j < list_len(fx) {
+        sum = (sum + list_get(fx, j)) % 256;
+        j = j + 1;
+    }
+    fx = pushs(fx, "10=");
+    if sum < 10 {
+        fx = list_push(fx, 48);
+        fx = list_push(fx, 48);
+        fx = list_push(fx, 48 + sum);
+    } else {
+        if sum < 100 {
+            fx = list_push(fx, 48);
+            fx = list_push(fx, 48 + (sum / 10));
+            fx = list_push(fx, 48 + (sum % 10));
+        } else {
+            fx = list_push(fx, 48 + (sum / 100));
+            fx = list_push(fx, 48 + ((sum / 10) % 10));
+            fx = list_push(fx, 48 + (sum % 10));
+        }
+    }
+    fx = list_push(fx, 1);
+    let fp: FixOut = fix_tag_streamer_parse(fx);
+    must(fix_tag_streamer_flag(fp), fix_tag_streamer_err(fp), "fix");
+    println("FIX SOH checksum mod 256");
+    let pr: Result[Int, String] = black_scholes_greeks_parity(100.0, 100.0, 0.05, 1.0, 0.2);
+    match pr {
+        Ok(v) => {
+            if v != 1 {
+                println("FAIL parity");
+                process_exit(1);
+            }
+        },
+        Err(e) => {
+            println("FAIL parity " + e);
+            process_exit(1);
+        }
+    }
+    let g: BsOut = black_scholes_greeks_price(100.0, 100.0, 0.05, 1.0, 0.2);
+    must(black_scholes_greeks_flag(g), black_scholes_greeks_err(g), "greeks");
+    println("C-P=S0-Ke^{-rT} within 1e-6");
+    println("Greeks present");
+    let mut sb: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 8 {
+        sb = list_push(sb, 0);
+        i = i + 1;
+    }
+    sb = list_push(sb, 7);
+    sb = list_push(sb, 0);
+    let se: SbeOut = sbe_decoder_parse(sb, 8, 2);
+    must(sbe_decoder_flag(se), sbe_decoder_err(se), "sbe");
+    if sbe_decoder_field(se) != 7 {
+        println("FAIL sbe field");
+        process_exit(1);
+    }
+    println("SBE field recovery");
+    let mc: McOut = monte_carlo_paths_step(100.0, 0.05, 0.2, 0.01, 0.5);
+    must(monte_carlo_paths_flag(mc), monte_carlo_paths_err(mc), "gbm");
+    println("GBM antithetic");
+    let mut code: List[Int] = list_new();
+    code = list_push(code, 96);
+    code = list_push(code, 3);
+    code = list_push(code, 96);
+    code = list_push(code, 4);
+    code = list_push(code, 1);
+    let ram0: List[Int] = list_new();
+    let evadd: EvmOut = evm_bytecode_core_run(code, ram0);
+    must(evm_bytecode_core_flag(evadd), evm_bytecode_core_err(evadd), "add");
+    if evm_bytecode_core_top(evadd) != 7 {
+        println("FAIL add");
+        process_exit(1);
+    }
+    let mut ram: List[Int] = list_new();
+    i = 0;
+    while i < 8 {
+        ram = list_push(ram, 0);
+        i = i + 1;
+    }
+    let mut ms: List[Int] = list_new();
+    ms = list_push(ms, 96);
+    ms = list_push(ms, 9);
+    ms = list_push(ms, 96);
+    ms = list_push(ms, 0);
+    ms = list_push(ms, 82);
+    ms = list_push(ms, 96);
+    ms = list_push(ms, 0);
+    ms = list_push(ms, 81);
+    let evm: EvmOut = evm_bytecode_core_run(ms, ram);
+    must(evm_bytecode_core_flag(evm), evm_bytecode_core_err(evm), "mstore");
+    if evm_bytecode_core_top(evm) != 9 {
+        println("FAIL mload");
+        process_exit(1);
+    }
+    let mut ac: List[Int] = list_new();
+    ac = list_push(ac, 96);
+    ac = list_push(ac, 15);
+    ac = list_push(ac, 96);
+    ac = list_push(ac, 240);
+    ac = list_push(ac, 22);
+    let eva: EvmOut = evm_bytecode_core_run(ac, ram);
+    must(evm_bytecode_core_flag(eva), evm_bytecode_core_err(eva), "and");
+    if evm_bytecode_core_top(eva) != 0 {
+        println("FAIL and");
+        process_exit(1);
+    }
+    let ramz: List[Int] = list_new();
+    let ev: EvmOut = evm_bytecode_core_step(81, 0, 0, ramz, 9);
+    if evm_bytecode_core_flag(ev) > 0 {
+        println("FAIL evm oob");
+        process_exit(1);
+    }
+    println("EVM stack/memory OOB Err");
+    let iso: IsoOut = iso20022_codec_parse("pacs.008|MsgId=M1|Amt=100|Ccy=USD|Dbtr=A|Cdtr=B");
+    must(iso20022_codec_flag(iso), iso20022_codec_err(iso), "iso");
+    if iso20022_codec_amt(iso) != 100 {
+        println("FAIL amt");
+        process_exit(1);
+    }
+    println("pacs.008 fields");
+    let ns: NsOut = nelson_siegel_curve_yield(0.03, 0.0 - 0.01, 0.01, 2.0, 1.0);
+    must(nelson_siegel_curve_flag(ns), nelson_siegel_curve_err(ns), "ns");
+    println("Nelson-Siegel four parameters");
+    let bad: McOut = monte_carlo_paths_step(100.0, 0.0, 0.2, 0.0, 0.1);
+    if monte_carlo_paths_flag(bad) > 0 {
+        println("FAIL dt");
+        process_exit(1);
+    }
+    let bads: McOut = monte_carlo_paths_step(100.0, 0.0, 0.0, 0.01, 0.1);
+    if monte_carlo_paths_flag(bads) > 0 {
+        println("FAIL sigma");
+        process_exit(1);
+    }
+    let nsb: NsOut = nelson_siegel_curve_yield(0.03, 0.0, 0.0, 0.0, 1.0);
+    if nelson_siegel_curve_flag(nsb) > 0 {
+        println("FAIL tau");
+        process_exit(1);
+    }
+    println("dt<=0/sigma<=0 Err");
+    println("SUITE PASSED");
+    println("smoke_m4_quant_finance: PASSED");
+}

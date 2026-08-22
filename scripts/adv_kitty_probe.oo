@@ -1,0 +1,107 @@
+// # Adversarial Kitty Graphics Protocol Probe
+//
+// Logline: Hostile stress-testing of Kitty protocol chunking, boundaries, format codes, and half-block fallback.
+//
+// Setup: Executes deep adversarial tests against std/tui/kitty_graphics on live binaries.
+//
+// Beats:
+//   1. Stress-test chunked streaming on exact 4095, 4096, 4097, 8192 byte boundaries and single-byte chunks.
+//   2. Probe negative, zero, and out-of-spec format codes and image IDs.
+//   3. Probe half-block fallback with empty lists, truncated pixel buffers, and odd heights.
+//   4. Assert all boundary conditions behave deterministically with fail-safe defaults.
+
+import "std/tui/kitty_graphics.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("=== Adversarial Kitty Graphics Probe ===");
+
+    // 1. Boundary chunking: 0 bytes, 4095, 4096, 4097, 8192 bytes
+    let img_empty: KittyImage = kitty_image_new_png(10, "");
+    let chunks_empty: List[String] = kitty_encode_chunked_stream(img_empty, 4096);
+    if list_len(chunks_empty) != 1 {
+        println("FAIL: Empty payload must return exactly 1 transmission chunk");
+        process_exit(1);
+    }
+    println("  [PASS] Empty payload chunking");
+
+    // Exact 4096 bytes
+    let mut p4096: String = "";
+    let mut i: Int = 0;
+    while i < 512 {
+        p4096 = p4096 + "12345678";
+        i = i + 1;
+    }
+    let img_4096: KittyImage = kitty_image_new_png(11, p4096);
+    let chunks_4096: List[String] = kitty_encode_chunked_stream(img_4096, 4096);
+    if list_len(chunks_4096) != 1 {
+        println("FAIL: 4096 byte payload with chunk_size 4096 must return 1 chunk");
+        process_exit(1);
+    }
+    println("  [PASS] Exact 4096 boundary payload");
+
+    // 4097 bytes (4096 + 1)
+    let p4097: String = p4096 + "A";
+    let img_4097: KittyImage = kitty_image_new_png(12, p4097);
+    let chunks_4097: List[String] = kitty_encode_chunked_stream(img_4097, 4096);
+    if list_len(chunks_4097) != 2 {
+        println("FAIL: 4097 byte payload must return 2 chunks");
+        process_exit(1);
+    }
+    let c0: String = list_get(chunks_4097, 0);
+    let c1: String = list_get(chunks_4097, 1);
+    if !str_contains(c0, "m=1") || !str_contains(c1, "m=0") {
+        println("FAIL: Chunk 0 must have m=1 and Chunk 1 must have m=0");
+        process_exit(1);
+    }
+    println("  [PASS] 4097 byte payload boundary (m=1/m=0 transition)");
+
+    // 8192 bytes (2 full 4096 chunks)
+    let p8192: String = p4096 + p4096;
+    let img_8192: KittyImage = kitty_image_new_png(13, p8192);
+    let chunks_8192: List[String] = kitty_encode_chunked_stream(img_8192, 4096);
+    if list_len(chunks_8192) != 2 {
+        println("FAIL: 8192 byte payload must return 2 chunks");
+        process_exit(1);
+    }
+    println("  [PASS] 8192 byte 2-chunk boundary");
+
+    // Single-byte chunking stress test
+    let img_small: KittyImage = kitty_image_new_rgb(14, 2, 2, "ABCDEF");
+    let chunks_1b: List[String] = kitty_encode_chunked_stream(img_small, 1);
+    if list_len(chunks_1b) != 6 {
+        println("FAIL: 6-byte payload with chunk size 1 must return 6 chunks");
+        process_exit(1);
+    }
+    println("  [PASS] Single-byte chunking granularity");
+
+    // 2. Format codes & Negative/Zero IDs
+    let img_neg: KittyImage = KittyImage { id: -1, width: -10, height: -20, format: -99, payload_base64: "NEG" };
+    let place_neg: KittyPlacement = KittyPlacement { image_id: -1, cell_x: -5, cell_y: -5, columns: 0, rows: 0, z_index: -1 };
+    let enc_neg: String = kitty_encode_transmit_and_display(img_neg, place_neg);
+    if !str_contains(enc_neg, "f=-99") || !str_contains(enc_neg, ";NEG\x1b\\") {
+        println("FAIL: Negative format encoding failed");
+        process_exit(1);
+    }
+    println("  [PASS] Out-of-spec format and negative dimensions");
+
+    // 3. Half-block fallback stress
+    let empty_pixels: List[PixelRgb] = list_new();
+    let fb_empty: String = kitty_render_halfblock_fallback(empty_pixels, 4, 4);
+    if !str_contains(fb_empty, "▀") {
+        println("FAIL: Empty pixel fallback rendering failed");
+        process_exit(1);
+    }
+    println("  [PASS] Half-block fallback with empty pixel buffer");
+
+    // Odd height and truncated pixels
+    let mut odd_pixels: List[PixelRgb] = list_new();
+    odd_pixels = list_push(odd_pixels, PixelRgb { r: 255, g: 128, b: 0 });
+    let fb_odd: String = kitty_render_halfblock_fallback(odd_pixels, 2, 3);
+    if !str_contains(fb_odd, "38;2;255;128;0") || !str_contains(fb_odd, "48;2;0;0;0") {
+        println("FAIL: Odd-height truncated half-block fallback failed");
+        process_exit(1);
+    }
+    println("  [PASS] Odd-height and truncated half-block rendering");
+
+    println("adv_kitty_probe: ALL PASS");
+}

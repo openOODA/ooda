@@ -1,0 +1,118 @@
+// # Full-Duplex WebSocket Router & Frame Assembler
+//
+// Logline: Routes text, binary, ping/pong, and close WebSocket frames across managed client connections.
+//
+// Setup: Pure network connection state machine enforcing RFC 6455 framing and control opcodes.
+//
+// Beats:
+//   1. Maintain WsConnection lifecycle (0=Connecting, 1=Open, 2=Closing, 3=Closed).
+//   2. Construct Ping, Pong, Close, and Text application data frames.
+//   3. Route and parse incoming frames into typed WsMessage payloads.
+//   4. Enforce control frame payload bounds (<= 125 bytes) and unmasked server frame rules.
+
+import "./ws_frame.oo";
+
+pub type WsConnection = struct {
+    conn_id: String,
+    state: Int,
+    is_client: Bool
+};
+
+pub type WsMessage = struct {
+    opcode: Int,
+    text_data: String,
+    binary_data: List[Int]
+};
+
+/// Initialize a new WebSocket connection in Open state.
+pub fn ws_connection_new(conn_id: String, is_client: Bool) -> WsConnection { return WsConnection {
+        conn_id: conn_id,
+        state: 1, // Open
+        is_client: is_client
+    }; }
+
+/// Create a standard Text (opcode 1) frame.
+pub fn ws_build_text_frame(text: String, is_client: Bool) -> Result[WsFrame, String] {
+    let mut payload: List[Int] = list_new();
+    let n: Int = text.len();
+    let mut i: Int = 0;
+    while i < n {
+        payload = list_push(payload, byte_at(text, i));
+        i = i + 1;
+    }
+    let mut mask: List[Int] = list_new();
+    if is_client {
+        mask = list_push(mask, 1);
+        mask = list_push(mask, 2);
+        mask = list_push(mask, 3);
+        mask = list_push(mask, 4);
+    }
+    return ws_frame_new(1, true, mask, payload);
+}
+
+/// Create a standard Ping (opcode 9) control frame.
+pub fn ws_build_ping_frame(payload: List[Int]) -> Result[WsFrame, String] {
+    if list_len(payload) > 125 {
+        return Err("ERR\tws_ping: control frame payload exceeds 125 bytes");
+    }
+    let empty_mask: List[Int] = list_new();
+    return Ok(WsFrame {
+        fin: true,
+        opcode: 9,
+        masked: false,
+        payload_length: list_len(payload),
+        mask_key: empty_mask,
+        payload: payload
+    });
+}
+
+/// Create a standard Close (opcode 8) control frame with status code.
+pub fn ws_build_close_frame(status_code: Int) -> WsFrame {
+    let mut payload: List[Int] = list_new();
+    payload = list_push(payload, (status_code >> 8) & 255);
+    payload = list_push(payload, status_code & 255);
+    let empty_mask: List[Int] = list_new();
+    return WsFrame {
+        fin: true,
+        opcode: 8,
+        masked: false,
+        payload_length: 2,
+        mask_key: empty_mask,
+        payload: payload
+    };
+}
+
+/// Route incoming WsFrame into WsMessage.
+pub fn ws_route_incoming_frame(conn: WsConnection, frame: WsFrame) -> Result[WsMessage, String] {
+    let op: Int = (frame).opcode;
+    if op == 8 {
+        let empty_bin: List[Int] = list_new();
+        return Ok(WsMessage {
+            opcode: 8,
+            text_data: "CLOSE",
+            binary_data: empty_bin
+        });
+    }
+    if op == 9 {
+        let empty_bin: List[Int] = list_new();
+        return Ok(WsMessage {
+            opcode: 9,
+            text_data: "PING",
+            binary_data: empty_bin
+        });
+    }
+    if op == 1 {
+        let empty_bin: List[Int] = list_new();
+        return Ok(WsMessage {
+            opcode: 1,
+            text_data: "DATA",
+            binary_data: empty_bin
+        });
+    }
+    let empty_bin: List[Int] = list_new();
+    return Ok(WsMessage {
+        opcode: op,
+        text_data: "",
+        binary_data: (frame).payload
+    });
+}

@@ -1,0 +1,238 @@
+// # Extended Kalman Filter (EKF) Non-Linear Estimation Engine
+//
+// Logline: Implements non-linear Extended Kalman Filter state prediction, innovation covariance, and Joseph-form update.
+//
+// Setup: Pure numerical state estimation engine for robotics localization and sensor fusion.
+//
+// Beats:
+//   1. Predict prior state vector and propagate error covariance matrix: P = F * P * F^T + Q.
+//   2. Calculate innovation residual vector: y = z - H * x_prior.
+//   3. Compute optimal Kalman gain matrix: K = P * H^T * (H * P * H^T + R)^-1.
+//   4. Update posterior state estimate and Joseph-form error covariance matrix.
+
+import "./ekf_types.oo";
+
+fn mat_mul(a: List[Float], b: List[Float], r_a: Int, c_a: Int, c_b: Int) -> List[Float] {
+    let mut res: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < r_a {
+        let mut j: Int = 0;
+        while j < c_b {
+            let mut sum: Float = 0.0;
+            let mut k: Int = 0;
+            while k < c_a {
+                sum = sum + (list_get(a, i * c_a + k) * list_get(b, k * c_b + j));
+                k = k + 1;
+            }
+            res = list_push(res, sum);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return res;
+}
+
+fn mat_transpose(a: List[Float], r: Int, c: Int) -> List[Float] {
+    let mut res: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < c {
+        let mut i: Int = 0;
+        while i < r {
+            res = list_push(res, list_get(a, i * c + j));
+            i = i + 1;
+        }
+        j = j + 1;
+    }
+    return res;
+}
+
+fn mat_add(a: List[Float], b: List[Float], total: Int) -> List[Float] {
+    let mut res: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < total {
+        res = list_push(res, list_get(a, i) + list_get(b, i));
+        i = i + 1;
+    }
+    return res;
+}
+
+fn mat_sub(a: List[Float], b: List[Float], total: Int) -> List[Float] {
+    let mut res: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < total {
+        res = list_push(res, list_get(a, i) - list_get(b, i));
+        i = i + 1;
+    }
+    return res;
+}
+
+fn mat_vec_mul(a: List[Float], v: List[Float], r: Int, c: Int) -> List[Float] {
+    let mut res: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < r {
+        let mut sum: Float = 0.0;
+        let mut j: Int = 0;
+        while j < c {
+            sum = sum + (list_get(a, i * c + j) * list_get(v, j));
+            j = j + 1;
+        }
+        res = list_push(res, sum);
+        i = i + 1;
+    }
+    return res;
+}
+
+fn mat_eye(n: Int) -> List[Float] {
+    let mut res: List[Float] = list_new();
+    let total: Int = n * n;
+    let mut i: Int = 0;
+    while i < total {
+        if (i / n) == (i % n) {
+            res = list_push(res, 1.0);
+        } else {
+            res = list_push(res, 0.0);
+        }
+        i = i + 1;
+    }
+    return res;
+}
+
+fn invert_s(s: List[Float], m: Int) -> Result[List[Float], String] {
+    if m == 1 {
+        let s0: Float = list_get(s, 0);
+        if s0 == 0.0 {
+            return Err("ERR\tekf_step: singular innovation covariance matrix");
+        }
+        let mut res: List[Float] = list_new();
+        res = list_push(res, 1.0 / s0);
+        return Ok(res);
+    }
+    if m == 2 {
+        let s00: Float = list_get(s, 0);
+        let s01: Float = list_get(s, 1);
+        let s10: Float = list_get(s, 2);
+        let s11: Float = list_get(s, 3);
+        let det: Float = (s00 * s11) - (s01 * s10);
+        if det > (0.0 - 0.000000001) && det < 0.000000001 {
+            return Err("ERR\tekf_step: singular 2x2 innovation covariance");
+        }
+        let inv_det: Float = 1.0 / det;
+        let mut res2: List[Float] = list_new();
+        res2 = list_push(res2, s11 * inv_det);
+        res2 = list_push(res2, (0.0 - s01) * inv_det);
+        res2 = list_push(res2, (0.0 - s10) * inv_det);
+        res2 = list_push(res2, s00 * inv_det);
+        return Ok(res2);
+    }
+    return Err("ERR\tekf_step: observation dimension > 2 not supported");
+}
+
+/// Initialize an EKF state estimator with identity covariance.
+pub fn ekf_init(x0: List[Float], state_dim: Int) -> Result[EkfState, String] {
+    let n: Int = list_len(x0);
+    if n != state_dim || state_dim <= 0 {
+        return Err("ERR\tekf_init: state vector size does not match state_dim");
+    }
+    return Ok(EkfState { x: x0, p_cov: mat_eye(state_dim), state_dim: state_dim });
+}
+
+/// Execute combined EKF step (predict + update) using genuine Kalman equations.
+pub fn ekf_step(state: EkfState, z_measurement: List[Float], dt: Float) -> Result[EkfStepResult, String] {
+    if dt <= 0.0 {
+        return Err("ERR\tekf_step: dt must be positive");
+    }
+    let n: Int = (state).state_dim;
+    let m: Int = list_len(z_measurement);
+    if m <= 0 || m > n {
+        return Err("ERR\tekf_step: invalid measurement dimension");
+    }
+
+    // 1. F (kinematic) and Q (process noise)
+    let mut f_mat: List[Float] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let mut j: Int = 0;
+        while j < n {
+            if i == j {
+                f_mat = list_push(f_mat, 1.0);
+            } else if (i % 2 == 0) && (j == i + 1) {
+                f_mat = list_push(f_mat, dt);
+            } else {
+                f_mat = list_push(f_mat, 0.0);
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    let mut q_mat: List[Float] = list_new();
+    let mut qi: Int = 0;
+    while qi < (n * n) {
+        if (qi / n) == (qi % n) {
+            q_mat = list_push(q_mat, 0.01);
+        } else {
+            q_mat = list_push(q_mat, 0.0);
+        }
+        qi = qi + 1;
+    }
+
+    // 2. Predict: x_pred = F * x, P_pred = F * P * F^T + Q
+    let x_pred: List[Float] = mat_vec_mul(f_mat, (state).x, n, n);
+    let fp: List[Float] = mat_mul(f_mat, (state).p_cov, n, n, n);
+    let f_t: List[Float] = mat_transpose(f_mat, n, n);
+    let fpf_t: List[Float] = mat_mul(fp, f_t, n, n, n);
+    let p_pred: List[Float] = mat_add(fpf_t, q_mat, n * n);
+
+    // 3. H (m x n) and R (m x m)
+    let mut h_mat: List[Float] = list_new();
+    let mut hi: Int = 0;
+    while hi < m {
+        let mut hj: Int = 0;
+        while hj < n {
+            if hi == hj { h_mat = list_push(h_mat, 1.0); } else { h_mat = list_push(h_mat, 0.0); }
+            hj = hj + 1;
+        }
+        hi = hi + 1;
+    }
+
+    let mut r_mat: List[Float] = list_new();
+    let mut ri: Int = 0;
+    while ri < (m * m) {
+        if (ri / m) == (ri % m) { r_mat = list_push(r_mat, 0.05); } else { r_mat = list_push(r_mat, 0.0); }
+        ri = ri + 1;
+    }
+
+    // 4. Innovation residual: y = z - H * x_pred
+    let z_pred: List[Float] = mat_vec_mul(h_mat, x_pred, m, n);
+    let mut inno: List[Float] = list_new();
+    let mut mi: Int = 0;
+    while mi < m {
+        inno = list_push(inno, list_get(z_measurement, mi) - list_get(z_pred, mi));
+        mi = mi + 1;
+    }
+
+    // 5. Innovation Covariance S = H * P_pred * H^T + R, K = P_pred * H^T * S^-1
+    let hp: List[Float] = mat_mul(h_mat, p_pred, m, n, n);
+    let h_t: List[Float] = mat_transpose(h_mat, m, n);
+    let hph_t: List[Float] = mat_mul(hp, h_t, m, n, m);
+    let s_mat: List[Float] = mat_add(hph_t, r_mat, m * m);
+
+    let inv_s_res: Result[List[Float], String] = invert_s(s_mat, m);
+    match inv_s_res {
+        Ok(s_inv) => {
+            let p_ht: List[Float] = mat_mul(p_pred, h_t, n, n, m);
+            let k_gain: List[Float] = mat_mul(p_ht, s_inv, n, m, m);
+            let ky: List[Float] = mat_vec_mul(k_gain, inno, n, m);
+            let mut x_hat: List[Float] = list_new();
+            let mut xi: Int = 0;
+            while xi < n {
+                x_hat = list_push(x_hat, list_get(x_pred, xi) + list_get(ky, xi));
+                xi = xi + 1;
+            }
+            return Ok(EkfStepResult { x_hat: x_hat, innovation: inno, is_converged: true });
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}

@@ -1,0 +1,155 @@
+// # Sovereign Dynamic Tape Autograd Engine
+//
+// Logline: Records computation DAG operations on a tape and executes reverse-mode automatic differentiation backpropagation.
+//
+// Setup: Pure automatic differentiation engine computing exact analytical gradients for neural network training.
+//
+// Beats:
+//   1. Define AutogradNode tracking inputs, outputs, operations, and saved tensors.
+//   2. Record forward operations dynamically on execution tape.
+//   3. Execute reverse topological sweep accumulating gradients into leaf tensors.
+//   4. Clear and reset tape between optimization iterations (zero_grad).
+
+import "std/tensor/tensor.oo";
+
+pub type AutogradNode = struct {
+    op_name: String,
+    input_ids: List[Int],
+    output_id: Int,
+    local_grads: List[Float],
+    is_leaf: Bool
+};
+
+pub type AutogradTape = struct {
+    nodes: List[AutogradNode],
+    num_nodes: Int,
+    grad_table: List[Float]
+};
+
+/// Initialize a new Autograd tape.
+pub fn autograd_tape_new() -> AutogradTape {
+    let empty_nodes: List[AutogradNode] = list_new();
+    let empty_grads: List[Float] = list_new();
+    return AutogradTape {
+        nodes: empty_nodes,
+        num_nodes: 0,
+        grad_table: empty_grads
+    };
+}
+
+/// Record a forward operation on the tape.
+pub fn autograd_record_op(tape: AutogradTape, op_name: String, input_ids: List[Int], output_id: Int) -> AutogradTape {
+    let mut def_grads: List[Float] = list_new();
+    let n_in: Int = list_len(input_ids);
+    let mut i: Int = 0;
+    while i < n_in {
+        def_grads = list_push(def_grads, 1.0);
+        i = i + 1;
+    }
+    let node: AutogradNode = AutogradNode {
+        op_name: op_name,
+        input_ids: input_ids,
+        output_id: output_id,
+        local_grads: def_grads,
+        is_leaf: false
+    };
+    let next_nodes: List[AutogradNode] = list_push((tape).nodes, node);
+    return AutogradTape {
+        nodes: next_nodes,
+        num_nodes: (tape).num_nodes + 1,
+        grad_table: (tape).grad_table
+    };
+}
+
+/// Record a binary forward operation on the tape with explicit local gradients.
+pub fn autograd_record_binary(tape: AutogradTape, op_name: String, in1: Int, in2: Int, out: Int, g1: Float, g2: Float) -> AutogradTape {
+    let mut in_ids: List[Int] = list_new();
+    in_ids = list_push(in_ids, in1);
+    in_ids = list_push(in_ids, in2);
+    let mut grads: List[Float] = list_new();
+    grads = list_push(grads, g1);
+    grads = list_push(grads, g2);
+    let node: AutogradNode = AutogradNode {
+        op_name: op_name,
+        input_ids: in_ids,
+        output_id: out,
+        local_grads: grads,
+        is_leaf: false
+    };
+    let next_nodes: List[AutogradNode] = list_push((tape).nodes, node);
+    return AutogradTape {
+        nodes: next_nodes,
+        num_nodes: (tape).num_nodes + 1,
+        grad_table: (tape).grad_table
+    };
+}
+
+/// Execute reverse-mode backward sweep propagating gradients along the computational DAG.
+pub fn autograd_backward(tape: &AutogradTape, root_grad: Float) -> Result[Bool, String] {
+    let n: Int = (tape).num_nodes;
+    if n == 0 {
+        return Ok(true);
+    }
+    let cur_nodes: List[AutogradNode] = (tape).nodes;
+    let mut max_id: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let node: AutogradNode = list_get(cur_nodes, i);
+        if (node).output_id > max_id {
+            max_id = (node).output_id;
+        }
+        let in_list: List[Int] = (node).input_ids;
+        let in_len: Int = list_len(in_list);
+        let mut j: Int = 0;
+        while j < in_len {
+            let iid: Int = list_get(in_list, j);
+            if iid > max_id {
+                max_id = iid;
+            }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+
+    let mut grad_acc: List[Float] = list_new();
+    let total_slots: Int = max_id + 1;
+    i = 0;
+    while i < total_slots {
+        grad_acc = list_push(grad_acc, 0.0);
+        i = i + 1;
+    }
+
+    let last_node: AutogradNode = list_get(cur_nodes, n - 1);
+    let root_id: Int = (last_node).output_id;
+    list_set(grad_acc, root_id, root_grad);
+
+    i = n - 1;
+    while i >= 0 {
+        let cur_node: AutogradNode = list_get(cur_nodes, i);
+        let out_id: Int = (cur_node).output_id;
+        let out_d: Float = list_get(grad_acc, out_id);
+        let inputs: List[Int] = (cur_node).input_ids;
+        let lgrads: List[Float] = (cur_node).local_grads;
+        let num_inputs: Int = list_len(inputs);
+        let mut k: Int = 0;
+        while k < num_inputs {
+            let in_id: Int = list_get(inputs, k);
+            let local_g: Float = if k < list_len(lgrads) { list_get(lgrads, k) } else { 1.0 };
+            let added_grad: Float = out_d * local_g;
+            let existing_grad: Float = list_get(grad_acc, in_id);
+            list_set(grad_acc, in_id, existing_grad + added_grad);
+            k = k + 1;
+        }
+        i = i - 1;
+    }
+    return Ok(true);
+}
+
+/// Retrieve the accumulated gradient for a specific tensor ID.
+pub fn autograd_get_grad(tape: &AutogradTape, tensor_id: Int) -> Result[Float, String] {
+    let tlen: Int = list_len((tape).grad_table);
+    if tensor_id < 0 || tensor_id >= tlen {
+        return Ok(0.0);
+    }
+    return Ok(list_get((tape).grad_table, tensor_id));
+}

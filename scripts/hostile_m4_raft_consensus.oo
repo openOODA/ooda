@@ -1,0 +1,235 @@
+// # Adversarial Probe: Raft Consensus Engine
+//
+// Logline: Hostile stress-test suite challenging Raft consensus under split-votes, log mismatches, uncommitted log overwrite, and state tampering.
+//
+// Setup: Pure consensus adversarial test harness asserting fail-closed invariants on Raft distributed state machine.
+//
+// Beats:
+//   1. Stress-test split-vote scenarios in multi-node clusters asserting non-quorum nodes remain candidates.
+//   2. Stress-test term monotonicity, vote idempotence, and higher-term state reset to follower.
+//   3. Stress-test log truncation on uncommitted conflict overwrite and commit index bounds.
+//   4. Stress-test non-leader proposal rejection, negative snapshot indices, and checksum tampering.
+
+import "std/cloud/raft_state.oo";
+import "std/cloud/raft_log.oo";
+import "std/cloud/raft_snapshot.oo";
+import "std/cloud/raft.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("===================================================================");
+    println(" HOSTILE PROBE: Raft Consensus Engine Stress Harness");
+    println("===================================================================");
+
+    // --- Probe 1: Empty node_id rejection ---
+    let mut peers_3: List[String] = list_new();
+    peers_3 = list_push(peers_3, "node-2");
+    peers_3 = list_push(peers_3, "node-3");
+    let err_node: Result[RaftNode, String] = raft_node_new("", peers_3, 150);
+    match err_node {
+        Ok(_) => {
+            println("FAIL: raft_node_new accepted empty node_id");
+            process_exit(1);
+        }
+        Err(_) => {}
+    }
+    println("  [PASS] 1. Empty Node ID Rejected Fail-Closed");
+
+    // --- Probe 2: Negative tick elapsed time ---
+    let node_res: Result[RaftNode, String] = raft_node_new("node-1", peers_3, 150);
+    match node_res {
+        Ok(node) => {
+            let mut local_node: RaftNode = node;
+            let neg_tick: Result[Int, String] = raft_node_tick(&mut local_node, -50);
+            match neg_tick {
+                Ok(_) => {
+                    println("FAIL: raft_node_tick accepted negative elapsed time");
+                    process_exit(1);
+                }
+                Err(_) => {}
+            }
+            println("  [PASS] 2. Negative Tick Elapsed Time Rejected Fail-Closed");
+
+            // --- Probe 3: Term Split-Vote in 3-Node Cluster (Quorum = 2) ---
+            // Local node times out and starts election (votes_received = 1).
+            // In a 3-node cluster, 1 vote is NOT majority (3/2 + 1 = 2).
+            // Node MUST remain Candidate (role == 1) and NOT become Leader (role == 2).
+            let tick_res: Result[Int, String] = raft_node_tick(&mut local_node, 160);
+            match tick_res {
+                Ok(t) => {
+                    if t != 1 {
+                        println("FAIL: Term not incremented to 1");
+                        process_exit(1);
+                    }
+                    if raft_node_is_leader(&local_node) {
+                        println("FAIL: Node became leader with only 1 vote in 3-node cluster");
+                        process_exit(1);
+                    }
+                    if ((local_node).state).role != 1 {
+                        println("FAIL: Node is not in Candidate role");
+                        process_exit(1);
+                    }
+                }
+                Err(e) => {
+                    println("FAIL: Tick error: " + e);
+                    process_exit(1);
+                }
+            }
+            println("  [PASS] 3. Split-Vote Handled: Node Remains Candidate Without Majority Quorum");
+
+            // --- Probe 4: Non-Leader Propose Rejection ---
+            let prop_res: Result[Int, String] = raft_node_propose(&mut local_node, "SET k=v");
+            match prop_res {
+                Ok(_) => {
+                    println("FAIL: raft_node_propose succeeded on Candidate node");
+                    process_exit(1);
+                }
+                Err(e) => {
+                    if !str_contains(e, "not the cluster leader") {
+                        println("FAIL: Unexpected error message: " + e);
+                        process_exit(1);
+                    }
+                }
+            }
+            println("  [PASS] 4. Non-Leader Proposal Rejected Fail-Closed");
+        }
+        Err(e) => {
+            println("FAIL: raft_node_new error: " + e);
+            process_exit(1);
+        }
+    }
+
+    // --- Probe 5: Double-Voting in Same Term ---
+    let mut state: RaftNodeState = raft_state_new("node-2", 150);
+    state = raft_state_record_vote(state, "candidate-A", 1);
+    if (state).voted_for != "candidate-A" {
+        println("FAIL: First vote not recorded");
+        process_exit(1);
+    }
+    // Attempt second vote in same term for candidate-B -> must remain candidate-A
+    state = raft_state_record_vote(state, "candidate-B", 1);
+    if (state).voted_for != "candidate-A" {
+        println("FAIL: Node voted twice in the same term!");
+        process_exit(1);
+    }
+    println("  [PASS] 5. Vote Idempotence: Double-Voting in Same Term Denied");
+
+    // --- Probe 6: Higher Term Discovery Transitions to Follower ---
+    state = raft_state_start_election(state);
+    if (state).role != 1 || (state).current_term != 2 {
+        println("FAIL: Candidate state transition failed");
+        process_exit(1);
+    }
+    state = raft_state_become_follower(state, 5, "leader-X");
+    if (state).role != 0 || (state).current_term != 5 || (state).leader_id != "leader-X" {
+        println("FAIL: Higher term follower transition failed");
+        process_exit(1);
+    }
+    println("  [PASS] 6. Higher Term Discovery Reverts Node to Follower Role");
+
+    // --- Probe 7: Uncommitted Log Conflict Overwrite & Truncation ---
+    let mut rlog: RaftLog = raft_log_new();
+    let idx1: Int = raft_log_append(&mut rlog, 1, "CMD_1");
+    let idx2: Int = raft_log_append(&mut rlog, 1, "CMD_2");
+    let idx3: Int = raft_log_append(&mut rlog, 2, "CMD_3_OLD");
+    let idx4: Int = raft_log_append(&mut rlog, 2, "CMD_4_OLD");
+    if raft_log_last_index(&rlog) != 4 || raft_log_last_term(&rlog) != 2 {
+        println("FAIL: Log initial setup mismatch");
+        process_exit(1);
+    }
+    // Truncate from index 3 (drop uncommitted conflicting entries 3 and 4)
+    raft_log_truncate_from(&mut rlog, 3);
+    if raft_log_last_index(&rlog) != 2 || raft_log_last_term(&rlog) != 1 {
+        println("FAIL: Log truncation failed to drop entries >= 3");
+        process_exit(1);
+    }
+    // Append new entry from new leader with term 3
+    let new_idx3: Int = raft_log_append(&mut rlog, 3, "CMD_3_NEW");
+    if new_idx3 != 3 || raft_log_last_index(&rlog) != 3 || raft_log_last_term(&rlog) != 3 {
+        println("FAIL: Appending new entry after truncation failed");
+        process_exit(1);
+    }
+    println("  [PASS] 7. Uncommitted Log Overwrite & Truncation Succeeded");
+
+    // --- Probe 8: Commit Index Monotonicity & Clamping ---
+    // Commit up to 2 (valid)
+    let c1: Bool = raft_log_commit_to(&mut rlog, 2);
+    if !c1 || (rlog).commit_index != 2 {
+        println("FAIL: raft_log_commit_to 2 failed");
+        process_exit(1);
+    }
+    // Attempt to commit beyond last index (should clamp to last_idx = 3)
+    let c2: Bool = raft_log_commit_to(&mut rlog, 999);
+    if !c2 || (rlog).commit_index != 3 {
+        println("FAIL: Commit index not clamped to last index");
+        process_exit(1);
+    }
+    // Attempt to regress commit index (commit to 1) -> must return false and remain 3
+    let c3: Bool = raft_log_commit_to(&mut rlog, 1);
+    if c3 || (rlog).commit_index != 3 {
+        println("FAIL: Commit index regressed backward");
+        process_exit(1);
+    }
+    println("  [PASS] 8. Commit Index Monotonicity & Clamping Enforced");
+
+    // --- Probe 9: Stale Term Snapshot Chunk Rejection ---
+    let snap_res: Result[SnapshotData, String] = raft_snapshot_create("state_chunk_payload", 10, 3);
+    match snap_res {
+        Ok(snap) => {
+            let mut local_snap: SnapshotData = snap;
+            let stale_arg: InstallSnapshotArgs = InstallSnapshotArgs {
+                term: 1,
+                leader_id: "old_leader",
+                last_included_index: 5,
+                last_included_term: 1,
+                offset: 0,
+                data: "extra_data",
+                done: true
+            };
+            let apply_res: Result[InstallSnapshotReply, String] = raft_snapshot_apply_chunk(&mut local_snap, &stale_arg, 3);
+            match apply_res {
+                Ok(_) => {
+                    println("FAIL: Snapshot apply accepted stale term chunk");
+                    process_exit(1);
+                }
+                Err(e) => {
+                    if !str_contains(e, "stale term") {
+                        println("FAIL: Unexpected error: " + e);
+                        process_exit(1);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println("FAIL: Snapshot create error: " + e);
+            process_exit(1);
+        }
+    }
+    println("  [PASS] 9. Stale Term Snapshot Rejection Enforced");
+
+    // --- Probe 10: Corrupted Snapshot Checksum Verification ---
+    let mut tampered_snap: SnapshotData = SnapshotData {
+        last_index: 10,
+        last_term: 3,
+        state_payload: "tampered_payload",
+        checksum: 99999999
+    };
+    let verify_res: Result[Bool, String] = raft_snapshot_verify(&tampered_snap);
+    match verify_res {
+        Ok(_) => {
+            println("FAIL: Tampered snapshot verified as valid");
+            process_exit(1);
+        }
+        Err(e) => {
+            if !str_contains(e, "checksum mismatch") {
+                println("FAIL: Unexpected verify error: " + e);
+                process_exit(1);
+            }
+        }
+    }
+    println("  [PASS] 10. Tampered Snapshot Checksum Rejected Fail-Closed");
+
+    println("===================================================================");
+    println(" ALL 10 RAFT CONSENSUS ADVERSARIAL PROBES PASSED [100% OK]");
+    println("===================================================================");
+    println("hostile_m4_raft_consensus: PASSED");
+}

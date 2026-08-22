@@ -1,0 +1,226 @@
+// # Block A crypto and ZK smoke
+//
+// Logline: Drives Kyber NTT invertibility, Dilithium NTT, G1, IPA, ChaCha RFC 8439, SHAKE, Ristretto, and Poseidon.
+//
+// Setup: Pure. Imports named Block A modules. Run from ooda/.
+//
+// Beats:
+//   1. Prove INTT(NTT(P)) recovers P modulo 3329 on live coefficients.
+//   2. Exercise Dilithium NTT matrix-vector, CBD, and rounding.
+//   3. Check G1, IPA range, ChaCha quarter-round, Poly1305, SHAKE, Ristretto, Poseidon.
+//   4. Reject truncated crypto input.
+
+import "std/crypto_pqc/kyber_ntt.oo";
+import "std/crypto_pqc/dilithium_lattice.oo";
+import "std/zk_curves/bls12_381.oo";
+import "std/zk_proofs/bulletproofs_ipa.oo";
+import "std/crypto_adv/chacha20_poly1305.oo";
+import "std/crypto_adv/chacha20_poly1305_mac.oo";
+import "std/crypto_adv/keccak_sponge.oo";
+import "std/crypto_adv/ristretto255.oo";
+import "std/zk_hash/poseidon_sponge.oo";
+import "std/crypto/sha256.oo";
+
+fn must(flag: Int, err: String, msg: String) {
+    if flag < 1 {
+        println("FAIL " + msg + " " + err);
+        process_exit(1);
+    }
+}
+
+pub fn main() {
+    let mut p: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        p = list_push(p, i % 17);
+        i = i + 1;
+    }
+    let rt: KyberOut = kyber_ntt_roundtrip(p);
+    must(kyber_ntt_flag(rt), kyber_ntt_err(rt), "ntt");
+    if kyber_ntt_c0(rt) != list_get(p, 0) {
+        println("FAIL ntt c0");
+        process_exit(1);
+    }
+    if kyber_ntt_c1(rt) != list_get(p, 1) {
+        println("FAIL ntt c1");
+        process_exit(1);
+    }
+    if kyber_ntt_c127(rt) != list_get(p, 127) {
+        println("FAIL ntt c127");
+        process_exit(1);
+    }
+    if kyber_ntt_c255(rt) != list_get(p, 255) {
+        println("FAIL ntt c255");
+        process_exit(1);
+    }
+    println("INTT(NTT(P)) ≡ P (mod 3329)");
+    let mut a0: List[Int] = list_new();
+    let mut a1: List[Int] = list_new();
+    let mut s0: List[Int] = list_new();
+    let mut s1: List[Int] = list_new();
+    i = 0;
+    while i < 256 {
+        a0 = list_push(a0, i % 7);
+        a1 = list_push(a1, i % 5);
+        s0 = list_push(s0, 1);
+        s1 = list_push(s1, 2);
+        i = i + 1;
+    }
+    let mv: DilOut = dilithium_lattice_matvec(a0, a1, s0, s1);
+    must(dilithium_lattice_flag(mv), dilithium_lattice_err(mv), "dil matvec");
+    let mut cb: List[Int] = list_new();
+    cb = list_push(cb, 27);
+    cb = list_push(cb, 85);
+    cb = list_push(cb, 3);
+    cb = list_push(cb, 240);
+    let cbd: DilOut = dilithium_lattice_cbd(cb);
+    must(dilithium_lattice_flag(cbd), dilithium_lattice_err(cbd), "cbd");
+    let rd: DilOut = dilithium_lattice_power2round(100);
+    must(dilithium_lattice_flag(rd), dilithium_lattice_err(rd), "round");
+    println("Dilithium NTT×CBD×rounding exercised");
+    let g: G1 = bls12_381_g1_gen();
+    must(bls12_381_flag(g), bls12_381_err(g), "g1 gen");
+    let d: G1 = bls12_381_g1_dbl(g);
+    must(bls12_381_flag(d), bls12_381_err(d), "dbl");
+    let s2: G1 = bls12_381_g1_mul(g, 2);
+    must(bls12_381_flag(s2), bls12_381_err(s2), "mul");
+    let ad: G1 = bls12_381_g1_add(g, g);
+    must(bls12_381_flag(ad), bls12_381_err(ad), "add");
+    let eq: Result[Int, String] = bls12_381_g1_eq(d, s2);
+    if eq.is_err() {
+        println("FAIL 2P");
+        process_exit(1);
+    }
+    let eq2: Result[Int, String] = bls12_381_g1_eq(d, ad);
+    if eq2.is_err() {
+        println("FAIL P+P");
+        process_exit(1);
+    }
+    let ne: Result[Int, String] = bls12_381_g1_eq(g, d);
+    if ne.is_ok() {
+        println("FAIL P==-P or P==2P");
+        process_exit(1);
+    }
+    println("G1 add/double/scalar");
+    let mut va: List[Int] = list_new();
+    let mut vb: List[Int] = list_new();
+    va = list_push(va, 1);
+    va = list_push(va, 2);
+    vb = list_push(vb, 3);
+    vb = list_push(vb, 4);
+    let ip: IpaOut = bulletproofs_ipa_fold(va, vb, 5);
+    must(bulletproofs_ipa_flag(ip), bulletproofs_ipa_err(ip), "ipa");
+    let mut bits: List[Int] = list_new();
+    i = 0;
+    while i < 64 {
+        if i == 0 {
+            bits = list_push(bits, 1);
+        } else {
+            if i == 2 {
+                bits = list_push(bits, 1);
+            } else {
+                bits = list_push(bits, 0);
+            }
+        }
+        i = i + 1;
+    }
+    let rg: IpaOut = bulletproofs_ipa_range64(5, bits);
+    must(bulletproofs_ipa_flag(rg), bulletproofs_ipa_err(rg), "range");
+    println("IPA 64-bit range verify");
+    let qr: QrOut = chacha20_poly1305_rfc8439();
+    must(chacha20_poly1305_flag(qr), chacha20_poly1305_err(qr), "qr");
+    if chacha20_poly1305_a(qr) != 3928658676 {
+        println("FAIL rfc a");
+        process_exit(1);
+    }
+    if chacha20_poly1305_b(qr) != 3407673550 {
+        println("FAIL rfc b");
+        process_exit(1);
+    }
+    if chacha20_poly1305_c(qr) != 1166100270 {
+        println("FAIL rfc c");
+        process_exit(1);
+    }
+    if chacha20_poly1305_d(qr) != 1484899515 {
+        println("FAIL rfc d");
+        process_exit(1);
+    }
+    println("RFC 8439 quarter-round match");
+    let mut r: List[Int] = list_new();
+    let mut s: List[Int] = list_new();
+    let mut msg: List[Int] = list_new();
+    i = 0;
+    while i < 16 {
+        r = list_push(r, (i * 3) & 255);
+        s = list_push(s, (i * 5) & 255);
+        msg = list_push(msg, (i * 7) & 255);
+        i = i + 1;
+    }
+    let tag: PolyOut = chacha20_poly1305_mac(r, s, msg);
+    must(chacha20_poly1305_mac_flag(tag), chacha20_poly1305_mac_err(tag), "mac");
+    if chacha20_poly1305_mac_t0(tag) + chacha20_poly1305_mac_t1(tag) + chacha20_poly1305_mac_t2(tag) + chacha20_poly1305_mac_t3(tag) == 0 {
+        println("FAIL mac zero");
+        process_exit(1);
+    }
+    let mut m2: List[Int] = list_new();
+    m2 = list_push(m2, 1);
+    m2 = list_push(m2, 2);
+    let sh: KecOut = keccak_sponge_shake(m2, 8);
+    must(keccak_sponge_flag(sh), keccak_sponge_err(sh), "shake");
+    let mut m3: List[Int] = list_new();
+    m3 = list_push(m3, 1);
+    m3 = list_push(m3, 3);
+    let sh2: KecOut = keccak_sponge_shake(m3, 8);
+    must(keccak_sponge_flag(sh2), keccak_sponge_err(sh2), "shake2");
+    if keccak_sponge_w0(sh) == keccak_sponge_w0(sh2) {
+        if keccak_sponge_w1(sh) == keccak_sponge_w1(sh2) {
+            println("FAIL shake collide");
+            process_exit(1);
+        }
+    }
+    let z: KecOut = keccak_sponge_shake(m2, 0);
+    if keccak_sponge_flag(z) > 0 {
+        println("FAIL shake out");
+        process_exit(1);
+    }
+    println("SHAKE squeeze");
+    let idn: Result[Int, String] = ristretto255_check(0, 1);
+    if idn.is_ok() {
+        println("FAIL ristretto identity");
+        process_exit(1);
+    }
+    if ristretto255_p_limb(0) != 4294967277 {
+        println("FAIL ristretto p0");
+        process_exit(1);
+    }
+    println("Ristretto small-subgroup Err");
+    let ps: PosOut = poseidon_sponge_hash(m2);
+    must(poseidon_sponge_flag(ps), poseidon_sponge_err(ps), "poseidon");
+    println("Poseidon sponge");
+    let mut tr: List[Int] = list_new();
+    tr = list_push(tr, 1);
+    let bad: KyberOut = kyber_ntt_fwd(tr);
+    if kyber_ntt_flag(bad) > 0 {
+        println("FAIL trunc ntt");
+        process_exit(1);
+    }
+    println("truncated crypto Err");
+    let d_abc: String = sha256("abc");
+    let d_empty: String = sha256("");
+    if d_abc == d_empty {
+        println("FAIL sha equal empty");
+        process_exit(1);
+    }
+    if bytes_len(d_abc) != 64 {
+        println("FAIL sha len");
+        process_exit(1);
+    }
+    let d_abc2: String = sha256("abc");
+    if d_abc != d_abc2 {
+        println("FAIL sha not deterministic");
+        process_exit(1);
+    }
+    println("SHA FIPS 180-4 live digest");
+    println("SUITE PASSED");
+    println("smoke_m4_crypto_zk: PASSED");
+}

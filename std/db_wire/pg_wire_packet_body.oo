@@ -1,0 +1,146 @@
+// # PostgreSQL RowDescription and fail-closed parse
+//
+// Logline: Builds RowDescription T frames and parses v3 packets with 4..65536 length checks.
+//
+// Setup: Pure. Bytes are List[Int]. Imports pg_wire_packet.oo.
+//
+// Beats:
+//   1. Encode RowDescription with field names as cstrings.
+//   2. Reject a truncated buffer, a length under 4, and a length over 65536.
+//   3. Reject an oversized row count versus remaining payload.
+//   4. Recover type, length, and a small record from a well-formed frame.
+
+import "std/byte_out.oo";
+import "std/db_wire/pg_wire_packet.oo";
+
+pub fn pg_wire_packet_row_desc(names: List[List[Int]]) -> ByteOut {
+    let n: Int = list_len(names);
+    if n > 4096 {
+        return byte_out_err("pg row count");
+    }
+    let mut p: List[Int] = pg_be16(n);
+    let mut i: Int = 0;
+    while i < n {
+        let nm: List[Int] = list_get(names, i);
+        if list_len(nm) < 1 {
+            return byte_out_err("pg field name");
+        }
+        p = pg_cstr(p, nm);
+        p = pg_cat(p, pg_be32(0));
+        p = pg_cat(p, pg_be16(0));
+        p = pg_cat(p, pg_be32(25));
+        p = pg_cat(p, pg_be16(0 - 1));
+        p = pg_cat(p, pg_be32(0 - 1));
+        p = pg_cat(p, pg_be16(0));
+        i = i + 1;
+    }
+    return pg_msg(84, p);
+}
+
+fn pg_parse_typed(buf: List[Int]) -> ByteOut {
+    if list_len(buf) < 5 {
+        return byte_out_err("postgres short");
+    }
+    let b0: Int = list_get(buf, 0);
+    let n: Int = pg_u32(buf, 1);
+    if n < 4 {
+        return byte_out_err("pg length");
+    }
+    if n > 65536 {
+        return byte_out_err("pg length");
+    }
+    if 1 + n > list_len(buf) {
+        return byte_out_err("postgres short");
+    }
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, b0);
+    rec = list_push(rec, n);
+    if b0 == 90 {
+        if n < 5 {
+            return byte_out_err("postgres short");
+        }
+        rec = list_push(rec, list_get(buf, 5));
+    }
+    if b0 == 81 {
+        if n < 5 {
+            return byte_out_err("pg delimiter");
+        }
+        if list_get(buf, n) != 0 {
+            return byte_out_err("pg delimiter");
+        }
+    }
+    if b0 == 67 {
+        if n < 5 {
+            return byte_out_err("pg delimiter");
+        }
+        if list_get(buf, n) != 0 {
+            return byte_out_err("pg delimiter");
+        }
+        rec = list_push(rec, list_get(buf, 5));
+    }
+    if b0 == 68 {
+        if n < 6 {
+            return byte_out_err("postgres short");
+        }
+        let nf: Int = list_get(buf, 5) * 256 + list_get(buf, 6);
+        if nf < 0 {
+            return byte_out_err("pg row count");
+        }
+        if nf > 4096 {
+            return byte_out_err("pg row count");
+        }
+        rec = list_push(rec, nf);
+    }
+    if b0 == 84 {
+        if n < 6 {
+            return byte_out_err("postgres short");
+        }
+        let nf2: Int = list_get(buf, 5) * 256 + list_get(buf, 6);
+        if nf2 > 4096 {
+            return byte_out_err("pg row count");
+        }
+        rec = list_push(rec, nf2);
+    }
+    return byte_out_ok(rec);
+}
+
+pub fn pg_wire_packet_parse(buf: List[Int]) -> ByteOut {
+    if list_len(buf) < 4 {
+        return byte_out_err("postgres short");
+    }
+    let b0: Int = list_get(buf, 0);
+    if b0 == 0 {
+        let n: Int = pg_u32(buf, 0);
+        if n < 4 {
+            return byte_out_err("pg length");
+        }
+        if n > 65536 {
+            return byte_out_err("pg length");
+        }
+        if n > list_len(buf) {
+            return byte_out_err("postgres short");
+        }
+        if n < 8 {
+            return byte_out_err("postgres short");
+        }
+        let ver: Int = pg_u32(buf, 4);
+        let mut rec: List[Int] = list_new();
+        rec = list_push(rec, 0);
+        rec = list_push(rec, ver);
+        rec = list_push(rec, n);
+        return byte_out_ok(rec);
+    }
+    return pg_parse_typed(buf);
+}
+
+pub fn pg_wire_packet_stat(o: ByteOut) -> Result[Int, String] { return byte_out_stat(o); }
+
+pub fn pg_wire_packet_len_guard(n: Int) -> Result[Int, String] {
+    if n < 4 {
+        return Err("pg length");
+    }
+    if n > 65536 {
+        return Err("pg length");
+    }
+    return Ok(n);
+}

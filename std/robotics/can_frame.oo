@@ -1,0 +1,74 @@
+// # CAN 2.0B Frame Serializer & SocketCAN Codec
+//
+// Logline: Validates 11-bit and 29-bit CAN identifiers and serializes 16-byte Linux SocketCAN struct can_frame payloads.
+//
+// Setup: Pure automotive HAL protocol parser enforcing CAN bus DLC and ID constraints.
+//
+// Beats:
+//   1. Validate standard (0..0x7FF) and extended (0..0x1FFFFFFF) CAN IDs and data length codes (0..8).
+//   2. Encode CanFrame into 16-byte standard Linux SocketCAN binary layout.
+//   3. Decode SocketCAN byte buffers into verified CanFrame records.
+//   4. Reject malformed frames with fail-closed error returns.
+
+import "./can_types.oo";
+
+/// Create a new validated CAN frame.
+pub fn can_frame_new(can_id: Int, is_ext: Bool, dlc: Int, data: List[Int]) -> Result[CanFrame, String] {
+    if dlc < 0 || dlc > 8 {
+        return Err("ERR\tcan_frame: DLC must be between 0 and 8");
+    }
+    if is_ext {
+        if can_id < 0 || can_id > 536870911 { // 0x1FFFFFFF
+            return Err("ERR\tcan_frame: extended CAN ID exceeds 29 bits");
+        }
+    } else {
+        if can_id < 0 || can_id > 2047 { // 0x7FF
+            return Err("ERR\tcan_frame: standard CAN ID exceeds 11 bits");
+        }
+    }
+    let actual_len: Int = list_len(data);
+    if actual_len != dlc {
+        return Err("ERR\tcan_frame: data buffer length does not match DLC");
+    }
+    return Ok(CanFrame {
+        can_id: can_id,
+        is_extended: is_ext,
+        is_rtr: false,
+        is_error: false,
+        dlc: dlc,
+        data: data
+    });
+}
+
+/// Encode CanFrame into 16-byte SocketCAN struct format.
+pub fn can_frame_to_socketcan(frame: &CanFrame) -> List[Int] {
+    let mut buf: List[Int] = list_new();
+    let mut id_flags: Int = (frame).can_id;
+    if (frame).is_extended {
+        id_flags = id_flags | 2147483648; // CAN_EFF_FLAG (0x80000000)
+    }
+    // 4-byte can_id (LE)
+    buf = list_push(buf, id_flags & 255);
+    buf = list_push(buf, (id_flags >> 8) & 255);
+    buf = list_push(buf, (id_flags >> 16) & 255);
+    buf = list_push(buf, (id_flags >> 24) & 255);
+
+    // 1-byte can_dlc
+    buf = list_push(buf, (frame).dlc);
+    // 3 bytes padding
+    buf = list_push(buf, 0);
+    buf = list_push(buf, 0);
+    buf = list_push(buf, 0);
+
+    // 8 bytes data payload
+    let mut i: Int = 0;
+    while i < 8 {
+        if i < (frame).dlc {
+            buf = list_push(buf, list_get((frame).data, i));
+        } else {
+            buf = list_push(buf, 0);
+        }
+        i = i + 1;
+    }
+    return buf;
+}

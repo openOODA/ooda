@@ -1,0 +1,70 @@
+// # Groth16 Zero-Knowledge SNARK Proof Verifier
+//
+// Logline: Verifies Groth16 zk-SNARK proofs over BN254 pairings against public inputs and verifying keys.
+//
+// Setup: Cryptographic zero-knowledge verifier checking the 4-pairing equation e(A, B) = e(alpha, beta) * e(L, gamma) * e(C, delta).
+//
+// Beats:
+//   1. Represent Groth16 proof coordinates (A in G1, B in G2, C in G1).
+//   2. Accumulate public input linear combinations: L = IC_0 + sum(x_i * IC_i).
+//   3. Compute and evaluate the 4-pairing verification equation.
+//   4. Return fail-closed Result indicating proof validity or specific constraint failure.
+
+import "./bn254_field.oo";
+import "./bn254_g1.oo";
+import "./bn254_g2.oo";
+import "./bn254_pairing.oo";
+
+pub type Groth16Proof = struct {
+    a_g1: Bn254G1Affine,
+    b_g2: Bn254G2Affine,
+    c_g1: Bn254G1Affine,
+    is_valid: Bool
+};
+
+pub type Groth16VerifyingKey = struct {
+    alpha_g1: Bn254G1Affine,
+    beta_g2: Bn254G2Affine,
+    gamma_g2: Bn254G2Affine,
+    delta_g2: Bn254G2Affine,
+    ic: List[Bn254G1Affine],
+    num_inputs: Int
+};
+
+/// Verify a Groth16 zk-SNARK proof against verifying key and public inputs.
+pub fn groth16_verify(vk: &Groth16VerifyingKey, proof: &Groth16Proof, public_inputs: List[Int]) -> Result[Bool, String] {
+    if !(proof).is_valid {
+        return Err("ERR\tgroth16_verify: malformed proof structure");
+    }
+    let n_pub: Int = list_len(public_inputs);
+    let n_ic: Int = list_len((vk).ic);
+    if (n_pub + 1) != n_ic {
+        return Err("ERR\tgroth16_verify: public input count mismatch with IC vector");
+    }
+    // Accumulate L = IC_0 + sum(x_i * IC_i)
+    let mut l_acc: Bn254G1Affine = list_get((vk).ic, 0);
+    let mut i: Int = 0;
+    while i < n_pub {
+        let input_val: Int = list_get(public_inputs, i);
+        let ic_pt: Bn254G1Affine = list_get((vk).ic, i + 1);
+        let scaled: Bn254G1Affine = bn254_g1_scalar_mul(&ic_pt, input_val);
+        l_acc = bn254_g1_add(&l_acc, &scaled);
+        i = i + 1;
+    }
+    // Compute e(A, B)
+    let e_ab: Bn254Gt = bn254_pairing(&(proof).a_g1, &(proof).b_g2);
+    // Compute e(alpha, beta)
+    let e_ab_vk: Bn254Gt = bn254_pairing(&(vk).alpha_g1, &(vk).beta_g2);
+    // Compute e(L, gamma)
+    let e_lg: Bn254Gt = bn254_pairing(&l_acc, &(vk).gamma_g2);
+    // Compute e(C, delta)
+    let e_cd: Bn254Gt = bn254_pairing(&(proof).c_g1, &(vk).delta_g2);
+
+    let rhs_part: Bn254Gt = bn254_gt_mul(&e_ab_vk, &e_lg);
+    let rhs: Bn254Gt = bn254_gt_mul(&rhs_part, &e_cd);
+
+    if (e_ab).val == (rhs).val {
+        return Ok(true);
+    }
+    return Err("ERR\tgroth16_verify: pairing equation failed");
+}

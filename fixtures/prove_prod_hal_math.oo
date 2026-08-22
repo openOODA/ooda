@@ -1,0 +1,120 @@
+// # Product prove HAL & Math Core (Zero-Trust)
+//
+// Logline: Reads ooda/std/drivers_hal/uart_ring.oo, ooda/std/drivers_hal/can_frame.oo, and ooda/std/math_core/kahan_sum.oo directly and asserts the actual observed behavior of uart_ring push/pop, can_frame new/validate, and kahan_sum compensated summation.
+//
+// Setup: Imports the three HAL/Math modules. Pure value-returning helpers, no IO. The can_frame encode-byte-layout test is omitted because the .oo C-emit is fragile around extracting a struct Result and indexing into its bytes (the same fragility we documented in the microvm and atomic fixtures). The can_frame new-validation and uart_ring push/pop are verified via is_ok / is_err only.
+//
+// Beats:
+//   1. TACTICAL: uart_ring_new constructs a ring of fixed capacity; is_empty; push then pop round-trips a byte.
+//   2. TACTICAL: kahan_add + kahan_sum returns the exact sum of small values; kahan_finalize returns the sum and resets.
+//   3. OPERATIONAL: can_frame_new validates dlc in 0..8 and data length matches dlc.
+//   4. OPERATIONAL: uart_ring_is_full detects when capacity is reached; push on full returns Err.
+//   5. STRATEGY: kahan_sum on a 0.1*10 sequence is ~1.0; kahan_sum_list matches.
+
+import "std/drivers_hal/uart_ring.oo";
+import "std/drivers_hal/can_frame.oo";
+import "std/math_core/kahan_sum.oo";
+
+pub fn uart_push_is_ok(mut_r: &mut UartRing, byte: Int) -> Bool {
+    let r: Result[Void, String] = uart_ring_push_byte(mut_r, byte);
+    return r.is_ok();
+}
+
+pub fn uart_pop_is_ok(mut_r: &mut UartRing) -> Bool {
+    let r: Result[Int, String] = uart_ring_pop_byte(mut_r);
+    return r.is_ok();
+}
+
+pub fn can_new_is_ok(id: Int, is_ext: Bool, rtr: Bool, dlc: Int, data: List[Int]) -> Bool {
+    let r: Result[CanFrame, String] = can_frame_new(id, is_ext, rtr, dlc, data);
+    return r.is_ok();
+}
+
+pub fn test_uart_ring_basic_push_pop() {
+    let mut r: UartRing = uart_ring_new(4);
+    if uart_ring_is_empty(&r) == false { println("FAIL: new ring must be empty"); process_exit(1); }
+    if uart_ring_is_full(&r) { println("FAIL: new ring must not be full"); process_exit(1); }
+    if uart_push_is_ok(&mut r, 65) == false { println("FAIL: push(65) must Ok"); process_exit(1); }
+    if uart_ring_count(&r) != 1 { println("FAIL: count after one push must be 1"); process_exit(1); }
+    if uart_pop_is_ok(&mut r) == false { println("FAIL: pop must Ok"); process_exit(1); }
+    if uart_ring_is_empty(&r) == false { println("FAIL: ring must be empty after pop"); process_exit(1); }
+    println("PASS: uart_ring push/pop round-trip (tactical)");
+}
+
+pub fn test_uart_ring_full_detection() {
+    let mut r: UartRing = uart_ring_new(2);
+    if uart_push_is_ok(&mut r, 1) == false { println("FAIL: push 1 must Ok"); process_exit(1); }
+    if uart_push_is_ok(&mut r, 2) == false { println("FAIL: push 2 must Ok"); process_exit(1); }
+    if uart_ring_is_full(&r) == false { println("FAIL: ring of 2 must be full after 2 pushes"); process_exit(1); }
+    if uart_push_is_ok(&mut r, 3) { println("FAIL: push 3 on full ring must Err"); process_exit(1); }
+    println("PASS: uart_ring full detection works (operational)");
+}
+
+pub fn test_can_frame_new_validates_dlc() {
+    let mut data: List[Int] = list_new();
+    if can_new_is_ok(42, false, false, 0, data) == false { println("FAIL: dlc=0 must Ok"); process_exit(1); }
+    let mut d8: List[Int] = list_new();
+    let mut k: Int = 0;
+    while k < 8 {
+        d8 = list_push(d8, k + 1);
+        k = k + 1;
+    }
+    if can_new_is_ok(42, false, false, 8, d8) == false { println("FAIL: dlc=8 with 8 data bytes must Ok"); process_exit(1); }
+    if can_new_is_ok(42, false, false, 9, d8) { println("FAIL: dlc=9 must Err"); process_exit(1); }
+    if can_new_is_ok(42, false, false, 5, d8) { println("FAIL: dlc=5 with 8 data bytes must Err"); process_exit(1); }
+    println("PASS: can_frame_new validates dlc and data length (operational)");
+}
+
+pub fn test_can_frame_new_is_ok() {
+    let mut data: List[Int] = list_new();
+    data = list_push(data, 1);
+    data = list_push(data, 2);
+    let f_r: Result[CanFrame, String] = can_frame_new(291, false, false, 2, data);
+    if f_r.is_ok() == false { println("FAIL: can_frame_new must Ok"); process_exit(1); }
+    if f_r.is_err() { println("FAIL: can_frame_new must not be Err"); process_exit(1); }
+    println("PASS: can_frame_new returns Ok for valid frame (operational)");
+}
+
+pub fn test_kahan_sum_basic() {
+    let mut acc: KahanAccumulator = kahan_new();
+    kahan_add(&mut acc, 1.0);
+    kahan_add(&mut acc, 2.0);
+    kahan_add(&mut acc, 3.0);
+    let s: Float = kahan_sum(&acc);
+    if s != 6.0 { println("FAIL: kahan sum of 1+2+3 must be 6.0"); process_exit(1); }
+    let s2: Float = kahan_finalize(&mut acc);
+    if s2 != 6.0 { println("FAIL: kahan_finalize must return 6.0"); process_exit(1); }
+    if kahan_sum(&acc) != 0.0 { println("FAIL: kahan sum after finalize must be 0.0"); process_exit(1); }
+    println("PASS: kahan_sum basic add+finalize+reset (tactical)");
+}
+
+pub fn test_kahan_sum_compensated() {
+    let mut acc: KahanAccumulator = kahan_new();
+    let mut i: Int = 0;
+    while i < 10 {
+        kahan_add(&mut acc, 0.1);
+        i = i + 1;
+    }
+    let s: Float = kahan_sum(&acc);
+    if s < 0.99 { println("FAIL: kahan sum of 0.1*10 must be ~1.0, got s"); process_exit(1); }
+    if s > 1.01 { println("FAIL: kahan sum of 0.1*10 must be ~1.0, got s"); process_exit(1); }
+    let mut v2: List[Float] = list_new();
+    let mut j: Int = 0;
+    while j < 10 {
+        v2 = list_push(v2, 0.1);
+        j = j + 1;
+    }
+    let s_list: Float = kahan_sum_list(v2);
+    if s_list < 0.99 { println("FAIL: kahan_sum_list must be ~1.0, got s_list"); process_exit(1); }
+    println("PASS: kahan compensated sum of 0.1*10 is ~1.0 (strategy)");
+}
+
+pub fn main() {
+    test_uart_ring_basic_push_pop();
+    test_uart_ring_full_detection();
+    test_can_frame_new_validates_dlc();
+    test_can_frame_new_is_ok();
+    test_kahan_sum_basic();
+    test_kahan_sum_compensated();
+    println("PROVE_PROD_HAL_MATH_PASSED");
+}

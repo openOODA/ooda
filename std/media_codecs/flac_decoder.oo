@@ -1,0 +1,138 @@
+// # FLAC subframe decoder
+//
+// Logline: Decodes constant, verbatim, fixed, and LPC subframes with Rice residuals.
+//
+// Setup: Pure. Samples are Int. Rice parameter k uses k low bits. Unknown type or short residual is Err.
+//
+// Beats:
+//   1. Dispatch on subframe type 0, 1, 8..12, and 32..63.
+//   2. Decode Rice residuals as unary plus k bits.
+//   3. Reconstruct fixed and LPC FIR predictors.
+//   4. Reject a truncated residual stream.
+
+pub type FlacOut = struct {
+    flag: Int,
+    err: String,
+    n: Int,
+    s0: Int,
+    s1: Int
+};
+
+fn fl_err(m: String) -> FlacOut {
+    return FlacOut { flag: 0, err: "ERR\tflac: " + m, n: 0, s0: 0, s1: 0 };
+}
+
+fn fl_rice(buf: List[Int], i: Int, k: Int) -> List[Int] {
+    let n: Int = list_len(buf);
+    let mut p: Int = i;
+    let mut q: Int = 0;
+    while p < n {
+        if list_get(buf, p) != 0 {
+            break;
+        }
+        q = q + 1;
+        p = p + 1;
+    }
+    p = p + 1;
+    let mut rem: Int = 0;
+    let mut b: Int = 0;
+    while b < k {
+        if p >= n {
+            let mut bad: List[Int] = list_new();
+            bad = list_push(bad, 0);
+            bad = list_push(bad, 0 - 1);
+            return bad;
+        }
+        rem = rem * 2 + (list_get(buf, p) & 1);
+        p = p + 1;
+        b = b + 1;
+    }
+    let mut o: List[Int] = list_new();
+    o = list_push(o, q * (1 << k) + rem);
+    o = list_push(o, p);
+    return o;
+}
+
+pub fn flac_decoder_sub(kind: Int, warm: List[Int], bits: List[Int], k: Int) -> FlacOut {
+    if kind == 0 {
+        if list_len(warm) < 1 {
+            return fl_err("const");
+        }
+        return FlacOut { flag: 1, err: "", n: 1, s0: list_get(warm, 0), s1: list_get(warm, 0) };
+    }
+    if kind == 1 {
+        if list_len(warm) < 1 {
+            return fl_err("verbatim");
+        }
+        let mut s1: Int = list_get(warm, 0);
+        if list_len(warm) > 1 {
+            s1 = list_get(warm, 1);
+        }
+        return FlacOut { flag: 1, err: "", n: list_len(warm), s0: list_get(warm, 0), s1: s1 };
+    }
+    if k < 0 {
+        return fl_err("rice");
+    }
+    let r: List[Int] = fl_rice(bits, 0, k);
+    if list_get(r, 1) < 0 {
+        return fl_err("short");
+    }
+    let res: Int = list_get(r, 0);
+    if kind >= 8 {
+        if kind <= 12 {
+            let order: Int = kind - 8;
+            if list_len(warm) < order {
+                return fl_err("fixed");
+            }
+            let mut pred: Int = 0;
+            if order == 1 {
+                pred = list_get(warm, list_len(warm) - 1);
+            }
+            if order == 2 {
+                pred = 2 * list_get(warm, list_len(warm) - 1) - list_get(warm, list_len(warm) - 2);
+            }
+            if order == 3 {
+                pred = 3 * list_get(warm, list_len(warm) - 1) - 3 * list_get(warm, list_len(warm) - 2) + list_get(warm, list_len(warm) - 3);
+            }
+            if order == 4 {
+                pred = 4 * list_get(warm, list_len(warm) - 1) - 6 * list_get(warm, list_len(warm) - 2) + 4 * list_get(warm, list_len(warm) - 3) - list_get(warm, list_len(warm) - 4);
+            }
+            return FlacOut { flag: 1, err: "", n: 1, s0: pred + res, s1: pred };
+        }
+    }
+    if kind >= 32 {
+        if kind <= 63 {
+            let ord: Int = (kind & 31) + 1;
+            if list_len(warm) < 2 * ord {
+                return fl_err("lpc");
+            }
+            let mut pred2: Int = 0;
+            let mut j: Int = 0;
+            while j < ord {
+                let hist: Int = list_get(warm, ord - 1 - j);
+                let coef: Int = list_get(warm, ord + j);
+                pred2 = pred2 + coef * hist;
+                j = j + 1;
+            }
+            return FlacOut { flag: 1, err: "", n: 1, s0: pred2 + res, s1: pred2 };
+        }
+    }
+    return fl_err("type");
+}
+
+pub fn flac_decoder_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}
+
+pub fn flac_decoder_flag(o: FlacOut) -> Int {
+    return o.flag;
+}
+pub fn flac_decoder_err(o: FlacOut) -> String {
+    return o.err;
+}
+pub fn flac_decoder_s0(o: FlacOut) -> Int {
+    return o.s0;
+}

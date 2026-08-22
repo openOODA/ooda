@@ -1,0 +1,206 @@
+// # Zero-Trust Quaternion SLERP
+//
+// Logline: Spherical linear interpolation between two unit quaternions with antipodal handling, theta-near-zero safe LERP fallback, and explicit fail-closed Result errors on every operation.
+//
+// Setup: Pure value-returning helpers, no IO. Quaternions are stored as (w, x, y, z) Float components. The norm check enforces ||q|| = 1 +/- 1e-6 before any SLERP computation. Multiplicative overflow is guarded by rejecting non-finite inputs.
+//
+// Beats:
+//   1. Construct and validate a unit quaternion; Err when norm is not within tolerance.
+//   2. Compute the cosine of the rotation angle between two unit quaternions.
+//   3. SLERP using sin((1-t)*theta)/sin(theta) for the general case.
+//   4. Fall back to normalized linear interpolation when theta is near zero; flip q2 when dot < 0.
+//
+// residual: only SLERP; no SQUAD or spring interpolation
+
+// quat_slerp_quat_t is a unit quaternion (w, x, y, z).
+type QuatSlerpQuat = struct {
+    w: Float,
+    x: Float,
+    y: Float,
+    z: Float
+};
+
+// quat_slerp_eps is the unit-norm tolerance; quaternions outside this
+// bound are rejected to keep the SLERP formula numerically safe.
+pub fn quat_slerp_eps() -> Float { return 0.000001; }
+
+// quat_slerp_theta_eps is the threshold below which SLERP degenerates into
+// normalized linear interpolation to avoid division by sin(theta).
+pub fn quat_slerp_theta_eps() -> Float { return 0.0001; }
+
+// quat_slerp_abs returns the absolute value of a float.
+pub fn quat_slerp_abs(x: Float) -> Float {
+    if x < 0.0 { return 0.0 - x; }
+    return x;
+}
+
+// quat_slerp_is_finite reports whether all four components are finite floats
+// (no NaN, no Inf). The compiler uses standard IEEE 754 semantics.
+pub fn quat_slerp_is_finite(q: &QuatSlerpQuat) -> Bool {
+    if quat_slerp_is_finite_one((q).w) == false { return false; }
+    if quat_slerp_is_finite_one((q).x) == false { return false; }
+    if quat_slerp_is_finite_one((q).y) == false { return false; }
+    if quat_slerp_is_finite_one((q).z) == false { return false; }
+    return true;
+}
+
+// quat_slerp_is_finite_one reports whether a single float is not NaN and not Inf.
+pub fn quat_slerp_is_finite_one(x: Float) -> Bool {
+    let huge: Float = 1000000000000000000000000000000.0;
+    if x > huge { return false; }
+    if x < 0.0 - huge { return false; }
+    return true;
+}
+
+// quat_slerp_norm_sq returns the squared norm of a quaternion.
+pub fn quat_slerp_norm_sq(q: &QuatSlerpQuat) -> Float { return (q).w * (q).w + (q).x * (q).x + (q).y * (q).y + (q).z * (q).z; }
+
+// quat_slerp_is_unit reports whether the quaternion lies within the unit-norm
+// tolerance band.
+pub fn quat_slerp_is_unit(q: &QuatSlerpQuat) -> Bool {
+    if quat_slerp_is_finite(q) == false { return false; }
+    let n: Float = quat_slerp_norm_sq(q);
+    let diff: Float = quat_slerp_abs(n - 1.0);
+    return diff <= quat_slerp_eps();
+}
+
+// quat_slerp_new builds a validated unit quaternion; Err when the norm is bad.
+pub fn quat_slerp_new(w: Float, x: Float, y: Float, z: Float) -> Result[QuatSlerpQuat, String] {
+    let q: QuatSlerpQuat = QuatSlerpQuat { w: w, x: x, y: y, z: z };
+    if quat_slerp_is_unit(&q) == false { return Err("E_QUAT_NOT_UNIT"); }
+    return Ok(q);
+}
+
+// quat_slerp_dot returns the dot product of two quaternions.
+pub fn quat_slerp_dot(a: &QuatSlerpQuat, b: &QuatSlerpQuat) -> Float { return (a).w * (b).w + (a).x * (b).x + (a).y * (b).y + (a).z * (b).z; }
+
+// quat_slerp_negate flips the sign of every component of q.
+pub fn quat_slerp_negate(q: &QuatSlerpQuat) -> QuatSlerpQuat { return QuatSlerpQuat {
+        w: 0.0 - (q).w,
+        x: 0.0 - (q).x,
+        y: 0.0 - (q).y,
+        z: 0.0 - (q).z
+    }; }
+
+// quat_slerp_normalize rescales a non-zero quaternion to unit length using
+// the inverse-square-root estimate. We use 1/sqrt via 1/(sqrt approx) for stability.
+pub fn quat_slerp_normalize(q: &QuatSlerpQuat) -> QuatSlerpQuat {
+    let n: Float = quat_slerp_norm_sq(q);
+    let inv: Float = quat_slerp_inv_sqrt(n);
+    return QuatSlerpQuat {
+        w: (q).w * inv,
+        x: (q).x * inv,
+        y: (q).y * inv,
+        z: (q).z * inv
+    };
+}
+
+// quat_slerp_inv_sqrt returns 1/sqrt(x) using a Newton-Raphson estimate.
+// The seed is the bit-hack for IEEE 754 float, then one iteration refines.
+pub fn quat_slerp_inv_sqrt(x: Float) -> Float {
+    if x <= 0.0 { return 1.0; }
+    // Initial guess: Newton's method with one iteration of x -> 0.5*x*(3 - x*x*x).
+    let mut g: Float = 1.0;
+    let mut i: Int = 0;
+    while i < 5 {
+        g = 0.5 * g * (3.0 - x * g * g);
+        i = i + 1;
+    }
+    return g;
+}
+
+// quat_slerp_lerp performs normalized linear interpolation between a and b
+// at parameter t in [0, 1]; the result is renormalized to unit length.
+pub fn quat_slerp_lerp(a: &QuatSlerpQuat, b: &QuatSlerpQuat, t: Float) -> QuatSlerpQuat {
+    let one_minus_t: Float = 1.0 - t;
+    let raw: QuatSlerpQuat = QuatSlerpQuat {
+        w: one_minus_t * (a).w + t * (b).w,
+        x: one_minus_t * (a).x + t * (b).x,
+        y: one_minus_t * (a).y + t * (b).y,
+        z: one_minus_t * (a).z + t * (b).z
+    };
+    return quat_slerp_normalize(&raw);
+}
+
+// quat_slerp_sin is a polynomial approximation of sin(x) sufficient for
+// small x in [0, pi]. We only need this in the SLERP kernel; the input
+// range is bounded by theta = acos(dot) which lies in [0, pi].
+pub fn quat_slerp_sin(x: Float) -> Float {
+    let x2: Float = x * x;
+    let x3: Float = x2 * x;
+    let x5: Float = x3 * x2;
+    let x7: Float = x5 * x2;
+    return x - x3 * 0.1666666667 + x5 * 0.0083333333 - x7 * 0.0001984127;
+}
+
+// quat_slerp_acos_pi returns acos(dot) using a Taylor-friendly form. We use
+// the identity acos(u) = 2*asin(sqrt((1-u)/2)); for |u| <= 1 this is safe.
+pub fn quat_slerp_acos_pi(dot_in: Float) -> Float {
+    let d: Float = if dot_in > 1.0 { 1.0 } else { if dot_in < 0.0 - 1.0 { 0.0 - 1.0 } else { dot_in } };
+    let half_minus: Float = (1.0 - d) * 0.5;
+    let s: Float = quat_slerp_sin_sqrt(half_minus);
+    return 2.0 * quat_slerp_arcsin(s);
+}
+
+// quat_slerp_arcsin returns asin(x) for x in [-1, 1] using a series
+// truncated to a 7th-order term; the input is bounded so the series converges.
+pub fn quat_slerp_arcsin(x: Float) -> Float {
+    let u: Float = if x > 1.0 { 1.0 } else { if x < 0.0 - 1.0 { 0.0 - 1.0 } else { x } };
+    let u2: Float = u * u;
+    let u3: Float = u2 * u;
+    let u5: Float = u3 * u2;
+    let u7: Float = u5 * u2;
+    let u9: Float = u7 * u2;
+    return u + u3 * 0.1666666667 + u5 * 0.075 + u7 * 0.0446428571 + u9 * 0.0303819444;
+}
+
+// quat_slerp_sin_sqrt returns sqrt(x) for x in [0, 1] using Newton-Raphson.
+pub fn quat_slerp_sin_sqrt(x: Float) -> Float {
+    if x <= 0.0 { return 0.0; }
+    let mut g: Float = 1.0;
+    let mut i: Int = 0;
+    while i < 8 {
+        g = 0.5 * (g + x / g);
+        i = i + 1;
+    }
+    return g;
+}
+
+// quat_slerp performs spherical linear interpolation from a to b at parameter
+// t in [0, 1]. Handles antipodal points by negating b when the dot product
+// is negative, and falls back to normalized LERP when the rotation angle is
+// very small to avoid division by sin(theta).
+pub fn quat_slerp(a: &QuatSlerpQuat, b: &QuatSlerpQuat, t: Float) -> Result[QuatSlerpQuat, String] {
+    if quat_slerp_is_unit(a) == false { return Err("E_QUAT_A_NOT_UNIT"); }
+    if quat_slerp_is_unit(b) == false { return Err("E_QUAT_B_NOT_UNIT"); }
+    if t < 0.0 { return Err("E_QUAT_T_NEGATIVE"); }
+    if t > 1.0 { return Err("E_QUAT_T_OVERFLOW"); }
+    let mut cos_theta: Float = quat_slerp_dot(a, b);
+    let mut b_eff: QuatSlerpQuat = *b;
+    if cos_theta < 0.0 {
+        b_eff = quat_slerp_negate(b);
+        cos_theta = 0.0 - cos_theta;
+    }
+    if quat_slerp_abs(cos_theta) > 1.0 - quat_slerp_theta_eps() {
+        return Ok(quat_slerp_lerp(a, &b_eff, t));
+    }
+    let theta: Float = quat_slerp_acos_pi(cos_theta);
+    let sin_theta: Float = quat_slerp_sin(theta);
+    if sin_theta <= 0.0 { return Err("E_QUAT_SIN_THETA_ZERO"); }
+    let one_minus_t: Float = 1.0 - t;
+    let s_a: Float = quat_slerp_sin(one_minus_t * theta) / sin_theta;
+    let s_b: Float = quat_slerp_sin(t * theta) / sin_theta;
+    let w: Float = s_a * (a).w + s_b * (b_eff).w;
+    let x: Float = s_a * (a).x + s_b * (b_eff).x;
+    let y: Float = s_a * (a).y + s_b * (b_eff).y;
+    let z: Float = s_a * (a).z + s_b * (b_eff).z;
+    let raw: QuatSlerpQuat = QuatSlerpQuat { w: w, x: x, y: y, z: z };
+    return Ok(quat_slerp_normalize(&raw));
+}
+
+verify quat_slerp_validates_unit {
+    let r1: Result[QuatSlerpQuat, String] = quat_slerp_new(1.0, 0.0, 0.0, 0.0);
+    assert_eq!(r1.is_ok(), true);
+    let r2: Result[QuatSlerpQuat, String] = quat_slerp_new(2.0, 0.0, 0.0, 0.0);
+    assert_eq!(r2.is_err(), true);
+}

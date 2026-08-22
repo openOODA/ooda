@@ -1,0 +1,248 @@
+// # RFC 9000 QUIC varint and ACK frames
+//
+// Logline: Encodes 1/2/4/8-byte QUIC varints and parses ACK range frames.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. Truncated varints and oversize ACK counts are Err.
+//
+// Beats:
+//   1. Encode an integer into the shortest legal varint form.
+//   2. Decode the two-bit length prefix.
+//   3. Parse largest-acked, delay, count, and first range.
+//   4. Reject a short buffer.
+
+pub type QvOut = struct {
+    flag: Int,
+    err: String,
+    bytes: List[Int]
+};
+
+pub type QuicAck = struct {
+    flag: Int,
+    err: String,
+    largest: Int,
+    delay: Int,
+    count: Int,
+    first: Int
+};
+
+fn qv_err(m: String) -> QvOut {
+    return QvOut { flag: 0, err: "ERR\tquic: " + m, bytes: list_new() };
+}
+
+fn qv_ok(b: List[Int]) -> QvOut {
+    return QvOut { flag: 1, err: "", bytes: b };
+}
+
+pub fn quic_framer_varint_enc(v: Int) -> QvOut {
+    if v < 0 {
+        return qv_err("neg");
+    }
+    let mut o: List[Int] = list_new();
+    if v < 64 {
+        o = list_push(o, v);
+        return qv_ok(o);
+    }
+    if v < 16384 {
+        o = list_push(o, 64 + ((v >> 8) & 63));
+        o = list_push(o, v & 255);
+        return qv_ok(o);
+    }
+    if v < 1073741824 {
+        o = list_push(o, 128 + ((v >> 24) & 63));
+        o = list_push(o, (v >> 16) & 255);
+        o = list_push(o, (v >> 8) & 255);
+        o = list_push(o, v & 255);
+        return qv_ok(o);
+    }
+    o = list_push(o, 192 + ((v >> 56) & 63));
+    o = list_push(o, (v >> 48) & 255);
+    o = list_push(o, (v >> 40) & 255);
+    o = list_push(o, (v >> 32) & 255);
+    o = list_push(o, (v >> 24) & 255);
+    o = list_push(o, (v >> 16) & 255);
+    o = list_push(o, (v >> 8) & 255);
+    o = list_push(o, v & 255);
+    return qv_ok(o);
+}
+
+pub fn quic_framer_varint_dec(buf: List[Int]) -> QvOut {
+    if list_len(buf) < 1 {
+        return qv_err("short");
+    }
+    let b0: Int = list_get(buf, 0);
+    let tag: Int = (b0 >> 6) & 3;
+    let mut rec: List[Int] = list_new();
+    if tag == 0 {
+        rec = list_push(rec, b0 & 63);
+        rec = list_push(rec, 1);
+        return qv_ok(rec);
+    }
+    if tag == 1 {
+        if list_len(buf) < 2 {
+            return qv_err("short");
+        }
+        rec = list_push(rec, (b0 & 63) * 256 + list_get(buf, 1));
+        rec = list_push(rec, 2);
+        return qv_ok(rec);
+    }
+    if tag == 2 {
+        if list_len(buf) < 4 {
+            return qv_err("short");
+        }
+        let hi: Int = (b0 & 63) * 256 + list_get(buf, 1);
+        let lo: Int = list_get(buf, 2) * 256 + list_get(buf, 3);
+        rec = list_push(rec, hi * 65536 + lo);
+        rec = list_push(rec, 4);
+        return qv_ok(rec);
+    }
+    if list_len(buf) < 8 {
+        return qv_err("short");
+    }
+    let mut v8: Int = b0 & 63;
+    v8 = v8 * 256 + list_get(buf, 1);
+    v8 = v8 * 256 + list_get(buf, 2);
+    v8 = v8 * 256 + list_get(buf, 3);
+    v8 = v8 * 256 + list_get(buf, 4);
+    v8 = v8 * 256 + list_get(buf, 5);
+    v8 = v8 * 256 + list_get(buf, 6);
+    v8 = v8 * 256 + list_get(buf, 7);
+    rec = list_push(rec, v8);
+    rec = list_push(rec, 8);
+    return qv_ok(rec);
+}
+
+pub fn quic_framer_ack(buf: List[Int]) -> QuicAck {
+    if list_len(buf) < 4 {
+        return QuicAck { flag: 0, err: "ERR\tquic: short", largest: 0, delay: 0, count: 0, first: 0 };
+    }
+    let a: QvOut = quic_framer_varint_dec(buf);
+    if a.flag < 1 {
+        return QuicAck { flag: 0, err: a.err, largest: 0, delay: 0, count: 0, first: 0 };
+    }
+    let n0: Int = list_get(a.bytes, 1);
+    if n0 >= list_len(buf) {
+        return QuicAck { flag: 0, err: "ERR\tquic: short", largest: 0, delay: 0, count: 0, first: 0 };
+    }
+    let mut rest: List[Int] = list_new();
+    let mut i: Int = n0;
+    while i < list_len(buf) {
+        rest = list_push(rest, list_get(buf, i));
+        i = i + 1;
+    }
+    let d: QvOut = quic_framer_varint_dec(rest);
+    if d.flag < 1 {
+        return QuicAck { flag: 0, err: d.err, largest: 0, delay: 0, count: 0, first: 0 };
+    }
+    let n1: Int = list_get(d.bytes, 1);
+    let mut rest2: List[Int] = list_new();
+    i = n1;
+    while i < list_len(rest) {
+        rest2 = list_push(rest2, list_get(rest, i));
+        i = i + 1;
+    }
+    let c: QvOut = quic_framer_varint_dec(rest2);
+    if c.flag < 1 {
+        return QuicAck { flag: 0, err: c.err, largest: 0, delay: 0, count: 0, first: 0 };
+    }
+    let n2: Int = list_get(c.bytes, 1);
+    let mut rest3: List[Int] = list_new();
+    i = n2;
+    while i < list_len(rest2) {
+        rest3 = list_push(rest3, list_get(rest2, i));
+        i = i + 1;
+    }
+    let f: QvOut = quic_framer_varint_dec(rest3);
+    if f.flag < 1 {
+        return QuicAck { flag: 0, err: f.err, largest: 0, delay: 0, count: 0, first: 0 };
+    }
+    return QuicAck { flag: 1, err: "", largest: list_get(a.bytes, 0), delay: list_get(d.bytes, 0), count: list_get(c.bytes, 0), first: list_get(f.bytes, 0) };
+}
+
+pub type QuicHdr = struct {
+    flag: Int,
+    err: String,
+    form: Int,
+    ptype: Int,
+    version: Int,
+    dcid_len: Int,
+    scid_len: Int,
+    pn_len: Int
+};
+
+fn qh_err(m: String) -> QuicHdr {
+    return QuicHdr { flag: 0, err: "ERR\tquic: " + m, form: 0, ptype: 0, version: 0, dcid_len: 0, scid_len: 0, pn_len: 0 };
+}
+
+fn qh_u32be(buf: List[Int], o: Int) -> Int {
+    return list_get(buf, o) * 16777216 + list_get(buf, o + 1) * 65536 + list_get(buf, o + 2) * 256 + list_get(buf, o + 3);
+}
+
+pub fn quic_framer_header(buf: List[Int]) -> QuicHdr {
+    if list_len(buf) < 1 {
+        return qh_err("short");
+    }
+    let b0: Int = list_get(buf, 0);
+    let form: Int = (b0 >> 7) & 1;
+    let pn_len: Int = (b0 & 3) + 1;
+    if form == 0 {
+        if ((b0 >> 6) & 1) < 1 {
+            return qh_err("fixed");
+        }
+        return QuicHdr { flag: 1, err: "", form: 0, ptype: 0, version: 0, dcid_len: 0, scid_len: 0, pn_len: pn_len };
+    }
+    if list_len(buf) < 6 {
+        return qh_err("short");
+    }
+    let version: Int = qh_u32be(buf, 1);
+    let dlen: Int = list_get(buf, 5);
+    if dlen < 0 {
+        return qh_err("dcid");
+    }
+    if 6 + dlen >= list_len(buf) {
+        return qh_err("short");
+    }
+    let slen: Int = list_get(buf, 6 + dlen);
+    if slen < 0 {
+        return qh_err("scid");
+    }
+    if 7 + dlen + slen > list_len(buf) {
+        return qh_err("short");
+    }
+    let ptype: Int = (b0 >> 4) & 3;
+    return QuicHdr { flag: 1, err: "", form: 1, ptype: ptype, version: version, dcid_len: dlen, scid_len: slen, pn_len: pn_len };
+}
+
+pub fn quic_framer_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}
+
+pub fn quic_framer_flag(o: QvOut) -> Int {
+    return o.flag;
+}
+pub fn quic_framer_err(o: QvOut) -> String {
+    return o.err;
+}
+pub fn quic_framer_bytes(o: QvOut) -> List[Int] {
+    return o.bytes;
+}
+pub fn quic_framer_ack_flag(o: QuicAck) -> Int {
+    return o.flag;
+}
+pub fn quic_framer_ack_err(o: QuicAck) -> String {
+    return o.err;
+}
+pub fn quic_framer_hdr_flag(o: QuicHdr) -> Int {
+    return o.flag;
+}
+pub fn quic_framer_hdr_err(o: QuicHdr) -> String {
+    return o.err;
+}
+pub fn quic_framer_hdr_form(o: QuicHdr) -> Int {
+    return o.form;
+}
+pub fn quic_framer_hdr_version(o: QuicHdr) -> Int {
+    return o.version;
+}

@@ -1,0 +1,152 @@
+// # MessagePack type-tag decoder
+//
+// Logline: Parses one MessagePack item and rejects unknown tags and truncated payloads.
+//
+// Setup: Pure. Called from msgpack_pure.oo. Bytes are List[Int] 0..255.
+//
+// Beats:
+//   1. Read the leading type tag.
+//   2. Decode fixint, int8/16/32, nil, bool, bin8/16, fixarray, and fixmap.
+//   3. Fail closed on a short buffer or an unknown tag.
+
+pub type MsgOut = struct {
+    flag: Int,
+    err: String,
+    kind: Int,
+    n: Int,
+    bytes: List[Int]
+};
+
+fn mp_err(m: String) -> MsgOut {
+    return MsgOut { flag: 0, err: m, kind: 0, n: 0, bytes: list_new() };
+}
+
+fn mp_ok(kind: Int, n: Int, b: List[Int]) -> MsgOut {
+    return MsgOut { flag: 1, err: "", kind: kind, n: n, bytes: b };
+}
+
+fn mp_need(buf: List[Int], i: Int, k: Int) -> Int {
+    if i < 0 {
+        return 0;
+    }
+    if i + k > list_len(buf) {
+        return 0;
+    }
+    return 1;
+}
+
+fn mp_i8(b: Int) -> Int {
+    if b >= 128 {
+        return b - 256;
+    }
+    return b;
+}
+
+fn mp_i16(hi: Int, lo: Int) -> Int {
+    let u: Int = hi * 256 + lo;
+    if u >= 32768 {
+        return u - 65536;
+    }
+    return u;
+}
+
+fn mp_i32(b0: Int, b1: Int, b2: Int, b3: Int) -> Int {
+    let u: Int = ((b0 * 256 + b1) * 256 + b2) * 256 + b3;
+    if b0 >= 128 {
+        return u - 4294967296;
+    }
+    return u;
+}
+
+fn mp_tail(buf: List[Int], i: Int) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let n: Int = list_len(buf);
+    while i < n {
+        o = list_push(o, list_get(buf, i));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn mp_slice(buf: List[Int], i: Int, n: Int) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut k: Int = 0;
+    while k < n {
+        o = list_push(o, list_get(buf, i + k));
+        k = k + 1;
+    }
+    return o;
+}
+
+pub fn msgpack_pure_dec_parse(buf: List[Int]) -> MsgOut {
+    if mp_need(buf, 0, 1) < 1 {
+        return mp_err("msgpack short");
+    }
+    let t: Int = list_get(buf, 0);
+    if t <= 127 {
+        return mp_ok(0, t, mp_tail(buf, 1));
+    }
+    if t >= 224 {
+        return mp_ok(0, t - 256, mp_tail(buf, 1));
+    }
+    if t == 192 {
+        return mp_ok(1, 0, mp_tail(buf, 1));
+    }
+    if t == 194 {
+        return mp_ok(2, 0, mp_tail(buf, 1));
+    }
+    if t == 195 {
+        return mp_ok(2, 1, mp_tail(buf, 1));
+    }
+    if t == 208 {
+        if mp_need(buf, 1, 1) < 1 {
+            return mp_err("msgpack short");
+        }
+        return mp_ok(0, mp_i8(list_get(buf, 1)), mp_tail(buf, 2));
+    }
+    if t == 209 {
+        if mp_need(buf, 1, 2) < 1 {
+            return mp_err("msgpack short");
+        }
+        return mp_ok(0, mp_i16(list_get(buf, 1), list_get(buf, 2)), mp_tail(buf, 3));
+    }
+    if t == 210 {
+        if mp_need(buf, 1, 4) < 1 {
+            return mp_err("msgpack short");
+        }
+        return mp_ok(0, mp_i32(list_get(buf, 1), list_get(buf, 2), list_get(buf, 3), list_get(buf, 4)), mp_tail(buf, 5));
+    }
+    if t == 196 {
+        if mp_need(buf, 1, 1) < 1 {
+            return mp_err("msgpack short");
+        }
+        let n: Int = list_get(buf, 1);
+        if mp_need(buf, 2, n) < 1 {
+            return mp_err("msgpack short");
+        }
+        return mp_ok(3, n, mp_slice(buf, 2, n));
+    }
+    if t == 197 {
+        if mp_need(buf, 1, 2) < 1 {
+            return mp_err("msgpack short");
+        }
+        let n2: Int = list_get(buf, 1) * 256 + list_get(buf, 2);
+        if mp_need(buf, 3, n2) < 1 {
+            return mp_err("msgpack short");
+        }
+        return mp_ok(3, n2, mp_slice(buf, 3, n2));
+    }
+    if t >= 144 {
+        if t <= 159 {
+            return mp_ok(4, t - 144, mp_tail(buf, 1));
+        }
+    }
+    if t >= 128 {
+        if t <= 143 {
+            return mp_ok(5, t - 128, mp_tail(buf, 1));
+        }
+    }
+    return mp_err("msgpack tag");
+}
+
+pub fn msgpack_pure_dec_alive() -> Int { return 1; }

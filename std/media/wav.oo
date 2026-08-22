@@ -1,0 +1,130 @@
+// # RIFF / WAVE Audio Header Parser & PCM16 Codec
+//
+// Logline: Parses 44-byte RIFF/WAVE PCM audio headers and encodes/decodes 16-bit signed audio sample streams.
+//
+// Setup: Pure audio stream parser validating 'RIFF' and 'WAVE' chunk signatures and channel parameters.
+//
+// Beats:
+//   1. Parse 44-byte standard RIFF/WAVE header chunk.
+//   2. Validate format tag (1 = uncompressed PCM), channels (1=Mono, 2=Stereo), and sample rate.
+//   3. Decode little-endian 16-bit signed PCM samples.
+//   4. Encode sample arrays into valid RIFF/WAVE binary byte sequences.
+
+import "./wav_types.oo";
+
+/// Parse 44-byte standard RIFF/WAVE audio header.
+pub fn wav_parse_header(bytes: List[Int]) -> Result[WavHeader, String] {
+    let total_len: Int = list_len(bytes);
+    if total_len < 44 {
+        return Err("ERR\twav_parse: header too short (< 44 bytes)");
+    }
+    // Check 'RIFF' (82, 73, 70, 70)
+    if list_get(bytes, 0) != 82 || list_get(bytes, 1) != 73 || list_get(bytes, 2) != 70 || list_get(bytes, 3) != 70 {
+        return Err("ERR\twav_parse: missing 'RIFF' chunk descriptor");
+    }
+    // Check 'WAVE' (87, 65, 86, 69)
+    if list_get(bytes, 8) != 87 || list_get(bytes, 9) != 65 || list_get(bytes, 10) != 86 || list_get(bytes, 11) != 69 {
+        return Err("ERR\twav_parse: missing 'WAVE' format format descriptor");
+    }
+    let num_channels: Int = list_get(bytes, 22) | (list_get(bytes, 23) << 8);
+    let sample_rate: Int = list_get(bytes, 24) | (list_get(bytes, 25) << 8) | (list_get(bytes, 26) << 16) | (list_get(bytes, 27) << 24);
+    let bits_per_sample: Int = list_get(bytes, 34) | (list_get(bytes, 35) << 8);
+    let data_size: Int = list_get(bytes, 40) | (list_get(bytes, 41) << 8) | (list_get(bytes, 42) << 16) | (list_get(bytes, 43) << 24);
+
+    return Ok(WavHeader {
+        num_channels: num_channels,
+        sample_rate: sample_rate,
+        bits_per_sample: bits_per_sample,
+        byte_rate: sample_rate * num_channels * (bits_per_sample / 8),
+        block_align: num_channels * (bits_per_sample / 8),
+        data_size: data_size
+    });
+}
+
+/// Encode PCM16 sample list into 44-byte headed RIFF/WAVE byte stream.
+pub fn wav_encode_pcm16(samples: List[Int], num_channels: Int, sample_rate: Int) -> Result[List[Int], String] {
+    let n_samples: Int = list_len(samples);
+    let data_bytes: Int = n_samples * 2;
+    let file_size: Int = data_bytes + 36;
+
+    let mut buf: List[Int] = list_new();
+    // 'RIFF'
+    buf = list_push(buf, 82);
+    buf = list_push(buf, 73);
+    buf = list_push(buf, 70);
+    buf = list_push(buf, 70);
+
+    // Chunk size LE
+    buf = list_push(buf, file_size & 255);
+    buf = list_push(buf, (file_size >> 8) & 255);
+    buf = list_push(buf, (file_size >> 16) & 255);
+    buf = list_push(buf, (file_size >> 24) & 255);
+
+    // 'WAVE'
+    buf = list_push(buf, 87);
+    buf = list_push(buf, 65);
+    buf = list_push(buf, 86);
+    buf = list_push(buf, 69);
+
+    // 'fmt '
+    buf = list_push(buf, 102);
+    buf = list_push(buf, 109);
+    buf = list_push(buf, 116);
+    buf = list_push(buf, 32);
+
+    // Subchunk1Size (16 for PCM)
+    buf = list_push(buf, 16);
+    buf = list_push(buf, 0);
+    buf = list_push(buf, 0);
+    buf = list_push(buf, 0);
+
+    // AudioFormat (1 for PCM)
+    buf = list_push(buf, 1);
+    buf = list_push(buf, 0);
+
+    // NumChannels
+    buf = list_push(buf, num_channels & 255);
+    buf = list_push(buf, (num_channels >> 8) & 255);
+
+    // SampleRate LE
+    buf = list_push(buf, sample_rate & 255);
+    buf = list_push(buf, (sample_rate >> 8) & 255);
+    buf = list_push(buf, (sample_rate >> 16) & 255);
+    buf = list_push(buf, (sample_rate >> 24) & 255);
+
+    let byte_rate: Int = sample_rate * num_channels * 2;
+    buf = list_push(buf, byte_rate & 255);
+    buf = list_push(buf, (byte_rate >> 8) & 255);
+    buf = list_push(buf, (byte_rate >> 16) & 255);
+    buf = list_push(buf, (byte_rate >> 24) & 255);
+
+    let block_align: Int = num_channels * 2;
+    buf = list_push(buf, block_align & 255);
+    buf = list_push(buf, (block_align >> 8) & 255);
+
+    // BitsPerSample (16)
+    buf = list_push(buf, 16);
+    buf = list_push(buf, 0);
+
+    // 'data'
+    buf = list_push(buf, 100);
+    buf = list_push(buf, 97);
+    buf = list_push(buf, 116);
+    buf = list_push(buf, 97);
+
+    // Data size LE
+    buf = list_push(buf, data_bytes & 255);
+    buf = list_push(buf, (data_bytes >> 8) & 255);
+    buf = list_push(buf, (data_bytes >> 16) & 255);
+    buf = list_push(buf, (data_bytes >> 24) & 255);
+
+    // Samples
+    let mut i: Int = 0;
+    while i < n_samples {
+        let s: Int = list_get(samples, i);
+        buf = list_push(buf, s & 255);
+        buf = list_push(buf, (s >> 8) & 255);
+        i = i + 1;
+    }
+    return Ok(buf);
+}

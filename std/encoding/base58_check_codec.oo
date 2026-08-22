@@ -1,0 +1,243 @@
+// # Base58Check radix and checksum body
+//
+// Logline: Converts payload bytes to Base58Check text and back, verifying the 4-byte double-SHA256 checksum.
+//
+// Setup: Pure. Called from base58_check.oo. Alphabet omits 0, O, I, and l.
+//
+// Beats:
+//   1. Build SHA-256 digest bytes from hex.
+//   2. Convert a byte buffer to and from radix 58.
+//   3. Attach and check a 4-byte checksum.
+
+import "std/byte_out.oo";
+
+pub type B58Out = struct {
+    flag: Int,
+    err: String,
+    text: String,
+    nzero: Int
+};
+
+fn b58_alpha() -> String {
+    return "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+}
+
+fn b58_nib(c: Int) -> Int {
+    if c >= 48 {
+        if c <= 57 {
+            return c - 48;
+        }
+    }
+    if c >= 97 {
+        if c <= 102 {
+            return c - 87;
+        }
+    }
+    return 0 - 1;
+}
+
+fn b58_unhex(h: String) -> List[Int] {
+    let n: Int = bytes_len(h);
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i + 1 < n {
+        let hi: Int = b58_nib(byte_at(h, i));
+        let lo: Int = b58_nib(byte_at(h, i + 1));
+        if hi < 0 {
+            return list_new();
+        }
+        if lo < 0 {
+            return list_new();
+        }
+        o = list_push(o, hi * 16 + lo);
+        i = i + 2;
+    }
+    return o;
+}
+
+fn b58_sha(b: List[Int]) -> List[Int] {
+    return b58_unhex(crypto_sha256_internal(bytes_to_str(b)));
+}
+
+fn b58_cs(payload: List[Int]) -> List[Int] {
+    let d: List[Int] = b58_sha(b58_sha(payload));
+    let mut o: List[Int] = list_new();
+    o = list_push(o, list_get(d, 0));
+    o = list_push(o, list_get(d, 1));
+    o = list_push(o, list_get(d, 2));
+    o = list_push(o, list_get(d, 3));
+    return o;
+}
+
+fn b58_iset(digits: List[Int], idx: Int, val: Int) -> List[Int] {
+    let n: Int = list_len(digits);
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        if i == idx {
+            out = list_push(out, val);
+        } else {
+            out = list_push(out, list_get(digits, i));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn b58_from_bytes(buf: List[Int]) -> String {
+    let blen: Int = list_len(buf);
+    let mut zeros: Int = 0;
+    while zeros < blen {
+        if list_get(buf, zeros) != 0 {
+            break;
+        }
+        zeros = zeros + 1;
+    }
+    let mut digits: List[Int] = list_new();
+    let mut i: Int = zeros;
+    while i < blen {
+        let mut carry: Int = list_get(buf, i);
+        let mut j: Int = 0;
+        let n: Int = list_len(digits);
+        while j < n {
+            carry = carry + 256 * list_get(digits, j);
+            digits = b58_iset(digits, j, carry % 58);
+            carry = carry / 58;
+            j = j + 1;
+        }
+        while carry > 0 {
+            digits = list_push(digits, carry % 58);
+            carry = carry / 58;
+        }
+        i = i + 1;
+    }
+    let alpha: String = b58_alpha();
+    let mut out: String = "";
+    let mut z: Int = 0;
+    while z < zeros {
+        out = out + "1";
+        z = z + 1;
+    }
+    let mut k: Int = list_len(digits) - 1;
+    while k >= 0 {
+        out = out + char_at(alpha, list_get(digits, k));
+        k = k - 1;
+    }
+    return out;
+}
+
+fn b58_to_bytes(s: String) -> ByteOut {
+    let n: Int = chars_len(s);
+    if n < 1 {
+        return byte_out_err("base58 empty");
+    }
+    let alpha: String = b58_alpha();
+    let mut zeros: Int = 0;
+    while zeros < n {
+        if char_at(s, zeros) != "1" {
+            break;
+        }
+        zeros = zeros + 1;
+    }
+    let mut digits: List[Int] = list_new();
+    let mut i: Int = zeros;
+    while i < n {
+        let c: String = char_at(s, i);
+        let mut idx: Int = 0 - 1;
+        let mut a: Int = 0;
+        while a < 58 {
+            if char_at(alpha, a) == c {
+                idx = a;
+            }
+            a = a + 1;
+        }
+        if idx < 0 {
+            return byte_out_err("base58 char");
+        }
+        let mut carry: Int = idx;
+        let mut j: Int = 0;
+        let dn: Int = list_len(digits);
+        while j < dn {
+            carry = carry + 58 * list_get(digits, j);
+            digits = b58_iset(digits, j, carry % 256);
+            carry = carry / 256;
+            j = j + 1;
+        }
+        while carry > 0 {
+            digits = list_push(digits, carry % 256);
+            carry = carry / 256;
+        }
+        i = i + 1;
+    }
+    let mut buf: List[Int] = list_new();
+    let mut z: Int = 0;
+    while z < zeros {
+        buf = list_push(buf, 0);
+        z = z + 1;
+    }
+    let mut k: Int = list_len(digits) - 1;
+    while k >= 0 {
+        buf = list_push(buf, list_get(digits, k));
+        k = k - 1;
+    }
+    return byte_out_ok(buf);
+}
+
+pub fn base58_check_codec_enc(payload: List[Int]) -> B58Out {
+    let mut i: Int = 0;
+    while i < list_len(payload) {
+        let x: Int = list_get(payload, i);
+        if x < 0 {
+            return B58Out { flag: 0, err: "base58 byte", text: "", nzero: 0 };
+        }
+        if x > 255 {
+            return B58Out { flag: 0, err: "base58 byte", text: "", nzero: 0 };
+        }
+        i = i + 1;
+    }
+    let mut buf: List[Int] = payload;
+    let cs: List[Int] = b58_cs(payload);
+    buf = list_push(buf, list_get(cs, 0));
+    buf = list_push(buf, list_get(cs, 1));
+    buf = list_push(buf, list_get(cs, 2));
+    buf = list_push(buf, list_get(cs, 3));
+    let mut z: Int = 0;
+    while z < list_len(payload) {
+        if list_get(payload, z) != 0 {
+            break;
+        }
+        z = z + 1;
+    }
+    return B58Out { flag: 1, err: "", text: b58_from_bytes(buf), nzero: z };
+}
+
+pub fn base58_check_codec_dec(text: String) -> ByteOut {
+    let raw: ByteOut = b58_to_bytes(text);
+    if raw.flag < 1 {
+        return raw;
+    }
+    let n: Int = list_len(raw.bytes);
+    if n < 4 {
+        return byte_out_err("base58 short");
+    }
+    let mut payload: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n - 4 {
+        payload = list_push(payload, list_get(raw.bytes, i));
+        i = i + 1;
+    }
+    let cs: List[Int] = b58_cs(payload);
+    if list_get(cs, 0) != list_get(raw.bytes, n - 4) {
+        return byte_out_err("base58 checksum");
+    }
+    if list_get(cs, 1) != list_get(raw.bytes, n - 3) {
+        return byte_out_err("base58 checksum");
+    }
+    if list_get(cs, 2) != list_get(raw.bytes, n - 2) {
+        return byte_out_err("base58 checksum");
+    }
+    if list_get(cs, 3) != list_get(raw.bytes, n - 1) {
+        return byte_out_err("base58 checksum");
+    }
+    return byte_out_ok(payload);
+}

@@ -1,0 +1,95 @@
+// # Dedicated Hostile Diagnostic QA & Malicious Input Fuzz Test
+//
+// Logline: Hostile fuzzing of diagnostic engine against ANSI code injection, recursion depth overflow, and invalid spans.
+//
+// Setup: Validates zero-trust resilience of openOODA std/diag under hostile adversarial payloads on live binary execution.
+//
+// Beats:
+//   1. Fuzz ANSI escape sequence injections and verify complete sanitization in NDJSON output.
+//   2. Fuzz extreme recursion depths (>16 and negative) and verify automatic depth clamping.
+//   3. Fuzz control characters, escaped quotes, newlines, and backslashes in telemetry strings.
+//   4. Fuzz relational and bounds invariant evaluator against boundary edge values.
+
+import "std/diag/trace_span.oo";
+import "std/diag/telemetry_ndjson.oo";
+import "std/diag/counterexample_capture.oo";
+import "std/diag/invariant_eval.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("===================================================================");
+    println(" openOODA Diagnostic Hostile QA & Malicious Input Fuzz");
+    println("===================================================================");
+
+    // 1. Hostile ANSI Injection Sanitization
+    let mut esc_bytes: List[Int] = bytes_new();
+    esc_bytes = bytes_push(esc_bytes, 27);
+    let esc_str: String = bytes_to_str(esc_bytes);
+
+    let mut attack_payload: String = esc_str + "[31;1;4mHOSTILE_RED_BOLD" + esc_str + "[0m";
+    attack_payload = attack_payload + esc_str + "[2J" + esc_str + "[H"; // Clear screen attempt
+    attack_payload = attack_payload + "SafeText";
+
+    let mut hostile_span: TraceSpan = trace_span_new(666, attack_payload, 0, 0, 1000);
+    trace_span_finish(&mut hostile_span, 1010, 2, 65536);
+
+    let ndjson: String = telemetry_span_to_ndjson(&hostile_span);
+    if str_contains(ndjson, esc_str) || !str_contains(ndjson, "SafeText") || !str_contains(ndjson, "HOSTILE_RED_BOLD") {
+        println("FAIL: Hostile ANSI escape codes were not properly sanitized from NDJSON stream");
+        process_exit(1);
+    }
+    println("  [PASS] 1. Hostile ANSI Injection Attacks Sanitized From Telemetry Stream");
+
+    // 2. Recursion Depth Overflow Clamping
+    let span_overflow: TraceSpan = trace_span_new(1, "deep_recursion", 0, 999999, 100);
+    let span_negative: TraceSpan = trace_span_new(2, "negative_depth", 0, -500, 100);
+
+    if (span_overflow).depth != 16 {
+        println("FAIL: Deep recursion depth was not clamped to 16 (got " + (span_overflow).depth.to_string() + ")");
+        process_exit(1);
+    }
+
+    if (span_negative).depth != 0 {
+        println("FAIL: Negative recursion depth was not clamped to 0 (got " + (span_negative).depth.to_string() + ")");
+        process_exit(1);
+    }
+    println("  [PASS] 2. Extreme Recursion Depths Clamped Strictly to [0..16]");
+
+    // 3. Control Character & JSON Escape Fuzzing
+    let mut quote_payload: String = "Quote: \" Backslash: \\ Tab: \t Newline: \n CR: \r";
+    let sanitized_quote: String = sanitize_telemetry_str(quote_payload);
+    if !str_contains(sanitized_quote, "\\\"") || !str_contains(sanitized_quote, "\\\\") || !str_contains(sanitized_quote, "\\t") {
+        println("FAIL: JSON special characters were not properly escaped in telemetry sanitizer");
+        process_exit(1);
+    }
+    println("  [PASS] 3. Control Characters, Quotes, & Backslashes Safely Escaped");
+
+    // 4. Invariant Evaluator Boundary Fuzzing
+    let rule_bound: InvariantRule = invariant_rule_between("clamped_val", 10, 20);
+    let r_min: Result[Bool, String] = invariant_eval_int(&rule_bound, 10); // Exact min boundary
+    let r_max: Result[Bool, String] = invariant_eval_int(&rule_bound, 20); // Exact max boundary
+    let r_below: Result[Bool, String] = invariant_eval_int(&rule_bound, 9); // 1 below min
+    let r_above: Result[Bool, String] = invariant_eval_int(&rule_bound, 21); // 1 above max
+
+    match r_min {
+        Ok(v) => { if !v { println("FAIL: Boundary min check failed"); process_exit(1); } }
+        Err(e) => { println("FAIL: Boundary min errored: " + e); process_exit(1); }
+    }
+
+    match r_max {
+        Ok(v) => { if !v { println("FAIL: Boundary max check failed"); process_exit(1); } }
+        Err(e) => { println("FAIL: Boundary max errored: " + e); process_exit(1); }
+    }
+
+    match r_below {
+        Ok(v) => { println("FAIL: Boundary below min should have failed"); process_exit(1); }
+        Err(e) => {}
+    }
+
+    match r_above {
+        Ok(v) => { println("FAIL: Boundary above max should have failed"); process_exit(1); }
+        Err(e) => {}
+    }
+    println("  [PASS] 4. Boundary Condition & Out-Of-Bounds Invariant Invalidation");
+
+    println("diag_hostile_fuzz_smoke: PASSED");
+}

@@ -1,0 +1,244 @@
+// # Dilithium NTT in Z_8380417[X]/(X^256+1)
+//
+// Logline: Runs eight Cooley-Tukey and Gentleman-Sande layers and a pointwise matrix-vector product.
+//
+// Setup: Pure. q is 8380417. 1753 is a primitive 512-th root. Length other than 256 is Err.
+//
+// Beats:
+//   1. Build zetas as 1753^{bitrev8(i)}.
+//   2. Forward NTT, pointwise multiply, and inverse NTT scaled by 256^{-1}=8347681.
+//   3. Matrix-vector t = a0 s0 + a1 s1 in the NTT domain.
+//   4. Return live coefficient samples.
+
+pub type DilNtt = struct {
+    flag: Int,
+    err: String,
+    n: Int,
+    c0: Int,
+    c1: Int,
+    sum: Int
+};
+
+fn dn_err(m: String) -> DilNtt {
+    return DilNtt { flag: 0, err: "ERR\tdilithium: " + m, n: 0, c0: 0, c1: 0, sum: 0 };
+}
+
+fn dn_mod(a: Int) -> Int {
+    let mut x: Int = a % 8380417;
+    if x < 0 {
+        x = x + 8380417;
+    }
+    return x;
+}
+
+fn dn_pow(e: Int) -> Int {
+    let mut r: Int = 1;
+    let mut b: Int = 1753;
+    let mut n: Int = e;
+    while n > 0 {
+        if (n & 1) == 1 {
+            r = dn_mod(r * b);
+        }
+        b = dn_mod(b * b);
+        n = n / 2;
+    }
+    return r;
+}
+
+fn dn_br8(x: Int) -> Int {
+    let mut r: Int = 0;
+    let mut i: Int = 0;
+    while i < 8 {
+        if (x & (1 << i)) != 0 {
+            r = r + (1 << (7 - i));
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+fn dn_zetas() -> List[Int] {
+    let mut z: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        z = list_push(z, dn_pow(dn_br8(i)));
+        i = i + 1;
+    }
+    return z;
+}
+
+fn dn_box(c: List[Int]) -> DilNtt {
+    let mut s: Int = 0;
+    let mut i: Int = 0;
+    while i < 256 {
+        s = s + list_get(c, i);
+        i = i + 1;
+    }
+    return DilNtt { flag: 1, err: "", n: 256, c0: list_get(c, 0), c1: list_get(c, 1), sum: s };
+}
+
+fn dn_fwd_layer(a: List[Int], len: Int, zetas: List[Int], k0: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        let block: Int = i / (2 * len);
+        let off: Int = i % (2 * len);
+        let zeta: Int = list_get(zetas, k0 + block);
+        if off < len {
+            let t: Int = dn_mod(zeta * list_get(a, i + len));
+            out = list_push(out, dn_mod(list_get(a, i) + t));
+        } else {
+            let t2: Int = dn_mod(zeta * list_get(a, i));
+            out = list_push(out, dn_mod(list_get(a, i - len) - t2));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn dn_inv_layer(a: List[Int], len: Int, zetas: List[Int], k0: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        let block: Int = i / (2 * len);
+        let off: Int = i % (2 * len);
+        let zeta: Int = list_get(zetas, k0 - block);
+        if off < len {
+            out = list_push(out, dn_mod(list_get(a, i) + list_get(a, i + len)));
+        } else {
+            out = list_push(out, dn_mod(zeta * dn_mod(list_get(a, i) - list_get(a, i - len))));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn dilithium_ntt_fwd(poly: List[Int]) -> DilNtt {
+    if list_len(poly) != 256 {
+        return dn_err("n");
+    }
+    let zetas: List[Int] = dn_zetas();
+    let mut a: List[Int] = poly;
+    let mut len: Int = 128;
+    let mut k0: Int = 1;
+    while len >= 1 {
+        a = dn_fwd_layer(a, len, zetas, k0);
+        k0 = k0 + (256 / (2 * len));
+        len = len / 2;
+    }
+    return dn_box(a);
+}
+
+fn dn_inv_list(y: List[Int]) -> List[Int] {
+    let zetas: List[Int] = dn_zetas();
+    let mut a: List[Int] = y;
+    let mut len: Int = 1;
+    let mut k0: Int = 255;
+    while len <= 128 {
+        a = dn_inv_layer(a, len, zetas, k0);
+        k0 = k0 - (256 / (2 * len));
+        len = len * 2;
+    }
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        out = list_push(out, dn_mod(list_get(a, i) * 8347681));
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn dilithium_ntt_inv(y: List[Int]) -> DilNtt {
+    if list_len(y) != 256 {
+        return dn_err("n");
+    }
+    return dn_box(dn_inv_list(y));
+}
+
+fn dn_pw(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        o = list_push(o, dn_mod(list_get(a, i) * list_get(b, i)));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn dn_add(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        o = list_push(o, dn_mod(list_get(a, i) + list_get(b, i)));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn dn_fwd_all(poly: List[Int]) -> List[Int] {
+    let zetas: List[Int] = dn_zetas();
+    let mut a: List[Int] = poly;
+    let mut len: Int = 128;
+    let mut k0: Int = 1;
+    while len >= 1 {
+        a = dn_fwd_layer(a, len, zetas, k0);
+        k0 = k0 + (256 / (2 * len));
+        len = len / 2;
+    }
+    return a;
+}
+
+pub fn dilithium_ntt_mul(a: List[Int], b: List[Int]) -> DilNtt {
+    if list_len(a) != 256 {
+        return dn_err("n");
+    }
+    if list_len(b) != 256 {
+        return dn_err("n");
+    }
+    return dn_box(dn_inv_list(dn_pw(dn_fwd_all(a), dn_fwd_all(b))));
+}
+
+pub fn dilithium_ntt_matvec(a0: List[Int], a1: List[Int], s0: List[Int], s1: List[Int]) -> DilNtt {
+    if list_len(a0) != 256 {
+        return dn_err("n");
+    }
+    if list_len(a1) != 256 {
+        return dn_err("n");
+    }
+    if list_len(s0) != 256 {
+        return dn_err("n");
+    }
+    if list_len(s1) != 256 {
+        return dn_err("n");
+    }
+    let na0: List[Int] = dn_fwd_all(a0);
+    let na1: List[Int] = dn_fwd_all(a1);
+    let ns0: List[Int] = dn_fwd_all(s0);
+    let ns1: List[Int] = dn_fwd_all(s1);
+    let t: List[Int] = dn_add(dn_pw(na0, ns0), dn_pw(na1, ns1));
+    return dn_box(dn_inv_list(t));
+}
+
+pub fn dilithium_ntt_flag(o: DilNtt) -> Int {
+    return o.flag;
+}
+
+pub fn dilithium_ntt_err(o: DilNtt) -> String {
+    return o.err;
+}
+
+pub fn dilithium_ntt_n(o: DilNtt) -> Int {
+    return o.n;
+}
+
+pub fn dilithium_ntt_c0(o: DilNtt) -> Int {
+    return o.c0;
+}
+
+pub fn dilithium_ntt_c1(o: DilNtt) -> Int {
+    return o.c1;
+}
+
+pub fn dilithium_ntt_sum(o: DilNtt) -> Int {
+    return o.sum;
+}

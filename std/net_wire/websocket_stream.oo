@@ -1,0 +1,212 @@
+// # RFC 6455 WebSocket frames
+//
+// Logline: Serializes and parses WebSocket frames with 4-byte client XOR masking, UTF-8 checks, and fragmentation.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. Opcode 0 is continue. Opcode 1 is text. Truncated frames are Err.
+//
+// Beats:
+//   1. Write FIN, opcode, MASK, and payload length.
+//   2. XOR the payload with a repeating 4-byte mask.
+//   3. Reject invalid UTF-8 on text frames.
+//   4. Recover opcode and unmasked bytes.
+
+pub type WsEnc = struct {
+    flag: Int,
+    err: String,
+    bytes: List[Int]
+};
+
+pub type WsOut = struct {
+    flag: Int,
+    err: String,
+    opcode: Int,
+    fin: Int,
+    n: Int,
+    b0: Int,
+    b1: Int
+};
+
+fn ws_err(m: String) -> WsEnc {
+    return WsEnc { flag: 0, err: "ERR\tws: " + m, bytes: list_new() };
+}
+
+fn ws_ok(b: List[Int]) -> WsEnc {
+    return WsEnc { flag: 1, err: "", bytes: b };
+}
+
+fn ws_utf8_ok(b: List[Int]) -> Int {
+    let n: Int = list_len(b);
+    let mut i: Int = 0;
+    while i < n {
+        let c: Int = list_get(b, i);
+        if c < 128 {
+            i = i + 1;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+pub fn websocket_stream_mask(payload: List[Int], key: List[Int]) -> WsEnc {
+    if list_len(key) != 4 {
+        return ws_err("mask");
+    }
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(payload) {
+        let k: Int = list_get(key, i % 4);
+        let x: Int = list_get(payload, i);
+        o = list_push(o, ((x | k) - (x & k)) & 255);
+        i = i + 1;
+    }
+    return ws_ok(o);
+}
+
+pub fn websocket_stream_enc(opcode: Int, fin: Int, payload: List[Int], key: List[Int]) -> WsEnc {
+    if list_len(key) != 4 {
+        return ws_err("mask");
+    }
+    if opcode == 1 {
+        if ws_utf8_ok(payload) < 1 {
+            return ws_err("utf8");
+        }
+    }
+    let n: Int = list_len(payload);
+    if n > 125 {
+        return ws_err("len");
+    }
+    let mut o: List[Int] = list_new();
+    let mut b0: Int = opcode & 15;
+    if fin > 0 {
+        b0 = b0 + 128;
+    }
+    o = list_push(o, b0);
+    o = list_push(o, 128 + n);
+    o = list_push(o, list_get(key, 0));
+    o = list_push(o, list_get(key, 1));
+    o = list_push(o, list_get(key, 2));
+    o = list_push(o, list_get(key, 3));
+    let m: WsEnc = websocket_stream_mask(payload, key);
+    if m.flag < 1 {
+        return m;
+    }
+    let mut i: Int = 0;
+    while i < n {
+        o = list_push(o, list_get(m.bytes, i));
+        i = i + 1;
+    }
+    return ws_ok(o);
+}
+
+pub fn websocket_stream_dec(buf: List[Int]) -> WsOut {
+    if list_len(buf) < 6 {
+        return WsOut { flag: 0, err: "ERR\tws: short", opcode: 0, fin: 0, n: 0, b0: 0, b1: 0 };
+    }
+    let b0: Int = list_get(buf, 0);
+    let b1: Int = list_get(buf, 1);
+    let fin: Int = (b0 >> 7) & 1;
+    let op: Int = b0 & 15;
+    if (b1 >> 7) < 1 {
+        return WsOut { flag: 0, err: "ERR\tws: mask", opcode: op, fin: fin, n: 0, b0: 0, b1: 0 };
+    }
+    let n: Int = b1 & 127;
+    if 6 + n > list_len(buf) {
+        return WsOut { flag: 0, err: "ERR\tws: short", opcode: op, fin: fin, n: n, b0: 0, b1: 0 };
+    }
+    let mut key: List[Int] = list_new();
+    key = list_push(key, list_get(buf, 2));
+    key = list_push(key, list_get(buf, 3));
+    key = list_push(key, list_get(buf, 4));
+    key = list_push(key, list_get(buf, 5));
+    let mut pl: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        pl = list_push(pl, list_get(buf, 6 + i));
+        i = i + 1;
+    }
+    let u: WsEnc = websocket_stream_mask(pl, key);
+    if u.flag < 1 {
+        return WsOut { flag: 0, err: u.err, opcode: op, fin: fin, n: n, b0: 0, b1: 0 };
+    }
+    if op == 1 {
+        if ws_utf8_ok(u.bytes) < 1 {
+            return WsOut { flag: 0, err: "ERR\tws: utf8", opcode: op, fin: fin, n: n, b0: 0, b1: 0 };
+        }
+    }
+    let mut p0: Int = 0;
+    let mut p1: Int = 0;
+    if n > 0 {
+        p0 = list_get(u.bytes, 0);
+    }
+    if n > 1 {
+        p1 = list_get(u.bytes, 1);
+    }
+    return WsOut { flag: 1, err: "", opcode: op, fin: fin, n: n, b0: p0, b1: p1 };
+}
+
+pub fn websocket_stream_reasm(op0: Int, p0: List[Int], op1: Int, p1: List[Int]) -> WsOut {
+    if op1 != 0 {
+        return WsOut { flag: 0, err: "ERR\tws: cont", opcode: op1, fin: 0, n: 0, b0: 0, b1: 0 };
+    }
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(p0) {
+        o = list_push(o, list_get(p0, i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < list_len(p1) {
+        o = list_push(o, list_get(p1, i));
+        i = i + 1;
+    }
+    if op0 == 1 {
+        if ws_utf8_ok(o) < 1 {
+            return WsOut { flag: 0, err: "ERR\tws: utf8", opcode: op0, fin: 1, n: list_len(o), b0: 0, b1: 0 };
+        }
+    }
+    let mut r0: Int = 0;
+    let mut r1: Int = 0;
+    if list_len(o) > 0 {
+        r0 = list_get(o, 0);
+    }
+    if list_len(o) > 1 {
+        r1 = list_get(o, 1);
+    }
+    return WsOut { flag: 1, err: "", opcode: op0, fin: 1, n: list_len(o), b0: r0, b1: r1 };
+}
+
+pub fn websocket_stream_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}
+
+pub fn websocket_stream_enc_flag(o: WsEnc) -> Int {
+    return o.flag;
+}
+pub fn websocket_stream_enc_err(o: WsEnc) -> String {
+    return o.err;
+}
+pub fn websocket_stream_enc_bytes(o: WsEnc) -> List[Int] {
+    return o.bytes;
+}
+pub fn websocket_stream_flag(o: WsOut) -> Int {
+    return o.flag;
+}
+pub fn websocket_stream_err(o: WsOut) -> String {
+    return o.err;
+}
+pub fn websocket_stream_opcode(o: WsOut) -> Int {
+    return o.opcode;
+}
+pub fn websocket_stream_b0(o: WsOut) -> Int {
+    return o.b0;
+}
+pub fn websocket_stream_b1(o: WsOut) -> Int {
+    return o.b1;
+}
+pub fn websocket_stream_n(o: WsOut) -> Int {
+    return o.n;
+}

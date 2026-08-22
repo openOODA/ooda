@@ -1,0 +1,106 @@
+// # Diagnostic Tracing Execution Span & Ring Buffer
+//
+// Logline: Bounded diagnostic trace span records, recursion depth clamping, and circular memory ring buffers.
+//
+// Setup: Zero-trust diagnostic telemetry primitive providing bounded memory guarantees under extreme event loads.
+//
+// Beats:
+//   1. Define TraceSpan structure with duration, status, memory footprint, and tags.
+//   2. Enforce strict recursion depth clamping to prevent stack and memory exhaustion.
+//   3. Define TraceRingBuffer for zero-growth circular event storage.
+//   4. Implement ring buffer push, overwrite, and indexed lookup operations.
+
+pub type TraceSpan = struct {
+    span_id: Int,
+    name: String,
+    parent_id: Int,
+    depth: Int,
+    start_ts: Int,
+    end_ts: Int,
+    status: Int, // 0: Running, 1: Success, 2: Failed
+    memory_bytes: Int,
+    tags: String
+};
+
+pub fn trace_span_new(id: Int, name: String, parent_id: Int, depth: Int, start_ts: Int) -> TraceSpan {
+    let clamped_depth: Int = if depth > 16 { 16 } else if depth < 0 { 0 } else { depth };
+    return TraceSpan {
+        span_id: id,
+        name: name,
+        parent_id: parent_id,
+        depth: clamped_depth,
+        start_ts: start_ts,
+        end_ts: 0,
+        status: 0,
+        memory_bytes: 0,
+        tags: ""
+    };
+}
+
+pub fn trace_span_finish(span: &mut TraceSpan, end_ts: Int, status: Int, mem: Int) {
+    (span).end_ts = end_ts;
+    (span).status = status;
+    (span).memory_bytes = mem;
+}
+
+pub fn trace_span_duration(span: &TraceSpan) -> Int {
+    if (span).end_ts >= (span).start_ts {
+        return (span).end_ts - (span).start_ts;
+    }
+    return 0;
+}
+
+pub type TraceRingBuffer = struct {
+    capacity: Int,
+    write_head: Int,
+    total_recorded: Int,
+    spans: List[TraceSpan]
+};
+
+pub fn trace_ring_buffer_new(capacity: Int) -> TraceRingBuffer {
+    let cap: Int = if capacity < 1 { 1 } else { capacity };
+    let spans: List[TraceSpan] = list_new();
+    return TraceRingBuffer {
+        capacity: cap,
+        write_head: 0,
+        total_recorded: 0,
+        spans: spans
+    };
+}
+
+pub fn trace_ring_buffer_push(rb: &mut TraceRingBuffer, span: TraceSpan) {
+    let cap: Int = (rb).capacity;
+    let mut spans: List[TraceSpan] = (rb).spans;
+    let cur_len: Int = list_len(spans);
+
+    if cur_len < cap {
+        spans = list_push(spans, span);
+        (rb).write_head = (cur_len + 1) % cap;
+    } else {
+        let head: Int = (rb).write_head;
+        spans = list_set(spans, head, span);
+        (rb).write_head = (head + 1) % cap;
+    }
+
+    (rb).spans = spans;
+    (rb).total_recorded = (rb).total_recorded + 1;
+}
+
+pub fn trace_ring_buffer_len(rb: &TraceRingBuffer) -> Int { return list_len((rb).spans); }
+
+pub fn trace_ring_buffer_get(rb: &TraceRingBuffer, index: Int) -> Result[TraceSpan, String] {
+    let spans: List[TraceSpan] = (rb).spans;
+    let cur_len: Int = list_len(spans);
+    if index < 0 || index >= cur_len {
+        return Err("ERR\tindex_out_of_bounds: " + index.to_string());
+    }
+    let span: TraceSpan = list_get(spans, index);
+    return Ok(span);
+}
+
+pub fn trace_span_probe() -> Int {
+    let mut rb: TraceRingBuffer = trace_ring_buffer_new(4);
+    let s: TraceSpan = trace_span_new(1, "probe", 0, 100, 1000);
+    trace_ring_buffer_push(&mut rb, s);
+    return (s).depth + trace_ring_buffer_len(&rb);
+}

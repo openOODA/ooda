@@ -1,0 +1,173 @@
+// # CLI Adversarial Challenge Stress Harness
+//
+// Logline: Adversarial stress testing of CLI argument parsing, malformed streams, missing options, and shell completion generation.
+//
+// Setup: Fuzzes and validates std/cli parser under hostile token streams, unrecognized commands, and completion builders.
+//
+// Beats:
+//   1. Stress-test malformed argument streams with empty strings, solitary dashes, unknown flags, and duplicate tokens.
+//   2. Stress-test unrecognized subcommands, positional argument bounds, and fail-closed error handling.
+//   3. Stress-test missing required options, typed integer parsing failures, and fallback default providers.
+//   4. Stress-test Bash, Zsh, and Fish shell completion generation for empty, complex, and deep command hierarchies.
+
+import "std/cli/cli_arg_parser.oo";
+import "std/cli/cli_completion.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("===================================================================");
+    println(" openOODA CLI Adversarial Challenge Stress Suite");
+    println("===================================================================");
+
+    // 1. Malformed Argument Streams & Hostile Tokens
+    let mut cmd: CliCommand = cli_command_new("oodactl", "v2.0.0", "openOODA Sovereign Control CLI");
+    let opt_force: CliOption = cli_option_flag("f", "force", "Force execution");
+    let opt_retries: CliOption = cli_option_value("r", "retries", "Maximum retries", "3", false);
+    cli_command_add_option(&mut cmd, opt_force);
+    cli_command_add_option(&mut cmd, opt_retries);
+
+    let mut sub_deploy: CliCommand = cli_command_new("deploy", "v2.0.0", "Deploy cluster services");
+    let pos_env: CliPositional = cli_positional_new("env", "Target environment", true, "prod");
+    cli_command_add_positional(&mut sub_deploy, pos_env);
+    cli_command_add_subcommand(&mut cmd, sub_deploy);
+
+    // Test stream 1: Empty argument list
+    let mut empty_args: List[String] = list_new();
+    let res_empty: Result[CliParsedArgs, String] = cli_parse(&cmd, empty_args);
+    match res_empty {
+        Ok(parsed) => {
+            if list_len((parsed).options) != 0 || list_len((parsed).positionals) != 0 {
+                println("FAIL: Empty argument stream produced unexpected tokens");
+                process_exit(1);
+            }
+        }
+        Err(e) => {
+            println("FAIL: Empty argument parse failed with unexpected error: " + e);
+            process_exit(1);
+        }
+    }
+
+    // Test stream 2: Malformed tokens (solitary dash, double dash, empty strings, unknown flags, duplicates)
+    let mut hostile_args: List[String] = list_new();
+    hostile_args = list_push(hostile_args, "");
+    hostile_args = list_push(hostile_args, "-");
+    hostile_args = list_push(hostile_args, "--");
+    hostile_args = list_push(hostile_args, "--unknown-flag-x");
+    hostile_args = list_push(hostile_args, "--force");
+    hostile_args = list_push(hostile_args, "--force"); // duplicate flag
+    hostile_args = list_push(hostile_args, "-f");
+    hostile_args = list_push(hostile_args, "deploy");
+    hostile_args = list_push(hostile_args, "staging");
+
+    let res_hostile: Result[CliParsedArgs, String] = cli_parse(&cmd, hostile_args);
+    match res_hostile {
+        Ok(parsed) => {
+            let has_force: Bool = cli_args_has_flag(parsed, "force");
+            let has_unknown: Bool = cli_args_has_flag(parsed, "unknown-flag-x");
+            let pos_deploy: String = cli_args_get_pos_or(parsed, 3, "");
+            let pos_env_val: String = cli_args_get_pos_or(parsed, 4, "");
+
+            if !has_force || !has_unknown || pos_deploy != "deploy" || pos_env_val != "staging" {
+                println("FAIL: Hostile token stream evaluation mismatch");
+                process_exit(1);
+            }
+        }
+        Err(e) => {
+            println("FAIL: Hostile token parse error: " + e);
+            process_exit(1);
+        }
+    }
+    println("  [PASS] 1. Malformed Argument Streams & Hostile Tokens");
+
+    // 2. Unrecognized Subcommands & Out-of-Bounds Queries
+    let mut unrecog_args: List[String] = list_new();
+    unrecog_args = list_push(unrecog_args, "invalid_subcmd_999");
+    unrecog_args = list_push(unrecog_args, "--unrecog_opt");
+
+    let res_unrecog: Result[CliParsedArgs, String] = cli_parse(&cmd, unrecog_args);
+    match res_unrecog {
+        Ok(parsed) => {
+            let pos_first: String = cli_args_get_pos_or(parsed, 0, "");
+            let pos_oob_neg: Result[String, String] = cli_args_get_pos(parsed, -1);
+            let pos_oob_large: Result[String, String] = cli_args_get_pos(parsed, 100);
+
+            let mut oob_pass: Bool = false;
+            match pos_oob_neg {
+                Ok(v) => { oob_pass = false; }
+                Err(e) => {
+                    match pos_oob_large {
+                        Ok(v2) => { oob_pass = false; }
+                        Err(e2) => { oob_pass = true; }
+                    }
+                }
+            }
+
+            if pos_first != "invalid_subcmd_999" || !oob_pass {
+                println("FAIL: Unrecognized subcommand & OOB handling failed");
+                process_exit(1);
+            }
+        }
+        Err(e) => {
+            println("FAIL: Unrecognized subcommand parse returned error: " + e);
+            process_exit(1);
+        }
+    }
+    println("  [PASS] 2. Unrecognized Subcommands & Out-of-Bounds Queries");
+
+    // 3. Missing Required Options & Typed Fail-Closed Parsing
+    let mut blank_args: List[String] = list_new();
+    let res_blank: Result[CliParsedArgs, String] = cli_parse(&cmd, blank_args);
+    match res_blank {
+        Ok(parsed) => {
+            let opt_missing: Result[String, String] = cli_args_get_opt(parsed, "nonexistent");
+            let int_missing: Result[Int, String] = cli_args_get_int(parsed, "nonexistent");
+            let opt_fallback: String = cli_args_get_opt_or(parsed, "nonexistent", "default_val");
+            let int_fallback: Int = cli_args_get_int_or(parsed, "nonexistent", 42);
+
+            let mut missing_fail_closed: Bool = false;
+            match opt_missing {
+                Ok(v) => { missing_fail_closed = false; }
+                Err(e1) => {
+                    match int_missing {
+                        Ok(n) => { missing_fail_closed = false; }
+                        Err(e2) => { missing_fail_closed = true; }
+                    }
+                }
+            }
+
+            if !missing_fail_closed || opt_fallback != "default_val" || int_fallback != 42 {
+                println("FAIL: Missing options fail-closed checks failed");
+                process_exit(1);
+            }
+        }
+        Err(e) => {
+            println("FAIL: Blank parse error: " + e);
+            process_exit(1);
+        }
+    }
+    println("  [PASS] 3. Missing Required Options & Typed Fail-Closed Validation");
+
+    // 4. Shell Completion Generation Across Multiple Hierarchies
+    // Hierarchy A: Minimal empty command
+    let empty_cmd: CliCommand = cli_command_new("empty_app", "v0.0.1", "Empty application");
+    let bash_empty: String = cli_completion_bash_command(empty_cmd);
+    let zsh_empty: String = cli_completion_zsh_command(empty_cmd);
+    let fish_empty: String = cli_completion_fish_command(empty_cmd);
+
+    // Hierarchy B: Complex nested command
+    let bash_full: String = cli_completion_bash_command(cmd);
+    let zsh_full: String = cli_completion_zsh_command(cmd);
+    let fish_full: String = cli_completion_fish_command(cmd);
+
+    if bash_empty.len() < 10 || zsh_empty.len() < 10 || fish_empty.len() < 10 {
+        println("FAIL: Empty command shell completions generated truncated output");
+        process_exit(1);
+    }
+
+    if bash_full.len() < 20 || zsh_full.len() < 20 || fish_full.len() < 20 {
+        println("FAIL: Complex command shell completions generated truncated output");
+        process_exit(1);
+    }
+    println("  [PASS] 4. Shell Completion Generation (Bash, Zsh, Fish) Across Hierarchies");
+
+    println("cli_adversarial_challenge_smoke: PASSED (ALL CHECKS GREEN)");
+}

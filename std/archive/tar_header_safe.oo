@@ -1,0 +1,226 @@
+// # POSIX ustar 512-byte header
+//
+// Logline: Builds and parses a ustar header with octal integers, header checksum, type flag, and path sanitization.
+//
+// Setup: Pure. Input is 512 List[Int] bytes. Absolute paths and '..' path segments are Err.
+//
+// Beats:
+//   1. Require a 512-byte block and ustar magic.
+//   2. Parse octal size and checksum fields.
+//   3. Verify the header checksum with spaces in the checksum field.
+//   4. Reject absolute or parent-directory paths.
+
+import "std/byte_out.oo";
+
+pub type TarHdr = struct {
+    flag: Int,
+    err: String,
+    size: Int,
+    typeflag: Int,
+    chksum: Int
+};
+
+fn tar_set(h: List[Int], idx: Int, v: Int) -> List[Int] {
+    let n: Int = list_len(h);
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        if i == idx {
+            o = list_push(o, v & 255);
+        } else {
+            o = list_push(o, list_get(h, i));
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+fn tar_put_str(h: List[Int], off: Int, s: String) -> List[Int] {
+    let mut o: List[Int] = h;
+    let n: Int = bytes_len(s);
+    let mut i: Int = 0;
+    while i < n {
+        o = tar_set(o, off + i, byte_at(s, i));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn tar_put_octal(h: List[Int], off: Int, width: Int, v: Int) -> List[Int] {
+    let mut x: Int = v;
+    let mut o: List[Int] = h;
+    let mut i: Int = width - 2;
+    while i >= 0 {
+        o = tar_set(o, off + i, 48 + (x % 8));
+        x = x / 8;
+        i = i - 1;
+    }
+    o = tar_set(o, off + width - 1, 0);
+    return o;
+}
+
+fn tar_octal(buf: List[Int], off: Int, width: Int) -> Result[Int, String] {
+    let mut v: Int = 0;
+    let mut seen: Int = 0;
+    let mut i: Int = 0;
+    while i < width {
+        let b: Int = list_get(buf, off + i);
+        if b == 0 {
+            break;
+        }
+        if b == 32 {
+            if seen > 0 {
+                break;
+            }
+        } else {
+            if b < 48 {
+                return Err("tar octal");
+            }
+            if b > 55 {
+                return Err("tar octal");
+            }
+            v = v * 8 + (b - 48);
+            seen = 1;
+        }
+        i = i + 1;
+    }
+    return Ok(v);
+}
+
+fn tar_sum(buf: List[Int]) -> Int {
+    let mut s: Int = 0;
+    let mut i: Int = 0;
+    while i < 512 {
+        if i >= 148 {
+            if i < 156 {
+                s = s + 32;
+            } else {
+                s = s + (list_get(buf, i) & 255);
+            }
+        } else {
+            s = s + (list_get(buf, i) & 255);
+        }
+        i = i + 1;
+    }
+    return s;
+}
+
+fn tar_name_ok(buf: List[Int]) -> Int {
+    if list_get(buf, 0) == 47 {
+        return 0;
+    }
+    let mut i: Int = 0;
+    while i < 100 {
+        let b: Int = list_get(buf, i);
+        if b == 0 {
+            return 1;
+        }
+        if b == 46 {
+            if i + 1 < 100 {
+                if list_get(buf, i + 1) == 46 {
+                    let mut prev: Int = 47;
+                    if i > 0 {
+                        prev = list_get(buf, i - 1);
+                    }
+                    let mut nxt: Int = 47;
+                    if i + 2 < 100 {
+                        nxt = list_get(buf, i + 2);
+                    }
+                    if prev == 47 {
+                        if nxt == 47 {
+                            return 0;
+                        }
+                        if nxt == 0 {
+                            return 0;
+                        }
+                    }
+                    if i == 0 {
+                        if nxt == 47 {
+                            return 0;
+                        }
+                        if nxt == 0 {
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+pub fn tar_header_safe_make(name: String, size: Int, typeflag: Int) -> ByteOut {
+    if bytes_len(name) < 1 {
+        return byte_out_err("tar name");
+    }
+    if bytes_len(name) > 99 {
+        return byte_out_err("tar name");
+    }
+    let mut h: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 512 {
+        h = list_push(h, 0);
+        i = i + 1;
+    }
+    h = tar_put_str(h, 0, name);
+    if tar_name_ok(h) < 1 {
+        return byte_out_err("tar path");
+    }
+    h = tar_put_octal(h, 124, 12, size);
+    h = tar_set(h, 156, typeflag & 255);
+    h = tar_put_str(h, 257, "ustar");
+    h = tar_set(h, 263, 48);
+    h = tar_set(h, 264, 48);
+    let sum: Int = tar_sum(h);
+    h = tar_put_octal(h, 148, 7, sum);
+    h = tar_set(h, 155, 32);
+    return byte_out_ok(h);
+}
+
+pub fn tar_header_safe_parse(buf: List[Int]) -> TarHdr {
+    if list_len(buf) < 512 {
+        return TarHdr { flag: 0, err: "tar short", size: 0, typeflag: 0, chksum: 0 };
+    }
+    if list_get(buf, 257) != 117 {
+        return TarHdr { flag: 0, err: "tar magic", size: 0, typeflag: 0, chksum: 0 };
+    }
+    if tar_name_ok(buf) < 1 {
+        return TarHdr { flag: 0, err: "tar path", size: 0, typeflag: 0, chksum: 0 };
+    }
+    let tf: Int = list_get(buf, 156);
+    if tf != 0 {
+        if tf != 48 {
+            if tf != 53 {
+                return TarHdr { flag: 0, err: "tar type", size: 0, typeflag: tf, chksum: 0 };
+            }
+        }
+    }
+    let sz: Result[Int, String] = tar_octal(buf, 124, 12);
+    match sz {
+        Ok(size) => {
+            let cs: Result[Int, String] = tar_octal(buf, 148, 8);
+            match cs {
+                Ok(chk) => {
+                    if tar_sum(buf) != chk {
+                        return TarHdr { flag: 0, err: "tar checksum", size: size, typeflag: tf, chksum: chk };
+                    }
+                    return TarHdr { flag: 1, err: "", size: size, typeflag: tf, chksum: chk };
+                },
+                Err(e) => {
+                    return TarHdr { flag: 0, err: e, size: 0, typeflag: tf, chksum: 0 };
+                }
+            }
+        },
+        Err(e2) => {
+            return TarHdr { flag: 0, err: e2, size: 0, typeflag: tf, chksum: 0 };
+        }
+    }
+}
+
+pub fn tar_header_safe_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}

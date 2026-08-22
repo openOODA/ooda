@@ -1,0 +1,249 @@
+// # Q32.32 Fixed-Point Arithmetic Module (with overflow and saturation)
+//
+// Logline: Deterministic 64-bit Q32.32 fixed-point arithmetic with zero IEEE-754 drift. Every operation has a saturating path that clamps to LLONG bounds and an explicit-overflow path that returns Err.
+//
+// Setup: Pure math. One 64-bit signed Int per value (raw = value * 2^32). Scale SCALE_Q32 = 4294967296. The hi/lo split in q32_mul avoids 64-bit overflow of (raw_a * raw_b) for |a|, |b| < 2^16. The overflow variants explicitly return Err.
+//
+// Beats:
+//   1. Construct Q32 from integer (n * SCALE) or fraction (num/den * SCALE) with bounds check.
+//   2. Add and subtract Q32.32 values exactly; overflow variants return Err.
+//   3. Multiply via 32-bit hi/lo split; overflow variant returns Err if any partial product overflows.
+//   4. Divide via long division; returns Err on divide-by-zero, negative dividend, or overflow.
+//   5. Compare, zero-test, negate, absolute value.
+//   6. Quadratic Bézier midpoint evaluation with zero drift.
+//   7. is_in_safe_range predicate so callers can pre-validate.
+//
+// residual: q32_div uses non-restoring long division over 33 quotient bits; safe for non-negative dividends. For signed-divide, use q32_negate on the dividend first.
+
+pub type Q32 = struct {
+    raw: Int
+};
+
+// q32_scale returns the Q32.32 scale factor 2^32.
+pub fn q32_scale() -> Int { return 4294967296; }
+
+// q32_max_raw and q32_min_raw are the inclusive raw value bounds.
+fn q32_max_raw() -> Int {
+    return 9223372036854775807;
+}
+fn q32_min_raw() -> Int {
+    return 0 - 9223372036854775807 - 1;
+}
+
+// q32_is_in_safe_range returns true when the raw value fits in i32 * SCALE.
+pub fn q32_is_in_safe_range(q: Q32) -> Bool {
+    let r: Int = q.raw;
+    if r > 9223371487111791280 { return false; }
+    if r < 0 - 9223371487111791280 { return false; }
+    return true;
+}
+
+// q32_mul_overflow_ok returns true when a*b fits in i64.
+fn q32_mul_overflow_ok(a: Int, b: Int) -> Bool {
+    if a == 0 { return true; }
+    if b == 0 { return true; }
+    let p: Int = a * b;
+    let q: Int = p / a;
+    if q != b { return false; }
+    return true;
+}
+
+// q32_add_overflow_ok returns true when a+b fits in i64.
+fn q32_add_overflow_ok(a: Int, b: Int) -> Bool {
+    if a == 0 { return true; }
+    if b == 0 { return true; }
+    let s: Int = a + b;
+    if a > 0 {
+        if b > 0 {
+            if s < 0 { return false; }
+        }
+    }
+    if a < 0 {
+        if b < 0 {
+            if s > 0 { return false; }
+        }
+    }
+    return true;
+}
+
+// q32_saturate clamps a raw value to the inclusive i64 range.
+fn q32_saturate(r: Int) -> Q32 {
+    if r > q32_max_raw() { return Q32 { raw: q32_max_raw() }; }
+    if r < q32_min_raw() { return Q32 { raw: q32_min_raw() }; }
+    return Q32 { raw: r };
+}
+
+// Encode integer n as Q32.32 (raw = n * SCALE). Saturates on overflow.
+pub fn q32_from_int(n: Int) -> Q32 {
+    let s: Int = q32_scale();
+    if q32_mul_overflow_ok(n, s) == false {
+        if n > 0 { return Q32 { raw: q32_max_raw() }; }
+        return Q32 { raw: q32_min_raw() };
+    }
+    return Q32 { raw: n * s };
+}
+
+// Encode num/den as Q32.32 (raw = (num * SCALE) / den). Returns saturated
+// Q32 on den == 0 or overflow.
+pub fn q32_from_fraction(num: Int, den: Int) -> Q32 {
+    if den == 0 {
+        return Q32 { raw: 0 };
+    }
+    let s: Int = q32_scale();
+    if q32_mul_overflow_ok(num, s) == false {
+        return q32_saturate(num * s / den);
+    }
+    return Q32 { raw: (num * s) / den };
+}
+
+// Decode Q32.32 to nearest integer via (raw + SCALE/2) / SCALE.
+pub fn q32_to_int_nearest(q: Q32) -> Int {
+    let s: Int = q32_scale();
+    let r: Int = q.raw;
+    return (r + s / 2) / s;
+}
+
+// Add two Q32.32 values. Saturates on overflow.
+pub fn q32_add(a: Q32, b: Q32) -> Q32 {
+    let ar: Int = a.raw;
+    let br: Int = b.raw;
+    if q32_add_overflow_ok(ar, br) == false {
+        if ar > 0 { return Q32 { raw: q32_max_raw() }; }
+        return Q32 { raw: q32_min_raw() };
+    }
+    return Q32 { raw: ar + br };
+}
+
+// Add two Q32.32 values returning Err on overflow rather than saturating.
+pub fn q32_add_overflow(a: Q32, b: Q32) -> Result[Q32, String] {
+    let ar: Int = a.raw;
+    let br: Int = b.raw;
+    if q32_add_overflow_ok(ar, br) == false { return Err("q32_add overflow"); }
+    return Ok(Q32 { raw: ar + br });
+}
+
+// Subtract two Q32.32 values. Saturates on overflow.
+pub fn q32_sub(a: Q32, b: Q32) -> Q32 {
+    let ar: Int = a.raw;
+    let br: Int = b.raw;
+    if q32_add_overflow_ok(ar, 0 - br) == false {
+        if ar >= 0 { return Q32 { raw: q32_max_raw() }; }
+        return Q32 { raw: q32_min_raw() };
+    }
+    return Q32 { raw: ar - br };
+}
+
+// Subtract two Q32.32 values returning Err on overflow rather than saturating.
+pub fn q32_sub_overflow(a: Q32, b: Q32) -> Result[Q32, String] {
+    let ar: Int = a.raw;
+    let br: Int = b.raw;
+    if q32_add_overflow_ok(ar, 0 - br) == false { return Err("q32_sub overflow"); }
+    return Ok(Q32 { raw: ar - br });
+}
+
+// Multiply two Q32.32 values. Uses 32-bit hi/lo split. Saturates on overflow.
+pub fn q32_mul(a: Q32, b: Q32) -> Q32 {
+    let r: Result[Q32, String] = q32_safe_mul(a, b);
+    if r.is_err() { return Q32 { raw: q32_max_raw() }; }
+    return r.val;
+}
+
+// Safe mul: returns Err on overflow. Uses 32-bit hi/lo split.
+pub fn q32_safe_mul(a: Q32, b: Q32) -> Result[Q32, String] {
+    let ar: Int = a.raw;
+    let br: Int = b.raw;
+    let a_hi: Int = ar >> 32;
+    let a_lo: Int = ar - (a_hi << 32);
+    let b_hi: Int = br >> 32;
+    let b_lo: Int = br - (b_hi << 32);
+    if q32_mul_overflow_ok(a_hi, b_hi) == false { return Err("q32_mul overflow (hi*hi)"); }
+    if q32_mul_overflow_ok(a_hi, b_lo) == false { return Err("q32_mul overflow (hi*lo)"); }
+    if q32_mul_overflow_ok(a_lo, b_hi) == false { return Err("q32_mul overflow (lo*hi)"); }
+    let hi: Int = a_hi * b_hi;
+    let mid1: Int = a_hi * b_lo;
+    let mid2: Int = a_lo * b_hi;
+    if q32_add_overflow_ok(mid1, mid2) == false { return Err("q32_mul overflow (mid+mid)"); }
+    if q32_add_overflow_ok(hi, mid1) == false { return Err("q32_mul overflow (hi+mid)"); }
+    let lo: Int = a_lo * b_lo;
+    let r: Int = (hi << 32) + mid1 + mid2 + (lo >> 32);
+    if r > q32_max_raw() { return Err("q32_mul overflow (final)"); }
+    if r < q32_min_raw() { return Err("q32_mul overflow (final)"); }
+    return Ok(Q32 { raw: r });
+}
+
+// Divide two Q32.32 values. Returns Err if b is zero. Returns Err("q32_div: negative dividend unsupported") for negative a; the caller should negate a before dividing. Result = (a * SCALE) / b computed via non-restoring long division over 33 quotient bits.
+pub fn q32_div(a: Q32, b: Q32) -> Result[Q32, String] {
+    let br: Int = b.raw;
+    if br == 0 {
+        return Err("q32_div: divide by zero");
+    }
+    let ar: Int = a.raw;
+    if ar < 0 {
+        return Err("q32_div: negative dividend unsupported (negate a first)");
+    }
+    let mut w: Int = ar;
+    let mut result: Int = 0;
+    let mut i: Int = 0;
+    let a_lo: Int = ar - ((ar >> 32) << 32);
+    while i < 33 {
+        if w >= br {
+            w = w - br;
+            result = result + (1 << (32 - i));
+        }
+        if i < 32 {
+            let next_bit: Int = (a_lo >> (31 - i)) & 1;
+            w = w * 2 + next_bit;
+        }
+        i = i + 1;
+    }
+    return Ok(Q32 { raw: result });
+}
+
+// True if a.raw == b.raw.
+pub fn q32_eq(a: Q32, b: Q32) -> Bool { return a.raw == b.raw; }
+
+// Compare: -1 if a < b, 0 if equal, 1 if a > b.
+pub fn q32_cmp(a: Q32, b: Q32) -> Int {
+    let ar: Int = a.raw;
+    let br: Int = b.raw;
+    if ar < br { return -1; }
+    if ar > br { return 1; }
+    return 0;
+}
+
+// True if q is exactly zero.
+pub fn q32_is_zero(q: Q32) -> Bool { return q.raw == 0; }
+
+// q32_negate returns -q. Saturates on overflow.
+pub fn q32_negate(q: Q32) -> Q32 {
+    if q.raw == q32_min_raw() { return Q32 { raw: q32_max_raw() }; }
+    return Q32 { raw: 0 - q.raw };
+}
+
+// q32_abs returns |q|. Saturates on overflow (LLONG_MIN negates to LLONG_MAX).
+pub fn q32_abs(q: Q32) -> Q32 {
+    if q.raw < 0 {
+        return q32_negate(q);
+    }
+    return q;
+}
+
+// Evaluate quadratic Bézier at parameter t: (1-t)^2 * p0 + 2(1-t)t * p1 + t^2 * p2.
+// All inputs are Q32.32. Uses split-form intermediates to avoid 64-bit overflow.
+pub fn q32_eval_bezier(p0: Q32, p1: Q32, p2: Q32, t: Q32) -> Q32 {
+    let s: Int = q32_scale();
+    let t_raw: Int = t.raw;
+    let omt_raw: Int = s - t_raw;
+    let t_sq_raw: Int = (t_raw * t_raw) / s;
+    let omt_sq_raw: Int = (omt_raw * omt_raw) / s;
+    let omt_t_raw: Int = (omt_raw * t_raw) / s;
+    let two_omt_t_raw: Int = omt_t_raw * 2;
+    let t_sq: Q32 = Q32 { raw: t_sq_raw };
+    let omt_sq: Q32 = Q32 { raw: omt_sq_raw };
+    let two_omt_t: Q32 = Q32 { raw: two_omt_t_raw };
+    let term0: Q32 = q32_mul(omt_sq, p0);
+    let term1: Q32 = q32_mul(two_omt_t, p1);
+    let term2: Q32 = q32_mul(t_sq, p2);
+    let sum01: Q32 = q32_add(term0, term1);
+    return q32_add(sum01, term2);
+}

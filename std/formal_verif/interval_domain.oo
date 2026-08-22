@@ -1,0 +1,198 @@
+// # Interval Arithmetic Domain (with joins, meets, and widening)
+//
+// Logline: Concrete numeric interval [min,max] with arithmetic, ordering, subset semantics, lattice joins and meets, and monotone widening for fixpoint iteration.
+//
+// Setup: Pure interval domain module used by static analyzers to bound runtime values without enumeration. Backing type is i64; arithmetic returns Err on overflow rather than silently wrapping.
+//
+// Beats:
+//   1. Define Interval as a 2-field Int struct with min <= max invariant.
+//   2. Implement add, sub, mul with signed-overflow detection; mul uses all 4 cross-products.
+//   3. Provide contains, subset (non-strict), overlaps, width, and min/max accessors.
+//   4. Provide interval_neg and interval_div for completeness.
+//   5. Provide interval_join (union) and interval_meet (intersection) for lattice operations.
+//   6. Provide interval_widen for fixpoint convergence.
+
+pub type Interval = struct {
+    min_val: Int,
+    max_val: Int
+};
+
+// mul_overflow_ok returns true when a*b fits in i64.
+fn mul_overflow_ok(a: Int, b: Int) -> Bool {
+    if a == 0 { return true; }
+    if b == 0 { return true; }
+    let p: Int = a * b;
+    let q: Int = p / a;
+    if q != b { return false; }
+    return true;
+}
+
+// add_overflow_ok returns true when a+b fits in i64.
+fn add_overflow_ok(a: Int, b: Int) -> Bool {
+    if a == 0 { return true; }
+    if b == 0 { return true; }
+    let s: Int = a + b;
+    if a > 0 {
+        if b > 0 {
+            if s < 0 { return false; }
+        }
+    }
+    if a < 0 {
+        if b < 0 {
+            if s > 0 { return false; }
+        }
+    }
+    return true;
+}
+
+// sub_overflow_ok returns true when a-b fits in i64.
+fn sub_overflow_ok(a: Int, b: Int) -> Bool {
+    return add_overflow_ok(a, 0 - b);
+}
+
+// interval_safe_min returns the minimum of two ints with overflow guard for
+// the addition. Used by interval_mul's 4-corner reduction.
+fn interval_safe_min(a: Int, b: Int) -> Int {
+    if a < b { return a; }
+    return b;
+}
+
+// interval_safe_max returns the maximum of two ints.
+fn interval_safe_max(a: Int, b: Int) -> Int {
+    if a > b { return a; }
+    return b;
+}
+
+// interval_new returns Err("invalid interval bounds") when min > max.
+pub fn interval_new(min_v: Int, max_v: Int) -> Result[Interval, String] {
+    if min_v > max_v {
+        return Err("invalid interval bounds");
+    }
+    return Ok(Interval {
+        min_val: min_v,
+        max_val: max_v
+    });
+}
+
+pub fn interval_min(i: Interval) -> Int { return (i).min_val; }
+
+pub fn interval_max(i: Interval) -> Int { return (i).max_val; }
+
+pub fn interval_width(i: Interval) -> Int { return (i).max_val - (i).min_val; }
+
+pub fn interval_contains(i: Interval, val: Int) -> Bool { return ((val >= (i).min_val) && (val <= (i).max_val)); }
+
+pub fn interval_eq(i1: Interval, i2: Interval) -> Bool { return (((i1).min_val == (i2).min_val) && ((i1).max_val == (i2).max_val)); }
+
+// interval_subset returns true when inner is a (non-strict) subset of outer.
+pub fn interval_subset(inner: Interval, outer: Interval) -> Bool { return (((inner).min_val >= (outer).min_val) && ((inner).max_val <= (outer).max_val)); }
+
+pub fn interval_overlaps(i1: Interval, i2: Interval) -> Bool {
+    let a_min: Int = (i1).min_val;
+    let a_max: Int = (i1).max_val;
+    let b_min: Int = (i2).min_val;
+    let b_max: Int = (i2).max_val;
+    return ((a_max >= b_min) && (b_max >= a_min));
+}
+
+// interval_add returns [a_min+b_min, a_max+b_max] with overflow detection.
+pub fn interval_add(i1: Interval, i2: Interval) -> Result[Interval, String] {
+    let lo: Int = (i1).min_val + (i2).min_val;
+    let hi: Int = (i1).max_val + (i2).max_val;
+    if add_overflow_ok((i1).min_val, (i2).min_val) == false { return Err("interval_add overflow (lo)"); }
+    if add_overflow_ok((i1).max_val, (i2).max_val) == false { return Err("interval_add overflow (hi)"); }
+    return Ok(Interval { min_val: lo, max_val: hi });
+}
+
+// interval_sub returns [a_min-b_max, a_max-b_min] with overflow detection.
+pub fn interval_sub(i1: Interval, i2: Interval) -> Result[Interval, String] {
+    if sub_overflow_ok((i1).min_val, (i2).max_val) == false { return Err("interval_sub overflow (lo)"); }
+    if sub_overflow_ok((i1).max_val, (i2).min_val) == false { return Err("interval_sub overflow (hi)"); }
+    let lo: Int = (i1).min_val - (i2).max_val;
+    let hi: Int = (i1).max_val - (i2).min_val;
+    return Ok(Interval { min_val: lo, max_val: hi });
+}
+
+// interval_neg returns [-max, -min] with overflow detection on LLONG_MIN.
+pub fn interval_neg(i: Interval) -> Result[Interval, String] {
+    let mn: Int = (i).min_val;
+    let mx: Int = (i).max_val;
+    let nmn: Int = 0 - mx;
+    let nmx: Int = 0 - mn;
+    if mx == 0 - 9223372036854775807 - 1 { return Err("interval_neg overflow (LLONG_MIN)"); }
+    if mn == 0 - 9223372036854775807 - 1 { return Err("interval_neg overflow (LLONG_MIN)"); }
+    return Ok(Interval { min_val: nmn, max_val: nmx });
+}
+
+// interval_mul uses all 4 cross-products (a_lo*b_lo, a_lo*b_hi, a_hi*b_lo, a_hi*b_hi)
+// and returns [min of the 4, max of the 4] with overflow detection.
+pub fn interval_mul(i1: Interval, i2: Interval) -> Result[Interval, String] {
+    let a_lo: Int = (i1).min_val;
+    let a_hi: Int = (i1).max_val;
+    let b_lo: Int = (i2).min_val;
+    let b_hi: Int = (i2).max_val;
+    if mul_overflow_ok(a_lo, b_lo) == false { return Err("interval_mul overflow (a_lo*b_lo)"); }
+    if mul_overflow_ok(a_lo, b_hi) == false { return Err("interval_mul overflow (a_lo*b_hi)"); }
+    if mul_overflow_ok(a_hi, b_lo) == false { return Err("interval_mul overflow (a_hi*b_lo)"); }
+    if mul_overflow_ok(a_hi, b_hi) == false { return Err("interval_mul overflow (a_hi*b_hi)"); }
+    let p1: Int = a_lo * b_lo;
+    let p2: Int = a_lo * b_hi;
+    let p3: Int = a_hi * b_lo;
+    let p4: Int = a_hi * b_hi;
+    let lo: Int = interval_safe_min(interval_safe_min(p1, p2), interval_safe_min(p3, p4));
+    let hi: Int = interval_safe_max(interval_safe_max(p1, p2), interval_safe_max(p3, p4));
+    return Ok(Interval { min_val: lo, max_val: hi });
+}
+
+// interval_div returns the interval of a/b for b strictly positive (or strictly
+// negative). When b contains 0 the result is Err("interval_div divide by zero").
+pub fn interval_div(i1: Interval, i2: Interval) -> Result[Interval, String] {
+    let b_lo: Int = (i2).min_val;
+    let b_hi: Int = (i2).max_val;
+    if b_lo == 0 {
+        if b_hi == 0 { return Err("interval_div divide by zero (0/0)"); }
+    }
+    if b_lo <= 0 {
+        if b_hi >= 0 { return Err("interval_div divide by zero (interval contains 0)"); }
+    }
+    let a_lo: Int = (i1).min_val;
+    let a_hi: Int = (i1).max_val;
+    if b_lo > 0 {
+        if mul_overflow_ok(a_lo, b_hi) == false { return Err("interval_div overflow (lo)"); }
+        if mul_overflow_ok(a_hi, b_lo) == false { return Err("interval_div overflow (hi)"); }
+        let lo: Int = a_lo / b_hi;
+        let hi: Int = a_hi / b_lo;
+        return Ok(Interval { min_val: lo, max_val: hi });
+    }
+    if mul_overflow_ok(a_lo, b_lo) == false { return Err("interval_div overflow (lo)"); }
+    if mul_overflow_ok(a_hi, b_hi) == false { return Err("interval_div overflow (hi)"); }
+    let lo: Int = a_hi / b_hi;
+    let hi: Int = a_lo / b_lo;
+    return Ok(Interval { min_val: lo, max_val: hi });
+}
+
+// interval_join returns the smallest interval containing both inputs (lattice union).
+pub fn interval_join(i1: Interval, i2: Interval) -> Result[Interval, String] {
+    let lo: Int = interval_safe_min((i1).min_val, (i2).min_val);
+    let hi: Int = interval_safe_max((i1).max_val, (i2).max_val);
+    return Ok(Interval { min_val: lo, max_val: hi });
+}
+
+// interval_meet returns the intersection of two intervals, or Err if disjoint.
+pub fn interval_meet(i1: Interval, i2: Interval) -> Result[Interval, String] {
+    if interval_overlaps(i1, i2) == false { return Err("interval_meet disjoint"); }
+    let lo: Int = interval_safe_max((i1).min_val, (i2).min_val);
+    let hi: Int = interval_safe_min((i1).max_val, (i2).max_val);
+    return Ok(Interval { min_val: lo, max_val: hi });
+}
+
+// interval_widen applies monotone widening: bounds that grew are clamped
+// toward -infinity or +infinity respectively. Use to accelerate fixpoint
+// convergence in abstract interpretation.
+pub fn interval_widen(prev: Interval, next: Interval) -> Result[Interval, String] {
+    let mut lo: Int = (next).min_val;
+    let mut hi: Int = (next).max_val;
+    if (next).min_val < (prev).min_val { lo = 0 - 9223372036854775807 - 1; }
+    if (next).max_val > (prev).max_val { hi = 9223372036854775807; }
+    return Ok(Interval { min_val: lo, max_val: hi });
+}

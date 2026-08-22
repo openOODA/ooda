@@ -1,0 +1,147 @@
+// # PostgreSQL v3 wire packet adversarial suite
+//
+// Logline: Encodes then parses StartupMessage Q T D C Z and rejects hostile lengths.
+//
+// Setup: Pure. Imports pg_wire_packet modules. Run from ooda/.
+//
+// Beats:
+//   1. Encode and parse each named v3 message.
+//   2. Reject length under 4 and over 65536.
+//   3. Reject a truncated body.
+
+import "std/db_wire/pg_wire_packet_body.oo";
+
+fn need(flag: Int, err: String, bytes: List[Int], msg: String) -> List[Int] {
+    if flag < 1 {
+        println("FAIL " + msg + ": " + err);
+        process_exit(1);
+    }
+    return bytes;
+}
+
+fn bstr(s: String) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < bytes_len(s) {
+        o = list_push(o, byte_at(s, i));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn hdr(typ: Int, a: Int, b: Int, c: Int, d: Int) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    o = list_push(o, typ);
+    o = list_push(o, a);
+    o = list_push(o, b);
+    o = list_push(o, c);
+    o = list_push(o, d);
+    return o;
+}
+
+fn must_err(flag: Int, msg: String) {
+    if flag > 0 {
+        println("FAIL " + msg);
+        process_exit(1);
+    }
+}
+
+pub fn main() {
+    let st0: ByteOut = pg_wire_packet_startup(bstr("u"), bstr("d"));
+    let st: List[Int] = need(st0.flag, st0.err, st0.bytes, "startup");
+    let ps0: ByteOut = pg_wire_packet_parse(st);
+    let ps: List[Int] = need(ps0.flag, ps0.err, ps0.bytes, "parse startup");
+    if list_get(ps, 0) != 0 {
+        println("FAIL startup type");
+        process_exit(1);
+    }
+    if list_get(ps, 1) != 196608 {
+        println("FAIL proto");
+        process_exit(1);
+    }
+    let q0: ByteOut = pg_wire_packet_query(bstr("SELECT 1"));
+    let q: List[Int] = need(q0.flag, q0.err, q0.bytes, "query");
+    let pq0: ByteOut = pg_wire_packet_parse(q);
+    let pq: List[Int] = need(pq0.flag, pq0.err, pq0.bytes, "parse Q");
+    if list_get(pq, 0) != 81 {
+        println("FAIL Q");
+        process_exit(1);
+    }
+    let mut names: List[List[Int]] = list_new();
+    names = list_push(names, bstr("id"));
+    let t0: ByteOut = pg_wire_packet_row_desc(names);
+    let t: List[Int] = need(t0.flag, t0.err, t0.bytes, "T");
+    let pt0: ByteOut = pg_wire_packet_parse(t);
+    let pt: List[Int] = need(pt0.flag, pt0.err, pt0.bytes, "parse T");
+    if list_get(pt, 0) != 84 {
+        println("FAIL T");
+        process_exit(1);
+    }
+    if list_get(t, 20) != 255 {
+        println("FAIL typlen hi");
+        process_exit(1);
+    }
+    if list_get(t, 21) != 255 {
+        println("FAIL typlen lo");
+        process_exit(1);
+    }
+    if list_get(t, 22) != 255 {
+        println("FAIL typmod");
+        process_exit(1);
+    }
+    let mut fld: List[Int] = list_new();
+    fld = list_push(fld, 65);
+    let d0: ByteOut = pg_wire_packet_datarow(fld);
+    let d: List[Int] = need(d0.flag, d0.err, d0.bytes, "D");
+    let pd0: ByteOut = pg_wire_packet_parse(d);
+    let pd: List[Int] = need(pd0.flag, pd0.err, pd0.bytes, "parse D");
+    if list_get(pd, 0) != 68 {
+        println("FAIL D");
+        process_exit(1);
+    }
+    let c0: ByteOut = pg_wire_packet_command_complete(bstr("SELECT 1"));
+    let c: List[Int] = need(c0.flag, c0.err, c0.bytes, "C");
+    let pc0: ByteOut = pg_wire_packet_parse(c);
+    let pc: List[Int] = need(pc0.flag, pc0.err, pc0.bytes, "parse C");
+    if list_get(pc, 0) != 67 {
+        println("FAIL C");
+        process_exit(1);
+    }
+    let z0: ByteOut = pg_wire_packet_ready(73);
+    let z: List[Int] = need(z0.flag, z0.err, z0.bytes, "Z");
+    let pz0: ByteOut = pg_wire_packet_parse(z);
+    let pz: List[Int] = need(pz0.flag, pz0.err, pz0.bytes, "parse Z");
+    if list_get(pz, 0) != 90 {
+        println("FAIL Z");
+        process_exit(1);
+    }
+    println("StartupMessage / Q / T / D / C / Z encode then parse");
+
+    let z4: ByteOut = pg_wire_packet_parse(hdr(90, 0, 0, 0, 4));
+    must_err(z4.flag, "Z len4 abort-or-ok");
+    let c4: ByteOut = pg_wire_packet_parse(hdr(67, 0, 0, 0, 4));
+    must_err(c4.flag, "C len4 abort-or-ok");
+    let q4: ByteOut = pg_wire_packet_parse(hdr(81, 0, 0, 0, 4));
+    must_err(q4.flag, "Q len4");
+    let mut qn: List[Int] = hdr(81, 0, 0, 0, 5);
+    qn = list_push(qn, 88);
+    let qnul: ByteOut = pg_wire_packet_parse(qn);
+    must_err(qnul.flag, "Q without NUL");
+    let big: ByteOut = pg_wire_packet_parse(hdr(90, 0, 1, 0, 1));
+    must_err(big.flag, "typed len 65537");
+    let lo: ByteOut = pg_wire_packet_parse(hdr(90, 0, 0, 0, 3));
+    must_err(lo.flag, "typed len 3");
+    println("len < 4 and len > 65536 are Err");
+
+    let mut trunc: List[Int] = list_new();
+    trunc = list_push(trunc, 81);
+    trunc = list_push(trunc, 0);
+    trunc = list_push(trunc, 0);
+    trunc = list_push(trunc, 0);
+    trunc = list_push(trunc, 10);
+    let tr: ByteOut = pg_wire_packet_parse(trunc);
+    must_err(tr.flag, "trunc");
+    println("truncated bodies are Err");
+    println("SUITE PASSED");
+    println("test_pg_wire_packet: PASSED");
+}

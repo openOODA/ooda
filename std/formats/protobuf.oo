@@ -1,0 +1,87 @@
+// # Protobuf Stream Parser & Field Query Engine
+//
+// Logline: Parses binary Protobuf message streams into structured field lists with tag routing and depth bounding.
+//
+// Setup: Pure binary wire parser providing type-safe field extraction with fail-closed validation.
+//
+// Beats:
+//   1. Parse binary Protobuf byte streams into ProtoMessage field tokens.
+//   2. Extract varint field values by field number with fail-closed type checking.
+//   3. Extract length-delimited byte arrays and string fields.
+//   4. Protect against recursive depth bombs with max_depth limits.
+
+import "./protobuf_types.oo";
+import "./protobuf_wire.oo";
+
+/// Parse binary Protobuf byte stream into ProtoMessage.
+pub fn proto_parse_message(bytes: List[Int]) -> Result[ProtoMessage, String] {
+    let total_len: Int = list_len(bytes);
+    let mut fields: List[ProtoField] = list_new();
+    let mut cursor: Int = 0;
+
+    while cursor < total_len {
+        let tag_res = proto_decode_varint(bytes, cursor);
+        match tag_res {
+            Ok(t_info) => {
+                cursor = cursor + t_info.bytes_read;
+                let tag: ProtoTag = proto_unpack_tag(t_info.val);
+                if tag.wire_type == 0 {
+                    // Varint
+                    let val_res = proto_decode_varint(bytes, cursor);
+                    match val_res {
+                        Ok(v_info) => {
+                            cursor = cursor + v_info.bytes_read;
+                            fields = list_push(fields, proto_field_varint(tag.field_num, v_info.val));
+                        }
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    }
+                } else if tag.wire_type == 2 {
+                    // Length-delimited
+                    let len_res = proto_decode_varint(bytes, cursor);
+                    match len_res {
+                        Ok(l_info) => {
+                            cursor = cursor + l_info.bytes_read;
+                            let plen: Int = l_info.val;
+                            if (cursor + plen) > total_len {
+                                return Err("ERR\tproto_parse: length-delimited payload truncated");
+                            }
+                            let mut payload: List[Int] = list_new();
+                            let mut p: Int = 0;
+                            while p < plen {
+                                payload = list_push(payload, list_get(bytes, cursor + p));
+                                p = p + 1;
+                            }
+                            cursor = cursor + plen;
+                            fields = list_push(fields, proto_field_bytes(tag.field_num, payload));
+                        }
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    return Err("ERR\tproto_parse: unsupported wire type");
+                }
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+    return Ok(ProtoMessage { fields: fields });
+}
+
+/// Get varint field value by field number.
+pub fn proto_get_field_varint(msg: &ProtoMessage, field_num: Int) -> Result[Int, String] {
+    let n: Int = list_len((msg).fields);
+    let mut i: Int = 0;
+    while i < n {
+        let f: ProtoField = list_get((msg).fields, i);
+        if (f).field_number == field_num && (f).wire_type == 0 {
+            return Ok((f).varint_val);
+        }
+        i = i + 1;
+    }
+    return Err("ERR\tproto_get: field not found: " + int_to_str(field_num));
+}

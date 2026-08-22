@@ -1,0 +1,237 @@
+// # BLS12-381 Fp multiply with 16-bit reduction
+//
+// Logline: Multiplies 12-limb field elements using 16-bit schoolbook and folds 2^384 through R mod p.
+//
+// Setup: Pure. Called from bls12_381_fp.oo. Limbs are little-endian 32-bit; products use 16-bit splits.
+//
+// Beats:
+//   1. Split each 32-bit limb into 16-bit halves.
+//   2. Schoolbook multiply to 48 16-bit limbs.
+//   3. Fold high limbs with 2^384 ≡ R.
+//   4. Pack and subtract p until the value is in 0..p-1.
+
+fn rd_p(i: Int) -> Int {
+    if i == 0 { return 4294945451; }
+    if i == 1 { return 3120496639; }
+    if i == 2 { return 2975072255; }
+    if i == 3 { return 514588670; }
+    if i == 4 { return 4138792484; }
+    if i == 5 { return 1731252896; }
+    if i == 6 { return 4085584575; }
+    if i == 7 { return 1685539716; }
+    if i == 8 { return 1129032919; }
+    if i == 9 { return 1260103606; }
+    if i == 10 { return 964683418; }
+    return 436277738;
+}
+
+fn rd_r16(j: Int) -> Int {
+    if j == 0 { return 196605 & 65535; }
+    if j == 1 { return (196605 >> 16) & 65535; }
+    if j == 2 { return 1980301312 & 65535; }
+    if j == 3 { return (1980301312 >> 16) & 65535; }
+    if j == 4 { return 3289120770 & 65535; }
+    if j == 5 { return (3289120770 >> 16) & 65535; }
+    if j == 6 { return 3958636555 & 65535; }
+    if j == 7 { return (3958636555 >> 16) & 65535; }
+    if j == 8 { return 1405573306 & 65535; }
+    if j == 9 { return (1405573306 >> 16) & 65535; }
+    if j == 10 { return 1598593111 & 65535; }
+    if j == 11 { return (1598593111 >> 16) & 65535; }
+    if j == 12 { return 1884444485 & 65535; }
+    if j == 13 { return (1884444485 >> 16) & 65535; }
+    if j == 14 { return 2010011731 & 65535; }
+    if j == 15 { return (2010011731 >> 16) & 65535; }
+    if j == 16 { return 2723605613 & 65535; }
+    if j == 17 { return (2723605613 >> 16) & 65535; }
+    if j == 18 { return 1543969431 & 65535; }
+    if j == 19 { return (1543969431 >> 16) & 65535; }
+    if j == 20 { return 4202751123 & 65535; }
+    if j == 21 { return (4202751123 >> 16) & 65535; }
+    if j == 22 { return 368467651 & 65535; }
+    return (368467651 >> 16) & 65535;
+}
+
+fn rd_u16(a: List[Int], i: Int) -> Int {
+    let v: Int = list_get(a, i / 2);
+    if (i & 1) == 0 {
+        return v & 65535;
+    }
+    return (v >> 16) & 65535;
+}
+
+fn rd_split(a: List[Int]) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 24 {
+        o = list_push(o, rd_u16(a, i));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn rd_mul16(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut carry: Int = 0;
+    let mut k: Int = 0;
+    while k < 48 {
+        let mut acc: Int = carry;
+        let mut i: Int = 0;
+        while i < 24 {
+            let j: Int = k - i;
+            if j >= 0 {
+                if j < 24 {
+                    acc = acc + list_get(a, i) * list_get(b, j);
+                }
+            }
+            i = i + 1;
+        }
+        out = list_push(out, acc & 65535);
+        carry = acc >> 16;
+        k = k + 1;
+    }
+    while carry > 0 {
+        out = list_push(out, carry & 65535);
+        carry = carry >> 16;
+    }
+    return out;
+}
+
+fn rd_highk(s: List[Int]) -> Int {
+    let mut k: Int = list_len(s) - 1;
+    while k >= 24 {
+        if list_get(s, k) != 0 {
+            return k;
+        }
+        k = k - 1;
+    }
+    return 0 - 1;
+}
+
+fn rd_fold1(s: List[Int], k: Int) -> List[Int] {
+    let coeff: Int = list_get(s, k);
+    let shift: Int = k - 24;
+    let n: Int = list_len(s);
+    let mut lim: Int = n;
+    let need: Int = 24 + shift + 2;
+    if need > lim {
+        lim = need;
+    }
+    let mut o: List[Int] = list_new();
+    let mut carry: Int = 0;
+    let mut i: Int = 0;
+    while i < lim {
+        let mut acc: Int = carry;
+        if i < n {
+            if i != k {
+                acc = acc + list_get(s, i);
+            }
+        }
+        let j: Int = i - shift;
+        if j >= 0 {
+            if j < 24 {
+                acc = acc + coeff * rd_r16(j);
+            }
+        }
+        o = list_push(o, acc & 65535);
+        carry = acc >> 16;
+        i = i + 1;
+    }
+    while carry > 0 {
+        o = list_push(o, carry & 65535);
+        carry = carry >> 16;
+    }
+    return o;
+}
+
+fn rd_fold(w: List[Int]) -> List[Int] {
+    let mut s: List[Int] = w;
+    let mut g: Int = 0;
+    while g < 200 {
+        let k: Int = rd_highk(s);
+        if k < 24 {
+            break;
+        }
+        s = rd_fold1(s, k);
+        g = g + 1;
+    }
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 24 {
+        if i < list_len(s) {
+            o = list_push(o, list_get(s, i));
+        } else {
+            o = list_push(o, 0);
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+fn rd_pack(u: List[Int]) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 12 {
+        o = list_push(o, (list_get(u, 2 * i) + (list_get(u, 2 * i + 1) << 16)) & 4294967295);
+        i = i + 1;
+    }
+    return o;
+}
+
+fn rd_ge(a: List[Int], b: List[Int]) -> Int {
+    let mut i: Int = 11;
+    while i >= 0 {
+        if list_get(a, i) > list_get(b, i) {
+            return 1;
+        }
+        if list_get(a, i) < list_get(b, i) {
+            return 0;
+        }
+        i = i - 1;
+    }
+    return 1;
+}
+
+fn rd_sub(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut br: Int = 0;
+    let mut i: Int = 0;
+    while i < 12 {
+        let mut t: Int = list_get(a, i) - list_get(b, i) - br;
+        if t < 0 {
+            t = t + 4294967296;
+            br = 1;
+        } else {
+            br = 0;
+        }
+        out = list_push(out, t & 4294967295);
+        i = i + 1;
+    }
+    return out;
+}
+
+fn rd_plist() -> List[Int] {
+    let mut p: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 12 {
+        p = list_push(p, rd_p(i));
+        i = i + 1;
+    }
+    return p;
+}
+
+pub fn bls12_381_fp_red_mul(a: List[Int], b: List[Int]) -> List[Int] {
+    let w: List[Int] = rd_mul16(rd_split(a), rd_split(b));
+    let mut s: List[Int] = rd_pack(rd_fold(w));
+    let p: List[Int] = rd_plist();
+    let mut k: Int = 0;
+    while k < 16 {
+        if rd_ge(s, p) > 0 {
+            s = rd_sub(s, p);
+        } else {
+            break;
+        }
+        k = k + 1;
+    }
+    return s;
+}

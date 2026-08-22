@@ -1,0 +1,236 @@
+// # Curve25519 Fp multiply and invert
+//
+// Logline: Multiplies 8-limb elements modulo 2^255-19 using 16-bit schoolbook and the 2^256 ≡ 38 fold.
+//
+// Setup: Pure. Called from ristretto_fp.oo. Limbs are little-endian 32-bit.
+//
+// Beats:
+//   1. Split limbs into 16-bit halves and schoolbook-multiply.
+//   2. Fold the high half by 38.
+//   3. Subtract p until the value is in 0..p-1.
+//   4. Invert by exponentiation to p-2.
+
+fn rr_p(i: Int) -> Int {
+    if i == 0 {
+        return 4294967277;
+    }
+    if i == 7 {
+        return 2147483647;
+    }
+    return 4294967295;
+}
+
+fn rr_plist() -> List[Int] {
+    let mut p: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 8 {
+        p = list_push(p, rr_p(i));
+        i = i + 1;
+    }
+    return p;
+}
+
+fn rr_u16(a: List[Int], i: Int) -> Int {
+    let v: Int = list_get(a, i / 2);
+    if (i & 1) == 0 {
+        return v & 65535;
+    }
+    return (v >> 16) & 65535;
+}
+
+fn rr_split(a: List[Int]) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 16 {
+        o = list_push(o, rr_u16(a, i));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn rr_mul16(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut carry: Int = 0;
+    let mut k: Int = 0;
+    while k < 32 {
+        let mut acc: Int = carry;
+        let mut i: Int = 0;
+        while i < 16 {
+            let j: Int = k - i;
+            if j >= 0 {
+                if j < 16 {
+                    acc = acc + list_get(a, i) * list_get(b, j);
+                }
+            }
+            i = i + 1;
+        }
+        out = list_push(out, acc & 65535);
+        carry = acc >> 16;
+        k = k + 1;
+    }
+    while carry > 0 {
+        out = list_push(out, carry & 65535);
+        carry = carry >> 16;
+    }
+    return out;
+}
+
+fn rr_add38(s: List[Int]) -> List[Int] {
+    let n: Int = list_len(s);
+    let mut o: List[Int] = list_new();
+    let mut carry: Int = 0;
+    let mut i: Int = 0;
+    while i < 16 {
+        let mut lo: Int = 0;
+        if i < n {
+            lo = list_get(s, i);
+        }
+        let mut hi: Int = 0;
+        if i + 16 < n {
+            hi = list_get(s, i + 16);
+        }
+        let acc: Int = lo + 38 * hi + carry;
+        o = list_push(o, acc & 65535);
+        carry = acc >> 16;
+        i = i + 1;
+    }
+    let mut k: Int = 32;
+    while carry > 0 {
+        let mut extra: Int = 0;
+        if k < n {
+            extra = list_get(s, k);
+        }
+        let acc2: Int = carry + 38 * extra;
+        o = list_push(o, acc2 & 65535);
+        carry = acc2 >> 16;
+        k = k + 1;
+    }
+    return o;
+}
+
+fn rr_high(s: List[Int]) -> Int {
+    let mut i: Int = 16;
+    while i < list_len(s) {
+        if list_get(s, i) != 0 {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn rr_fold(w: List[Int]) -> List[Int] {
+    let mut s: List[Int] = w;
+    let mut g: Int = 0;
+    while g < 8 {
+        if rr_high(s) < 1 {
+            break;
+        }
+        s = rr_add38(s);
+        g = g + 1;
+    }
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 16 {
+        if i < list_len(s) {
+            o = list_push(o, list_get(s, i));
+        } else {
+            o = list_push(o, 0);
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+fn rr_pack(u: List[Int]) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 8 {
+        o = list_push(o, (list_get(u, 2 * i) + (list_get(u, 2 * i + 1) << 16)) & 4294967295);
+        i = i + 1;
+    }
+    return o;
+}
+
+fn rr_ge(a: List[Int], b: List[Int]) -> Int {
+    let mut i: Int = 7;
+    while i >= 0 {
+        if list_get(a, i) > list_get(b, i) {
+            return 1;
+        }
+        if list_get(a, i) < list_get(b, i) {
+            return 0;
+        }
+        i = i - 1;
+    }
+    return 1;
+}
+
+fn rr_sub(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut br: Int = 0;
+    let mut i: Int = 0;
+    while i < 8 {
+        let mut t: Int = list_get(a, i) - list_get(b, i) - br;
+        if t < 0 {
+            t = t + 4294967296;
+            br = 1;
+        } else {
+            br = 0;
+        }
+        out = list_push(out, t & 4294967295);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn ristretto_fp_red_mul(a: List[Int], b: List[Int]) -> List[Int] {
+    let w: List[Int] = rr_mul16(rr_split(a), rr_split(b));
+    let mut s: List[Int] = rr_pack(rr_fold(w));
+    let p: List[Int] = rr_plist();
+    let mut k: Int = 0;
+    while k < 8 {
+        if rr_ge(s, p) > 0 {
+            s = rr_sub(s, p);
+        } else {
+            break;
+        }
+        k = k + 1;
+    }
+    return s;
+}
+
+pub fn ristretto_fp_red_one() -> List[Int] {
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 1);
+    let mut i: Int = 1;
+    while i < 8 {
+        o = list_push(o, 0);
+        i = i + 1;
+    }
+    return o;
+}
+
+pub fn ristretto_fp_red_inv(a: List[Int]) -> List[Int] {
+    let mut r: List[Int] = ristretto_fp_red_one();
+    let mut b: List[Int] = a;
+    let mut i: Int = 0;
+    while i < 255 {
+        let limb: Int = i / 32;
+        let bit: Int = i % 32;
+        let mut e: Int = 4294967275;
+        if limb == 7 {
+            e = 2147483647;
+        } else {
+            if limb > 0 {
+                e = 4294967295;
+            }
+        }
+        if ((e >> bit) & 1) == 1 {
+            r = ristretto_fp_red_mul(r, b);
+        }
+        b = ristretto_fp_red_mul(b, b);
+        i = i + 1;
+    }
+    return r;
+}

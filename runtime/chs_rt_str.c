@@ -74,6 +74,10 @@ long long oo_byte_at(OoStr s, long long idx) {
   return (long long)(unsigned char)s.data[idx];
 }
 
+long long oo_str_byte_at(OoStr s, long long idx) {
+  return oo_byte_at(s, idx);
+}
+
 /* Path A (M163): byte length alias of oo_str_byte_len. Not UTF-8 char count. */
 long long oo_bytes_len(OoStr s) { return oo_str_byte_len(s); }
 

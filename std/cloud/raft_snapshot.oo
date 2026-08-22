@@ -1,0 +1,133 @@
+// # Raft State Machine Snapshot & Compaction Engine
+//
+// Logline: Implements state machine snapshotting, chunked transfer, and log compaction for distributed Raft consensus.
+//
+// Setup: Pure consensus snapshot engine providing chunk serialization and fail-closed state validation.
+//
+// Beats:
+//   1. Define InstallSnapshotArgs and InstallSnapshotReply for peer state synchronization.
+//   2. Create verified state machine snapshots with integrity metadata.
+//   3. Partition snapshots into bounded byte chunks for network transport.
+//   4. Reassemble and validate incoming snapshot chunks before applying to state machine.
+
+pub type InstallSnapshotArgs = struct {
+    term: Int,
+    leader_id: String,
+    last_included_index: Int,
+    last_included_term: Int,
+    offset: Int,
+    data: String,
+    done: Bool
+};
+
+pub type InstallSnapshotReply = struct {
+    term: Int,
+    bytes_received: Int,
+    is_complete: Bool
+};
+
+pub type SnapshotData = struct {
+    last_index: Int,
+    last_term: Int,
+    state_payload: String,
+    checksum: Int
+};
+
+/// Calculate simple arithmetic checksum over a string payload.
+pub fn raft_calc_checksum(payload: String) -> Int {
+    let n: Int = payload.len();
+    let mut sum: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let code: Int = byte_at(payload, i);
+        sum = (sum * 31 + code + i) % 1000000007;
+        i = i + 1;
+    }
+    return sum;
+}
+
+/// Create a verified snapshot container from state machine payload.
+pub fn raft_snapshot_create(state_payload: String, last_index: Int, last_term: Int) -> Result[SnapshotData, String] {
+    if last_index < 0 || last_term < 0 {
+        return Err("ERR\traft_snapshot: negative index or term");
+    }
+    let ck: Int = raft_calc_checksum(state_payload);
+    return Ok(SnapshotData {
+        last_index: last_index,
+        last_term: last_term,
+        state_payload: state_payload,
+        checksum: ck
+    });
+}
+
+/// Verify integrity of snapshot data container.
+pub fn raft_snapshot_verify(snap: &SnapshotData) -> Result[Bool, String] {
+    if (snap).last_index < 0 || (snap).last_term < 0 {
+        return Err("ERR\traft_snapshot_verify: corrupted index or term");
+    }
+    let payload: String = (snap).state_payload;
+    let expected: Int = raft_calc_checksum(payload);
+    if expected != (snap).checksum {
+        return Err("ERR\traft_snapshot_verify: checksum mismatch");
+    }
+    return Ok(true);
+}
+
+/// Split snapshot payload into chunked InstallSnapshotArgs for network replication.
+pub fn raft_snapshot_split_chunks(snap: &SnapshotData, term: Int, leader_id: String, chunk_size: Int) -> List[InstallSnapshotArgs] {
+    let mut chunks: List[InstallSnapshotArgs] = list_new();
+    let payload: String = (snap).state_payload;
+    let total_len: Int = payload.len();
+    if chunk_size <= 0 || total_len == 0 {
+        let single: InstallSnapshotArgs = InstallSnapshotArgs {
+            term: term,
+            leader_id: leader_id,
+            last_included_index: (snap).last_index,
+            last_included_term: (snap).last_term,
+            offset: 0,
+            data: payload,
+            done: true
+        };
+        chunks = list_push(chunks, single);
+        return chunks;
+    }
+    let mut offset: Int = 0;
+    while offset < total_len {
+        let mut rem: Int = total_len - offset;
+        let mut take: Int = chunk_size;
+        if rem < take {
+            take = rem;
+        }
+        let chunk_data: String = str_slice(payload, offset, offset + take);
+        let is_done: Bool = (offset + take) >= total_len;
+        let arg: InstallSnapshotArgs = InstallSnapshotArgs {
+            term: term,
+            leader_id: leader_id,
+            last_included_index: (snap).last_index,
+            last_included_term: (snap).last_term,
+            offset: offset,
+            data: chunk_data,
+            done: is_done
+        };
+        chunks = list_push(chunks, arg);
+        offset = offset + take;
+    }
+    return chunks;
+}
+
+/// Apply received snapshot chunk to snapshot container.
+pub fn raft_snapshot_apply_chunk(snap: &mut SnapshotData, chunk: &InstallSnapshotArgs, cur_term: Int) -> Result[InstallSnapshotReply, String] {
+    if (chunk).term < cur_term {
+        return Err("ERR\traft_snapshot_apply: stale term");
+    }
+    let cur_p: String = (snap).state_payload;
+    let chunk_d: String = (chunk).data;
+    let new_p: String = cur_p + chunk_d;
+    (snap).state_payload = new_p;
+    let total_bytes: Int = new_p.len();
+    return Ok(InstallSnapshotReply {
+        term: cur_term,
+        bytes_received: total_bytes,
+        is_complete: (chunk).done
+    });
+}

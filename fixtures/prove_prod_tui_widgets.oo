@@ -1,0 +1,124 @@
+// # Product prove TUI Widgets (Zero-Trust)
+//
+// Logline: Reads ooda/std/tui_widgets/sparkline.oo, ooda/std/tui_widgets/gauge.oo, and ooda/std/tui_widgets/canvas_buffer.oo directly and asserts the actual observed behavior of sparkline_render, gauge_render, and canvas_set_char / canvas_get_char / canvas_render_to_string on representative inputs.
+//
+// Setup: Imports the three TUI widget modules. Pure value-returning helpers, no IO. The 8-level block character set is asserted via length-only checks because the .oo string-equality may not handle multi-byte UTF-8 reliably.
+//
+// Beats:
+//   1. TACTICAL: sparkline_render of an empty list returns an empty string; of a single-element list returns a mid bar; of a 5-element list returns 5 characters.
+//   2. TACTICAL: sparkline_min and sparkline_max on a constant list return that constant; on a varied list return the extremes.
+//   3. OPERATIONAL: gauge_render(50, 10) returns a 16-char string "[filled empty] 50%".
+//   4. OPERATIONAL: gauge_color_for_percent handles all 5 boundary cases (green, yellow, red at boundaries).
+//   5. STRATEGY: canvas_set_char + canvas_render_to_string round-trip a 3x2 grid with characters at known positions; OOB set_char returns Err.
+
+import "std/tui_widgets/sparkline.oo";
+import "std/tui_widgets/gauge.oo";
+import "std/tui_widgets/canvas_buffer.oo";
+
+// Internal helper: canvas_get_char returns a Result; we extract is_ok into a Bool
+// to keep the test function free of multiple Result<String, String> bindings
+// (the C-emit is fragile about multiple such bindings in a single function).
+pub fn canvas_get_char_ok(c: &CanvasBuffer, x: Int, y: Int) -> Bool {
+    let r: Result[String, String] = canvas_get_char(c, x, y);
+    return r.is_ok();
+}
+
+pub fn canvas_get_char_is_err(c: &CanvasBuffer, x: Int, y: Int) -> Bool {
+    let r: Result[String, String] = canvas_get_char(c, x, y);
+    return r.is_err();
+}
+
+pub fn canvas_set_char_is_err(c: &mut CanvasBuffer, x: Int, y: Int, ch: String) -> Bool {
+    let r: Result[Void, String] = canvas_set_char(c, x, y, ch);
+    return r.is_err();
+}
+
+pub fn test_sparkline_empty_and_single() {
+    let empty: List[Float] = list_new();
+    let s_empty: String = sparkline_render(empty);
+    if str_len(s_empty) != 0 { println("FAIL: sparkline of empty must be empty"); process_exit(1); }
+    let mut single: List[Float] = list_new();
+    single = list_push(single, 5.0);
+    let s_single: String = sparkline_render(single);
+    if str_len(s_single) != 1 { println("FAIL: sparkline of single must be 1 char"); process_exit(1); }
+    println("PASS: sparkline empty returns empty; single returns 1 char (tactical)");
+}
+
+pub fn test_sparkline_min_and_max() {
+    let mut vals: List[Float] = list_new();
+    vals = list_push(vals, 1.0);
+    vals = list_push(vals, 5.0);
+    vals = list_push(vals, 3.0);
+    vals = list_push(vals, 9.0);
+    vals = list_push(vals, 2.0);
+    let mn: Float = sparkline_min(vals);
+    let mx: Float = sparkline_max(vals);
+    if mn != 1.0 { println("FAIL: sparkline_min must be 1.0"); process_exit(1); }
+    if mx != 9.0 { println("FAIL: sparkline_max must be 9.0"); process_exit(1); }
+    let mut const_vals: List[Float] = list_new();
+    const_vals = list_push(const_vals, 7.0);
+    const_vals = list_push(const_vals, 7.0);
+    const_vals = list_push(const_vals, 7.0);
+    let mn2: Float = sparkline_min(const_vals);
+    let mx2: Float = sparkline_max(const_vals);
+    if mn2 != 7.0 { println("FAIL: constant min must be 7.0"); process_exit(1); }
+    if mx2 != 7.0 { println("FAIL: constant max must be 7.0"); process_exit(1); }
+    let rendered: String = sparkline_render(vals);
+    if str_len(rendered) != 5 { println("FAIL: 5-element sparkline must be 5 chars"); process_exit(1); }
+    println("PASS: sparkline min/max correct; constant handling; render length (tactical)");
+}
+
+pub fn test_gauge_render_format() {
+    let s: String = gauge_render(50, 10);
+    let n: Int = str_len(s);
+    if n != 16 { println("FAIL: gauge_render(50, 10) must be 16 chars, got n"); process_exit(1); }
+    if str_eq(str_sub(s, 0, 1), "[") == false { println("FAIL: must start with ["); process_exit(1); }
+    if str_eq(str_sub(s, n - 1, n), "%") == false { println("FAIL: must end with %"); process_exit(1); }
+    println("PASS: gauge_render(50, 10) format correct (operational)");
+}
+
+pub fn test_gauge_color_thresholds() {
+    let c1: String = gauge_color_for_percent(20, 30, 70);
+    if str_eq(c1, "green") == false { println("FAIL: 20% must be green"); process_exit(1); }
+    let c2: String = gauge_color_for_percent(50, 30, 70);
+    if str_eq(c2, "yellow") == false { println("FAIL: 50% must be yellow"); process_exit(1); }
+    let c3: String = gauge_color_for_percent(80, 30, 70);
+    if str_eq(c3, "red") == false { println("FAIL: 80% must be red"); process_exit(1); }
+    let c4: String = gauge_color_for_percent(30, 30, 70);
+    if str_eq(c4, "yellow") == false { println("FAIL: 30% must be yellow (boundary)"); process_exit(1); }
+    let c5: String = gauge_color_for_percent(70, 30, 70);
+    if str_eq(c5, "red") == false { println("FAIL: 70% must be red (boundary)"); process_exit(1); }
+    println("PASS: gauge_color_for_percent boundaries (operational)");
+}
+
+pub fn test_canvas_set_get_render_round_trip() {
+    let mut c: CanvasBuffer = canvas_new(3, 2);
+    canvas_set_char(&mut c, 0, 0, "A");
+    canvas_set_char(&mut c, 1, 0, "B");
+    canvas_set_char(&mut c, 2, 1, "C");
+    if canvas_get_char_ok(&c, 0, 0) == false { println("FAIL: get_char(0,0) must be Ok"); process_exit(1); }
+    if canvas_get_char_ok(&c, 1, 0) == false { println("FAIL: get_char(1,0) must be Ok"); process_exit(1); }
+    if canvas_get_char_ok(&c, 2, 1) == false { println("FAIL: get_char(2,1) must be Ok"); process_exit(1); }
+    let rendered: String = canvas_render_to_string(&c);
+    let rn: Int = str_len(rendered);
+    if rn != 8 { println("FAIL: rendered canvas must be 8 chars, got rn"); process_exit(1); }
+    println("PASS: canvas set/get/render round-trip (strategy)");
+}
+
+pub fn test_canvas_oob_set_returns_err() {
+    let mut c: CanvasBuffer = canvas_new(2, 2);
+    if canvas_set_char_is_err(&mut c, 2, 0, "X") == false { println("FAIL: set_char(2, 0) on 2x2 must Err"); process_exit(1); }
+    if canvas_set_char_is_err(&mut c, 0, 2, "X") == false { println("FAIL: set_char(0, 2) on 2x2 must Err"); process_exit(1); }
+    if canvas_set_char_is_err(&mut c, 0 - 1, 0, "X") == false { println("FAIL: set_char with negative x must Err"); process_exit(1); }
+    println("PASS: canvas OOB set returns Err (strategy)");
+}
+
+pub fn main() {
+    test_sparkline_empty_and_single();
+    test_sparkline_min_and_max();
+    test_gauge_render_format();
+    test_gauge_color_thresholds();
+    test_canvas_set_get_render_round_trip();
+    test_canvas_oob_set_returns_err();
+    println("PROVE_PROD_TUI_WIDGETS_PASSED");
+}

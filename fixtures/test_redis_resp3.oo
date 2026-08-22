@@ -1,0 +1,110 @@
+// # RESP3 adversarial suite
+//
+// Logline: Roundtrips + - : $ * % and rejects depth 17 plus unterminated chunks with the exact syntax error.
+//
+// Setup: Pure. Imports redis_resp3.oo. Run from ooda/.
+//
+// Beats:
+//   1. Encode then parse each RESP3 type.
+//   2. Nest arrays to depth 17 and require Err.
+//   3. Parse an unterminated simple string as resp3 syntax error.
+
+import "std/database/redis_resp3.oo";
+
+fn need(flag: Int, err: String, bytes: List[Int], msg: String) -> List[Int] {
+    if flag < 1 {
+        println("FAIL " + msg + ": " + err);
+        process_exit(1);
+    }
+    return bytes;
+}
+
+fn bstr(s: String) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < bytes_len(s) {
+        o = list_push(o, byte_at(s, i));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn parse_ok(buf: List[Int], msg: String) {
+    let o: ByteOut = redis_resp3_parse_bytes(buf);
+    let f: Int = o.flag;
+    if f < 1 {
+        println("FAIL " + msg + ": " + o.err);
+        process_exit(1);
+    }
+}
+
+pub fn main() {
+    let e1: ByteOut = redis_resp3_simple(bstr("OK"));
+    let p: List[Int] = need(e1.flag, e1.err, e1.bytes, "+");
+    parse_ok(p, "parse +");
+    let e2: ByteOut = redis_resp3_error(bstr("ERR x"));
+    let m: List[Int] = need(e2.flag, e2.err, e2.bytes, "-");
+    parse_ok(m, "parse -");
+    let e3: ByteOut = redis_resp3_int(42);
+    let n: List[Int] = need(e3.flag, e3.err, e3.bytes, ":");
+    parse_ok(n, "parse :");
+    let e4: ByteOut = redis_resp3_bulk(bstr("hello"));
+    let b: List[Int] = need(e4.flag, e4.err, e4.bytes, "$");
+    parse_ok(b, "parse $");
+    let e5: ByteOut = redis_resp3_int(1);
+    let one: List[Int] = need(e5.flag, e5.err, e5.bytes, ":1");
+    let e6: ByteOut = redis_resp3_array_n(1, one);
+    let arr: List[Int] = need(e6.flag, e6.err, e6.bytes, "*");
+    parse_ok(arr, "parse *");
+    let e7: ByteOut = redis_resp3_simple(bstr("a"));
+    let k: List[Int] = need(e7.flag, e7.err, e7.bytes, "k");
+    let e8: ByteOut = redis_resp3_simple(bstr("b"));
+    let v: List[Int] = need(e8.flag, e8.err, e8.bytes, "v");
+    let kv: List[Int] = redis_resp3_join(k, v);
+    let e9: ByteOut = redis_resp3_map_n(1, kv);
+    let mp: List[Int] = need(e9.flag, e9.err, e9.bytes, "%");
+    parse_ok(mp, "parse %");
+    println("+ - : $ * % roundtrip");
+
+    let leaf: ByteOut = redis_resp3_int(1);
+    let mut nest: List[Int] = need(leaf.flag, leaf.err, leaf.bytes, "leaf");
+    let mut d: Int = 0;
+    while d < 17 {
+        let w: ByteOut = redis_resp3_array_n(1, nest);
+        nest = need(w.flag, w.err, w.bytes, "nest");
+        d = d + 1;
+    }
+    let deep: ByteOut = redis_resp3_parse_bytes(nest);
+    let df: Int = deep.flag;
+    if df > 0 {
+        println("FAIL depth 17 not err");
+        process_exit(1);
+    }
+    println("nested depth 17 is Err");
+
+    let mut raw: List[Int] = list_new();
+    raw = list_push(raw, 43);
+    raw = list_push(raw, 79);
+    raw = list_push(raw, 75);
+    let st: Result[Int, String] = redis_resp3_parse_status(raw);
+    if st.is_ok() {
+        println("FAIL unterminated ok");
+        process_exit(1);
+    }
+    match st {
+        Ok(x) => {
+            println("FAIL ok arm " + x.to_string());
+            process_exit(1);
+        },
+        Err(e) => {
+            if e == "resp3 syntax error" {
+                println("unterminated input is exactly Err(resp3 syntax error)");
+            } else {
+                println("FAIL err " + e);
+                process_exit(1);
+            }
+        }
+    }
+    println("SUITE PASSED");
+    println("test_redis_resp3: PASSED");
+}

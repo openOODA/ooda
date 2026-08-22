@@ -1,0 +1,86 @@
+// # Zero-Trust LEB128 Safe Encoder
+//
+// Logline: Variable-length LEB128 (Little Endian Base 128) unsigned and signed integer encoder with explicit bounds checks; returns Result[T, String] with fail-closed logic on every operation. This is the safe, validation-first variant; the bare leb128.oo module is faster but does not validate inputs.
+//
+// Setup: Pure value-returning helpers, no IO. Decimal literals in place of hex because the .oo lexer does not accept 0xNN. Max output length is 10 bytes (covers u64).
+//
+// Beats:
+//   1. Validate v in range [0, 2^63-1] for u64; Err on negative.
+//   2. Encode 7 bits at a time with the continuation bit set until the last byte.
+//   3. i64 sign-extension encoding via zigzag on the sign bit.
+//   4. Decoder validates each byte is in [0, 255] and stops on continuation bit clear.
+
+import "std/core/str.oo";
+
+pub fn leb128_safe_max_bytes() -> Int { return 10; }
+pub fn leb128_safe_continuation_bit() -> Int { return 128; }
+pub fn leb128_safe_value_mask() -> Int { return 127; }
+
+pub fn leb128_safe_encode_u64(v: Int) -> Result[List[Int], String] {
+    if v < 0 { return Err("E_LEB128_NEGATIVE"); }
+    let mut out: List[Int] = list_new();
+    let mut work: Int = v;
+    let mut i: Int = 0;
+    while i < leb128_safe_max_bytes() {
+        let mut b: Int = work & leb128_safe_value_mask();
+        work = work / 128;
+        if work != 0 { b = b | leb128_safe_continuation_bit(); }
+        if b < 0 || b > 255 { return Err("E_LEB128_BYTE_OOB"); }
+        out = list_push(out, b);
+        if work == 0 { return Ok(out); }
+        i = i + 1;
+    }
+    if work != 0 { return Err("E_LEB128_OVERFLOW"); }
+    return Ok(out);
+}
+
+pub fn leb128_safe_encode_i64(v: Int) -> Result[List[Int], String] {
+    let mut work: Int = v;
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < leb128_safe_max_bytes() {
+        let b: Int = work & leb128_safe_value_mask();
+        work = work / 128;
+        let sign_bit: Int = b & 64;
+        if (work == 0 && sign_bit == 0) || (work == 0 - 1 && sign_bit != 0) {
+            if b < 0 || b > 255 { return Err("E_LEB128_BYTE_OOB"); }
+            out = list_push(out, b);
+            return Ok(out);
+        } else {
+            let with_cont: Int = b | leb128_safe_continuation_bit();
+            if with_cont < 0 || with_cont > 255 { return Err("E_LEB128_BYTE_OOB"); }
+            out = list_push(out, with_cont);
+        }
+        i = i + 1;
+    }
+    return Err("E_LEB128_OVERFLOW");
+}
+
+pub fn leb128_safe_decode_u64(bytes: List[Int]) -> Result[Int, String] {
+    let n: Int = list_len(bytes);
+    if n == 0 { return Err("E_LEB128_EMPTY"); }
+    if n > leb128_safe_max_bytes() { return Err("E_LEB128_TOO_LONG"); }
+    let mut result: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let b: Int = list_get(bytes, i);
+        if b < 0 || b > 255 { return Err("E_LEB128_BYTE_OOB"); }
+        let low7: Int = b & leb128_safe_value_mask();
+        let shift: Int = i * 7;
+        result = result | (low7 * pow2_safe(shift));
+        if (b & leb128_safe_continuation_bit()) == 0 { return Ok(result); }
+        i = i + 1;
+    }
+    return Err("E_LEB128_TRUNCATED");
+}
+
+pub fn pow2_safe(n: Int) -> Int {
+    let mut v: Int = 1;
+    let mut i: Int = 0;
+    while i < n {
+        v = v * 2;
+        i = i + 1;
+    }
+    return v;
+}
+

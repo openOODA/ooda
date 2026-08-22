@@ -1,0 +1,131 @@
+// # QUIC & HTTP/3 Variable-Length Integer (Varint) Codec
+//
+// Logline: Implements RFC 9000 2-bit prefix variable-length integer encoding and decoding for QUIC transport frames.
+//
+// Setup: Pure network encoding engine providing fail-closed byte parsing across 1, 2, 4, and 8-byte integers.
+//
+// Beats:
+//   1. Encode 64-bit unsigned values into 1, 2, 4, or 8 byte prefix-tagged buffers.
+//   2. Decode variable-length integers from raw byte sequences with offset advancement.
+//   3. Validate length boundaries and buffer bounds to prevent truncation bugs.
+//   4. Calculate exact encoded byte length for buffer allocation planning.
+
+pub type VarintDecode = struct {
+    value: Int,
+    bytes_consumed: Int
+};
+
+/// Calculate required encoded byte length for a given integer value.
+pub fn varint_encoded_len(val: Int) -> Int {
+    if val < 64 {
+        return 1;
+    }
+    if val < 16384 {
+        return 2;
+    }
+    if val < 1073741824 {
+        return 4;
+    }
+    return 8;
+}
+
+/// Encode integer into RFC 9000 variable-length byte list.
+pub fn varint_encode(val: Int) -> Result[List[Int], String] {
+    if val < 0 {
+        return Err("ERR\tvarint_encode: negative value prohibited");
+    }
+    let mut buf: List[Int] = list_new();
+    if val < 64 {
+        buf = list_push(buf, val);
+        return Ok(buf);
+    }
+    if val < 16384 {
+        // 2-byte: prefix 01 (0x40)
+        let b0: Int = 64 | ((val >> 8) & 63);
+        let b1: Int = val & 255;
+        buf = list_push(buf, b0);
+        buf = list_push(buf, b1);
+        return Ok(buf);
+    }
+    if val < 1073741824 {
+        // 4-byte: prefix 10 (0x80)
+        let b0: Int = 128 | ((val >> 24) & 63);
+        let b1: Int = (val >> 16) & 255;
+        let b2: Int = (val >> 8) & 255;
+        let b3: Int = val & 255;
+        buf = list_push(buf, b0);
+        buf = list_push(buf, b1);
+        buf = list_push(buf, b2);
+        buf = list_push(buf, b3);
+        return Ok(buf);
+    }
+    // 8-byte: prefix 11 (0xC0)
+    let b0: Int = 192 | ((val >> 56) & 63);
+    buf = list_push(buf, b0);
+    buf = list_push(buf, (val >> 48) & 255);
+    buf = list_push(buf, (val >> 40) & 255);
+    buf = list_push(buf, (val >> 32) & 255);
+    buf = list_push(buf, (val >> 24) & 255);
+    buf = list_push(buf, (val >> 16) & 255);
+    buf = list_push(buf, (val >> 8) & 255);
+    buf = list_push(buf, val & 255);
+    return Ok(buf);
+}
+
+/// Decode RFC 9000 variable-length integer from byte buffer at offset.
+pub fn varint_decode(buf: List[Int], offset: Int) -> Result[VarintDecode, String] {
+    let total_len: Int = list_len(buf);
+    if offset >= total_len {
+        return Err("ERR\tvarint_decode: unexpected EOF");
+    }
+    let first: Int = list_get(buf, offset);
+    let tag: Int = (first >> 6) & 3;
+    if tag == 0 {
+        return Ok(VarintDecode {
+            value: first & 63,
+            bytes_consumed: 1
+        });
+    }
+    if tag == 1 {
+        if (offset + 2) > total_len {
+            return Err("ERR\tvarint_decode: buffer truncated for 2-byte varint");
+        }
+        let b1: Int = list_get(buf, offset + 1);
+        let val: Int = ((first & 63) << 8) | b1;
+        return Ok(VarintDecode {
+            value: val,
+            bytes_consumed: 2
+        });
+    }
+    if tag == 2 {
+        if (offset + 4) > total_len {
+            return Err("ERR\tvarint_decode: buffer truncated for 4-byte varint");
+        }
+        let b1: Int = list_get(buf, offset + 1);
+        let b2: Int = list_get(buf, offset + 2);
+        let b3: Int = list_get(buf, offset + 3);
+        let val: Int = ((first & 63) << 24) | (b1 << 16) | (b2 << 8) | b3;
+        return Ok(VarintDecode {
+            value: val,
+            bytes_consumed: 4
+        });
+    }
+    // tag == 3 (8 bytes)
+    if (offset + 8) > total_len {
+        return Err("ERR\tvarint_decode: buffer truncated for 8-byte varint");
+    }
+    let b1: Int = list_get(buf, offset + 1);
+    let b2: Int = list_get(buf, offset + 2);
+    let b3: Int = list_get(buf, offset + 3);
+    let b4: Int = list_get(buf, offset + 4);
+    let b5: Int = list_get(buf, offset + 5);
+    let b6: Int = list_get(buf, offset + 6);
+    let b7: Int = list_get(buf, offset + 7);
+    let val_hi: Int = ((first & 63) << 24) | (b1 << 16) | (b2 << 8) | b3;
+    let val_lo: Int = (b4 << 24) | (b5 << 16) | (b6 << 8) | b7;
+    let val: Int = (val_hi << 32) | val_lo;
+    return Ok(VarintDecode {
+        value: val,
+        bytes_consumed: 8
+    });
+}

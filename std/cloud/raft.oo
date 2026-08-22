@@ -1,0 +1,112 @@
+// # Sovereign Raft Distributed Consensus Engine
+//
+// Logline: Unified distributed consensus engine providing leader election, log replication, and snapshot transfers.
+//
+// Setup: Pure consensus coordinator with monotonic term transitions and fail-closed quorum evaluation.
+//
+// Beats:
+//   1. Instantiate multi-node Raft state machine with peer discovery.
+//   2. Coordinate heartbeat ticks, election timeouts, and role transitions.
+//   3. Process and replicate command proposals through majority quorum commit.
+//   4. Coordinate snapshot creation and peer state machine synchronization.
+
+import "./raft_state.oo";
+import "./raft_log.oo";
+import "./raft_snapshot.oo";
+
+pub type RaftNode = struct {
+    state: RaftNodeState,
+    log: RaftLog,
+    peers: List[String],
+    votes_received: Int,
+    cluster_size: Int,
+    last_snapshot_index: Int,
+    last_snapshot_term: Int,
+    snapshot_payload: String
+};
+
+/// Initialize a new sovereign Raft node instance.
+pub fn raft_node_new(node_id: String, peers: List[String], election_timeout_ms: Int) -> Result[RaftNode, String] {
+    if node_id.len() == 0 {
+        return Err("ERR\traft_node_new: empty node_id");
+    }
+    let st: RaftNodeState = raft_state_new(node_id, election_timeout_ms);
+    let lg: RaftLog = raft_log_new();
+    let num_peers: Int = list_len(peers);
+    return Ok(RaftNode {
+        state: st,
+        log: lg,
+        peers: peers,
+        votes_received: 0,
+        cluster_size: num_peers + 1,
+        last_snapshot_index: 0,
+        last_snapshot_term: 0,
+        snapshot_payload: ""
+    });
+}
+
+/// Advance node timer and trigger election if timeout elapsed in Follower or Candidate role.
+pub fn raft_node_tick(node: &mut RaftNode, elapsed_ms: Int) -> Result[Int, String] {
+    if elapsed_ms < 0 {
+        return Err("ERR\traft_node_tick: negative elapsed time");
+    }
+    let current_role: Int = ((node).state).role;
+    let next_heard: Int = ((node).state).last_heard_ms + elapsed_ms;
+    (node).state = RaftNodeState {
+        node_id: ((node).state).node_id,
+        current_term: ((node).state).current_term,
+        voted_for: ((node).state).voted_for,
+        role: ((node).state).role,
+        leader_id: ((node).state).leader_id,
+        election_timeout_ms: ((node).state).election_timeout_ms,
+        heartbeat_timeout_ms: ((node).state).heartbeat_timeout_ms,
+        last_heard_ms: next_heard
+    };
+    if current_role != 2 && next_heard >= ((node).state).election_timeout_ms {
+        (node).state = raft_state_start_election((node).state);
+        (node).votes_received = 1;
+        let majority: Int = ((node).cluster_size / 2) + 1;
+        if (node).votes_received >= majority {
+            (node).state = raft_state_become_leader((node).state);
+        }
+        return Ok(((node).state).current_term);
+    }
+    return Ok(((node).state).current_term);
+}
+
+/// Propose a command to be replicated by the leader.
+pub fn raft_node_propose(node: &mut RaftNode, command: String) -> Result[Int, String] {
+    if ((node).state).role != 2 {
+        return Err("ERR\traft_node_propose: not the cluster leader");
+    }
+    let term: Int = ((node).state).current_term;
+    let next_idx: Int = raft_log_append(&mut (node).log, term, command);
+    return Ok(next_idx);
+}
+
+/// Check if node is the cluster leader.
+pub fn raft_node_is_leader(node: &RaftNode) -> Bool { return ((node).state).role == 2; }
+
+/// Create a verified snapshot and truncate old log entries.
+pub fn raft_node_take_snapshot(node: &mut RaftNode, payload: String, last_index: Int) -> Result[Bool, String] {
+    if last_index < 0 {
+        return Err("ERR\traft_node_take_snapshot: invalid index");
+    }
+    let term: Int = ((node).state).current_term;
+    let snap_res: Result[SnapshotData, String] = raft_snapshot_create(payload, last_index, term);
+    match snap_res {
+        Ok(snap) => {
+            (node).last_snapshot_index = last_index;
+            (node).last_snapshot_term = term;
+            (node).snapshot_payload = payload;
+            let ok_trunc: Bool = raft_log_truncate_from(&mut (node).log, last_index);
+            if !ok_trunc {
+                return Err("ERR\traft_node_take_snapshot: truncation failed");
+            }
+            return Ok(true);
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}

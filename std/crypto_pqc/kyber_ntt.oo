@@ -1,0 +1,199 @@
+// # Kyber incomplete NTT in Z_3329[X]/(X^256+1)
+//
+// Logline: Runs seven Cooley-Tukey and Gentleman-Sande layers so INTT(NTT(P)) recovers P modulo 3329.
+//
+// Setup: Pure. q is 3329. 17 is a primitive 256-th root of unity. Zetas are 17^{bitrev7(i)}. Length other than 256 is Err.
+//
+// Beats:
+//   1. Build 128 zetas with 7-bit reversal.
+//   2. Forward butterflies from length 128 down to 2.
+//   3. Inverse butterflies from length 2 up to 128, then scale by 128^{-1}=3303.
+//   4. Return the full coefficient list so inverse consumes live NTT output.
+
+pub type KyberOut = struct {
+    flag: Int,
+    err: String,
+    n: Int,
+    c0: Int,
+    c1: Int,
+    c127: Int,
+    c255: Int,
+    coeffs: List[Int]
+};
+
+fn ky_err(m: String) -> KyberOut {
+    return KyberOut { flag: 0, err: "ERR\tkyber: " + m, n: 0, c0: 0, c1: 0, c127: 0, c255: 0, coeffs: list_new() };
+}
+
+fn ky_mod(a: Int) -> Int {
+    let mut x: Int = a % 3329;
+    if x < 0 {
+        x = x + 3329;
+    }
+    return x;
+}
+
+fn ky_pow(e: Int) -> Int {
+    let mut r: Int = 1;
+    let mut b: Int = 17;
+    let mut n: Int = e;
+    while n > 0 {
+        if (n & 1) == 1 {
+            r = ky_mod(r * b);
+        }
+        b = ky_mod(b * b);
+        n = n / 2;
+    }
+    return r;
+}
+
+fn ky_br7(x: Int) -> Int {
+    let mut r: Int = 0;
+    let mut i: Int = 0;
+    while i < 7 {
+        if (x & (1 << i)) != 0 {
+            r = r + (1 << (6 - i));
+        }
+        i = i + 1;
+    }
+    return r;
+}
+
+fn ky_zetas() -> List[Int] {
+    let mut z: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 128 {
+        z = list_push(z, ky_pow(ky_br7(i)));
+        i = i + 1;
+    }
+    return z;
+}
+
+fn ky_box(c: List[Int]) -> KyberOut {
+    return KyberOut { flag: 1, err: "", n: 256, c0: list_get(c, 0), c1: list_get(c, 1), c127: list_get(c, 127), c255: list_get(c, 255), coeffs: c };
+}
+
+fn ky_fwd_layer(a: List[Int], len: Int, zetas: List[Int], k0: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        let block: Int = i / (2 * len);
+        let off: Int = i % (2 * len);
+        let zeta: Int = list_get(zetas, k0 + block);
+        if off < len {
+            let t: Int = ky_mod(zeta * list_get(a, i + len));
+            out = list_push(out, ky_mod(list_get(a, i) + t));
+        } else {
+            let t2: Int = ky_mod(zeta * list_get(a, i));
+            out = list_push(out, ky_mod(list_get(a, i - len) - t2));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn ky_inv_layer(a: List[Int], len: Int, zetas: List[Int], k0: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        let block: Int = i / (2 * len);
+        let off: Int = i % (2 * len);
+        let zeta: Int = list_get(zetas, k0 - block);
+        if off < len {
+            let t: Int = list_get(a, i);
+            let u: Int = list_get(a, i + len);
+            out = list_push(out, ky_mod(t + u));
+        } else {
+            let t2: Int = list_get(a, i - len);
+            let u2: Int = list_get(a, i);
+            out = list_push(out, ky_mod(zeta * ky_mod(u2 - t2)));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn kyber_ntt_fwd(p: List[Int]) -> KyberOut {
+    if list_len(p) != 256 {
+        return ky_err("n");
+    }
+    let zetas: List[Int] = ky_zetas();
+    let mut a: List[Int] = p;
+    let mut len: Int = 128;
+    let mut k0: Int = 1;
+    while len >= 2 {
+        a = ky_fwd_layer(a, len, zetas, k0);
+        k0 = k0 + (256 / (2 * len));
+        len = len / 2;
+    }
+    return ky_box(a);
+}
+
+pub fn kyber_ntt_inv(y: List[Int]) -> KyberOut {
+    if list_len(y) != 256 {
+        return ky_err("n");
+    }
+    let zetas: List[Int] = ky_zetas();
+    let mut a: List[Int] = y;
+    let mut len: Int = 2;
+    let mut k0: Int = 127;
+    while len <= 128 {
+        a = ky_inv_layer(a, len, zetas, k0);
+        k0 = k0 - (256 / (2 * len));
+        len = len * 2;
+    }
+    let mut out: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        out = list_push(out, ky_mod(list_get(a, i) * 3303));
+        i = i + 1;
+    }
+    return ky_box(out);
+}
+
+pub fn kyber_ntt_roundtrip(poly: List[Int]) -> KyberOut {
+    let y: KyberOut = kyber_ntt_fwd(poly);
+    if y.flag < 1 {
+        return y;
+    }
+    let yc: List[Int] = y.coeffs;
+    let z: KyberOut = kyber_ntt_inv(yc);
+    if z.flag < 1 {
+        return z;
+    }
+    let zc: List[Int] = z.coeffs;
+    let mut i: Int = 0;
+    while i < 256 {
+        if list_get(zc, i) != list_get(poly, i) {
+            return ky_err("rt");
+        }
+        i = i + 1;
+    }
+    return z;
+}
+
+pub fn kyber_ntt_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}
+
+pub fn kyber_ntt_flag(o: KyberOut) -> Int {
+    return o.flag;
+}
+pub fn kyber_ntt_err(o: KyberOut) -> String {
+    return o.err;
+}
+pub fn kyber_ntt_c0(o: KyberOut) -> Int {
+    return o.c0;
+}
+pub fn kyber_ntt_c1(o: KyberOut) -> Int {
+    return o.c1;
+}
+pub fn kyber_ntt_c127(o: KyberOut) -> Int {
+    return o.c127;
+}
+pub fn kyber_ntt_c255(o: KyberOut) -> Int {
+    return o.c255;
+}

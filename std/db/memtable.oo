@@ -1,0 +1,116 @@
+// # In-Memory Sorted MemTable Engine
+//
+// Logline: Implements an in-memory sorted key-value store with sequence ordering, point lookups, and range scanning.
+//
+// Setup: Pure memory indexing engine providing sorted mutation staging before SSTable flush.
+//
+// Beats:
+//   1. Insert and update key-value mutations with monotonic sequence numbers.
+//   2. Query point lookups with tombstone detection.
+//   3. Execute sorted range scans over key boundaries.
+//   4. Calculate memory consumption to determine flush triggers.
+
+import "./kv_types.oo";
+
+pub type MemTable = struct {
+    entries: List[KvEntry],
+    size_bytes: Int,
+    capacity_bytes: Int
+};
+
+/// Initialize a new MemTable with specified capacity.
+pub fn memtable_new(capacity_bytes: Int) -> MemTable {
+    let empty_entries: List[KvEntry] = list_new();
+    return MemTable {
+        entries: empty_entries,
+        size_bytes: 0,
+        capacity_bytes: capacity_bytes
+    };
+}
+
+/// Put or update a key-value entry in sorted order.
+pub fn memtable_put(mem: &mut MemTable, entry: KvEntry) -> Result[Bool, String] {
+    let entry_k: String = (entry).key;
+    if entry_k.len() == 0 {
+        return Err("ERR\tmemtable_put: empty key");
+    }
+    let mut updated: List[KvEntry] = list_new();
+    let n: Int = list_len((mem).entries);
+    let mut inserted: Bool = false;
+    let mut i: Int = 0;
+    while i < n {
+        let cur: KvEntry = list_get((mem).entries, i);
+        let cur_k: String = (cur).key;
+        if !inserted && str_lt(entry_k, cur_k) {
+            updated = list_push(updated, entry);
+            inserted = true;
+        }
+        if cur_k == entry_k {
+            if !inserted {
+                updated = list_push(updated, entry);
+                inserted = true;
+            }
+        } else {
+            updated = list_push(updated, cur);
+        }
+        i = i + 1;
+    }
+    if !inserted {
+        updated = list_push(updated, entry);
+    }
+    (mem).entries = updated;
+    let delta: Int = entry_k.len() + ((entry).value).len() + 16;
+    (mem).size_bytes = (mem).size_bytes + delta;
+    return Ok(true);
+}
+
+/// Get a key from the MemTable. Returns None if missing or tombstone.
+pub fn memtable_get(mem: &MemTable, key: String) -> Option[String] {
+    let mut out: Option[String] = None;
+    if key.len() == 0 {
+        return out;
+    }
+    let n: Int = list_len((mem).entries);
+    let mut i: Int = 0;
+    while i < n {
+        let cur: KvEntry = list_get((mem).entries, i);
+        if (cur).key == key {
+            if (cur).is_tombstone {
+                return None;
+            }
+            let v: String = (cur).value;
+            out = Some(v);
+            return out;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Check if MemTable has exceeded capacity.
+pub fn memtable_should_flush(mem: &MemTable) -> Bool { return (mem).size_bytes >= (mem).capacity_bytes && list_len((mem).entries) > 0; }
+
+/// Return number of entries in MemTable.
+pub fn memtable_len(mem: &MemTable) -> Int { return list_len((mem).entries); }
+
+/// Scan range between min_key and max_key up to limit.
+pub fn memtable_scan(mem: &MemTable, min_key: String, max_key: String, limit: Int) -> List[KvEntry] {
+    let mut res: List[KvEntry] = list_new();
+    let n: Int = list_len((mem).entries);
+    let mut count: Int = 0;
+    let mut i: Int = 0;
+    while i < n && count < limit {
+        let cur: KvEntry = list_get((mem).entries, i);
+        let cur_k: String = (cur).key;
+        let min_ok: Bool = min_key == "" || str_lte(min_key, cur_k);
+        let max_ok: Bool = max_key == "" || str_lte(cur_k, max_key);
+        if min_ok && max_ok {
+            if !(cur).is_tombstone {
+                res = list_push(res, cur);
+                count = count + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return res;
+}

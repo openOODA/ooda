@@ -1,0 +1,85 @@
+// # Minimax Phase 3 Audit: Memory Allocator Fragmentation Stress
+//
+// Logline: Hostile probe that exercises the UndoRam transaction log under multi-transaction append, grouping, truncation, and clearing cycles.
+//
+// Setup: Pure .oo audit. Imports std/mem/txn_log.oo.
+//
+// Beats:
+//   1. Empty TxnLog initialization and count validation.
+//   2. Multi-entry append sequence across distinct transaction IDs.
+//   3. Transaction entry query filtering (txn_log_get_entries_for_txn).
+//   4. Forward log truncation from entry ID and full log clearing.
+
+import "std/mem/txn_log.oo";
+
+fn af_assert(label: String, ok: Bool) {
+    if ok == false {
+        println("FAIL: " + label);
+        process_exit(1);
+    }
+}
+
+// Step 1: empty log has count 0.
+fn test_empty_log() {
+    let log: TxnLog = txn_log_new();
+    let n: Int = txn_log_count(log);
+    af_assert("empty log count == 0", n == 0);
+}
+
+// Step 2: append grows the log by one entry per call with distinct transactions.
+fn test_append_grows() {
+    let log0: TxnLog = txn_log_new();
+    let log1: TxnLog = txn_log_append(log0, 101, 4096, 0, 42, 1000);
+    af_assert("log count after 1st append is 1", txn_log_count(log1) == 1);
+    let log2: TxnLog = txn_log_append(log1, 101, 4100, 0, 84, 1001);
+    af_assert("log count after 2nd append is 2", txn_log_count(log2) == 2);
+    let log3: TxnLog = txn_log_append(log2, 102, 8192, 0, 126, 1002);
+    af_assert("log count after 3rd append is 3", txn_log_count(log3) == 3);
+}
+
+// Step 3: get_entries_for_txn extracts exact transaction entries.
+fn test_entries_per_txn() {
+    let mut log: TxnLog = txn_log_new();
+    log = txn_log_append(log, 201, 1000, 10, 20, 1);
+    log = txn_log_append(log, 201, 1004, 30, 40, 2);
+    log = txn_log_append(log, 202, 2000, 50, 60, 3);
+    log = txn_log_append(log, 201, 1008, 70, 80, 4);
+
+    let entries_201: List[TxnEntry] = txn_log_get_entries_for_txn(log, 201);
+    af_assert("txn 201 has 3 entries", list_len(entries_201) == 3);
+
+    let entries_202: List[TxnEntry] = txn_log_get_entries_for_txn(log, 202);
+    af_assert("txn 202 has 1 entry", list_len(entries_202) == 1);
+
+    let entries_none: List[TxnEntry] = txn_log_get_entries_for_txn(log, 999);
+    af_assert("unknown txn 999 has 0 entries", list_len(entries_none) == 0);
+}
+
+// Step 4: truncate_from unrolls transactions; clear resets count to 0.
+fn test_truncate_and_clear() {
+    let mut log: TxnLog = txn_log_new();
+    log = txn_log_append(log, 301, 100, 1, 2, 10);
+    log = txn_log_append(log, 301, 104, 3, 4, 11);
+    log = txn_log_append(log, 302, 200, 5, 6, 12);
+    log = txn_log_append(log, 303, 300, 7, 8, 13);
+    af_assert("initial count before truncate is 4", txn_log_count(log) == 4);
+
+    let truncated: TxnLog = txn_log_truncate_from(log, 3);
+    af_assert("truncated log keeping entry_id < 3 has count 2", txn_log_count(truncated) == 2);
+
+    let cleared: TxnLog = txn_log_clear(log);
+    af_assert("cleared log count is 0", txn_log_count(cleared) == 0);
+}
+
+pub fn main() {
+    println("audit_alloc_frag: starting");
+    test_empty_log();
+    println("step1 ok");
+    test_append_grows();
+    println("step2 ok");
+    test_entries_per_txn();
+    println("step3 ok");
+    test_truncate_and_clear();
+    println("step4 ok");
+    println("audit_alloc_frag: AUDIT COMPLETE (see findings in source)");
+}

@@ -1,0 +1,207 @@
+// # Adversarial Probe: Tensor GEMM & Autograd Engine
+//
+// Logline: Hostile stress-test suite challenging N-Dim strided Tensors, GEMM boundary dimensions, Autograd DAG tapes, and AdamW.
+//
+// Setup: Pure numerical adversarial test harness asserting dimensional safety and mathematical correctness.
+//
+// Beats:
+//   1. Stress-test GEMM inner dimension mismatches, 1x1 scalars, and outer product rectangular dimensions.
+//   2. Stress-test tensor buffer length validation, coordinate out-of-bounds guards, and shape indexing.
+//   3. Stress-test Autograd execution on empty tapes, multi-branch DAG tapes, and zero-gradient sweeps.
+//   4. Stress-test Linear layer dimension errors and AdamW decoupled weight decay with zero/positive/negative gradients.
+
+import "std/tensor/tensor_shape.oo";
+import "std/tensor/tensor.oo";
+import "std/ml/autograd_engine.oo";
+import "std/ml/layer_linear.oo";
+import "std/ml/optimizer.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("===================================================================");
+    println(" HOSTILE PROBE: Tensor GEMM & Autograd Machine Learning Harness");
+    println("===================================================================");
+
+    // --- Probe 1: GEMM Inner Dimension Mismatch ---
+    let mut data_a: List[Float] = list_new();
+    data_a = list_push(data_a, 1.0); data_a = list_push(data_a, 2.0); data_a = list_push(data_a, 3.0);
+    data_a = list_push(data_a, 4.0); data_a = list_push(data_a, 5.0); data_a = list_push(data_a, 6.0); // 2x3
+    let mut data_b: List[Float] = list_new();
+    data_b = list_push(data_b, 1.0); data_b = list_push(data_b, 2.0);
+    data_b = list_push(data_b, 3.0); data_b = list_push(data_b, 4.0); // 2x2 (mismatch: 3 != 2)
+    let bad_gemm: Result[List[Float], String] = tensor_gemm(data_a, 2, 3, data_b, 2, 2);
+    match bad_gemm {
+        Ok(_) => { println("FAIL: accepted incompatible inner dimensions"); process_exit(1); }
+        Err(e) => {
+            if !str_contains(e, "inner dimensions do not match") {
+                println("FAIL: Unexpected GEMM error: " + e);
+                process_exit(1);
+            }
+        }
+    }
+    println("  [PASS] 1. Incompatible GEMM Inner Dimensions Rejected Fail-Closed");
+
+    // --- Probe 2: GEMM 1x1 Boundary Dimensions ---
+    let mut s1: List[Float] = list_new(); s1 = list_push(s1, 3.5);
+    let mut s2: List[Float] = list_new(); s2 = list_push(s2, 2.0);
+    let g1x1_res: Result[Float, String] = tensor_gemm_get(s1, 1, 1, s2, 1, 1, 0, 0);
+    match g1x1_res {
+        Ok(v) => {
+            if v < 6.99 || v > 7.01 { println("FAIL: 1x1 GEMM mismatch"); process_exit(1); }
+        }
+        Err(e) => { println("FAIL: 1x1 GEMM error: " + e); process_exit(1); }
+    }
+    println("  [PASS] 2. 1x1 Boundary GEMM Matrix Multiplication Exact");
+
+    // --- Probe 3: Rectangular Vector Dot Product & Outer Matrix Product ---
+    let mut vec_a: List[Float] = list_new();
+    vec_a = list_push(vec_a, 1.0); vec_a = list_push(vec_a, 2.0); vec_a = list_push(vec_a, 3.0);
+    let mut vec_b: List[Float] = list_new();
+    vec_b = list_push(vec_b, 4.0); vec_b = list_push(vec_b, 5.0); vec_b = list_push(vec_b, 6.0);
+    let dot_res: Result[Float, String] = tensor_gemm_get(vec_a, 1, 3, vec_b, 3, 1, 0, 0);
+    match dot_res {
+        Ok(d_val) => {
+            if d_val < 31.9 || d_val > 32.1 { println("FAIL: Vector dot product mismatch"); process_exit(1); }
+        }
+        Err(e) => { println("FAIL: Dot product error: " + e); process_exit(1); }
+    }
+    let mut u: List[Float] = list_new(); u = list_push(u, 2.0); u = list_push(u, 3.0);
+    let mut v: List[Float] = list_new(); v = list_push(v, 4.0); v = list_push(v, 5.0);
+    let m00_res: Result[Float, String] = tensor_gemm_get(u, 2, 1, v, 1, 2, 0, 0);
+    let m11_res: Result[Float, String] = tensor_gemm_get(u, 2, 1, v, 1, 2, 1, 1);
+    match m00_res {
+        Ok(m00) => {
+            match m11_res {
+                Ok(m11) => {
+                    if m00 < 7.9 || m00 > 8.1 || m11 < 14.9 || m11 > 15.1 {
+                        println("FAIL: Outer product mismatch"); process_exit(1);
+                    }
+                }
+                Err(_) => { process_exit(1); }
+            }
+        }
+        Err(_) => { process_exit(1); }
+    }
+    println("  [PASS] 3. Rectangular Inner & Outer GEMM Matrix Multiplications Exact");
+
+    // --- Probe 4: tensor_gemm_get Boundary Coordinates ---
+    let oob_r: Result[Float, String] = tensor_gemm_get(s1, 1, 1, s2, 1, 1, 5, 0);
+    let oob_c: Result[Float, String] = tensor_gemm_get(s1, 1, 1, s2, 1, 1, 0, -1);
+    let mut oob_both_err: Bool = true;
+    match oob_r { Ok(_) => { oob_both_err = false; }, Err(_) => {} }
+    match oob_c { Ok(_) => { oob_both_err = false; }, Err(_) => {} }
+    if !oob_both_err { println("FAIL: accepted out-of-bounds row/col"); process_exit(1); }
+    println("  [PASS] 4. GEMM Coordinate Out-of-Bounds Queries Rejected Fail-Closed");
+
+    // --- Probe 5: Tensor from list length mismatch ---
+    let mut bad_flat: List[Float] = list_new();
+    bad_flat = list_push(bad_flat, 1.0); bad_flat = list_push(bad_flat, 2.0); bad_flat = list_push(bad_flat, 3.0);
+    let bad_tensor: Result[Tensor, String] = tensor_from_list_2d(bad_flat, 2, 2);
+    match bad_tensor {
+        Ok(_) => { println("FAIL: accepted mismatched buffer length"); process_exit(1); }
+        Err(_) => {}
+    }
+    println("  [PASS] 5. Tensor Buffer Length Mismatch Rejected Fail-Closed");
+
+    // --- Probe 6: TensorShape Invalid Dimension Lists ---
+    let mut empty_dims: List[Int] = list_new();
+    let sh_empty: Result[TensorShape, String] = tensor_shape_new(empty_dims);
+    let mut zero_dims: List[Int] = list_new();
+    zero_dims = list_push(zero_dims, 2); zero_dims = list_push(zero_dims, 0);
+    let sh_zero: Result[TensorShape, String] = tensor_shape_new(zero_dims);
+    let mut neg_dims: List[Int] = list_new();
+    neg_dims = list_push(neg_dims, -4);
+    let sh_neg: Result[TensorShape, String] = tensor_shape_new(neg_dims);
+    let mut sh_all_err: Bool = true;
+    match sh_empty { Ok(_) => { sh_all_err = false; }, Err(_) => {} }
+    match sh_zero { Ok(_) => { sh_all_err = false; }, Err(_) => {} }
+    match sh_neg { Ok(_) => { sh_all_err = false; }, Err(_) => {} }
+    if !sh_all_err { println("FAIL: accepted non-positive dimensions"); process_exit(1); }
+    println("  [PASS] 6. Non-Positive / Empty Tensor Dimensions Rejected Fail-Closed");
+
+    // --- Probe 7: Tensor Flat Index Boundary Safety ---
+    let mut ok_dims: List[Int] = list_new();
+    ok_dims = list_push(ok_dims, 3); ok_dims = list_push(ok_dims, 4);
+    let shape_res: Result[TensorShape, String] = tensor_shape_new(ok_dims);
+    match shape_res {
+        Ok(shape_3x4) => {
+            let mut oob_idx: List[Int] = list_new();
+            oob_idx = list_push(oob_idx, 3); oob_idx = list_push(oob_idx, 0);
+            let idx_res: Result[Int, String] = tensor_shape_flat_idx(&shape_3x4, oob_idx);
+            match idx_res {
+                Ok(_) => { println("FAIL: accepted out-of-bounds coord"); process_exit(1); }
+                Err(_) => {}
+            }
+        }
+        Err(e) => { println("FAIL: Tensor shape error: " + e); process_exit(1); }
+    }
+    println("  [PASS] 7. Tensor Coordinate Flat Indexing Bounds Enforced");
+
+    // --- Probe 8: Autograd Empty Tape & Zero-Gradient Execution ---
+    let empty_tape: AutogradTape = autograd_tape_new();
+    let bk_empty: Result[Bool, String] = autograd_backward(&empty_tape, 1.0);
+    match bk_empty {
+        Ok(_) => {}
+        Err(e) => { println("FAIL: backward empty tape: " + e); process_exit(1); }
+    }
+    let mut multi_tape: AutogradTape = autograd_tape_new();
+    let mut in1: List[Int] = list_new(); in1 = list_push(in1, 0);
+    multi_tape = autograd_record_op(multi_tape, "linear", in1, 1);
+    let mut in2: List[Int] = list_new(); in2 = list_push(in2, 1);
+    multi_tape = autograd_record_op(multi_tape, "relu", in2, 2);
+    let bk_zero: Result[Bool, String] = autograd_backward(&multi_tape, 0.0);
+    match bk_zero {
+        Ok(_) => {}
+        Err(e) => { println("FAIL: zero-gradient backward: " + e); process_exit(1); }
+    }
+    println("  [PASS] 8. Autograd Empty Tape & Multi-Node DAG Zero-Gradient Sweeps Handled");
+
+    // --- Probe 9: LinearLayer Invalid Dimensions & Forward Mismatch ---
+    let bad_lin1: Result[LinearLayer, String] = linear_new(0, 5);
+    let bad_lin2: Result[LinearLayer, String] = linear_new(5, -1);
+    let mut lin_all_err: Bool = true;
+    match bad_lin1 { Ok(_) => { lin_all_err = false; }, Err(_) => {} }
+    match bad_lin2 { Ok(_) => { lin_all_err = false; }, Err(_) => {} }
+    if !lin_all_err { println("FAIL: linear_new accepted invalid dims"); process_exit(1); }
+    let lin_res: Result[LinearLayer, String] = linear_new(3, 2);
+    match lin_res {
+        Ok(valid_lin) => {
+            let mut bad_x_data: List[Float] = list_new();
+            bad_x_data = list_push(bad_x_data, 1.0); bad_x_data = list_push(bad_x_data, 2.0);
+            let bad_x_res: Result[Tensor, String] = tensor_from_list_2d(bad_x_data, 1, 2);
+            match bad_x_res {
+                Ok(bad_x) => {
+                    let fwd_err: Result[Tensor, String] = linear_forward(&valid_lin, &bad_x);
+                    match fwd_err {
+                        Ok(_) => { println("FAIL: accepted mismatched input dim"); process_exit(1); }
+                        Err(_) => {}
+                    }
+                }
+                Err(e) => { println("FAIL: " + e); process_exit(1); }
+            }
+        }
+        Err(e) => { println("FAIL: " + e); process_exit(1); }
+    }
+    println("  [PASS] 9. Linear Layer Dimensions & Input Shape Checked Fail-Closed");
+
+    // --- Probe 10: AdamW Optimizer Zero-Gradient Decoupled Weight Decay ---
+    let mut p_vec: List[Float] = list_new(); p_vec = list_push(p_vec, 10.0);
+    let mut g_zero: List[Float] = list_new(); g_zero = list_push(g_zero, 0.0);
+    let step_zero: Result[Float, String] = adamw_step_index(0.1, 0.05, p_vec, g_zero, 0);
+    match step_zero {
+        Ok(p_next) => {
+            if p_next < 9.94 || p_next > 9.96 { println("FAIL: AdamW zero-gradient mismatch"); process_exit(1); }
+        }
+        Err(e) => { println("FAIL: " + e); process_exit(1); }
+    }
+    let bad_step_idx: Result[Float, String] = adamw_step_index(0.1, 0.05, p_vec, g_zero, 5);
+    match bad_step_idx {
+        Ok(_) => { println("FAIL: accepted out-of-bounds idx"); process_exit(1); }
+        Err(_) => {}
+    }
+    println("  [PASS] 10. AdamW Zero-Gradient Decoupled Weight Decay & Bounds Exact");
+
+    println("===================================================================");
+    println(" ALL 10 TENSOR & AUTOGRAD ADVERSARIAL PROBES PASSED [100% OK]");
+    println("===================================================================");
+    println("hostile_m4_tensor_autograd: PASSED");
+}

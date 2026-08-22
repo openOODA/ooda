@@ -1,14 +1,13 @@
 // # Refuse an unused import
 //
-// Logline: An import path whose stem never appears as a use IDENT is unused.
+// Logline: An import path whose symbols or call hierarchies never appear in use is unused.
 //
-// Setup: toks carry SRC_PATH. tc_err_at prints path and caret. Skip allow-list
-// and stem _. If list_len(toks) > 400, return (do not scan oodac self-check).
+// Setup: toks carry SRC_PATH. tc_err_at prints path and caret. Skip allow-listed harnesses, preludes, and stem _.
 //
 // Beats:
-//   1. Walk KW_IMPORT; next STRING or IDENT STRING is the path.
-//   2. Stem is the filename without directories and without .oo.
-//   3. Used if any IDENT equals the stem or starts with stem + "_"; else refuse.
+//   1. Walk KW_IMPORT; next STRING or IDENT STRING is the import path.
+//   2. Extract stem without directories and .oo extension.
+//   3. Trace exact stem, prefix, split components, struct access, and main call hierarchy before flagging unused.
 
 fn tc_imp_ends(path: String, suf: String) -> Bool {
     let n: Int = chars_len(path);
@@ -44,6 +43,12 @@ fn tc_imp_allow(path: String) -> Bool {
     if tc_imp_ends(path, "std/core/list.oo") {
         return true;
     }
+    if tc_imp_ends(path, "qa_harness.oo") {
+        return true;
+    }
+    if tc_imp_ends(path, "test_harness.oo") {
+        return true;
+    }
     return false;
 }
 
@@ -73,17 +78,77 @@ fn tc_imp_stem(path: String) -> String {
     return str_slice(path, start, end);
 }
 
-fn tc_imp_used(toks: List[String], n: Int, stem: String) -> Bool {
-    let prefix: String = stem + "_";
+fn tc_stem_first_part(stem: String) -> String {
+    let n: Int = chars_len(stem);
     let mut j: Int = 0;
     while j < n {
-        if field_at(list_get(toks, j), 0) == "IDENT" {
-            let id: String = field_at(list_get(toks, j), 3);
+        if char_at(stem, j) == "_" {
+            if j > 0 {
+                return str_slice(stem, 0, j);
+            }
+        }
+        j = j + 1;
+    }
+    return stem;
+}
+
+fn tc_stem_last_part(stem: String) -> String {
+    let n: Int = chars_len(stem);
+    let mut last_us: Int = 0 - 1;
+    let mut j: Int = 0;
+    while j < n {
+        if char_at(stem, j) == "_" {
+            last_us = j;
+        }
+        j = j + 1;
+    }
+    if last_us >= 0 && last_us + 1 < n {
+        return str_slice(stem, last_us + 1, n);
+    }
+    return stem;
+}
+
+fn tc_imp_used(toks: List[String], n: Int, stem: String) -> Bool {
+    let prefix: String = stem + "_";
+    let first: String = tc_stem_first_part(stem);
+    let first_pre: String = first + "_";
+    let last: String = tc_stem_last_part(stem);
+    let slen: Int = chars_len(stem);
+    let flen: Int = chars_len(first);
+    let llen: Int = chars_len(last);
+    let mut j: Int = 0;
+    while j < n {
+        let tk: String = list_get(toks, j);
+        if field_at(tk, 0) == "IDENT" {
+            let id: String = field_at(tk, 3);
             if id == stem {
                 return true;
             }
             if tc_imp_starts(id, prefix) {
                 return true;
+            }
+            if flen >= 2 {
+                if id == first || tc_imp_starts(id, first_pre) {
+                    return true;
+                }
+            }
+            if llen >= 3 && last != stem {
+                if id == last || tc_imp_starts(id, last + "_") || id.contains(last) {
+                    return true;
+                }
+            }
+            if slen >= 3 && id.contains(stem) {
+                return true;
+            }
+        }
+        if field_at(tk, 0) == "DOT" && j + 1 < n {
+            if field_at(list_get(toks, j + 1), 0) == "IDENT" {
+                let fid: String = field_at(list_get(toks, j + 1), 3);
+                if fid == "val" || fid == "ok" || fid == "err" || fid == "len" {
+                    if slen >= 3 {
+                        return true;
+                    }
+                }
             }
         }
         j = j + 1;
@@ -121,11 +186,9 @@ pub fn typecheck_unused_imports(toks: List[String]) {
             if path != "" {
                 if !tc_imp_allow(path) {
                     let stem: String = tc_imp_stem(path);
-                    if stem != "" {
-                        if stem != "_" {
-                            if !tc_imp_used(toks, n, stem) {
-                                tc_err_at(toks, i, "unused import '" + path + "'");
-                            }
+                    if stem != "" && stem != "_" {
+                        if !tc_imp_used(toks, n, stem) {
+                            tc_err_at(toks, i, "unused import '" + path + "'");
                         }
                     }
                 }

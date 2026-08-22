@@ -10,156 +10,168 @@
 //   3. Fail closed on div0, binop, or annotation mismatch, then bind name:ann or name:init_ty into lit_env.
 
 import "tc_read_result.oo";
+import "tc_infer.oo";
 
 pub fn ann_check_let(toks: List[String], i: Int, n: Int, aliases: String, lit_env0: String, ret_table: String, struct_table: String) -> String {
     let mut lit_env = lit_env0;
-            let mut p = i + 1;
-            if p < n && field_at(list_get(toks, p), 0) == "KW_MUT" {
-                p = p + 1;
-            }
+    let mut p = i + 1;
+    if p < n && field_at(list_get(toks, p), 0) == "KW_MUT" {
+        p = p + 1;
+    }
+    if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
+        let vname: String = field_at(list_get(toks, p), 3);
+        let vidx = p;
+        p = p + 1;
+        let mut ann_raw = "";
+        let mut ann = "";
+        if p < n && field_at(list_get(toks, p), 0) == "COLON" {
+            p = p + 1;
             if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
-                let vname: String = field_at(list_get(toks, p), 3);
-                let vidx = p;
-                p = p + 1;
-                let mut ann_raw = "";
-                let mut ann = "";
-                if p < n && field_at(list_get(toks, p), 0) == "COLON" {
+                ann_raw = field_at(list_get(toks, p), 3);
+                if ann_raw == "dyn" && p + 1 < n && field_at(list_get(toks, p + 1), 0) == "IDENT" {
                     p = p + 1;
-                    if p < n && field_at(list_get(toks, p), 0) == "IDENT" {
-                        ann_raw = field_at(list_get(toks, p), 3);
-                        if ann_raw == "dyn" && p + 1 < n && field_at(list_get(toks, p + 1), 0) == "IDENT" {
-                            p = p + 1;
-                            ann_raw = "dyn " + field_at(list_get(toks, p), 3);
-                        }
-                        ann = resolve_type_alias(aliases, ann_raw);
-                        p = p + 1;
-                        if p < n {
-                            ann = tc_read_result_ann(ann, toks, p);
-                            p = tc_skip_brackets(toks, p);
+                    ann_raw = "dyn " + field_at(list_get(toks, p), 3);
+                }
+                ann = resolve_type_alias(aliases, ann_raw);
+                p = p + 1;
+                if p < n {
+                    ann = tc_read_result_ann(ann, toks, p);
+                    p = tc_skip_brackets(toks, p);
+                }
+            }
+        }
+        if p < n && field_at(list_get(toks, p), 0) == "EQ" {
+            p = p + 1;
+            if p < n {
+                let mut init_ty: String = infer_typed_expr_type(toks, p, lit_env);
+                if field_at(list_get(toks, p), 0) == "IDENT" {
+                    let mut re = p;
+                    let mut cont_i = true;
+                    while cont_i {
+                        if re >= n {
+                            cont_i = false;
+                        } else {
+                            if field_at(list_get(toks, re), 0) == "SEMI" {
+                                cont_i = false;
+                            } else {
+                                re = re + 1;
+                            }
                         }
                     }
-                }
-                if p < n && field_at(list_get(toks, p), 0) == "EQ" {
-                    p = p + 1;
-                    if p < n {
-                        let mut init_ty: String = infer_typed_expr_type(toks, p, lit_env);
+                    if is_field_chain_span(toks, p, re) {
+                        let fty = field_chain_type(
+                            toks,
+                            p,
+                            re,
+                            lit_env,
+                            struct_table
+                        );
+                        if fty != "" {
+                            init_ty = fty;
+                        }
+                    }
+                    if p + 4 < n {
                         if field_at(list_get(toks, p), 0) == "IDENT" {
-                            let mut re = p;
-                            let mut cont_i = true;
-                            while cont_i {
-                                if re >= n {
-                                    cont_i = false;
-                                } else {
-                                    if field_at(list_get(toks, re), 0) == "SEMI" {
-                                        cont_i = false;
-                                    } else {
-                                        re = re + 1;
+                            if field_at(list_get(toks, p + 1), 0) == "DOT" {
+                                if field_at(list_get(toks, p + 2), 0) == "IDENT" {
+                                    if field_at(list_get(toks, p + 3), 0) == "LPAREN" {
+                                        let rname: String = field_at(list_get(toks, p), 3);
+                                        let mname: String = field_at(list_get(toks, p + 2), 3);
+                                        let cur_fn: String = get_cur_fn_at(toks, p);
+                                        let mut rty: String = "";
+                                        if cur_fn != "" {
+                                            rty = resolve_type_alias(lit_env, cur_fn + "." + rname);
+                                            if rty == cur_fn + "." + rname { rty = ""; }
+                                        }
+                                        if rty == "" {
+                                            rty = resolve_type_alias(lit_env, rname);
+                                        }
+                                        if mname == "to_string" {
+                                            if rty == "Int" || rty == "Bool"
+                                                || rty == "Float" || rty == "String" {
+                                                init_ty = "String";
+                                            }
+                                        }
+                                        if mname == "len" {
+                                            if rty == "String" || is_list_type_name(rty) {
+                                                init_ty = "Int";
+                                            }
+                                        }
+                                        if mname == "is_ok" || mname == "is_err" {
+                                            if is_result_type_name(rty) {
+                                                init_ty = "Bool";
+                                            }
+                                        }
+                                        if mname == "unwrap" {
+                                            if is_result_type_name(rty) {
+                                                init_ty = "String";
+                                            }
+                                        }
                                     }
                                 }
                             }
-                            if is_field_chain_span(toks, p, re) {
-                                let fty = field_chain_type(
-                                    toks,
-                                    p,
-                                    re,
-                                    lit_env,
-                                    struct_table
-                                );
-                                if fty != "" {
-                                    init_ty = fty;
-                                }
-                            }
-                            // Method call: x.to_string() / .len() / .is_ok() (not bare field chain)
-                            if p + 4 < n {
-                                if field_at(list_get(toks, p), 0) == "IDENT" {
-                                    if field_at(list_get(toks, p + 1), 0) == "DOT" {
-                                        if field_at(list_get(toks, p + 2), 0) == "IDENT" {
-                                            if field_at(list_get(toks, p + 3), 0) == "LPAREN" {
-                                                let rname: String = field_at(list_get(toks, p), 3);
-                                                let mname: String = field_at(list_get(toks, p + 2), 3);
-                                                let rty: String = resolve_type_alias(lit_env, rname);
-                                                if mname == "to_string" {
-                                                    if rty == "Int" || rty == "Bool"
-                                                        || rty == "Float" || rty == "String" {
-                                                        init_ty = "String";
-                                                    }
-                                                }
-                                                if mname == "len" {
-                                                    if rty == "String" || is_list_type_name(rty) {
-                                                        init_ty = "Int";
-                                                    }
-                                                }
-                                                if mname == "is_ok" || mname == "is_err" {
-                                                    if is_result_type_name(rty) {
-                                                        init_ty = "Bool";
-                                                    }
-                                                }
-                                                if mname == "unwrap" {
-                                                    if is_result_type_name(rty) {
-                                                        init_ty = "String";
-                                                    }
-                                                }
-                                            }
-                                        }
+                        }
+                    }
+                }
+                if init_ty == "" {
+                    if field_at(list_get(toks, p), 0) == "IDENT" {
+                        if p + 2 < n {
+                            if field_at(list_get(toks, p + 1), 0) == "LPAREN" {
+                                if field_at(list_get(toks, p + 2), 0) == "RPAREN" {
+                                    let cname: String = field_at(list_get(toks, p), 3);
+                                    let got: String = resolve_type_alias(ret_table, cname);
+                                    if got != cname {
+                                        init_ty = resolve_type_alias(aliases, got);
                                     }
                                 }
                             }
                         }
                         if init_ty == "" {
-                            if field_at(list_get(toks, p), 0) == "IDENT" {
-                                if p + 2 < n {
-                                    if field_at(list_get(toks, p + 1), 0) == "LPAREN" {
-                                        if field_at(list_get(toks, p + 2), 0) == "RPAREN" {
-                                            let cname: String = field_at(list_get(toks, p), 3);
-                                            let got: String = resolve_type_alias(ret_table, cname);
-                                            if got != cname {
-                                                init_ty = resolve_type_alias(aliases, got);
-                                            }
-                                        }
-                                    }
-                                }
-                                if init_ty == "" {
-                                    if field_at(list_get(toks, p + 1), 0) == "LBRACE" {
-                                        init_ty = field_at(list_get(toks, p), 3);
-                                    }
-                                }
-                            }
-                        }
-                        if init_ty == "ERR_DIV0" {
-                            tc_err_at(
-                                toks,
-                                vidx,
-                                "division by zero in initializer for '" + vname + "'"
-                            );
-                        }
-                        if init_ty == "ERR_BINOP" {
-                            tc_err_at(
-                                toks,
-                                vidx,
-                                "incompatible operand types in initializer for '" + vname + "'"
-                            );
-                        }
-                        if init_ty != "" {
-                            if ann != "" {
-                                if !types_compatible(ann, init_ty) {
-                                    tc_err_at(
-                                        toks,
-                                        vidx,
-                                        "let '"
-                                            + vname
-                                            + "' annotated as "
-                                            + ann_raw
-                                            + " but initializer has type "
-                                            + init_ty
-                                    );
-                                }
-                                lit_env = lit_env + vname + ":" + ann + "\t";
-                            } else {
-                                lit_env = lit_env + vname + ":" + init_ty + "\t";
+                            if field_at(list_get(toks, p + 1), 0) == "LBRACE" {
+                                init_ty = field_at(list_get(toks, p), 3);
                             }
                         }
                     }
                 }
+                if init_ty == "ERR_DIV0" {
+                    tc_err_at(
+                        toks,
+                        vidx,
+                        "division by zero in initializer for '" + vname + "'"
+                    );
+                }
+                if init_ty == "ERR_BINOP" {
+                    tc_err_at(
+                        toks,
+                        vidx,
+                        "incompatible operand types in initializer for '" + vname + "'"
+                    );
+                }
+                if init_ty != "" {
+                    if ann != "" {
+                        if !types_compatible(ann, init_ty) {
+                            tc_err_at(
+                                toks,
+                                vidx,
+                                "let '"
+                                    + vname
+                                    + "' annotated as "
+                                    + ann_raw
+                                    + " but initializer has type "
+                                    + init_ty
+                            );
+                        }
+                        let cur_fn2: String = get_cur_fn_at(toks, vidx);
+                        if cur_fn2 != "" { lit_env = lit_env + cur_fn2 + "." + vname + ":" + ann + "\t"; }
+                        lit_env = lit_env + vname + ":" + ann + "\t";
+                    } else {
+                        let cur_fn3: String = get_cur_fn_at(toks, vidx);
+                        if cur_fn3 != "" { lit_env = lit_env + cur_fn3 + "." + vname + ":" + init_ty + "\t"; }
+                        lit_env = lit_env + vname + ":" + init_ty + "\t";
+                    }
+                }
             }
+        }
+    }
     return lit_env;
 }

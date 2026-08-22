@@ -1,0 +1,142 @@
+// # Adversarial WebAssembly Virtual DOM Reconciliation Probe
+//
+// Logline: Hostile stress-testing of VDOM diffing, deep tree reconciliation, empty nodes, and patch bytecode serialization.
+//
+// Setup: Validates openOODA std/wui diff engine against deep recursive trees and boundary mutations.
+//
+// Beats:
+//   1. Stress-test deep 20-level recursive tree reconciliation without stack overflow or corrupted paths.
+//   2. Probe tag mismatch, node kind switching (Element <-> Text <-> Component), and empty trees.
+//   3. Probe massive child addition (0 -> 30) and deletion (30 -> 0) patch sequences.
+//   4. Verify patch serialization parity across JSON and binary bytecode formats for all patch kinds.
+
+import "std/wui/wui_vnode.oo";
+import "std/wui/wui_vdom_builder.oo";
+import "std/wui/wui_patch.oo";
+import "std/wui/wui_diff.oo";
+import "std/wui/wui_patch_serializer.oo";
+
+fn build_deep_tree(depth: Int, leaf_text: String) -> VNode {
+    if depth <= 0 {
+        return h_text(leaf_text);
+    }
+    let mut empty_p: List[VProp] = list_new();
+    let mut ch: List[VNode] = list_new();
+    ch = list_push(ch, build_deep_tree(depth - 1, leaf_text));
+    return h_div(empty_p, ch);
+}
+
+pub fn main(p: &ProcessCap) {
+    println("=== Adversarial WUI Virtual DOM Probe ===");
+
+    // 1. Deep 20-level recursive tree reconciliation
+    let tree_a: VNode = build_deep_tree(20, "Leaf A");
+    let tree_b: VNode = build_deep_tree(20, "Leaf B");
+
+    let patches_deep: List[Patch] = vdom_diff(&tree_a, &tree_b, "root");
+    if list_len(patches_deep) != 1 {
+        println("FAIL: Deep tree reconciliation must emit exactly 1 text patch at the leaf");
+        process_exit(1);
+    }
+    let p_leaf: Patch = list_get(patches_deep, 0);
+    if (p_leaf).patch_type != 5 || !str_contains((p_leaf).text_content, "Leaf B") {
+        println("FAIL: Deep leaf patch mismatch");
+        process_exit(1);
+    }
+    println("  [PASS] 20-level deep recursive tree surgical leaf reconciliation");
+
+    // 2. Node Kind Switching (Element <-> Text <-> Component)
+    let mut ep0: List[VProp] = list_new();
+    let mut ec0: List[VNode] = list_new();
+    let elem_node: VNode = h_div(ep0, ec0);
+    let txt_node: VNode = h_text("standalone_text");
+    let mut ep1: List[VProp] = list_new();
+    let mut ec1: List[VNode] = list_new();
+    let comp_node: VNode = vnode_component("CustomWidget", "k1", ep1, ec1);
+
+    let p_elem_to_txt: List[Patch] = vdom_diff(&elem_node, &txt_node, "root");
+    let p_txt_to_comp: List[Patch] = vdom_diff(&txt_node, &comp_node, "root");
+    let p_comp_to_elem: List[Patch] = vdom_diff(&comp_node, &elem_node, "root");
+
+    if list_len(p_elem_to_txt) != 1 || (list_get(p_elem_to_txt, 0)).patch_type != 1 {
+        println("FAIL: Element to Text diff must emit replace_node");
+        process_exit(1);
+    }
+    if list_len(p_txt_to_comp) != 1 || (list_get(p_txt_to_comp, 0)).patch_type != 1 {
+        println("FAIL: Text to Component diff must emit replace_node");
+        process_exit(1);
+    }
+    if list_len(p_comp_to_elem) != 1 || (list_get(p_comp_to_elem, 0)).patch_type != 1 {
+        println("FAIL: Component to Element diff must emit replace_node");
+        process_exit(1);
+    }
+    println("  [PASS] Node kind switching transitions (Element <-> Text <-> Component)");
+
+    // 3. Tag Name Mismatch at Same Node Kind
+    let mut ep2: List[VProp] = list_new();
+    let mut ec2: List[VNode] = list_new();
+    let div_node: VNode = h_div(ep2, ec2);
+    let mut ep3: List[VProp] = list_new();
+    let mut ec3: List[VNode] = list_new();
+    let span_node: VNode = h_span(ep3, ec3);
+    let p_tag_mismatch: List[Patch] = vdom_diff(&div_node, &span_node, "0");
+    if list_len(p_tag_mismatch) != 1 || (list_get(p_tag_mismatch, 0)).patch_type != 1 {
+        println("FAIL: Tag mismatch must emit replace_node");
+        process_exit(1);
+    }
+    println("  [PASS] Tag name mismatch replacement");
+
+    // 4. Large Child Addition (0 -> 30) and Removal (30 -> 0)
+    let mut large_ch: List[VNode] = list_new();
+    let mut i: Int = 0;
+    while i < 30 {
+        large_ch = list_push(large_ch, h_text("item_" + i.to_string()));
+        i = i + 1;
+    }
+    let mut ep4: List[VProp] = list_new();
+    let parent_full: VNode = h_div(ep4, large_ch);
+    let mut ep5: List[VProp] = list_new();
+    let mut ec5: List[VNode] = list_new();
+    let parent_empty: VNode = h_div(ep5, ec5);
+
+    // 0 -> 30 additions
+    let p_adds: List[Patch] = vdom_diff(&parent_empty, &parent_full, "root");
+    if list_len(p_adds) != 30 {
+        println("FAIL: 0 -> 30 additions must emit 30 append_child patches");
+        process_exit(1);
+    }
+
+    // 30 -> 0 removals
+    let p_rems: List[Patch] = vdom_diff(&parent_full, &parent_empty, "root");
+    if list_len(p_rems) != 30 {
+        println("FAIL: 30 -> 0 removals must emit 30 remove_child patches");
+        process_exit(1);
+    }
+    println("  [PASS] Large child addition (30) and reverse-indexed deletion (30)");
+
+    // 5. Full Patch Serializer Coverage (All 5 Types)
+    let mut all_patches: List[Patch] = list_new();
+    let mut ep6: List[VProp] = list_new();
+    let mut ec6: List[VNode] = list_new();
+    all_patches = list_push(all_patches, patch_replace_node("r", h_div(ep6, ec6)));
+    let mut ep7: List[VProp] = list_new();
+    all_patches = list_push(all_patches, patch_update_props("r", ep7));
+    all_patches = list_push(all_patches, patch_append_child("r", h_text("appended")));
+    all_patches = list_push(all_patches, patch_remove_child("r", 3));
+    all_patches = list_push(all_patches, patch_set_text("r.0", "new_text"));
+
+    let json_rep: String = patch_serialize_json(all_patches);
+    let byte_rep: List[Int] = patch_serialize_binary(all_patches);
+
+    if !str_contains(json_rep, "{\"t\":1") || !str_contains(json_rep, "{\"t\":2") || !str_contains(json_rep, "{\"t\":3") || !str_contains(json_rep, "{\"t\":4") || !str_contains(json_rep, "{\"t\":5") {
+        println("FAIL: JSON serialization missing patch types:\n" + json_rep);
+        process_exit(1);
+    }
+    if list_len(byte_rep) != 21 { // 1 header + 5 * 4 fields = 21
+        println("FAIL: Bytecode serialization length mismatch (got " + list_len(byte_rep).to_string() + ")");
+        process_exit(1);
+    }
+    println("  [PASS] Patch serialization across all 5 patch types");
+
+    println("adv_wui_probe: ALL PASS");
+}

@@ -1,0 +1,166 @@
+// # Canonical MessagePack codec
+//
+// Logline: Encodes and decodes MessagePack fixint, int8/16/32, nil, bool, bin8/16, fixarray, and fixmap with type-tag checks.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. Unknown tags and short buffers are Err.
+//
+// Beats:
+//   1. Encode integers in the shortest signed form.
+//   2. Encode nil, bool, bin, fixarray, and fixmap.
+//   3. Decode with type-tag validation.
+//   4. Reject truncated input and unknown tags.
+
+import "std/byte_out.oo";
+import "std/encoding/msgpack_pure_dec.oo";
+
+fn mp_push16(o: List[Int], v: Int) -> List[Int] {
+    let mut x: Int = v;
+    if x < 0 {
+        x = 65536 + x;
+    }
+    let mut b: List[Int] = o;
+    b = list_push(b, (x >> 8) & 255);
+    b = list_push(b, x & 255);
+    return b;
+}
+
+fn mp_push32(o: List[Int], v: Int) -> List[Int] {
+    let mut x: Int = v;
+    if x < 0 {
+        x = 4294967296 + x;
+    }
+    let mut b: List[Int] = o;
+    b = list_push(b, (x >> 24) & 255);
+    b = list_push(b, (x >> 16) & 255);
+    b = list_push(b, (x >> 8) & 255);
+    b = list_push(b, x & 255);
+    return b;
+}
+
+pub fn msgpack_pure_enc_int(v: Int) -> ByteOut {
+    let mut o: List[Int] = list_new();
+    if v >= 0 {
+        if v <= 127 {
+            o = list_push(o, v);
+            return byte_out_ok(o);
+        }
+    } else {
+        if v >= 0 - 32 {
+            o = list_push(o, 256 + v);
+            return byte_out_ok(o);
+        }
+    }
+    if v >= 0 - 128 {
+        if v <= 127 {
+            o = list_push(o, 208);
+            if v < 0 {
+                o = list_push(o, 256 + v);
+            } else {
+                o = list_push(o, v);
+            }
+            return byte_out_ok(o);
+        }
+    }
+    if v >= 0 - 32768 {
+        if v <= 32767 {
+            o = list_push(o, 209);
+            return byte_out_ok(mp_push16(o, v));
+        }
+    }
+    if v >= 0 - 2147483647 {
+        if v <= 2147483647 {
+            o = list_push(o, 210);
+            return byte_out_ok(mp_push32(o, v));
+        }
+    }
+    return byte_out_err("msgpack int");
+}
+
+pub fn msgpack_pure_enc_nil() -> ByteOut {
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 192);
+    return byte_out_ok(o);
+}
+
+pub fn msgpack_pure_enc_bool(v: Int) -> ByteOut {
+    let mut o: List[Int] = list_new();
+    if v > 0 {
+        o = list_push(o, 195);
+    } else {
+        o = list_push(o, 194);
+    }
+    return byte_out_ok(o);
+}
+
+pub fn msgpack_pure_enc_bin(b: List[Int]) -> ByteOut {
+    let n: Int = list_len(b);
+    let mut o: List[Int] = list_new();
+    if n < 256 {
+        o = list_push(o, 196);
+        o = list_push(o, n);
+    } else {
+        if n < 65536 {
+            o = list_push(o, 197);
+            o = list_push(o, (n >> 8) & 255);
+            o = list_push(o, n & 255);
+        } else {
+            return byte_out_err("msgpack bin");
+        }
+    }
+    let mut i: Int = 0;
+    while i < n {
+        let x: Int = list_get(b, i);
+        if x < 0 {
+            return byte_out_err("msgpack byte");
+        }
+        if x > 255 {
+            return byte_out_err("msgpack byte");
+        }
+        o = list_push(o, x);
+        i = i + 1;
+    }
+    return byte_out_ok(o);
+}
+
+fn mp_cat(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut o: List[Int] = a;
+    let mut i: Int = 0;
+    while i < list_len(b) {
+        o = list_push(o, list_get(b, i) & 255);
+        i = i + 1;
+    }
+    return o;
+}
+
+pub fn msgpack_pure_enc_array(n: Int, kids: List[Int]) -> ByteOut {
+    if n < 0 {
+        return byte_out_err("msgpack array");
+    }
+    if n > 15 {
+        return byte_out_err("msgpack array");
+    }
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 144 + n);
+    return byte_out_ok(mp_cat(o, kids));
+}
+
+pub fn msgpack_pure_enc_map(n: Int, kids: List[Int]) -> ByteOut {
+    if n < 0 {
+        return byte_out_err("msgpack map");
+    }
+    if n > 15 {
+        return byte_out_err("msgpack map");
+    }
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 128 + n);
+    return byte_out_ok(mp_cat(o, kids));
+}
+
+pub fn msgpack_pure_decode(buf: List[Int]) -> MsgOut { return msgpack_pure_dec_parse(buf); }
+
+pub fn msgpack_pure_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}

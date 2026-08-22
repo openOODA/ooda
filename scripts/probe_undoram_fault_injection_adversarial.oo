@@ -1,0 +1,254 @@
+// # Adversarial Probe: Undo-RAM Transactional Rollback & Fault Injection
+//
+// Logline: Hostile test harness verifying Undo-RAM memory boundaries, transaction state invariants, and fault-injected rollbacks.
+//
+// Setup: AllocCap granted to execute deep memory mutation and rollback stress tests.
+//
+// Beats:
+//   1. Verify memory bounds and fail-closed error returns on negative and out-of-bounds addresses.
+//   2. Verify transaction lifecycle state machine rules and nested transaction rejection.
+//   3. Verify transactional rollback under multi-cell fault injection and data corruption.
+//   4. Verify savepoint checkpointing and layered partial rollbacks.
+//   5. Execute multi-cycle transaction fault soak asserting zero state drift.
+// RULES.oot 1.7: Under 256 lines.
+
+import "std/mem/undoram.oo";
+import "std/mem/checkpoint.oo";
+import "std/mem/txn_log.oo";
+
+fn assert_true(label: String, ok: Bool) {
+    if !ok {
+        println("FAIL: " + label);
+        process_exit(1);
+    }
+}
+
+fn test_memory_boundaries() {
+    let ram: UndoRam = undoram_pure_new(32);
+    assert_true("cap_check", ram.capacity == 32);
+
+    // Negative address write
+    let w_neg: Result[UndoRam, String] = undoram_pure_write(ram, -1, 42);
+    assert_true("w_neg_err", w_neg.is_err());
+
+    // Out of bounds write
+    let w_oob: Result[UndoRam, String] = undoram_pure_write(ram, 32, 42);
+    assert_true("w_oob_err", w_oob.is_err());
+
+    // Negative address read
+    let r_neg: Result[Int, String] = undoram_read(ram, -5);
+    assert_true("r_neg_err", r_neg.is_err());
+
+    // Out of bounds read
+    let r_oob: Result[Int, String] = undoram_read(ram, 32);
+    assert_true("r_oob_err", r_oob.is_err());
+
+    // Safe zero/negative capacity init
+    let r_zero_cap: UndoRam = undoram_pure_new(0);
+    assert_true("zero_cap_safe", r_zero_cap.capacity == 64);
+    let r_neg_cap: UndoRam = undoram_pure_new(-10);
+    assert_true("neg_cap_safe", r_neg_cap.capacity == 64);
+
+    // Valid boundary write at capacity - 1
+    let w_max: Result[UndoRam, String] = undoram_pure_write(ram, 31, 999);
+    assert_true("w_max_ok", w_max.is_ok());
+    let ram_max: UndoRam = match w_max { Ok(r) => r, Err(_) => ram };
+    let r_max: Result[Int, String] = undoram_read(ram_max, 31);
+    let val_max_ok: Bool = match r_max { Ok(v) => (v == 999), Err(_) => false };
+    assert_true("r_max_val", val_max_ok);
+}
+
+fn test_transaction_lifecycle() {
+    let mut ram: UndoRam = undoram_pure_new(16);
+
+    // Commit without transaction
+    let c_no_txn: Result[UndoRam, String] = undoram_pure_commit(ram);
+    assert_true("c_no_txn_err", c_no_txn.is_err());
+
+    // Rollback without transaction
+    let rb_no_txn: Result[UndoRam, String] = undoram_pure_rollback(ram);
+    assert_true("rb_no_txn_err", rb_no_txn.is_err());
+
+    // Begin transaction 1
+    let b1: Result[UndoRam, String] = undoram_pure_begin(ram);
+    assert_true("b1_ok", b1.is_ok());
+    ram = match b1 { Ok(r) => r, Err(_) => ram };
+    assert_true("in_txn_1", undoram_is_in_transaction(ram));
+
+    // Nested begin must fail
+    let b_nested: Result[UndoRam, String] = undoram_pure_begin(ram);
+    assert_true("nested_begin_err", b_nested.is_err());
+
+    // Commit transaction 1
+    let c1: Result[UndoRam, String] = undoram_pure_commit(ram);
+    assert_true("c1_ok", c1.is_ok());
+    ram = match c1 { Ok(r) => r, Err(_) => ram };
+    assert_true("not_in_txn_after_commit", !undoram_is_in_transaction(ram));
+}
+
+fn test_fault_injection_and_rollback() {
+    let mut ram: UndoRam = undoram_pure_new(16);
+
+    // Baseline setup: set addresses 0..7 to (i + 1) * 10
+    let mut i: Int = 0;
+    while i < 8 {
+        let val: Int = (i + 1) * 10;
+        let w: Result[UndoRam, String] = undoram_pure_write(ram, i, val);
+        ram = match w { Ok(r) => r, Err(_) => ram };
+        i = i + 1;
+    }
+
+    // Verify baseline values
+    i = 0;
+    while i < 8 {
+        let expected: Int = (i + 1) * 10;
+        let r: Result[Int, String] = undoram_read(ram, i);
+        let match_ok: Bool = match r { Ok(v) => (v == expected), Err(_) => false };
+        assert_true("baseline_val", match_ok);
+        i = i + 1;
+    }
+
+    // Begin transaction
+    let b: Result[UndoRam, String] = undoram_pure_begin(ram);
+    ram = match b { Ok(r) => r, Err(_) => ram };
+
+    // Simulate fault injection: corrupt memory with dirty writes
+    i = 0;
+    while i < 8 {
+        let dirty_val: Int = 9000 + i;
+        let w: Result[UndoRam, String] = undoram_pure_write(ram, i, dirty_val);
+        ram = match w { Ok(r) => r, Err(_) => ram };
+        i = i + 1;
+    }
+
+    // Verify dirty values are visible during active transaction
+    i = 0;
+    while i < 8 {
+        let dirty_expected: Int = 9000 + i;
+        let r: Result[Int, String] = undoram_read(ram, i);
+        let match_ok: Bool = match r { Ok(v) => (v == dirty_expected), Err(_) => false };
+        assert_true("dirty_val_visible", match_ok);
+        i = i + 1;
+    }
+
+    // Trigger rollback to abort dirty transaction
+    let rb: Result[UndoRam, String] = undoram_pure_rollback(ram);
+    assert_true("rollback_ok", rb.is_ok());
+    ram = match rb { Ok(r) => r, Err(_) => ram };
+    assert_true("txn_cleared", !undoram_is_in_transaction(ram));
+
+    // Verify all addresses 0..7 restored to exact baseline
+    i = 0;
+    while i < 8 {
+        let expected: Int = (i + 1) * 10;
+        let r: Result[Int, String] = undoram_read(ram, i);
+        let match_ok: Bool = match r { Ok(v) => (v == expected), Err(_) => false };
+        assert_true("restored_baseline_val", match_ok);
+        i = i + 1;
+    }
+}
+
+fn test_checkpoint_nested_savepoints(alloc: &AllocCap) {
+    let mut ram: UndoRam = undoram_pure_new(16);
+
+    // Initial value
+    let w0: Result[UndoRam, String] = undoram_pure_write(ram, 0, 100);
+    ram = match w0 { Ok(r) => r, Err(_) => ram };
+
+    // Begin transaction
+    let b: Result[UndoRam, String] = undoram_pure_begin(ram);
+    ram = match b { Ok(r) => r, Err(_) => ram };
+
+    // Write stage 1
+    let w1: Result[UndoRam, String] = undoram_pure_write(ram, 0, 200);
+    ram = match w1 { Ok(r) => r, Err(_) => ram };
+
+    // Create savepoint CP1
+    let cp1_res: Result[UndoRam, String] = undoram_checkpoint(alloc, ram);
+    assert_true("cp1_ok", cp1_res.is_ok());
+    ram = match cp1_res { Ok(r) => r, Err(_) => ram };
+
+    // Write stage 2 (faulty)
+    let w2: Result[UndoRam, String] = undoram_pure_write(ram, 0, 500);
+    ram = match w2 { Ok(r) => r, Err(_) => ram };
+    let r_stage2: Result[Int, String] = undoram_read(ram, 0);
+    let s2_ok: Bool = match r_stage2 { Ok(v) => (v == 500), Err(_) => false };
+    assert_true("stage2_val", s2_ok);
+
+    // Rollback to CP1 (savepoint ID 1)
+    let rb_cp1: Result[UndoRam, String] = undoram_rollback_to_checkpoint(alloc, ram, 1);
+    assert_true("rb_cp1_ok", rb_cp1.is_ok());
+    ram = match rb_cp1 { Ok(r) => r, Err(_) => ram };
+
+    // Value should be restored to stage 1 (200)
+    let r_cp1: Result[Int, String] = undoram_read(ram, 0);
+    let cp1_match: Bool = match r_cp1 { Ok(v) => (v == 200), Err(_) => false };
+    assert_true("restored_cp1_val", cp1_match);
+
+    // Non-existent checkpoint rollback must fail
+    let rb_bad: Result[UndoRam, String] = undoram_rollback_to_checkpoint(alloc, ram, 999);
+    assert_true("rb_bad_cp_err", rb_bad.is_err());
+
+    // Full rollback to pre-transaction state
+    let rb_full: Result[UndoRam, String] = undoram_pure_rollback(ram);
+    assert_true("rb_full_ok", rb_full.is_ok());
+    ram = match rb_full { Ok(r) => r, Err(_) => ram };
+
+    // Value should be restored to initial (100)
+    let r_init: Result[Int, String] = undoram_read(ram, 0);
+    let init_match: Bool = match r_init { Ok(v) => (v == 100), Err(_) => false };
+    assert_true("restored_initial_val", init_match);
+}
+
+fn test_fault_injection_soak() {
+    let mut ram: UndoRam = undoram_pure_new(32);
+    let mut cycle: Int = 0;
+    let mut val_tracker: Int = 1000;
+
+    while cycle < 200 {
+        let pre_val: Int = val_tracker;
+        let w_pre: Result[UndoRam, String] = undoram_pure_write(ram, 5, pre_val);
+        ram = match w_pre { Ok(r) => r, Err(_) => ram };
+
+        let b: Result[UndoRam, String] = undoram_pure_begin(ram);
+        ram = match b { Ok(r) => r, Err(_) => ram };
+
+        let w_dirty: Result[UndoRam, String] = undoram_pure_write(ram, 5, 888888);
+        ram = match w_dirty { Ok(r) => r, Err(_) => ram };
+
+        if cycle % 2 == 0 {
+            // Fault injected: rollback
+            let rb: Result[UndoRam, String] = undoram_pure_rollback(ram);
+            ram = match rb { Ok(r) => r, Err(_) => ram };
+            let r: Result[Int, String] = undoram_read(ram, 5);
+            let check: Bool = match r { Ok(v) => (v == pre_val), Err(_) => false };
+            assert_true("soak_rollback_exact", check);
+        } else {
+            // Success path: commit
+            val_tracker = val_tracker + 1;
+            let w_new: Result[UndoRam, String] = undoram_pure_write(ram, 5, val_tracker);
+            ram = match w_new { Ok(r) => r, Err(_) => ram };
+            let cm: Result[UndoRam, String] = undoram_pure_commit(ram);
+            ram = match cm { Ok(r) => r, Err(_) => ram };
+            let r: Result[Int, String] = undoram_read(ram, 5);
+            let check: Bool = match r { Ok(v) => (v == val_tracker), Err(_) => false };
+            assert_true("soak_commit_exact", check);
+        }
+        cycle = cycle + 1;
+    }
+}
+
+pub fn main(alloc: &AllocCap) {
+    println("--- probe_undoram_fault_injection_adversarial: starting ---");
+    test_memory_boundaries();
+    println("  [PASS] Undo-RAM memory boundary checks & fail-closed error returns verified");
+    test_transaction_lifecycle();
+    println("  [PASS] Transaction lifecycle state machine & nested txn rejection verified");
+    test_fault_injection_and_rollback();
+    println("  [PASS] Multi-cell fault injection & bit-exact rollback restoration verified");
+    test_checkpoint_nested_savepoints(alloc);
+    println("  [PASS] Checkpoint savepoints & partial rollback unwinding verified");
+    test_fault_injection_soak();
+    println("  [PASS] 200-cycle transaction fault injection soak verified with 0 drift");
+    println("probe_undoram_fault_injection_adversarial: PASSED");
+}

@@ -1,0 +1,249 @@
+// # Exact Rational Arithmetic Module (i64-bounded with signed-overflow guard)
+//
+// Logline: Exact rational arithmetic in canonical GCD-reduced form with sign normalization, positive denominator, and signed-overflow detection on every cross-product and negation.
+//
+// Setup: Pure math module. Backing type is i64 (long long, range [-2^63, 2^63-1]). Every cross-product, negation, and reduction is guarded by explicit overflow checks; operations that would overflow return Err("overflow") rather than silently wrapping. The "exact" guarantee holds for every result with abs(num) and abs(den) within the canonical post-reduction i64 range. Inputs that would produce intermediate cross-products outside i64 fail closed at the operator boundary.
+//
+// Beats:
+//   1. Euclidean GCD helper with safe negation (LLONG_MIN guard).
+//   2. Canonical constructor with sign normalization, LLONG_MIN guard, and zero-denominator guard.
+//   3. Exact add, sub, mul, div, negate, abs with signed-overflow detection returning Err.
+//   4. Comparison (-1/0/1) and zero-test helpers; cmp returns 999 sentinel on overflow (callers must check).
+//   5. is_in_safe_range predicate so callers can pre-validate inputs.
+//   6. Accessors, equality, zero-test, and post-condition invariant checker.
+// RULES.oot 1.4: Pure mathematical data format structure, zero ambient effects.
+// RULES.oot 1.7: Under 256 lines.
+
+pub type Rational = struct {
+    num: Int,
+    den: Int
+};
+
+// i64_min is computed via the (0 - 9223372036854775807 - 1) idiom to avoid
+// lexer rejection of the literal -9223372036854775808.
+fn i64_min() -> Int { return 0 - 9223372036854775807 - 1; }
+
+// safe_neg_ok returns true when x can be safely negated in i64. The only
+// value in i64 that has no representable negation is LLONG_MIN.
+fn safe_neg_ok(x: Int) -> Bool {
+    if x == i64_min() { return false; }
+    return true;
+}
+
+// safe_neg returns -x. The caller must check safe_neg_ok first; this
+// function does not guard against LLONG_MIN.
+fn safe_neg(x: Int) -> Int {
+    return 0 - x;
+}
+
+// mul_overflow_ok returns true when a*b is representable in i64.
+// Uses the standard identity: if a != 0 and (a*b)/a != b, then overflow happened.
+fn mul_overflow_ok(a: Int, b: Int) -> Bool {
+    if a == 0 { return true; }
+    if b == 0 { return true; }
+    let p: Int = a * b;
+    let q: Int = p / a;
+    if q != b { return false; }
+    return true;
+}
+
+// add_overflow_ok returns true when a+b is representable in i64.
+fn add_overflow_ok(a: Int, b: Int) -> Bool {
+    if a == 0 { return true; }
+    if b == 0 { return true; }
+    let s: Int = a + b;
+    if a > 0 {
+        if b > 0 {
+            if s < 0 { return false; }
+        }
+    }
+    if a < 0 {
+        if b < 0 {
+            if s > 0 { return false; }
+        }
+    }
+    return true;
+}
+
+// sub_overflow_ok returns true when a-b is representable in i64.
+fn sub_overflow_ok(a: Int, b: Int) -> Bool {
+    return add_overflow_ok(a, safe_neg(b));
+}
+
+// Euclidean greatest common divisor; gcd(0, 0) returns 1 so the canonical form
+// is well-defined. Both inputs are assumed to be LLONG_MIN-safe (i.e. the
+// caller has already validated them if they came from a sign-flip).
+fn rational_gcd(a: Int, b: Int) -> Int {
+    let mut x: Int = a;
+    let mut y: Int = b;
+    if x < 0 { x = safe_neg(x); }
+    if y < 0 { y = safe_neg(y); }
+    while y != 0 {
+        let t: Int = y;
+        y = x % y;
+        x = t;
+    }
+    if x == 0 { return 1; }
+    return x;
+}
+
+// is_in_safe_range returns true when the value x can be safely used in
+// the cross-product operations of this module. Specifically, |x| must
+// fit in i32 so that x*x fits in i64.
+pub fn rational_is_in_safe_range(x: Int) -> Bool {
+    if x > 2147483647 { return false; }
+    if x < 0 - 2147483647 - 1 { return false; }
+    return true;
+}
+
+// Build canonical Rational from numerator and denominator; reduces and normalizes sign.
+// Returns Err("division by zero") on den == 0, Err("overflow on sign normalization")
+// on LLONG_MIN, Err("overflow") on cross-product reduction overflow.
+pub fn rational_new(num: Int, den: Int) -> Result[Rational, String] {
+    if den == 0 {
+        return Err("division by zero");
+    }
+    let mut n: Int = num;
+    let mut d: Int = den;
+    if d < 0 {
+        if safe_neg_ok(n) == false {
+            return Err("overflow on sign normalization (LLONG_MIN numerator)");
+        }
+        if safe_neg_ok(d) == false {
+            return Err("overflow on sign normalization (LLONG_MIN denominator)");
+        }
+        n = safe_neg(n);
+        d = safe_neg(d);
+    }
+    let g: Int = rational_gcd(n, d);
+    if rational_is_in_safe_range(n / g) == false {
+        return Err("overflow on canonical reduction");
+    }
+    if rational_is_in_safe_range(d / g) == false {
+        return Err("overflow on canonical reduction");
+    }
+    return Ok(Rational {
+        num: n / g,
+        den: d / g
+    });
+}
+
+// Numerator accessor.
+pub fn rational_num(r: Rational) -> Int { return r.num; }
+
+// Denominator accessor.
+pub fn rational_den(r: Rational) -> Int { return r.den; }
+
+// True iff a == b. Canonical form makes direct num/den compare sufficient.
+pub fn rational_eq(a: Rational, b: Rational) -> Bool {
+    if a.num == b.num {
+        if a.den == b.den {
+            return true;
+        }
+    }
+    return false;
+}
+
+// True iff r is the zero rational (0/1).
+pub fn rational_is_zero(r: Rational) -> Bool {
+    if r.num == 0 {
+        return true;
+    }
+    return false;
+}
+
+// rational_negate returns -r in canonical form, or Err if num is LLONG_MIN.
+pub fn rational_negate(r: Rational) -> Result[Rational, String] {
+    if safe_neg_ok(r.num) == false {
+        return Err("overflow on negate (LLONG_MIN numerator)");
+    }
+    return rational_new(safe_neg(r.num), r.den);
+}
+
+// Add two rationals via cross-multiplication; result is canonical.
+// Returns Err on signed overflow at any cross-product.
+pub fn rational_add(a: Rational, b: Rational) -> Result[Rational, String] {
+    let an: Int = a.num;
+    let ad: Int = a.den;
+    let bn: Int = b.num;
+    let bd: Int = b.den;
+    if mul_overflow_ok(an, bd) == false { return Err("overflow"); }
+    if mul_overflow_ok(bn, ad) == false { return Err("overflow"); }
+    let ab: Int = an * bd;
+    let ba: Int = bn * ad;
+    if add_overflow_ok(ab, ba) == false { return Err("overflow"); }
+    if mul_overflow_ok(ad, bd) == false { return Err("overflow"); }
+    let n: Int = ab + ba;
+    let d: Int = ad * bd;
+    return rational_new(n, d);
+}
+
+// Subtract two rationals via cross-multiplication; result is canonical.
+// Returns Err on signed overflow.
+pub fn rational_sub(a: Rational, b: Rational) -> Result[Rational, String] {
+    let an: Int = a.num;
+    let ad: Int = a.den;
+    let bn: Int = b.num;
+    let bd: Int = b.den;
+    if mul_overflow_ok(an, bd) == false { return Err("overflow"); }
+    if mul_overflow_ok(bn, ad) == false { return Err("overflow"); }
+    let ab: Int = an * bd;
+    let ba: Int = bn * ad;
+    if sub_overflow_ok(ab, ba) == false { return Err("overflow"); }
+    if mul_overflow_ok(ad, bd) == false { return Err("overflow"); }
+    let n: Int = ab - ba;
+    let d: Int = ad * bd;
+    return rational_new(n, d);
+}
+
+// Multiply two rationals; result is canonical. Returns Err on signed overflow.
+pub fn rational_mul(a: Rational, b: Rational) -> Result[Rational, String] {
+    let an: Int = a.num;
+    let ad: Int = a.den;
+    let bn: Int = b.num;
+    let bd: Int = b.den;
+    if mul_overflow_ok(an, bn) == false { return Err("overflow"); }
+    if mul_overflow_ok(ad, bd) == false { return Err("overflow"); }
+    return rational_new(an * bn, ad * bd);
+}
+
+// Divide two rationals; Err if divisor numerator is 0 or on overflow.
+pub fn rational_div(a: Rational, b: Rational) -> Result[Rational, String] {
+    if b.num == 0 {
+        return Err("division by zero");
+    }
+    let an: Int = a.num;
+    let ad: Int = a.den;
+    let bn: Int = b.num;
+    let bd: Int = b.den;
+    if mul_overflow_ok(an, bd) == false { return Err("overflow"); }
+    if mul_overflow_ok(ad, bn) == false { return Err("overflow"); }
+    return rational_new(an * bd, ad * bn);
+}
+
+// Three-way compare: -1, 0, 1 via a*b cross product.
+// Returns sentinel 999 on overflow. Callers should check rational_is_in_safe_range
+// on both rationals first if they cannot tolerate the 999 sentinel.
+pub fn rational_cmp(a: Rational, b: Rational) -> Int {
+    if rational_is_in_safe_range(a.num) == false { return 999; }
+    if rational_is_in_safe_range(b.num) == false { return 999; }
+    if rational_is_in_safe_range(a.den) == false { return 999; }
+    if rational_is_in_safe_range(b.den) == false { return 999; }
+    let lhs: Int = a.num * b.den;
+    let rhs: Int = b.num * a.den;
+    if mul_overflow_ok(a.num, b.den) == false { return 999; }
+    if mul_overflow_ok(b.num, a.den) == false { return 999; }
+    if lhs < rhs { return -1; }
+    if lhs > rhs { return 1; }
+    return 0;
+}
+
+// rational_invariant_check verifies the post-condition that the rational is
+// in canonical form: den > 0 and gcd(|num|, den) == 1. Returns true iff
+// the invariant holds. Useful for fuzz harnesses.
+pub fn rational_invariant_check(r: Rational) -> Bool {
+    if r.den <= 0 { return false; }
+    let g: Int = rational_gcd(r.num, r.den);
+    if g != 1 { return false; }
+    return true;
+}

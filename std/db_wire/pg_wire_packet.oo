@@ -1,0 +1,145 @@
+// # PostgreSQL v3.0 wire packet encoder
+//
+// Logline: Packs StartupMessage, Query, RowDescription, DataRow, CommandComplete, and ReadyForQuery as network big-endian frames.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. No sockets. Length field is 4..65536.
+//
+// Beats:
+//   1. Write big-endian 16-bit and 32-bit integers.
+//   2. Build a typed message as type byte plus length plus payload.
+//   3. Emit StartupMessage with protocol 196608 and null-terminated parameters.
+//   4. Emit Query Q, RowDescription T, DataRow D, CommandComplete C, and ReadyForQuery Z.
+
+import "std/byte_out.oo";
+
+pub fn pg_be32(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 24) & 255);
+    b = list_push(b, (n >> 16) & 255);
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+pub fn pg_be16(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+pub fn pg_u32(b: List[Int], o: Int) -> Int {
+    let b0: Int = list_get(b, o);
+    let b1: Int = list_get(b, o + 1);
+    let b2: Int = list_get(b, o + 2);
+    let b3: Int = list_get(b, o + 3);
+    let hi: Int = b0 * 256 + b1;
+    let lo: Int = b2 * 256 + b3;
+    return hi * 65536 + lo;
+}
+
+pub fn pg_cat(o: List[Int], s: List[Int]) -> List[Int] {
+    let mut i: Int = 0;
+    let mut out: List[Int] = o;
+    while i < list_len(s) {
+        out = list_push(out, list_get(s, i) & 255);
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn pg_cstr(o: List[Int], s: List[Int]) -> List[Int] {
+    let mut out: List[Int] = pg_cat(o, s);
+    out = list_push(out, 0);
+    return out;
+}
+
+fn pg_len_ok(n: Int) -> Bool {
+    if n < 4 {
+        return false;
+    }
+    if n > 65536 {
+        return false;
+    }
+    return true;
+}
+
+pub fn pg_msg(typ: Int, payload: List[Int]) -> ByteOut {
+    let n: Int = list_len(payload) + 4;
+    if pg_len_ok(n) == false {
+        return byte_out_err("pg length");
+    }
+    let mut o: List[Int] = list_new();
+    o = list_push(o, typ & 255);
+    o = pg_cat(o, pg_be32(n));
+    o = pg_cat(o, payload);
+    return byte_out_ok(o);
+}
+
+pub fn pg_wire_packet_startup(user: List[Int], database: List[Int]) -> ByteOut {
+    if list_len(user) < 1 {
+        return byte_out_err("postgres user");
+    }
+    let mut body: List[Int] = pg_be32(196608);
+    let mut uk: List[Int] = list_new();
+    uk = list_push(uk, 117);
+    uk = list_push(uk, 115);
+    uk = list_push(uk, 101);
+    uk = list_push(uk, 114);
+    body = pg_cstr(body, uk);
+    body = pg_cstr(body, user);
+    let mut dk: List[Int] = list_new();
+    dk = list_push(dk, 100);
+    dk = list_push(dk, 97);
+    dk = list_push(dk, 116);
+    dk = list_push(dk, 97);
+    dk = list_push(dk, 98);
+    dk = list_push(dk, 97);
+    dk = list_push(dk, 115);
+    dk = list_push(dk, 101);
+    body = pg_cstr(body, dk);
+    body = pg_cstr(body, database);
+    body = list_push(body, 0);
+    let n: Int = list_len(body) + 4;
+    if pg_len_ok(n) == false {
+        return byte_out_err("pg length");
+    }
+    let mut out: List[Int] = pg_be32(n);
+    out = pg_cat(out, body);
+    return byte_out_ok(out);
+}
+
+pub fn pg_wire_packet_query(sql: List[Int]) -> ByteOut {
+    if list_len(sql) < 1 {
+        return byte_out_err("postgres query empty");
+    }
+    return pg_msg(81, pg_cstr(list_new(), sql));
+}
+
+pub fn pg_wire_packet_ready(status: Int) -> ByteOut {
+    let mut p: List[Int] = list_new();
+    p = list_push(p, status & 255);
+    return pg_msg(90, p);
+}
+
+pub fn pg_wire_packet_command_complete(tag: List[Int]) -> ByteOut {
+    if list_len(tag) < 1 {
+        return byte_out_err("postgres tag");
+    }
+    return pg_msg(67, pg_cstr(list_new(), tag));
+}
+
+pub fn pg_wire_packet_datarow(fields: List[Int]) -> ByteOut {
+    let n: Int = list_len(fields);
+    if n > 4096 {
+        return byte_out_err("pg row count");
+    }
+    let mut p: List[Int] = pg_be16(n);
+    let mut i: Int = 0;
+    while i < n {
+        p = pg_cat(p, pg_be32(1));
+        p = list_push(p, list_get(fields, i) & 255);
+        i = i + 1;
+    }
+    return pg_msg(68, p);
+}

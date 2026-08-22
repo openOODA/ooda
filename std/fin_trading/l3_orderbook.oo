@@ -1,0 +1,204 @@
+// # L3 limit order book
+//
+// Logline: Matches buy and sell orders FIFO by price-time, cancels by id, and reports the BBO spread.
+//
+// Setup: Pure. Opposite book is packed as px and qty lists in time order. Side 0 is incoming buy. Bad qty is Err.
+//
+// Beats:
+//   1. Walk the opposite book at the best price, earliest time first.
+//   2. Match min(remaining, standing qty) and rebuild standing qty.
+//   3. Cancel by identifier by zeroing qty.
+//   4. Expose matched, remaining, rest_sum, and BBO.
+
+pub type BookOut = struct {
+    flag: Int,
+    err: String,
+    matched: Int,
+    remaining: Int,
+    rest_sum: Int,
+    bbo_bid: Int,
+    bbo_ask: Int,
+    n: Int
+};
+
+fn bk_err(m: String) -> BookOut {
+    return BookOut { flag: 0, err: "ERR\tbook: " + m, matched: 0, remaining: 0, rest_sum: 0, bbo_bid: 0, bbo_ask: 0, n: 0 };
+}
+
+fn bk_sum(qty: List[Int]) -> Int {
+    let mut s: Int = 0;
+    let mut i: Int = 0;
+    while i < list_len(qty) {
+        s = s + list_get(qty, i);
+        i = i + 1;
+    }
+    return s;
+}
+
+fn bk_set(qty: List[Int], idx: Int, v: Int) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < list_len(qty) {
+        if i == idx {
+            o = list_push(o, v);
+        } else {
+            o = list_push(o, list_get(qty, i));
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
+fn bk_best(px: List[Int], qty: List[Int], side: Int, lim: Int) -> Int {
+    let mut best_i: Int = 0 - 1;
+    let mut best_p: Int = 0;
+    let mut i: Int = 0;
+    while i < list_len(px) {
+        let q: Int = list_get(qty, i);
+        let p: Int = list_get(px, i);
+        if q > 0 {
+            let mut ok: Int = 0;
+            if side == 0 {
+                if p <= lim {
+                    ok = 1;
+                }
+            } else {
+                if p >= lim {
+                    ok = 1;
+                }
+            }
+            if ok > 0 {
+                if best_i < 0 {
+                    best_i = i;
+                    best_p = p;
+                } else {
+                    let mut better: Int = 0;
+                    if side == 0 {
+                        if p < best_p {
+                            better = 1;
+                        }
+                    } else {
+                        if p > best_p {
+                            better = 1;
+                        }
+                    }
+                    if better > 0 {
+                        best_i = i;
+                        best_p = p;
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return best_i;
+}
+
+pub fn l3_orderbook_fifo(opp_px: List[Int], opp_qty: List[Int], side: Int, px: Int, qty: Int) -> BookOut {
+    if qty < 1 {
+        return bk_err("qty");
+    }
+    if list_len(opp_px) != list_len(opp_qty) {
+        return bk_err("len");
+    }
+    let before: Int = bk_sum(opp_qty);
+    let mut qy: List[Int] = opp_qty;
+    let mut rem: Int = qty;
+    let mut matched: Int = 0;
+    let mut guard: Int = 0;
+    while rem > 0 {
+        if guard > list_len(opp_px) + 1 {
+            break;
+        }
+        let bi: Int = bk_best(opp_px, qy, side, px);
+        if bi < 0 {
+            break;
+        }
+        let stand: Int = list_get(qy, bi);
+        let mut take: Int = rem;
+        if stand < take {
+            take = stand;
+        }
+        matched = matched + take;
+        rem = rem - take;
+        qy = bk_set(qy, bi, stand - take);
+        guard = guard + 1;
+    }
+    return BookOut { flag: 1, err: "", matched: matched, remaining: rem, rest_sum: bk_sum(qy), bbo_bid: px, bbo_ask: px, n: before };
+}
+
+pub fn l3_orderbook_match(bid_px: Int, bid_qty: Int, ask_px: Int, ask_qty: Int) -> BookOut {
+    let mut px: List[Int] = list_new();
+    let mut qy: List[Int] = list_new();
+    px = list_push(px, ask_px);
+    qy = list_push(qy, ask_qty);
+    return l3_orderbook_fifo(px, qy, 0, bid_px, bid_qty);
+}
+
+pub fn l3_orderbook_cancel(qty: List[Int], ids: List[Int], id: Int) -> BookOut {
+    let n: Int = list_len(ids);
+    if n != list_len(qty) {
+        return bk_err("len");
+    }
+    let mut i: Int = 0;
+    let mut found: Int = 0;
+    let mut qy: List[Int] = qty;
+    while i < n {
+        if list_get(ids, i) == id {
+            qy = bk_set(qy, i, 0);
+            found = 1;
+        }
+        i = i + 1;
+    }
+    if found < 1 {
+        return bk_err("id");
+    }
+    return BookOut { flag: 1, err: "", matched: 0, remaining: 0, rest_sum: bk_sum(qy), bbo_bid: 0, bbo_ask: 0, n: n };
+}
+
+pub fn l3_orderbook_bbo(bid_px: List[Int], bid_qty: List[Int], ask_px: List[Int], ask_qty: List[Int]) -> BookOut {
+    if list_len(bid_px) != list_len(bid_qty) {
+        return bk_err("len");
+    }
+    if list_len(ask_px) != list_len(ask_qty) {
+        return bk_err("len");
+    }
+    let bb: Int = bk_best(bid_px, bid_qty, 1, 0);
+    let ba: Int = bk_best(ask_px, ask_qty, 0, 2147483647);
+    if bb < 0 {
+        return bk_err("bid");
+    }
+    if ba < 0 {
+        return bk_err("ask");
+    }
+    return BookOut { flag: 1, err: "", matched: 0, remaining: 0, rest_sum: bk_sum(bid_qty) + bk_sum(ask_qty), bbo_bid: list_get(bid_px, bb), bbo_ask: list_get(ask_px, ba), n: list_len(bid_px) + list_len(ask_px) };
+}
+
+pub fn l3_orderbook_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}
+
+pub fn l3_orderbook_flag(o: BookOut) -> Int {
+    return o.flag;
+}
+pub fn l3_orderbook_err(o: BookOut) -> String {
+    return o.err;
+}
+pub fn l3_orderbook_matched(o: BookOut) -> Int {
+    return o.matched;
+}
+pub fn l3_orderbook_remaining(o: BookOut) -> Int {
+    return o.remaining;
+}
+pub fn l3_orderbook_rest_sum(o: BookOut) -> Int {
+    return o.rest_sum;
+}
+pub fn l3_orderbook_bbo_bid(o: BookOut) -> Int {
+    return o.bbo_bid;
+}
+pub fn l3_orderbook_bbo_ask(o: BookOut) -> Int {
+    return o.bbo_ask;
+}

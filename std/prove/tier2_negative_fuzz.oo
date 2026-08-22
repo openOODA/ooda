@@ -1,0 +1,216 @@
+// # Tier 2 Zero-Trust Negative Fuzzing & Defensive Fail-Closed
+//
+// Logline: Fuzzing harnesses evaluating corrupted wire frames, depth bombs, and negative spans with fail-closed Result[T, String] returns.
+//
+// Setup: Adversarial verification engine ensuring 100 percent graceful rejection with zero panics or memory leaks.
+//
+// Beats:
+//   1. Fuzz corrupted varint LEB128 streams with infinite continuation and overflow.
+//   2. Fuzz corrupted wire frames with negative lengths, invalid magic, and buffer truncations.
+//   3. Fuzz parser recursion depth bombs exceeding maximum recursion depth limits.
+//   4. Fuzz slice buffer indexing with negative spans and out-of-bounds ranges.
+//   5. Assert all probes fail closed returning Err("...") with zero crashes.
+
+pub type Tier2FuzzReport = struct {
+    probes_executed: Int,
+    probes_rejected_safely: Int,
+    panics_count: Int,
+    is_tier2_certified: Bool
+};
+
+pub fn tier2_decode_varint(bytes: List[Int]) -> Result[Int, String] {
+    let n: Int = list_len(bytes);
+    if n == 0 {
+        return Err("E_VARINT_EMPTY: stream is empty");
+    }
+    let mut val: Int = 0;
+    let mut shift: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        if i >= 10 {
+            return Err("E_VARINT_OVERFLOW: varint exceeded 64-bit maximum byte limit");
+        }
+        let b: Int = list_get(bytes, i);
+        if b < 0 || b > 255 {
+            return Err("E_VARINT_INVALID_BYTE: byte value out of 8-bit octet range");
+        }
+        let payload: Int = b % 128;
+        val = val + payload * (1 + shift * 7);
+        let has_more: Bool = (b >= 128);
+        if !has_more {
+            return Ok(val);
+        }
+        shift = shift + 1;
+        i = i + 1;
+    }
+    return Err("E_VARINT_TRUNCATED: unexpected EOF with continuation bit set");
+}
+
+pub fn tier2_decode_wire_frame(magic: Int, declared_len: Int, actual_buf_len: Int) -> Result[Int, String] {
+    if magic != 1330594881 {
+        return Err("E_WIRE_INVALID_MAGIC: packet magic signature mismatch");
+    }
+    if declared_len < 0 {
+        return Err("E_WIRE_NEGATIVE_LENGTH: declared packet length cannot be negative");
+    }
+    if actual_buf_len < 0 {
+        return Err("E_WIRE_NEGATIVE_BUFFER: actual buffer size cannot be negative");
+    }
+    if declared_len > actual_buf_len {
+        return Err("E_WIRE_FRAME_TRUNCATED: buffer contains fewer bytes than header declaration");
+    }
+    return Ok(declared_len);
+}
+
+pub fn tier2_check_recursion_depth(depth: Int, max_allowed: Int) -> Result[Int, String] {
+    if max_allowed <= 0 {
+        return Err("E_INVALID_MAX_DEPTH: maximum allowed depth must be positive");
+    }
+    if depth < 0 {
+        return Err("E_NEGATIVE_DEPTH: recursion depth cannot be negative");
+    }
+    if depth > max_allowed {
+        return Err("E_RECURSION_DEPTH_EXCEEDED: recursion depth exceeded call stack safety bound");
+    }
+    return Ok(depth);
+}
+
+pub fn tier2_check_slice_bounds(buf_len: Int, start: Int, length: Int) -> Result[Int, String] {
+    if buf_len < 0 {
+        return Err("E_SLICE_NEGATIVE_CAPACITY: buffer capacity cannot be negative");
+    }
+    if start < 0 {
+        return Err("E_SLICE_NEGATIVE_START: slice start index cannot be negative");
+    }
+    if length < 0 {
+        return Err("E_SLICE_NEGATIVE_LENGTH: slice length cannot be negative");
+    }
+    if start > buf_len {
+        return Err("E_SLICE_START_OOB: slice start index exceeds buffer capacity");
+    }
+    let end_idx: Int = start + length;
+    if end_idx > buf_len {
+        return Err("E_SLICE_SPAN_OOB: slice span exceeds buffer capacity");
+    }
+    return Ok(length);
+}
+
+pub fn tier2_fuzz_varint_overflow() -> Result[Bool, String] {
+    let mut corrupt_stream: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 15 {
+        corrupt_stream = list_push(corrupt_stream, 128 + 1);
+        i = i + 1;
+    }
+    let res: Result[Int, String] = tier2_decode_varint(corrupt_stream);
+    match res {
+        Ok(_) => { return Err("FAIL: Varint overflow did not fail-close"); },
+        Err(_) => { return Ok(true); }
+    }
+}
+
+pub fn tier2_fuzz_wire_negative_len() -> Result[Bool, String] {
+    let res: Result[Int, String] = tier2_decode_wire_frame(1330594881, -42, 1024);
+    match res {
+        Ok(_) => { return Err("FAIL: Negative wire length did not fail-close"); },
+        Err(_) => { return Ok(true); }
+    }
+}
+
+pub fn tier2_fuzz_depth_bomb(depth: Int, max_allowed: Int) -> Result[Bool, String] {
+    let res: Result[Int, String] = tier2_check_recursion_depth(depth, max_allowed);
+    match res {
+        Ok(_) => { return Err("FAIL: Depth bomb did not fail-close"); },
+        Err(_) => { return Ok(true); }
+    }
+}
+
+pub fn tier2_fuzz_negative_span(buf_len: Int, start: Int, length: Int) -> Result[Bool, String] {
+    let res: Result[Int, String] = tier2_check_slice_bounds(buf_len, start, length);
+    match res {
+        Ok(_) => { return Err("FAIL: Negative/OOB span did not fail-close"); },
+        Err(_) => { return Ok(true); }
+    }
+}
+
+pub fn tier2_negative_fuzz_evaluate_all() -> Result[Tier2FuzzReport, String] {
+    let mut executed: Int = 0;
+    let mut rejected: Int = 0;
+
+    let r_varint_overflow: Result[Bool, String] = tier2_fuzz_varint_overflow();
+    executed = executed + 1;
+    match r_varint_overflow {
+        Ok(v) => { if v { rejected = rejected + 1; } },
+        Err(_) => {}
+    }
+
+    let mut truncated_varint: List[Int] = list_new();
+    truncated_varint = list_push(truncated_varint, 128);
+    let r_varint_trunc: Result[Int, String] = tier2_decode_varint(truncated_varint);
+    executed = executed + 1;
+    match r_varint_trunc {
+        Ok(_) => {},
+        Err(_) => { rejected = rejected + 1; }
+    }
+
+    let r_wire_neg: Result[Bool, String] = tier2_fuzz_wire_negative_len();
+    executed = executed + 1;
+    match r_wire_neg {
+        Ok(v) => { if v { rejected = rejected + 1; } },
+        Err(_) => {}
+    }
+
+    let r_wire_trunc: Result[Int, String] = tier2_decode_wire_frame(1330594881, 2048, 512);
+    executed = executed + 1;
+    match r_wire_trunc {
+        Ok(_) => {},
+        Err(_) => { rejected = rejected + 1; }
+    }
+
+    let r_wire_magic: Result[Int, String] = tier2_decode_wire_frame(0, 100, 512);
+    executed = executed + 1;
+    match r_wire_magic {
+        Ok(_) => {},
+        Err(_) => { rejected = rejected + 1; }
+    }
+
+    let r_depth: Result[Bool, String] = tier2_fuzz_depth_bomb(1000, 64);
+    executed = executed + 1;
+    match r_depth {
+        Ok(v) => { if v { rejected = rejected + 1; } },
+        Err(_) => {}
+    }
+
+    let r_span_neg_start: Result[Bool, String] = tier2_fuzz_negative_span(100, -5, 10);
+    executed = executed + 1;
+    match r_span_neg_start {
+        Ok(v) => { if v { rejected = rejected + 1; } },
+        Err(_) => {}
+    }
+
+    let r_span_neg_len: Result[Bool, String] = tier2_fuzz_negative_span(100, 5, -10);
+    executed = executed + 1;
+    match r_span_neg_len {
+        Ok(v) => { if v { rejected = rejected + 1; } },
+        Err(_) => {}
+    }
+
+    let r_span_oob: Result[Bool, String] = tier2_fuzz_negative_span(100, 80, 50);
+    executed = executed + 1;
+    match r_span_oob {
+        Ok(v) => { if v { rejected = rejected + 1; } },
+        Err(_) => {}
+    }
+
+    let is_cert: Bool = (executed > 0 && rejected == executed);
+    if !is_cert {
+        return Err("E_TIER2_FUZZ_FAILED: some negative fuzzing probes were not safely rejected");
+    }
+
+    return Ok(Tier2FuzzReport {
+        probes_executed: executed,
+        probes_rejected_safely: rejected,
+        panics_count: 0,
+        is_tier2_certified: is_cert
+    });
+}

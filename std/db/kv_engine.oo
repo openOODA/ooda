@@ -1,0 +1,185 @@
+// # Sovereign Key-Value Storage Engine Facade
+//
+// Logline: Orchestrates LSM-Tree and B-Tree storage architectures with WAL durability and multi-level SSTables.
+//
+// Setup: Sovereign embedded KV engine providing point queries, range scans, and crash recovery.
+//
+// Beats:
+//   1. Open database state with WAL writer and in-memory MemTable.
+//   2. Execute put/delete mutations with WAL append before memory update.
+//   3. Resolve point lookups across active MemTable, frozen tables, and SSTable levels.
+//   4. Flush MemTables to immutable SSTables and compact tombstone records.
+
+import "./kv_types.oo";
+import "./wal.oo";
+import "./memtable.oo";
+import "./sstable.oo";
+import "./btree.oo";
+
+pub type KvEngine = struct {
+    config: KvConfig,
+    wal: WalWriter,
+    memtable: MemTable,
+    sstables: List[SSTable],
+    btree: BTree,
+    next_seq: Int,
+    next_sstable_id: Int
+};
+
+/// Open a new sovereign KV storage engine.
+pub fn kv_open(config: KvConfig) -> Result[KvEngine, String] {
+    let wal_res: Result[WalWriter, String] = wal_open((config).db_path + "/wal.log");
+    match wal_res {
+        Ok(w) => {
+            let mem: MemTable = memtable_new((config).memtable_capacity);
+            let ssts: List[SSTable] = list_new();
+            let bt: BTree = btree_new(16);
+            return Ok(KvEngine {
+                config: config,
+                wal: w,
+                memtable: mem,
+                sstables: ssts,
+                btree: bt,
+                next_seq: 1,
+                next_sstable_id: 1
+            });
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}
+
+/// Put a key-value pair into the storage engine.
+pub fn kv_put(engine: &mut KvEngine, key: String, value: String) -> Result[Int, String] {
+    if key.len() == 0 {
+        return Err("ERR\tkv_put: empty key prohibited");
+    }
+    let seq: Int = (engine).next_seq;
+    (engine).next_seq = seq + 1;
+    let entry: KvEntry = kv_entry_new(key, value, seq);
+    let wal_res: Result[Int, String] = wal_append(&mut (engine).wal, entry);
+    match wal_res {
+        Ok(_) => {
+            let mem_res: Result[Bool, String] = memtable_put(&mut (engine).memtable, entry);
+            match mem_res {
+                Ok(_) => {
+                    let bt_res: Result[Bool, String] = btree_insert(&mut (engine).btree, key, value);
+                    match bt_res {
+                        Ok(_) => {
+                            if memtable_should_flush(&(engine).memtable) {
+                                let flush_res: Result[Bool, String] = kv_flush(engine);
+                                match flush_res {
+                                    Ok(_) => {
+                                        return Ok(seq);
+                                    }
+                                    Err(e) => {
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                            return Ok(seq);
+                        }
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}
+
+/// Delete a key from the storage engine.
+pub fn kv_delete(engine: &mut KvEngine, key: String) -> Result[Int, String] {
+    if key.len() == 0 {
+        return Err("ERR\tkv_delete: empty key");
+    }
+    let seq: Int = (engine).next_seq;
+    (engine).next_seq = seq + 1;
+    let tomb: KvEntry = kv_entry_tombstone(key, seq);
+    let wal_res: Result[Int, String] = wal_append(&mut (engine).wal, tomb);
+    match wal_res {
+        Ok(_) => {
+            let mem_res: Result[Bool, String] = memtable_put(&mut (engine).memtable, tomb);
+            match mem_res {
+                Ok(_) => {
+                    return Ok(seq);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}
+
+/// Get a key from the storage engine. Returns Option[String].
+pub fn kv_get(engine: &KvEngine, key: String) -> Option[String] {
+    let mut out: Option[String] = None;
+    if key.len() == 0 {
+        return out;
+    }
+    let mem_opt: Option[String] = memtable_get(&(engine).memtable, key);
+    match mem_opt {
+        Some(v) => {
+            out = Some(v);
+            return out;
+        }
+        None => {
+            // Check SSTables in reverse order (newest first)
+            let n: Int = list_len((engine).sstables);
+            let mut i: Int = n - 1;
+            while i >= 0 {
+                let sst: SSTable = list_get((engine).sstables, i);
+                let sst_opt: Option[String] = sstable_get(&sst, key);
+                match sst_opt {
+                    Some(sv) => {
+                        out = Some(sv);
+                        return out;
+                    }
+                    None => {}
+                }
+                i = i - 1;
+            }
+            return out;
+        }
+    }
+}
+
+/// Flush active MemTable to an immutable SSTable.
+pub fn kv_flush(engine: &mut KvEngine) -> Result[Bool, String] {
+    if memtable_len(&(engine).memtable) == 0 {
+        return Ok(true);
+    }
+    let sst_id: Int = (engine).next_sstable_id;
+    (engine).next_sstable_id = sst_id + 1;
+    let sst_res: Result[SSTable, String] = sstable_from_memtable(&(engine).memtable, sst_id, 0);
+    match sst_res {
+        Ok(sst) => {
+            (engine).sstables = list_push((engine).sstables, sst);
+            (engine).memtable = memtable_new(((engine).config).memtable_capacity);
+            let trunc_res: Result[Bool, String] = wal_truncate(&mut (engine).wal);
+            match trunc_res {
+                Ok(_) => {
+                    return Ok(true);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}

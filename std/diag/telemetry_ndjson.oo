@@ -1,0 +1,87 @@
+// # Diagnostic AI Telemetry NDJSON Formatter & Sanitizer
+//
+// Logline: Compact single-line NDJSON telemetry serialization with ANSI escape code stripping and injection sanitization.
+//
+// Setup: Machine-readable telemetry format optimized for AI agent parsing and hostile log ingestion.
+//
+// Beats:
+//   1. Strip ANSI escape sequences and non-printable control characters from telemetry strings.
+//   2. Escape JSON special characters (quotes, backslashes, tabs, newlines).
+//   3. Serialize individual trace spans into validated single-line NDJSON objects.
+//   4. Batch-serialize trace buffers into newline-delimited JSON streams.
+
+import "./trace_span.oo";
+
+pub fn sanitize_telemetry_str(input: String) -> String {
+    let n: Int = input.len();
+    let mut out: String = "";
+    let mut i: Int = 0;
+    let mut in_escape: Bool = false;
+    let mut in_csi: Bool = false;
+
+    while i < n {
+        let b: Int = byte_at(input, i);
+        if in_escape {
+            if b == 91 { // '['
+                in_csi = true;
+                in_escape = false;
+            } else if b >= 64 && b <= 126 {
+                in_escape = false;
+            }
+        } else if in_csi {
+            if b >= 64 && b <= 126 {
+                in_csi = false;
+            }
+        } else if b == 27 { // 0x1B Escape
+            in_escape = true;
+        } else if b == 34 { // Double quote "
+            out = out + "\\\"";
+        } else if b == 92 { // Backslash \
+            out = out + "\\\\";
+        } else if b == 10 { // Newline \n
+            out = out + "\\n";
+        } else if b == 13 { // Carriage return \r
+            out = out + "\\r";
+        } else if b == 9 { // Tab \t
+            out = out + "\\t";
+        } else if b >= 32 && b <= 126 {
+            let ch: String = str_slice(input, i, i + 1);
+            out = out + ch;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn telemetry_span_to_ndjson(span: &TraceSpan) -> String {
+    let clean_name: String = sanitize_telemetry_str((span).name);
+    let dur: Int = trace_span_duration(span);
+    let mut line: String = "{\"event\":\"span\",\"id\":" + (span).span_id.to_string();
+    line = line + ",\"name\":\"" + clean_name + "\"";
+    line = line + ",\"parent\":" + (span).parent_id.to_string();
+    line = line + ",\"depth\":" + (span).depth.to_string();
+    line = line + ",\"dur_ms\":" + dur.to_string();
+    line = line + ",\"status\":" + (span).status.to_string();
+    line = line + ",\"mem_bytes\":" + (span).memory_bytes.to_string() + "}";
+    return line;
+}
+
+pub fn telemetry_export_ndjson(spans: List[TraceSpan]) -> String {
+    let n: Int = list_len(spans);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let span: TraceSpan = list_get(spans, i);
+        let line: String = telemetry_span_to_ndjson(&span);
+        out = out + line + "\n";
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn telemetry_ndjson_probe() -> Int {
+    let mut s: TraceSpan = trace_span_new(1, "\x1b[31mInjected\x1b[0m", 0, 0, 100);
+    trace_span_finish(&mut s, 200, 1, 512);
+    let ndjson: String = telemetry_span_to_ndjson(&s);
+    return ndjson.len() + trace_span_probe();
+}

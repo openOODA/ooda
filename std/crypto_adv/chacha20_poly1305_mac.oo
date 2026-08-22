@@ -1,0 +1,132 @@
+// # Poly1305 MAC modulo 2^130-5
+//
+// Logline: Accumulates 16-byte blocks under clamped r, reduces 26-bit limbs modulo 2^130-5, and adds s.
+//
+// Setup: Pure. r and s are 16 bytes. Message is List[Int]. Short r or s is Err.
+//
+// Beats:
+//   1. Clamp r into five 26-bit limbs.
+//   2. Add each block plus 2^128.
+//   3. Multiply by r and carry with the 5*h4 reduction.
+//   4. Add s and emit four 32-bit tag words.
+
+pub type PolyOut = struct {
+    flag: Int,
+    err: String,
+    t0: Int,
+    t1: Int,
+    t2: Int,
+    t3: Int
+};
+
+fn po_err(m: String) -> PolyOut {
+    return PolyOut { flag: 0, err: "ERR\tpoly1305: " + m, t0: 0, t1: 0, t2: 0, t3: 0 };
+}
+
+fn po_le32(b: List[Int], o: Int) -> Int {
+    return (list_get(b, o) + list_get(b, o + 1) * 256 + list_get(b, o + 2) * 65536 + list_get(b, o + 3) * 16777216) & 4294967295;
+}
+
+fn po_mask26(x: Int) -> Int {
+    return x & 67108863;
+}
+
+pub fn chacha20_poly1305_mac_block(r: List[Int], s: List[Int], msg: List[Int]) -> PolyOut {
+    if list_len(r) < 16 {
+        return po_err("r");
+    }
+    if list_len(s) < 16 {
+        return po_err("s");
+    }
+    if list_len(msg) < 1 {
+        return po_err("msg");
+    }
+    let v0: Int = po_le32(r, 0);
+    let v1: Int = po_le32(r, 4);
+    let v2: Int = po_le32(r, 8);
+    let v3: Int = po_le32(r, 12);
+    let r0: Int = v0 & 67108863;
+    let r1: Int = ((v0 >> 26) | (v1 << 6)) & 67108611;
+    let r2: Int = ((v1 >> 20) | (v2 << 12)) & 67092735;
+    let r3: Int = ((v2 >> 14) | (v3 << 18)) & 66076415;
+    let r4: Int = (v3 >> 8) & 1048575;
+    let mut h0: Int = 0;
+    let mut h1: Int = 0;
+    let mut h2: Int = 0;
+    let mut h3: Int = 0;
+    let mut h4: Int = 0;
+    let mut off: Int = 0;
+    while off < list_len(msg) {
+        let mut blk: List[Int] = list_new();
+        let mut i: Int = 0;
+        while i < 16 {
+            if off + i < list_len(msg) {
+                blk = list_push(blk, list_get(msg, off + i) & 255);
+            } else {
+                blk = list_push(blk, 0);
+            }
+            i = i + 1;
+        }
+        let m0: Int = po_le32(blk, 0);
+        let m1: Int = po_le32(blk, 4);
+        let m2: Int = po_le32(blk, 8);
+        let m3: Int = po_le32(blk, 12);
+        h0 = h0 + (m0 & 67108863);
+        h1 = h1 + (((m0 >> 26) | (m1 << 6)) & 67108863);
+        h2 = h2 + (((m1 >> 20) | (m2 << 12)) & 67108863);
+        h3 = h3 + (((m2 >> 14) | (m3 << 18)) & 67108863);
+        h4 = h4 + ((m3 >> 8) | 16777216);
+        let mut t0: Int = h0 * r0 + h1 * 5 * r4 + h2 * 5 * r3 + h3 * 5 * r2 + h4 * 5 * r1;
+        let mut t1: Int = h0 * r1 + h1 * r0 + h2 * 5 * r4 + h3 * 5 * r3 + h4 * 5 * r2;
+        let mut t2: Int = h0 * r2 + h1 * r1 + h2 * r0 + h3 * 5 * r4 + h4 * 5 * r3;
+        let mut t3: Int = h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * 5 * r4;
+        let mut t4: Int = h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0;
+        let mut c: Int = t0 >> 26;
+        h0 = po_mask26(t0);
+        t1 = t1 + c;
+        c = t1 >> 26;
+        h1 = po_mask26(t1);
+        t2 = t2 + c;
+        c = t2 >> 26;
+        h2 = po_mask26(t2);
+        t3 = t3 + c;
+        c = t3 >> 26;
+        h3 = po_mask26(t3);
+        t4 = t4 + c;
+        c = t4 >> 26;
+        h4 = po_mask26(t4);
+        h0 = h0 + c * 5;
+        c = h0 >> 26;
+        h0 = po_mask26(h0);
+        h1 = h1 + c;
+        off = off + 16;
+    }
+    let s0: Int = po_le32(s, 0);
+    let s1: Int = po_le32(s, 4);
+    let s2: Int = po_le32(s, 8);
+    let s3: Int = po_le32(s, 12);
+    let g0: Int = h0 | (h1 << 26);
+    let g1: Int = (h1 >> 6) | (h2 << 20);
+    let g2: Int = (h2 >> 12) | (h3 << 14);
+    let g3: Int = (h3 >> 18) | (h4 << 8);
+    return PolyOut { flag: 1, err: "", t0: (g0 + s0) & 4294967295, t1: (g1 + s1) & 4294967295, t2: (g2 + s2) & 4294967295, t3: (g3 + s3) & 4294967295 };
+}
+
+pub fn chacha20_poly1305_mac_flag(o: PolyOut) -> Int {
+    return o.flag;
+}
+pub fn chacha20_poly1305_mac_err(o: PolyOut) -> String {
+    return o.err;
+}
+pub fn chacha20_poly1305_mac_t0(o: PolyOut) -> Int {
+    return o.t0;
+}
+pub fn chacha20_poly1305_mac_t1(o: PolyOut) -> Int {
+    return o.t1;
+}
+pub fn chacha20_poly1305_mac_t2(o: PolyOut) -> Int {
+    return o.t2;
+}
+pub fn chacha20_poly1305_mac_t3(o: PolyOut) -> Int {
+    return o.t3;
+}

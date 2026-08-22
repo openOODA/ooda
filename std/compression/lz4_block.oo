@@ -1,0 +1,149 @@
+// # LZ4 block format decoder
+//
+// Logline: Decodes LZ4 block tokens, extra literal lengths, 2-byte match offsets, and run-length expansion.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. Match offset 0 and truncated sequences are Err.
+//
+// Beats:
+//   1. Read a token and any extra literal-length bytes.
+//   2. Copy literals, then a little-endian match offset if more bytes remain.
+//   3. Expand the match by byte-wise copy so overlaps work.
+//   4. Reject offset 0 and a truncated token sequence.
+
+import "std/byte_out.oo";
+
+fn lz4_cat_byte(o: List[Int], b: Int) -> List[Int] {
+    return list_push(o, b & 255);
+}
+
+fn lz4_extra(buf: List[Int], i: Int, acc: Int) -> ByteOut {
+    let mut p: Int = i;
+    let mut n: Int = acc;
+    let len: Int = list_len(buf);
+    while 1 > 0 {
+        if p >= len {
+            return byte_out_err("lz4 short");
+        }
+        let e: Int = list_get(buf, p);
+        p = p + 1;
+        n = n + e;
+        if e != 255 {
+            let mut rec: List[Int] = list_new();
+            rec = list_push(rec, n);
+            rec = list_push(rec, p);
+            return byte_out_ok(rec);
+        }
+    }
+    return byte_out_err("lz4 extra");
+}
+
+pub fn lz4_block_decode(buf: List[Int]) -> ByteOut {
+    let mut out: List[Int] = list_new();
+    let n: Int = list_len(buf);
+    let mut i: Int = 0;
+    while i < n {
+        let token: Int = list_get(buf, i);
+        i = i + 1;
+        let mut lit: Int = token >> 4;
+        if lit == 15 {
+            let ex: ByteOut = lz4_extra(buf, i, lit);
+            if ex.flag < 1 {
+                return ex;
+            }
+            lit = list_get(ex.bytes, 0);
+            i = list_get(ex.bytes, 1);
+        }
+        if i + lit > n {
+            return byte_out_err("lz4 short");
+        }
+        let mut k: Int = 0;
+        while k < lit {
+            out = lz4_cat_byte(out, list_get(buf, i + k));
+            k = k + 1;
+        }
+        i = i + lit;
+        if i >= n {
+            return byte_out_ok(out);
+        }
+        if i + 2 > n {
+            return byte_out_err("lz4 short");
+        }
+        let off: Int = list_get(buf, i) + list_get(buf, i + 1) * 256;
+        i = i + 2;
+        if off < 1 {
+            return byte_out_err("lz4 offset");
+        }
+        let mut mlen: Int = (token & 15) + 4;
+        if (token & 15) == 15 {
+            let ex2: ByteOut = lz4_extra(buf, i, mlen);
+            if ex2.flag < 1 {
+                return ex2;
+            }
+            mlen = list_get(ex2.bytes, 0);
+            i = list_get(ex2.bytes, 1);
+        }
+        let start: Int = list_len(out) - off;
+        if start < 0 {
+            return byte_out_err("lz4 offset");
+        }
+        let mut m: Int = 0;
+        while m < mlen {
+            let src: Int = start + m;
+            if src >= list_len(out) {
+                return byte_out_err("lz4 offset");
+            }
+            out = lz4_cat_byte(out, list_get(out, src));
+            m = m + 1;
+        }
+    }
+    return byte_out_ok(out);
+}
+
+pub fn lz4_block_lits(src: List[Int]) -> ByteOut {
+    let n: Int = list_len(src);
+    if n > 14 {
+        return byte_out_err("lz4 lits");
+    }
+    let mut o: List[Int] = list_new();
+    o = list_push(o, (n << 4) & 255);
+    let mut i: Int = 0;
+    while i < n {
+        o = list_push(o, list_get(src, i) & 255);
+        i = i + 1;
+    }
+    return byte_out_ok(o);
+}
+
+pub fn lz4_block_match(lits: List[Int], off: Int, mlen: Int) -> ByteOut {
+    let ln: Int = list_len(lits);
+    if ln > 14 {
+        return byte_out_err("lz4 lits");
+    }
+    if off < 1 {
+        return byte_out_err("lz4 offset");
+    }
+    if mlen < 4 {
+        return byte_out_err("lz4 match");
+    }
+    let low: Int = mlen - 4;
+    if low > 14 {
+        return byte_out_err("lz4 match");
+    }
+    let mut o: List[Int] = list_new();
+    o = list_push(o, ((ln << 4) + low) & 255);
+    let mut i: Int = 0;
+    while i < ln {
+        o = list_push(o, list_get(lits, i) & 255);
+        i = i + 1;
+    }
+    o = list_push(o, off & 255);
+    o = list_push(o, (off >> 8) & 255);
+    return byte_out_ok(o);
+}
+
+pub fn lz4_block_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}

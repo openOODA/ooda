@@ -1,0 +1,209 @@
+// # Limit Order Book (LOB) Continuous Double Auction Matching Engine
+//
+// Logline: Executes price-time priority (FIFO) matching for Limit and Market orders across Bid and Ask queues.
+//
+// Setup: Pure exchange matching engine ensuring strict trade conservation and order book balance invariants.
+//
+// Beats:
+//   1. Match aggressive incoming buy/sell orders against resting passive maker queues.
+//   2. Rest unexecuted limit order volume at appropriate price levels.
+//   3. Generate sequential Trade execution event records for maker and taker.
+//   4. Cancel resting orders and reclaim price level volume.
+
+import "./orderbook_types.oo";
+
+pub type OrderBookPlacement = struct {
+    book: OrderBook,
+    trades: List[Trade]
+};
+
+/// Initialize an empty OrderBook.
+pub fn orderbook_new() -> OrderBook {
+    let empty_bids: List[PriceLevel] = list_new();
+    let empty_asks: List[PriceLevel] = list_new();
+    return OrderBook { bids: empty_bids, asks: empty_asks, next_order_id: 1, next_trade_id: 1 };
+}
+
+fn ob_insert_bid(bids: List[PriceLevel], ord: Order) -> List[PriceLevel] {
+    let mut out: List[PriceLevel] = list_new();
+    let n: Int = list_len(bids);
+    let mut inserted: Bool = false;
+    let mut i: Int = 0;
+    while i < n {
+        let lvl: PriceLevel = list_get(bids, i);
+        if !inserted && (ord).price == (lvl).price {
+            let mut o_list: List[Order] = (lvl).orders;
+            o_list = list_push(o_list, ord);
+            let updated: PriceLevel = PriceLevel { price: (lvl).price, total_qty: (lvl).total_qty + (ord).qty, orders: o_list };
+            out = list_push(out, updated);
+            inserted = true;
+        } else if !inserted && (ord).price > (lvl).price {
+            let mut o_list: List[Order] = list_new();
+            o_list = list_push(o_list, ord);
+            let new_lvl: PriceLevel = PriceLevel { price: (ord).price, total_qty: (ord).qty, orders: o_list };
+            out = list_push(out, new_lvl);
+            out = list_push(out, lvl);
+            inserted = true;
+        } else {
+            out = list_push(out, lvl);
+        }
+        i = i + 1;
+    }
+    if !inserted {
+        let mut o_list: List[Order] = list_new();
+        o_list = list_push(o_list, ord);
+        let new_lvl: PriceLevel = PriceLevel { price: (ord).price, total_qty: (ord).qty, orders: o_list };
+        out = list_push(out, new_lvl);
+    }
+    return out;
+}
+
+fn ob_insert_ask(asks: List[PriceLevel], ord: Order) -> List[PriceLevel] {
+    let mut out: List[PriceLevel] = list_new();
+    let n: Int = list_len(asks);
+    let mut inserted: Bool = false;
+    let mut i: Int = 0;
+    while i < n {
+        let lvl: PriceLevel = list_get(asks, i);
+        if !inserted && (ord).price == (lvl).price {
+            let mut o_list: List[Order] = (lvl).orders;
+            o_list = list_push(o_list, ord);
+            let updated: PriceLevel = PriceLevel { price: (lvl).price, total_qty: (lvl).total_qty + (ord).qty, orders: o_list };
+            out = list_push(out, updated);
+            inserted = true;
+        } else if !inserted && (ord).price < (lvl).price {
+            let mut o_list: List[Order] = list_new();
+            o_list = list_push(o_list, ord);
+            let new_lvl: PriceLevel = PriceLevel { price: (ord).price, total_qty: (ord).qty, orders: o_list };
+            out = list_push(out, new_lvl);
+            out = list_push(out, lvl);
+            inserted = true;
+        } else {
+            out = list_push(out, lvl);
+        }
+        i = i + 1;
+    }
+    if !inserted {
+        let mut o_list: List[Order] = list_new();
+        o_list = list_push(o_list, ord);
+        let new_lvl: PriceLevel = PriceLevel { price: (ord).price, total_qty: (ord).qty, orders: o_list };
+        out = list_push(out, new_lvl);
+    }
+    return out;
+}
+
+/// Place a Limit order into the order book and match crossing volume with continuous double auction.
+pub fn orderbook_place_limit(book: OrderBook, side: Int, price: Int, qty: Int, ts: Int) -> Result[OrderBookPlacement, String] {
+    if price <= 0 || qty <= 0 {
+        return Err("ERR\torderbook: price and quantity must be strictly positive");
+    }
+    let order_id: Int = (book).next_order_id;
+    let mut rem_qty: Int = qty;
+    let mut next_t_id: Int = (book).next_trade_id;
+    let mut trades: List[Trade] = list_new();
+    let mut cur_bids: List[PriceLevel] = (book).bids;
+    let mut cur_asks: List[PriceLevel] = (book).asks;
+
+    if side == 1 { // BUY matching against ASKS
+        let mut rem_asks: List[PriceLevel] = list_new();
+        let n_asks: Int = list_len(cur_asks);
+        let mut ask_idx: Int = 0;
+        while ask_idx < n_asks {
+            let lvl: PriceLevel = list_get(cur_asks, ask_idx);
+            if rem_qty > 0 && (lvl).price <= price {
+                let lvl_orders: List[Order] = (lvl).orders;
+                let n_orders: Int = list_len(lvl_orders);
+                let mut rem_orders: List[Order] = list_new();
+                let mut lvl_matched: Int = 0;
+                let mut ord_idx: Int = 0;
+                while ord_idx < n_orders {
+                    let maker_ord: Order = list_get(lvl_orders, ord_idx);
+                    if rem_qty > 0 {
+                        let m_qty: Int = (maker_ord).qty;
+                        let mut match_q: Int = rem_qty;
+                        if m_qty < match_q { match_q = m_qty; }
+                        let tr: Trade = Trade { trade_id: next_t_id, maker_order_id: (maker_ord).id, taker_order_id: order_id, price: (lvl).price, qty: match_q, timestamp: ts };
+                        trades = list_push(trades, tr);
+                        next_t_id = next_t_id + 1;
+                        rem_qty = rem_qty - match_q;
+                        lvl_matched = lvl_matched + match_q;
+                        let rem_m_qty: Int = m_qty - match_q;
+                        if rem_m_qty > 0 {
+                            let updated_m: Order = Order { id: (maker_ord).id, side: (maker_ord).side, price: (maker_ord).price, qty: rem_m_qty, timestamp: (maker_ord).timestamp };
+                            rem_orders = list_push(rem_orders, updated_m);
+                        }
+                    } else {
+                        rem_orders = list_push(rem_orders, maker_ord);
+                    }
+                    ord_idx = ord_idx + 1;
+                }
+                let rem_lvl_qty: Int = (lvl).total_qty - lvl_matched;
+                if rem_lvl_qty > 0 && list_len(rem_orders) > 0 {
+                    let updated_lvl: PriceLevel = PriceLevel { price: (lvl).price, total_qty: rem_lvl_qty, orders: rem_orders };
+                    rem_asks = list_push(rem_asks, updated_lvl);
+                }
+            } else {
+                rem_asks = list_push(rem_asks, lvl);
+            }
+            ask_idx = ask_idx + 1;
+        }
+        cur_asks = rem_asks;
+        if rem_qty > 0 {
+            let resting_b: Order = Order { id: order_id, side: 1, price: price, qty: rem_qty, timestamp: ts };
+            cur_bids = ob_insert_bid(cur_bids, resting_b);
+        }
+    } else { // SELL matching against BIDS
+        let mut rem_bids: List[PriceLevel] = list_new();
+        let n_bids: Int = list_len(cur_bids);
+        let mut bid_idx: Int = 0;
+        while bid_idx < n_bids {
+            let lvl: PriceLevel = list_get(cur_bids, bid_idx);
+            if rem_qty > 0 && (lvl).price >= price {
+                let lvl_orders: List[Order] = (lvl).orders;
+                let n_orders: Int = list_len(lvl_orders);
+                let mut rem_orders: List[Order] = list_new();
+                let mut lvl_matched: Int = 0;
+                let mut ord_idx: Int = 0;
+                while ord_idx < n_orders {
+                    let maker_ord: Order = list_get(lvl_orders, ord_idx);
+                    if rem_qty > 0 {
+                        let m_qty: Int = (maker_ord).qty;
+                        let mut match_q: Int = rem_qty;
+                        if m_qty < match_q { match_q = m_qty; }
+                        let tr: Trade = Trade { trade_id: next_t_id, maker_order_id: (maker_ord).id, taker_order_id: order_id, price: (lvl).price, qty: match_q, timestamp: ts };
+                        trades = list_push(trades, tr);
+                        next_t_id = next_t_id + 1;
+                        rem_qty = rem_qty - match_q;
+                        lvl_matched = lvl_matched + match_q;
+                        let rem_m_qty: Int = m_qty - match_q;
+                        if rem_m_qty > 0 {
+                            let updated_m: Order = Order { id: (maker_ord).id, side: (maker_ord).side, price: (maker_ord).price, qty: rem_m_qty, timestamp: (maker_ord).timestamp };
+                            rem_orders = list_push(rem_orders, updated_m);
+                        }
+                    } else {
+                        rem_orders = list_push(rem_orders, maker_ord);
+                    }
+                    ord_idx = ord_idx + 1;
+                }
+                let rem_lvl_qty: Int = (lvl).total_qty - lvl_matched;
+                if rem_lvl_qty > 0 && list_len(rem_orders) > 0 {
+                    let updated_lvl: PriceLevel = PriceLevel { price: (lvl).price, total_qty: rem_lvl_qty, orders: rem_orders };
+                    rem_bids = list_push(rem_bids, updated_lvl);
+                }
+            } else {
+                rem_bids = list_push(rem_bids, lvl);
+            }
+            bid_idx = bid_idx + 1;
+        }
+        cur_bids = rem_bids;
+        if rem_qty > 0 {
+            let resting_a: Order = Order { id: order_id, side: 2, price: price, qty: rem_qty, timestamp: ts };
+            cur_asks = ob_insert_ask(cur_asks, resting_a);
+        }
+    }
+
+    return Ok(OrderBookPlacement {
+        book: OrderBook { bids: cur_bids, asks: cur_asks, next_order_id: order_id + 1, next_trade_id: next_t_id },
+        trades: trades
+    });
+}

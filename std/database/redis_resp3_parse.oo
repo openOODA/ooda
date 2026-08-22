@@ -1,0 +1,181 @@
+// # RESP3 fail-closed parser
+//
+// Logline: Parses + - : $ * % frames with CRLF, a depth cap of 16, and exact syntax errors.
+//
+// Setup: Pure. Unterminated input returns err resp3 syntax error. Nested depth over 16 fails closed.
+//
+// Beats:
+//   1. Scan to CRLF or fail with resp3 syntax error.
+//   2. Parse integers, bulk payloads, arrays, and maps.
+//   3. Increment depth on each aggregate and reject depth 17.
+//   4. Return a flattened tag record of the value.
+
+import "std/byte_out.oo";
+
+fn resp_line(buf: List[Int], start: Int) -> ByteOut {
+    let mut i: Int = start;
+    while i + 1 < list_len(buf) {
+        if list_get(buf, i) == 13 {
+            if list_get(buf, i + 1) == 10 {
+                let mut rec: List[Int] = list_new();
+                rec = list_push(rec, i);
+                rec = list_push(rec, i + 2);
+                return byte_out_ok(rec);
+            }
+            return byte_out_err("resp3 syntax error");
+        }
+        i = i + 1;
+    }
+    return byte_out_err("resp3 syntax error");
+}
+
+fn resp_num(buf: List[Int], a: Int, b: Int) -> Int {
+    let mut n: Int = 0;
+    let mut i: Int = a;
+    let mut sgn: Int = 1;
+    if i < b {
+        if list_get(buf, i) == 45 {
+            sgn = 0 - 1;
+            i = i + 1;
+        }
+    }
+    while i < b {
+        let d: Int = list_get(buf, i) - 48;
+        if d < 0 {
+            return 0 - 999999;
+        }
+        if d > 9 {
+            return 0 - 999999;
+        }
+        n = n * 10 + d;
+        i = i + 1;
+    }
+    return n * sgn;
+}
+
+fn resp_push_range(o: List[Int], buf: List[Int], a: Int, b: Int) -> List[Int] {
+    let mut out: List[Int] = o;
+    let mut i: Int = a;
+    while i < b {
+        out = list_push(out, list_get(buf, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn resp_parse_at(buf: List[Int], start: Int, depth: Int) -> ByteOut {
+    if start >= list_len(buf) {
+        return byte_out_err("resp3 syntax error");
+    }
+    let t: Int = list_get(buf, start);
+    let lr: ByteOut = resp_line(buf, start + 1);
+    if lr.flag < 1 {
+        return lr;
+    }
+    let end: Int = list_get(lr.bytes, 0);
+    let next: Int = list_get(lr.bytes, 1);
+    if t == 43 {
+        return resp_line_val(buf, 43, start, end, next);
+    }
+    if t == 45 {
+        return resp_line_val(buf, 45, start, end, next);
+    }
+    if t == 58 {
+        return resp_int_val(buf, start, end, next);
+    }
+    if t == 36 {
+        return resp_bulk_val(buf, start, end, next);
+    }
+    if t == 42 {
+        return resp_agg_val(buf, 42, start, end, next, depth);
+    }
+    if t == 37 {
+        return resp_agg_val(buf, 37, start, end, next, depth);
+    }
+    return byte_out_err("resp3 syntax error");
+}
+
+fn resp_line_val(buf: List[Int], tag: Int, start: Int, end: Int, next: Int) -> ByteOut {
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, tag);
+    rec = list_push(rec, end - (start + 1));
+    rec = resp_push_range(rec, buf, start + 1, end);
+    rec = list_push(rec, next);
+    return byte_out_ok(rec);
+}
+
+fn resp_int_val(buf: List[Int], start: Int, end: Int, next: Int) -> ByteOut {
+    let n: Int = resp_num(buf, start + 1, end);
+    if n == (0 - 999999) {
+        return byte_out_err("resp3 syntax error");
+    }
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, 58);
+    rec = list_push(rec, n);
+    rec = list_push(rec, next);
+    return byte_out_ok(rec);
+}
+
+fn resp_bulk_val(buf: List[Int], start: Int, end: Int, next: Int) -> ByteOut {
+    let n: Int = resp_num(buf, start + 1, end);
+    if n < 0 {
+        return byte_out_err("resp3 syntax error");
+    }
+    if next + n + 2 > list_len(buf) {
+        return byte_out_err("resp3 syntax error");
+    }
+    if list_get(buf, next + n) != 13 {
+        return byte_out_err("resp3 syntax error");
+    }
+    if list_get(buf, next + n + 1) != 10 {
+        return byte_out_err("resp3 syntax error");
+    }
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, 36);
+    rec = list_push(rec, n);
+    rec = resp_push_range(rec, buf, next, next + n);
+    rec = list_push(rec, next + n + 2);
+    return byte_out_ok(rec);
+}
+
+fn resp_agg_val(buf: List[Int], tag: Int, start: Int, end: Int, next: Int, depth: Int) -> ByteOut {
+    if depth > 16 {
+        return byte_out_err("resp3 depth");
+    }
+    let n: Int = resp_num(buf, start + 1, end);
+    if n < 0 {
+        return byte_out_err("resp3 syntax error");
+    }
+    let mut need: Int = n;
+    if tag == 37 {
+        need = n * 2;
+    }
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, tag);
+    rec = list_push(rec, n);
+    let mut pos: Int = next;
+    let mut k: Int = 0;
+    while k < need {
+        let ch: ByteOut = resp_parse_at(buf, pos, depth + 1);
+        if ch.flag < 1 {
+            return ch;
+        }
+        let cl: Int = list_len(ch.bytes);
+        if cl < 1 {
+            return byte_out_err("resp3 syntax error");
+        }
+        pos = list_get(ch.bytes, cl - 1);
+        let mut j: Int = 0;
+        while j < cl - 1 {
+            rec = list_push(rec, list_get(ch.bytes, j));
+            j = j + 1;
+        }
+        k = k + 1;
+    }
+    rec = list_push(rec, pos);
+    return byte_out_ok(rec);
+}
+
+pub fn redis_resp3_parse(buf: List[Int]) -> ByteOut { return resp_parse_at(buf, 0, 1); }
+
+pub fn redis_resp3_parse_stat(buf: List[Int]) -> Result[Int, String] { return byte_out_stat(redis_resp3_parse(buf)); }

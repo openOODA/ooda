@@ -1,0 +1,168 @@
+// # Kitty Terminal Graphics Protocol Engine
+//
+// Logline: High-resolution graphics protocol encoder with GPU VRAM caching, chunked base64 streaming, and Unicode half-block fallback.
+//
+// Setup: Generates Kitty graphics escape sequences (\x1b_G...) and renders 24-bit TrueColor half-blocks when unsupported.
+//
+// Beats:
+//   1. Define KittyImage, KittyPlacement, and PixelRgb structures.
+//   2. Encode direct image display, GPU VRAM caching (a=t), and cached image placement (a=p).
+//   3. Split large payloads into 4KB chunked stream sequences (m=1/m=0).
+//   4. Detect terminal Kitty support and render Unicode half-block fallbacks (▀/▄).
+
+import "std/str.oo";
+
+pub type KittyImage = struct {
+    id: Int,
+    width: Int,
+    height: Int,
+    format: Int,
+    payload_base64: String
+};
+
+pub type KittyPlacement = struct {
+    image_id: Int,
+    cell_x: Int,
+    cell_y: Int,
+    columns: Int,
+    rows: Int,
+    z_index: Int
+};
+
+pub type PixelRgb = struct {
+    r: Int,
+    g: Int,
+    b: Int
+};
+
+pub fn kitty_image_new_rgba(id: Int, width: Int, height: Int, base64_data: String) -> KittyImage { return KittyImage {
+        id: id,
+        width: width,
+        height: height,
+        format: 32,
+        payload_base64: base64_data
+    }; }
+
+pub fn kitty_image_new_rgb(id: Int, width: Int, height: Int, base64_data: String) -> KittyImage { return KittyImage {
+        id: id,
+        width: width,
+        height: height,
+        format: 24,
+        payload_base64: base64_data
+    }; }
+
+pub fn kitty_image_new_png(id: Int, base64_data: String) -> KittyImage { return KittyImage {
+        id: id,
+        width: 0,
+        height: 0,
+        format: 100,
+        payload_base64: base64_data
+    }; }
+
+pub fn kitty_placement_new(img_id: Int, cx: Int, cy: Int, cols: Int, rows: Int) -> KittyPlacement { return KittyPlacement {
+        image_id: img_id,
+        cell_x: cx,
+        cell_y: cy,
+        columns: cols,
+        rows: rows,
+        z_index: 0
+    }; }
+
+pub fn kitty_encode_transmit_and_display(img: KittyImage, placement: KittyPlacement) -> String {
+    let mut ctrl: String = "\x1b_Ga=T,f=" + img.format.to_string();
+    if img.width > 0 { ctrl = ctrl + ",s=" + img.width.to_string(); }
+    if img.height > 0 { ctrl = ctrl + ",v=" + img.height.to_string(); }
+    if placement.columns > 0 { ctrl = ctrl + ",c=" + placement.columns.to_string(); }
+    if placement.rows > 0 { ctrl = ctrl + ",r=" + placement.rows.to_string(); }
+    ctrl = ctrl + ";" + img.payload_base64 + "\x1b\\";
+    return ctrl;
+}
+
+pub fn kitty_encode_transmit_cache(img: KittyImage) -> String {
+    let mut ctrl: String = "\x1b_Ga=t,i=" + img.id.to_string() + ",f=" + img.format.to_string();
+    if img.width > 0 { ctrl = ctrl + ",s=" + img.width.to_string(); }
+    if img.height > 0 { ctrl = ctrl + ",v=" + img.height.to_string(); }
+    ctrl = ctrl + ";" + img.payload_base64 + "\x1b\\";
+    return ctrl;
+}
+
+pub fn kitty_encode_display_cached(placement: KittyPlacement) -> String {
+    let mut ctrl: String = "\x1b_Ga=p,i=" + placement.image_id.to_string();
+    if placement.columns > 0 { ctrl = ctrl + ",c=" + placement.columns.to_string(); }
+    if placement.rows > 0 { ctrl = ctrl + ",r=" + placement.rows.to_string(); }
+    ctrl = ctrl + "\x1b\\";
+    return ctrl;
+}
+
+pub fn kitty_encode_delete_image(image_id: Int) -> String { return "\x1b_Ga=d,d=i,i=" + image_id.to_string() + "\x1b\\"; }
+
+pub fn kitty_encode_delete_all() -> String { return "\x1b_Ga=d,d=a\x1b\\"; }
+
+pub fn kitty_encode_chunked_stream(img: KittyImage, chunk_size: Int) -> List[String] {
+    let mut chunks: List[String] = list_new();
+    let total_len: Int = img.payload_base64.len();
+    if total_len <= chunk_size {
+        let chunk_seq: String = kitty_encode_transmit_cache(img);
+        chunks = list_push(chunks, chunk_seq);
+        return chunks;
+    }
+
+    let mut offset: Int = 0;
+    let mut is_first: Bool = true;
+    while offset < total_len {
+        let mut end_idx: Int = offset + chunk_size;
+        if end_idx > total_len { end_idx = total_len; }
+        let slice: String = str_sub(img.payload_base64, offset, end_idx);
+        let has_more: Bool = end_idx < total_len;
+
+        let mut seq: String = "\x1b_G";
+        if is_first {
+            seq = seq + "a=t,i=" + img.id.to_string() + ",f=" + img.format.to_string();
+            if img.width > 0 { seq = seq + ",s=" + img.width.to_string(); }
+            if img.height > 0 { seq = seq + ",v=" + img.height.to_string(); }
+            if has_more { seq = seq + ",m=1"; } else { seq = seq + ",m=0"; }
+            is_first = false;
+        } else {
+            if has_more { seq = seq + "m=1"; } else { seq = seq + "m=0"; }
+        }
+        seq = seq + ";" + slice + "\x1b\\";
+        chunks = list_push(chunks, seq);
+        offset = end_idx;
+    }
+    return chunks;
+}
+
+pub fn kitty_detect_support(term_env: String, term_prog: String, kitty_win: String) -> Bool {
+    if kitty_win.len() > 0 { return true; }
+    if term_prog == "kitty" || term_prog == "Ghostty" || term_prog == "WezTerm" { return true; }
+    if str_contains(term_env, "kitty") || str_contains(term_env, "ghostty") || str_contains(term_env, "wezterm") {
+        return true;
+    }
+    return false;
+}
+
+pub fn kitty_render_halfblock_fallback(pixels: List[PixelRgb], width: Int, height: Int) -> String {
+    let mut out: String = "";
+    let mut y: Int = 0;
+    while y < height {
+        let mut x: Int = 0;
+        while x < width {
+            let top_idx: Int = y * width + x;
+            let bot_idx: Int = (y + 1) * width + x;
+
+            let mut top_p: PixelRgb = PixelRgb { r: 0, g: 0, b: 0 };
+            if top_idx < list_len(pixels) { top_p = list_get(pixels, top_idx); }
+
+            let mut bot_p: PixelRgb = PixelRgb { r: 0, g: 0, b: 0 };
+            if (y + 1) < height && bot_idx < list_len(pixels) { bot_p = list_get(pixels, bot_idx); }
+
+            out = out + "\x1b[38;2;" + top_p.r.to_string() + ";" + top_p.g.to_string() + ";" + top_p.b.to_string() + "m";
+            out = out + "\x1b[48;2;" + bot_p.r.to_string() + ";" + bot_p.g.to_string() + ";" + bot_p.b.to_string() + "m";
+            out = out + "▀";
+            x = x + 1;
+        }
+        out = out + "\x1b[0m\n";
+        y = y + 2;
+    }
+    return out;
+}

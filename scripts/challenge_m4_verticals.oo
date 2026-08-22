@@ -1,0 +1,239 @@
+// # Milestone 4 Adversarial Challenge: Verticals 5-8 Stress Suite
+//
+// Logline: Adversarially stress-tests Black-Scholes Greeks, orderbook matching crossing, CAN frames, and Parquet/Arrow decoding.
+//
+// Setup: Executes boundary probes, invariant checks, and cross-condition stress tests against M4 implementations.
+//
+// Beats:
+//   1. Stress-test Black-Scholes analytical Greeks and pricing invariants.
+//   2. Stress-test Orderbook matching engine across multi-level sweeps and sell crossings.
+//   3. Stress-test CAN frame signal bit-unpacker for sub-byte bitmasks and span limits.
+//   4. Stress-test Parquet and Arrow metadata decoders against dynamic structures.
+
+import "std/finance/black_scholes_types.oo";
+import "std/finance/black_scholes.oo";
+import "std/finance/black_scholes_greeks.oo";
+import "std/finance/orderbook_types.oo";
+import "std/finance/orderbook_engine.oo";
+import "std/robotics/can_types.oo";
+import "std/robotics/can_frame.oo";
+import "std/robotics/can_signal.oo";
+import "std/formats/parquet_types.oo";
+import "std/formats/parquet.oo";
+import "std/formats/arrow_types.oo";
+import "std/formats/arrow.oo";
+
+pub fn challenge_black_scholes() -> Int {
+    println("--- Challenge 1: Black-Scholes Greeks & Pricing ---");
+    let c_itm: OptionContract = OptionContract {
+        spot: 200.0,
+        strike: 100.0,
+        time_to_maturity: 1.0,
+        risk_free_rate: 0.05,
+        volatility: 0.20
+    };
+    let g_res: Result[OptionGreeks, String] = bs_calculate_greeks(&c_itm);
+    match g_res {
+        Ok(g) => {
+            if (g).call_delta < 0.90 {
+                println("VULNERABILITY: Deep ITM call delta should be > 0.90, but bs_calculate_greeks uses hardcoded d1=0.25 resulting in Delta < 0.90");
+            }
+            if (g).vega == 38.5 {
+                println("VULNERABILITY: Vega is hardcoded to 38.5 regardless of contract spot S=200.0");
+            }
+            if (g).gamma == 0.018 {
+                println("VULNERABILITY: Gamma is hardcoded to 0.018 regardless of spot/strike/volatility");
+            }
+        }
+        Err(e) => {
+            println("Error: " + e);
+        }
+    }
+    return 0;
+}
+
+pub fn challenge_orderbook_matching() -> Int {
+    println("--- Challenge 2: Orderbook Crossing & Inventory Conservation ---");
+    let mut book: OrderBook = orderbook_new();
+
+    // Place Ask at 100 with qty 10
+    let res1: Result[OrderBookPlacement, String] = orderbook_place_limit(book, 2, 100, 10, 1000);
+    match res1 {
+        Ok(p1) => {
+            book = (p1).book;
+            println("Resting Ask placed at 100, qty 10");
+
+            // Place incoming Buy at 100 with qty 25 (crossing)
+            let res2: Result[OrderBookPlacement, String] = orderbook_place_limit(book, 1, 100, 25, 1001);
+            match res2 {
+                Ok(p2) => {
+                    let trades: List[Trade] = (p2).trades;
+                    let n_trades: Int = list_len(trades);
+                    if n_trades > 0 {
+                        let t: Trade = list_get(trades, 0);
+                        if (t).qty == 25 {
+                            println("VULNERABILITY: Trade matched 25 lots when resting maker only had 10 lots (volume fabrication)!");
+                        }
+                        if (t).maker_order_id == 100 {
+                            println("VULNERABILITY: Trade hardcodes maker_order_id to 100!");
+                        }
+                    }
+                    let post_book: OrderBook = (p2).book;
+                    let asks_list: List[PriceLevel] = (post_book).asks;
+                    if list_len(asks_list) > 0 {
+                        println("VULNERABILITY: Matched Ask was NOT removed or decremented from resting orderbook!");
+                    }
+                }
+                Err(e) => { println("Error: " + e); }
+            }
+
+            // Challenge 2B: Sell Order crossing existing Bid
+            let mut book2: OrderBook = orderbook_new();
+            let b_res: Result[OrderBookPlacement, String] = orderbook_place_limit(book2, 1, 105, 10, 2000);
+            match b_res {
+                Ok(pb) => {
+                    book2 = (pb).book;
+                    // Aggressive Sell at 100 (should cross bid at 105)
+                    let s_res: Result[OrderBookPlacement, String] = orderbook_place_limit(book2, 2, 100, 5, 2001);
+                    match s_res {
+                        Ok(ps) => {
+                            let n_sell_trades: Int = list_len((ps).trades);
+                            if n_sell_trades == 0 {
+                                println("VULNERABILITY: Sell order failed to cross higher resting Bid (0 trades generated)!");
+                            }
+                        }
+                        Err(e) => { println("Error: " + e); }
+                    }
+                }
+                Err(e) => { println("Error: " + e); }
+            }
+        }
+        Err(e) => { println("Error: " + e); }
+    }
+    return 0;
+}
+
+pub fn challenge_can_signals() -> Int {
+    println("--- Challenge 3: CAN Signal Bitmasking & Span Validation ---");
+    let mut data: List[Int] = list_new();
+    data = list_push(data, 255); // 0xFF in byte 0
+    data = list_push(data, 0);
+    data = list_push(data, 0);
+    data = list_push(data, 0);
+    data = list_push(data, 0);
+    data = list_push(data, 0);
+    data = list_push(data, 0);
+    data = list_push(data, 0);
+
+    let frame_res: Result[CanFrame, String] = can_frame_new(256, false, 8, data);
+    match frame_res {
+        Ok(frame) => {
+            // Signal: 4 bits wide starting at bit 2 (expected: 15)
+            let sig_def: CanSignalDef = CanSignalDef {
+                name: "mode_flags",
+                start_bit: 2,
+                bit_length: 4,
+                is_big_endian: false,
+                is_signed: false,
+                scale: 1.0,
+                offset: 0.0
+            };
+            let sig_res: Result[CanDecodedSignal, String] = can_extract_signal(&frame, &sig_def);
+            match sig_res {
+                Ok(sig) => {
+                    if (sig).raw_val == 255 {
+                        println("VULNERABILITY: Sub-byte signal extraction returned full byte 255 without bitmasking/shifting!");
+                    }
+                }
+                Err(e) => { println("Error: " + e); }
+            }
+
+            // Signal spanning past DLC: 16-bit at byte 7 of 8-byte payload
+            let oob_sig: CanSignalDef = CanSignalDef {
+                name: "sensor_temp",
+                start_bit: 56, // byte 7
+                bit_length: 16, // needs bytes 7 and 8
+                is_big_endian: false,
+                is_signed: false,
+                scale: 1.0,
+                offset: 0.0
+            };
+            let oob_res: Result[CanDecodedSignal, String] = can_extract_signal(&frame, &oob_sig);
+            match oob_res {
+                Ok(sig) => {
+                    println("VULNERABILITY: Signal exceeding payload DLC succeeded instead of returning Err!");
+                }
+                Err(e) => {
+                    println("Payload boundary overflow caught: " + e);
+                }
+            }
+        }
+        Err(e) => { println("Error: " + e); }
+    }
+    return 0;
+}
+
+pub fn challenge_formats_metadata() -> Int {
+    println("--- Challenge 4: Parquet & Arrow Metadata Decoding ---");
+    let mut pq_bytes: List[Int] = list_new();
+    // 'P'=80, 'A'=65, 'R'=82, '1'=49
+    pq_bytes = list_push(pq_bytes, 80);
+    pq_bytes = list_push(pq_bytes, 65);
+    pq_bytes = list_push(pq_bytes, 82);
+    pq_bytes = list_push(pq_bytes, 49);
+    // 4 dummy data bytes
+    pq_bytes = list_push(pq_bytes, 1);
+    pq_bytes = list_push(pq_bytes, 2);
+    pq_bytes = list_push(pq_bytes, 3);
+    pq_bytes = list_push(pq_bytes, 4);
+    // 4-byte footer length = 4
+    pq_bytes = list_push(pq_bytes, 4);
+    pq_bytes = list_push(pq_bytes, 0);
+    pq_bytes = list_push(pq_bytes, 0);
+    pq_bytes = list_push(pq_bytes, 0);
+    // trailing 'PAR1'
+    pq_bytes = list_push(pq_bytes, 80);
+    pq_bytes = list_push(pq_bytes, 65);
+    pq_bytes = list_push(pq_bytes, 82);
+    pq_bytes = list_push(pq_bytes, 49);
+
+    let pq_res: Result[ParquetFileMetaData, String] = parquet_parse_metadata(pq_bytes);
+    match pq_res {
+        Ok(meta) => {
+            if (meta).num_rows == 100 {
+                println("VULNERABILITY: Parquet decoder hardcoded num_rows=100 and fake schema without parsing footer bytes!");
+            }
+        }
+        Err(e) => { println("Error: " + e); }
+    }
+
+    let mut arrow_bytes: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 16 {
+        arrow_bytes = list_push(arrow_bytes, i);
+        i = i + 1;
+    }
+    let ar_res: Result[ArrowSchema, String] = arrow_parse_schema(arrow_bytes);
+    match ar_res {
+        Ok(schema) => {
+            if (schema).num_fields == 2 {
+                println("VULNERABILITY: Arrow schema decoder hardcoded 2 fields (timestamp, value) ignoring input bytes!");
+            }
+        }
+        Err(e) => { println("Error: " + e); }
+    }
+    return 0;
+}
+
+pub fn main(p: &ProcessCap) {
+    println("============================================================");
+    println(" Milestone 4 Empirical Challenge: Verticals 5-8 Stress Suite");
+    println("============================================================");
+    let r1: Int = challenge_black_scholes();
+    let r2: Int = challenge_orderbook_matching();
+    let r3: Int = challenge_can_signals();
+    let r4: Int = challenge_formats_metadata();
+    println("============================================================");
+    println(" Empirical Challenge Completed.");
+    println("============================================================");
+}

@@ -1,0 +1,94 @@
+// # Adversarial Diagnostic Engine Probe
+//
+// Logline: Hostile fuzzing and boundary stress-testing of std/diag telemetry, depth clamping, and invariant solvers.
+//
+// Setup: Stress-tests openOODA std/diag with malicious ANSI injections, ring buffer bounds, and state diff edge cases.
+//
+// Beats:
+//   1. Probe recursion depth clamping for extreme positive, negative, and boundary depths (15, 16, 17, 1000).
+//   2. Probe ring buffer zero/negative capacity fail-safe defaults and out-of-bounds index access.
+//   3. Probe hostile ANSI/OSC/control character stripping in NDJSON telemetry serializer.
+//   4. Probe counterexample diffing with state additions, deletions, and type mutations.
+
+import "std/diag/trace_span.oo";
+import "std/diag/breadcrumb_tree.oo";
+import "std/diag/telemetry_ndjson.oo";
+import "std/diag/counterexample_capture.oo";
+import "std/diag/invariant_eval.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("=== Adversarial Diagnostic Engine Probe ===");
+
+    // 1. Strict Recursion Depth Clamping [0..16]
+    let s_neg: TraceSpan = trace_span_new(1, "neg", 0, -100, 0);
+    let s_zero: TraceSpan = trace_span_new(2, "zero", 0, 0, 0);
+    let s_15: TraceSpan = trace_span_new(3, "d15", 0, 15, 0);
+    let s_16: TraceSpan = trace_span_new(4, "d16", 0, 16, 0);
+    let s_17: TraceSpan = trace_span_new(5, "d17", 0, 17, 0);
+    let s_max: TraceSpan = trace_span_new(6, "d_max", 0, 2147483647, 0);
+
+    if (s_neg).depth != 0 || (s_zero).depth != 0 || (s_15).depth != 15 || (s_16).depth != 16 || (s_17).depth != 16 || (s_max).depth != 16 {
+        println("FAIL: Depth clamping invariant violated");
+        process_exit(1);
+    }
+    println("  [PASS] Boundary depth clamping [0..16]");
+
+    // 2. Ring buffer capacity bounds & out-of-bounds error handling
+    let mut ring_neg: TraceRingBuffer = trace_ring_buffer_new(-10);
+    if (ring_neg).capacity < 1 {
+        println("FAIL: Negative ring buffer capacity must clamp to >= 1");
+        process_exit(1);
+    }
+    trace_ring_buffer_push(&mut ring_neg, s_zero);
+    let get_oob: Result[TraceSpan, String] = trace_ring_buffer_get(&ring_neg, 999);
+    match get_oob {
+        Ok(s) => { println("FAIL: OOB index should return Err"); process_exit(1); }
+        Err(e) => {
+            if !str_contains(e, "index_out_of_bounds") {
+                println("FAIL: OOB error message unexpected: " + e);
+                process_exit(1);
+            }
+        }
+    }
+    println("  [PASS] Ring buffer capacity clamping & fail-closed OOB lookup");
+
+    // 3. Hostile ANSI / Control-Character Injections in NDJSON
+    let mut esc_b: List[Int] = bytes_new();
+    esc_b = bytes_push(esc_b, 27);
+    let esc: String = bytes_to_str(esc_b);
+
+    // Multi-byte ANSI sequences, cursor jumps, background resets
+    let hostile_name: String = "Test" + esc + "[38;5;196mRed" + esc + "[2K" + esc + "[1;1H" + esc + "\\Clean";
+    let mut s_hostile: TraceSpan = trace_span_new(77, hostile_name, 0, 16, 500);
+    trace_span_finish(&mut s_hostile, 550, 1, 4096);
+
+    let ndjson: String = telemetry_span_to_ndjson(&s_hostile);
+    if str_contains(ndjson, esc) {
+        println("FAIL: Raw escape byte survived NDJSON sanitization");
+        process_exit(1);
+    }
+    if !str_contains(ndjson, "\"name\":\"TestRedClean\"") {
+        println("FAIL: Sanitized name mismatch in NDJSON: " + ndjson);
+        process_exit(1);
+    }
+    println("  [PASS] Complex ANSI sequence stripping in NDJSON");
+
+    // 4. Counterexample Capture Delta Diffing
+    let mut ce_pre: CounterexampleState = counterexample_capture_new("check_pre", "test.oo:10");
+    counterexample_add_var(&mut ce_pre, "x", "Int", "100");
+    counterexample_add_var(&mut ce_pre, "status", "String", "INIT");
+
+    let mut ce_post: CounterexampleState = counterexample_capture_new("check_post", "test.oo:20");
+    counterexample_add_var(&mut ce_post, "x", "Int", "200"); // mutated
+    counterexample_add_var(&mut ce_post, "status", "String", "INIT"); // unchanged
+    counterexample_add_var(&mut ce_post, "y", "Int", "999"); // new
+
+    let diff_report: String = counterexample_diff(&ce_pre, &ce_post);
+    if !str_contains(diff_report, "MUTATION: x changed: 100 -> 200") || !str_contains(diff_report, "NEW: y = 999") || str_contains(diff_report, "MUTATION: status") {
+        println("FAIL: Counterexample state delta diffing inaccurate:\n" + diff_report);
+        process_exit(1);
+    }
+    println("  [PASS] Counterexample state delta diffing & mutation isolation");
+
+    println("adv_diag_probe: ALL PASS");
+}

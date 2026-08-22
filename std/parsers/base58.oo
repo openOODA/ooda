@@ -1,0 +1,171 @@
+// # Bitcoin/IPFS Base58 Codec
+//
+// Logline: Encodes and decodes Base58 strings (the Bitcoin/IPFS alphabet) with leading-zero preservation, as used by Bitcoin addresses and IPFS CIDs.
+//
+// Setup: Pure value-returning helpers, no IO. The decoder returns Result[String, String] for invalid characters. Decimal literals in place of hex because the .oo lexer does not accept 0xNN.
+//
+// Beats:
+//   1. Provide the Base58 alphabet (Bitcoin order, no 0OIl).
+//   2. Encode a byte list to a Base58 string, preserving leading zero bytes as leading '1' characters.
+//   3. Decode a Base58 string back to a byte list, preserving leading '1' characters as leading zero bytes.
+//   4. Reject any character outside the Base58 alphabet with a clear Err message.
+
+import "std/core/str.oo";
+
+pub fn base58_alphabet() -> String { return "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"; }
+
+pub fn base58_index_of(ch: String) -> Int {
+    let alpha: String = base58_alphabet();
+    let n: Int = str_len(alpha);
+    let mut i: Int = 0;
+    while i < n {
+        if str_eq(str_sub(alpha, i, i + 1), ch) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+pub fn base58_is_valid_char(ch: String) -> Bool { return base58_index_of(ch) >= 0; }
+
+pub fn base58_count_leading_ones(s: String) -> Int {
+    let n: Int = str_len(s);
+    let mut i: Int = 0;
+    let mut count: Int = 0;
+    while i < n {
+        if str_eq(str_sub(s, i, i + 1), "1") {
+            count = count + 1;
+        } else {
+            return count;
+        }
+        i = i + 1;
+    }
+    return count;
+}
+
+pub fn base58_encode(bytes: List[Int]) -> String {
+    // Build a working copy as decimal-encoded "byte" list; the .oo language does
+    // not have a mutable byte buffer primitive, so we implement the count-
+    // leading-zeros + divide-by-58 algorithm in pure Int arithmetic.
+    // First: count leading zeros to prepend as '1' characters.
+    let mut leading_zeros: Int = 0;
+    let n: Int = list_len(bytes);
+    let mut i: Int = 0;
+    while i < n {
+        if list_get(bytes, i) == 0 { leading_zeros = leading_zeros + 1; }
+        else { i = n; }
+        i = i + 1;
+    }
+    // Compute the encoded length: each non-zero byte contributes at least one char.
+    let mut encoded: String = "";
+    let mut j: Int = 0;
+    while j < leading_zeros {
+        encoded = str_concat(encoded, "1");
+        j = j + 1;
+    }
+    // Build a working copy of the bytes in mutable form (we cannot mutate
+    // List[Int] in place, so we allocate a fresh list each divide).
+    let mut work: List[Int] = list_new();
+    let mut k: Int = 0;
+    while k < n {
+        work = list_push(work, list_get(bytes, k));
+        k = k + 1;
+    }
+    let mut nonzero_found: Bool = false;
+    let mut done: Bool = false;
+    while done == false {
+        let mut rem: Int = 0;
+        let mut new_work: List[Int] = list_new();
+        let mut k2: Int = 0;
+        let mut all_zero: Bool = true;
+        while k2 < list_len(work) {
+            let cur: Int = list_get(work, k2);
+            let acc: Int = rem * 256 + cur;
+            let q: Int = acc / 58;
+            let r: Int = acc - q * 58;
+            rem = r;
+            if q > 0 { all_zero = false; }
+            new_work = list_push(new_work, q);
+            k2 = k2 + 1;
+        }
+        let alpha: String = base58_alphabet();
+        let ch: String = str_sub(alpha, rem, rem + 1);
+        encoded = str_concat(encoded, ch);
+        if all_zero { done = true; }
+        if all_zero == false { work = new_work; }
+    }
+    return encoded;
+}
+
+pub fn base58_decode(s: String) -> Result[String, String] {
+    // First: count leading '1' characters.
+    let leading: Int = base58_count_leading_ones(s);
+    let n: Int = str_len(s);
+    // Decode the Base58 string into a byte list. Each Base58 char contributes
+    // log2(58)/log2(256) ~= 0.732 bytes; allocate generously.
+    let mut bytes: List[Int] = list_new();
+    let mut i: Int = 0;
+    let alpha: String = base58_alphabet();
+    while i < n {
+        let ch: String = str_sub(s, i, i + 1);
+        let mut idx: Int = base58_index_of(ch);
+        if idx < 0 { return Err("E_BASE58_INVALID_CHAR"); }
+        // Multiply current byte-list by 58 and add idx.
+        let mut new_bytes: List[Int] = list_new();
+        let mut carry: Int = idx;
+        let mut k: Int = 0;
+        while k < list_len(bytes) {
+            let cur: Int = list_get(bytes, k);
+            let acc: Int = cur * 58 + carry;
+            new_bytes = list_push(new_bytes, acc & 255);
+            carry = acc / 256;
+            k = k + 1;
+        }
+        if carry > 0 { new_bytes = list_push(new_bytes, carry); }
+        bytes = new_bytes;
+        i = i + 1;
+    }
+    // Prepend leading zero bytes for each leading '1'.
+    let mut result: String = "";
+    let mut j: Int = 0;
+    while j < leading {
+        result = str_concat(result, str_concat("0", "0"));
+        j = j + 1;
+    }
+    // Append the decoded bytes in reverse (most significant first).
+    let mut k2: Int = list_len(bytes) - 1;
+    while k2 >= 0 {
+        let b: Int = list_get(bytes, k2);
+        // Format byte b as 2 hex digits.
+        let hex: String = leb58_byte_to_hex(b);
+        result = str_concat(result, hex);
+        k2 = k2 - 1;
+    }
+    return Ok(result);
+}
+
+pub fn leb58_byte_to_hex(b: Int) -> String {
+    let hi: Int = b / 16;
+    let lo: Int = b - hi * 16;
+    return str_concat(leb58_nibble_to_char(hi), leb58_nibble_to_char(lo));
+}
+
+pub fn leb58_nibble_to_char(n: Int) -> String {
+    if n < 10 {
+        if n == 0 { return "0"; }
+        if n == 1 { return "1"; }
+        if n == 2 { return "2"; }
+        if n == 3 { return "3"; }
+        if n == 4 { return "4"; }
+        if n == 5 { return "5"; }
+        if n == 6 { return "6"; }
+        if n == 7 { return "7"; }
+        if n == 8 { return "8"; }
+        return "9";
+    }
+    if n == 10 { return "A"; }
+    if n == 11 { return "B"; }
+    if n == 12 { return "C"; }
+    if n == 13 { return "D"; }
+    if n == 14 { return "E"; }
+    return "F";
+}

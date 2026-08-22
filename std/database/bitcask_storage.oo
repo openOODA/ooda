@@ -1,0 +1,168 @@
+// # Bitcask log-structured records
+//
+// Logline: Serializes CRC32, timestamp, key size, value size, key, and value, and tracks the latest key location in a keydir.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. CRC-32 covers the record after the checksum field. CRC mismatch is Err.
+//
+// Beats:
+//   1. Pack timestamp and sizes as big-endian integers.
+//   2. Append key and value bytes and prefix the CRC-32.
+//   3. Parse and verify the checksum.
+//   4. Store the latest offset and size per key.
+
+import "std/byte_out.oo";
+import "std/hash/crc32_iso.oo";
+
+pub type BitRec = struct {
+    flag: Int,
+    err: String,
+    ts: Int,
+    ksz: Int,
+    vsz: Int,
+    off: Int
+};
+
+pub type Keydir = struct {
+    flag: Int,
+    err: String,
+    n: Int,
+    keys: List[String],
+    ts: List[Int],
+    off: List[Int],
+    sz: List[Int]
+};
+
+fn bc_be16(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+fn bc_be32(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 24) & 255);
+    b = list_push(b, (n >> 16) & 255);
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+fn bc_cat(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut o: List[Int] = a;
+    let mut i: Int = 0;
+    while i < list_len(b) {
+        o = list_push(o, list_get(b, i) & 255);
+        i = i + 1;
+    }
+    return o;
+}
+
+fn bc_u16(buf: List[Int], o: Int) -> Int {
+    return list_get(buf, o) * 256 + list_get(buf, o + 1);
+}
+
+fn bc_u32(buf: List[Int], o: Int) -> Int {
+    let hi: Int = list_get(buf, o) * 256 + list_get(buf, o + 1);
+    let lo: Int = list_get(buf, o + 2) * 256 + list_get(buf, o + 3);
+    return hi * 65536 + lo;
+}
+
+pub fn bitcask_storage_pack(ts: Int, key: List[Int], val: List[Int]) -> ByteOut {
+    let ksz: Int = list_len(key);
+    let vsz: Int = list_len(val);
+    if ksz > 65535 {
+        return byte_out_err("bitcask ksz");
+    }
+    let mut body: List[Int] = bc_be32(ts);
+    body = bc_cat(body, bc_be16(ksz));
+    body = bc_cat(body, bc_be32(vsz));
+    body = bc_cat(body, key);
+    body = bc_cat(body, val);
+    let crc: Int = crc32_iso_bits(body);
+    let mut o: List[Int] = bc_be32(crc);
+    o = bc_cat(o, body);
+    return byte_out_ok(o);
+}
+
+pub fn bitcask_storage_parse(buf: List[Int]) -> BitRec {
+    if list_len(buf) < 14 {
+        return BitRec { flag: 0, err: "bitcask short", ts: 0, ksz: 0, vsz: 0, off: 0 };
+    }
+    let crc: Int = bc_u32(buf, 0);
+    let ts: Int = bc_u32(buf, 4);
+    let ksz: Int = bc_u16(buf, 8);
+    let vsz: Int = bc_u32(buf, 10);
+    if 14 + ksz + vsz > list_len(buf) {
+        return BitRec { flag: 0, err: "bitcask length", ts: ts, ksz: ksz, vsz: vsz, off: 0 };
+    }
+    let mut body: List[Int] = list_new();
+    let mut i: Int = 4;
+    while i < 14 + ksz + vsz {
+        body = list_push(body, list_get(buf, i));
+        i = i + 1;
+    }
+    if crc32_iso_bits(body) != crc {
+        return BitRec { flag: 0, err: "bitcask crc", ts: ts, ksz: ksz, vsz: vsz, off: 0 };
+    }
+    return BitRec { flag: 1, err: "", ts: ts, ksz: ksz, vsz: vsz, off: 14 };
+}
+
+pub fn bitcask_storage_keydir_new() -> Keydir {
+    let ks: List[String] = list_new();
+    let ts0: List[Int] = list_new();
+    let off0: List[Int] = list_new();
+    let sz0: List[Int] = list_new();
+    return Keydir { flag: 1, err: "", n: 0, keys: ks, ts: ts0, off: off0, sz: sz0 };
+}
+
+pub fn bitcask_storage_put(keys: List[String], ts: List[Int], offs: List[Int], szs: List[Int], n: Int, key: String, tsv: Int, off: Int, sz: Int) -> Keydir {
+    let mut nk: List[String] = list_new();
+    let mut nt: List[Int] = list_new();
+    let mut no: List[Int] = list_new();
+    let mut ns: List[Int] = list_new();
+    let mut found: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let k: String = list_get(keys, i);
+        if k == key {
+            nk = list_push(nk, key);
+            nt = list_push(nt, tsv);
+            no = list_push(no, off);
+            ns = list_push(ns, sz);
+            found = 1;
+        } else {
+            nk = list_push(nk, k);
+            nt = list_push(nt, list_get(ts, i));
+            no = list_push(no, list_get(offs, i));
+            ns = list_push(ns, list_get(szs, i));
+        }
+        i = i + 1;
+    }
+    if found < 1 {
+        nk = list_push(nk, key);
+        nt = list_push(nt, tsv);
+        no = list_push(no, off);
+        ns = list_push(ns, sz);
+        return Keydir { flag: 1, err: "", n: n + 1, keys: nk, ts: nt, off: no, sz: ns };
+    }
+    return Keydir { flag: 1, err: "", n: n, keys: nk, ts: nt, off: no, sz: ns };
+}
+
+pub fn bitcask_storage_get(keys: List[String], offs: List[Int], n: Int, key: String) -> Result[Int, String] {
+    let mut i: Int = 0;
+    while i < n {
+        if list_get(keys, i) == key {
+            return Ok(list_get(offs, i));
+        }
+        i = i + 1;
+    }
+    return Err("bitcask key");
+}
+
+pub fn bitcask_storage_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}

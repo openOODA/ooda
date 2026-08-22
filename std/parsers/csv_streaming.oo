@@ -1,0 +1,176 @@
+// # RFC 4180 streaming CSV parser
+//
+// Logline: Parses comma-separated records with quoted fields, CRLF breaks, and escaped quotes.
+//
+// Setup: Pure. Input is List[Int] bytes. Quote is 34, comma is 44, CR is 13, LF is 10.
+//
+// Beats:
+//   1. Split records on CRLF or LF outside quotes.
+//   2. Treat comma inside quotes as data.
+//   3. Unescape "" to a single quote.
+//   4. Map a header name to a column index for later rows.
+
+pub type CsvOut = struct {
+    flag: Int,
+    err: String,
+    nrows: Int,
+    ncols: Int,
+    cells: List[String]
+};
+
+fn csv_field_str(buf: List[Int]) -> String {
+    return bytes_to_str(buf);
+}
+
+pub fn csv_streaming_parse(buf: List[Int]) -> CsvOut {
+    let empty_s: List[String] = list_new();
+    let mut cells: List[String] = list_new();
+    let mut field: List[Int] = bytes_new();
+    let mut q: Int = 0;
+    let mut ncols: Int = 0;
+    let mut col: Int = 0;
+    let mut nrows: Int = 0;
+    let n: Int = list_len(buf);
+    let mut i: Int = 0;
+    while i < n {
+        let b: Int = list_get(buf, i);
+        if q > 0 {
+            if b == 34 {
+                if i + 1 < n {
+                    if list_get(buf, i + 1) == 34 {
+                        field = bytes_push(field, 34);
+                        i = i + 2;
+                        continue;
+                    }
+                }
+                q = 0;
+                i = i + 1;
+                continue;
+            }
+            field = bytes_push(field, b);
+            i = i + 1;
+            continue;
+        }
+        if b == 34 {
+            q = 1;
+            i = i + 1;
+            continue;
+        }
+        if b == 44 {
+            cells = list_push(cells, csv_field_str(field));
+            field = bytes_new();
+            col = col + 1;
+            i = i + 1;
+            continue;
+        }
+        if b == 13 {
+            if i + 1 < n {
+                if list_get(buf, i + 1) == 10 {
+                    i = i + 1;
+                }
+            }
+            cells = list_push(cells, csv_field_str(field));
+            field = bytes_new();
+            col = col + 1;
+            if ncols < 1 {
+                ncols = col;
+            } else {
+                if col != ncols {
+                    return CsvOut { flag: 0, err: "csv columns", nrows: 0, ncols: 0, cells: empty_s };
+                }
+            }
+            nrows = nrows + 1;
+            col = 0;
+            i = i + 1;
+            continue;
+        }
+        if b == 10 {
+            cells = list_push(cells, csv_field_str(field));
+            field = bytes_new();
+            col = col + 1;
+            if ncols < 1 {
+                ncols = col;
+            } else {
+                if col != ncols {
+                    return CsvOut { flag: 0, err: "csv columns", nrows: 0, ncols: 0, cells: empty_s };
+                }
+            }
+            nrows = nrows + 1;
+            col = 0;
+            i = i + 1;
+            continue;
+        }
+        field = bytes_push(field, b);
+        i = i + 1;
+    }
+    if q > 0 {
+        return CsvOut { flag: 0, err: "csv quote", nrows: 0, ncols: 0, cells: empty_s };
+    }
+    if col > 0 {
+        cells = list_push(cells, csv_field_str(field));
+        col = col + 1;
+        if ncols < 1 {
+            ncols = col;
+        } else {
+            if col != ncols {
+                return CsvOut { flag: 0, err: "csv columns", nrows: 0, ncols: 0, cells: empty_s };
+            }
+        }
+        nrows = nrows + 1;
+    } else {
+        if n > 0 {
+            if list_get(buf, n - 1) != 10 {
+                if list_get(buf, n - 1) != 13 {
+                    cells = list_push(cells, csv_field_str(field));
+                    col = col + 1;
+                    if ncols < 1 {
+                        ncols = col;
+                    } else {
+                        if col != ncols {
+                            return CsvOut { flag: 0, err: "csv columns", nrows: 0, ncols: 0, cells: empty_s };
+                        }
+                    }
+                    nrows = nrows + 1;
+                }
+            }
+        }
+    }
+    return CsvOut { flag: 1, err: "", nrows: nrows, ncols: ncols, cells: cells };
+}
+
+pub fn csv_streaming_col(cells: List[String], ncols: Int, name: String) -> Result[Int, String] {
+    if ncols < 1 {
+        return Err("csv header");
+    }
+    let mut i: Int = 0;
+    while i < ncols {
+        if list_get(cells, i) == name {
+            return Ok(i);
+        }
+        i = i + 1;
+    }
+    return Err("csv col");
+}
+
+pub fn csv_streaming_cell(cells: List[String], ncols: Int, nrows: Int, row: Int, col: Int) -> Result[String, String] {
+    if row < 0 {
+        return Err("csv row");
+    }
+    if row >= nrows {
+        return Err("csv row");
+    }
+    if col < 0 {
+        return Err("csv col");
+    }
+    if col >= ncols {
+        return Err("csv col");
+    }
+    return Ok(list_get(cells, row * ncols + col));
+}
+
+pub fn csv_streaming_stat(flag: Int, err: String, nrows: Int) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(nrows);
+}

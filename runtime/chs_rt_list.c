@@ -242,7 +242,7 @@ OoStr oo_slist_get(OoSList l, long long i) {
   OoStr r;
   if (i < 0 || i >= l.len) {
     oo_slist_release(l);
-    fprintf(stderr, "ERR\tslist_get OOB\n");
+    fprintf(stderr, "ERR\tslist_get OOB: i=%lld, len=%lld\n", i, l.len);
     exit(1);
   }
   /* Return an owned ref so let s = list_get(...) is free-safe. */

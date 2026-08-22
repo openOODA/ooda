@@ -1,0 +1,112 @@
+// # RFC 9114 HTTP/3 Frame Packing & Decoding Engine
+//
+// Logline: Encodes and decodes RFC 9114 HTTP/3 frames (DATA, HEADERS, SETTINGS, GOAWAY) over QUIC streams.
+//
+// Setup: Pure network framing engine with fail-closed payload validation and varint headers.
+//
+// Beats:
+//   1. Define Http3Frame structure with frame type and payload byte buffers.
+//   2. Pack and serialize HTTP/3 frames with RFC 9000 varint headers.
+//   3. Decode frames from stream byte buffers with boundary validation.
+//   4. Pack SETTINGS key-value parameter lists into wire format.
+
+import "./varint.oo";
+
+pub type Http3Frame = struct {
+    frame_type: Int,
+    payload_length: Int,
+    payload: List[Int]
+};
+
+pub type Http3Setting = struct {
+    setting_id: Int,
+    value: Int
+};
+
+/// Create a new Http3Frame container.
+pub fn http3_frame_new(frame_type: Int, payload: List[Int]) -> Http3Frame {
+    let plen: Int = list_len(payload);
+    return Http3Frame {
+        frame_type: frame_type,
+        payload_length: plen,
+        payload: payload
+    };
+}
+
+/// Encode an Http3Frame into byte buffer with varint type and length headers.
+pub fn http3_frame_encode(frame: &Http3Frame) -> Result[List[Int], String] {
+    let type_enc_res: Result[List[Int], String] = varint_encode((frame).frame_type);
+    let len_enc_res: Result[List[Int], String] = varint_encode((frame).payload_length);
+    match type_enc_res {
+        Ok(type_bytes) => {
+            match len_enc_res {
+                Ok(len_bytes) => {
+                    let mut out: List[Int] = list_new();
+                    let t_len: Int = list_len(type_bytes);
+                    let mut i: Int = 0;
+                    while i < t_len {
+                        out = list_push(out, list_get(type_bytes, i));
+                        i = i + 1;
+                    }
+                    let l_len: Int = list_len(len_bytes);
+                    let mut j: Int = 0;
+                    while j < l_len {
+                        out = list_push(out, list_get(len_bytes, j));
+                        j = j + 1;
+                    }
+                    let p_len: Int = list_len((frame).payload);
+                    let mut k: Int = 0;
+                    while k < p_len {
+                        out = list_push(out, list_get((frame).payload, k));
+                        k = k + 1;
+                    }
+                    return Ok(out);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}
+
+/// Decode an Http3Frame from byte buffer at given offset.
+pub fn http3_frame_decode(buf: List[Int], offset: Int) -> Result[Http3Frame, String] {
+    let type_dec_res: Result[VarintDecode, String] = varint_decode(buf, offset);
+    match type_dec_res {
+        Ok(t_dec) => {
+            let next_off: Int = offset + (t_dec).bytes_consumed;
+            let len_dec_res: Result[VarintDecode, String] = varint_decode(buf, next_off);
+            match len_dec_res {
+                Ok(l_dec) => {
+                    let payload_start: Int = next_off + (l_dec).bytes_consumed;
+                    let plen: Int = (l_dec).value;
+                    let total_buf_len: Int = list_len(buf);
+                    if (payload_start + plen) > total_buf_len {
+                        return Err("ERR\thttp3_frame_decode: truncated payload");
+                    }
+                    let mut payload: List[Int] = list_new();
+                    let mut i: Int = 0;
+                    while i < plen {
+                        payload = list_push(payload, list_get(buf, payload_start + i));
+                        i = i + 1;
+                    }
+                    return Ok(Http3Frame {
+                        frame_type: (t_dec).value,
+                        payload_length: plen,
+                        payload: payload
+                    });
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        }
+        Err(e) => {
+            return Err(e);
+        }
+    }
+}

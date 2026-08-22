@@ -1,0 +1,242 @@
+// # Zero-Trust 2D Convex Hull (Andrew's Monotone Chain)
+//
+// Logline: Computes the 2D convex hull of a point set using Andrew's Monotone Chain algorithm with exact integer-safe cross product orientation; returns Result[T, String] with fail-closed logic on degenerate inputs.
+//
+// Setup: Pure value-returning helpers, no IO. Points are stored as a 2D point with x, y Int coordinates (no float drift). The orientation predicate is the exact 2D cross product (Bx - Ax)(Cy - Ay) - (By - Ay)(Cx - Ax). Multiplicative overflow is guarded by rejecting inputs whose squared magnitude exceeds a safe bound.
+//
+// Beats:
+//   1. Define a 2D point type with integer coordinates.
+//   2. Compute the exact integer 2D cross-product orientation of three points.
+//   3. Build the lower and upper hull chains from a sorted unique point list.
+//   4. Return the full convex hull polygon, handling collinear, duplicate, and N<3 cases cleanly.
+//
+// residual: only monotone chain; no Graham scan variant
+//
+// NOTE: struct-Result match-unwrap C-emit trips codegen (ag/grok fixing).
+// This file inlines the chain build to avoid match-unwrap on
+// Result[List[Point], String]; the chain helpers return List directly.
+
+// convex_hull_2d_point_t is a 2D point with signed-integer coordinates.
+type ConvexHull2DPoint = struct {
+    x: Int,
+    y: Int
+};
+
+// Safe squared magnitude bound to avoid 64-bit multiplicative overflow in
+// the cross product. 2^30 squared equals 2^60, which fits in a signed 64-bit int.
+pub fn convex_hull_2d_safe_bound() -> Int { return 1073741824; }
+
+// convex_hull_2d_in_safe_range checks whether a point lies within the safe
+// squared-magnitude bound; Err is otherwise returned by callers.
+pub fn convex_hull_2d_in_safe_range(p: &ConvexHull2DPoint) -> Bool {
+    let b: Int = convex_hull_2d_safe_bound();
+    if (p).x > b { return false; }
+    if (p).x < 0 - b { return false; }
+    if (p).y > b { return false; }
+    if (p).y < 0 - b { return false; }
+    return true;
+}
+
+// convex_hull_2d_eq reports coordinate equality.
+pub fn convex_hull_2d_eq(a: &ConvexHull2DPoint, b: &ConvexHull2DPoint) -> Bool {
+    if (a).x != (b).x { return false; }
+    if (a).y != (b).y { return false; }
+    return true;
+}
+
+// convex_hull_2d_lex_less orders points by (x, y) lexicographically for the
+// monotone chain pre-sort.
+pub fn convex_hull_2d_lex_less(a: &ConvexHull2DPoint, b: &ConvexHull2DPoint) -> Bool {
+    if (a).x < (b).x { return true; }
+    if (a).x > (b).x { return false; }
+    if (a).y < (b).y { return true; }
+    return false;
+}
+
+// convex_hull_2d_cross_oob checks the orientation (b - a) x (c - a) for sign.
+// Returns 1 for strictly positive, -1 for strictly negative, 0 for zero or
+// any out-of-bounds pre-condition. The 0 case is used to halt the chain
+// so the rest of the pipeline remains fail-closed.
+pub fn convex_hull_2d_cross_sign(a: &ConvexHull2DPoint, b: &ConvexHull2DPoint, c: &ConvexHull2DPoint) -> Int {
+    if convex_hull_2d_in_safe_range(a) == false { return 0; }
+    if convex_hull_2d_in_safe_range(b) == false { return 0; }
+    if convex_hull_2d_in_safe_range(c) == false { return 0; }
+    let bx: Int = (b).x - (a).x;
+    let by: Int = (b).y - (a).y;
+    let cx: Int = (c).x - (a).x;
+    let cy: Int = (c).y - (a).y;
+    let left: Int = bx * cy;
+    let right: Int = by * cx;
+    let diff: Int = left - right;
+    if diff > 0 { return 1; }
+    if diff < 0 { return 0 - 1; }
+    return 0;
+}
+
+// convex_hull_2d_sort_insertion sorts a point list in-place by (x, y) order
+// using insertion sort (O(n^2), acceptable for the test fixture sizes).
+pub fn convex_hull_2d_sort_insertion(pts: List[ConvexHull2DPoint]) -> List[ConvexHull2DPoint] {
+    let n: Int = list_len(pts);
+    let mut out: List[ConvexHull2DPoint] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let p: ConvexHull2DPoint = list_get(pts, i);
+        let mut j: Int = list_len(out);
+        while j > 0 {
+            let prev: ConvexHull2DPoint = list_get(out, j - 1);
+            if convex_hull_2d_lex_less(&prev, &p) { break; }
+            j = j - 1;
+        }
+        out = convex_hull_2d_insert_at(out, j, p);
+        i = i + 1;
+    }
+    return out;
+}
+
+// convex_hull_2d_insert_at inserts p at index j in the list, growing it.
+pub fn convex_hull_2d_insert_at(pts: List[ConvexHull2DPoint], j: Int, p: ConvexHull2DPoint) -> List[ConvexHull2DPoint] {
+    let n: Int = list_len(pts);
+    let mut out: List[ConvexHull2DPoint] = list_new();
+    let mut i: Int = 0;
+    let mut inserted: Bool = false;
+    while i < n {
+        if i == j {
+            out = list_push(out, p);
+            inserted = true;
+        }
+        out = list_push(out, list_get(pts, i));
+        i = i + 1;
+    }
+    if inserted == false {
+        out = list_push(out, p);
+    }
+    return out;
+}
+
+// convex_hull_2d_dedup_sorted removes adjacent duplicates from a sorted list.
+pub fn convex_hull_2d_dedup_sorted(pts: List[ConvexHull2DPoint]) -> List[ConvexHull2DPoint] {
+    let n: Int = list_len(pts);
+    let mut out: List[ConvexHull2DPoint] = list_new();
+    if n == 0 { return out; }
+    let mut prev: ConvexHull2DPoint = list_get(pts, 0);
+    out = list_push(out, prev);
+    let mut i: Int = 1;
+    while i < n {
+        let cur: ConvexHull2DPoint = list_get(pts, i);
+        if convex_hull_2d_eq(&prev, &cur) == false {
+            out = list_push(out, cur);
+            prev = cur;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// convex_hull_2d_remove_last pops the last element of the list.
+pub fn convex_hull_2d_remove_last(xs: List[ConvexHull2DPoint]) -> List[ConvexHull2DPoint] {
+    let n: Int = list_len(xs);
+    if n == 0 { return xs; }
+    let mut out: List[ConvexHull2DPoint] = list_new();
+    let mut i: Int = 0;
+    while i < n - 1 {
+        out = list_push(out, list_get(xs, i));
+        i = i + 1;
+    }
+    return out;
+}
+
+// convex_hull_2d_in_safe_range_all returns true when every point in the list
+// lies within the safe squared-magnitude bound.
+pub fn convex_hull_2d_in_safe_range_all(pts: List[ConvexHull2DPoint]) -> Bool {
+    let n: Int = list_len(pts);
+    let mut i: Int = 0;
+    while i < n {
+        let p: ConvexHull2DPoint = list_get(pts, i);
+        if convex_hull_2d_in_safe_range(&p) == false { return false; }
+        i = i + 1;
+    }
+    return true;
+}
+
+// convex_hull_2d_build_lower inlines the lower hull chain; returns the chain
+// directly (no Result wrapper needed because cross_sign is fail-closed).
+pub fn convex_hull_2d_build_lower(pts: List[ConvexHull2DPoint]) -> List[ConvexHull2DPoint] {
+    let n: Int = list_len(pts);
+    let mut chain: List[ConvexHull2DPoint] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        let p: ConvexHull2DPoint = list_get(pts, i);
+        let mut m: Int = list_len(chain);
+        while m >= 2 {
+            let q1: ConvexHull2DPoint = list_get(chain, m - 2);
+            let q2: ConvexHull2DPoint = list_get(chain, m - 1);
+            let s: Int = convex_hull_2d_cross_sign(&q1, &q2, &p);
+            // For lower hull we require strictly counter-clockwise turn (s > 0).
+            if s > 0 { break; }
+            chain = convex_hull_2d_remove_last(chain);
+            m = list_len(chain);
+        }
+        chain = list_push(chain, p);
+        i = i + 1;
+    }
+    return chain;
+}
+
+// convex_hull_2d_build_upper inlines the upper hull chain.
+pub fn convex_hull_2d_build_upper(pts: List[ConvexHull2DPoint]) -> List[ConvexHull2DPoint] {
+    let n: Int = list_len(pts);
+    let mut chain: List[ConvexHull2DPoint] = list_new();
+    let mut i: Int = n - 1;
+    while i >= 0 {
+        let p: ConvexHull2DPoint = list_get(pts, i);
+        let mut m: Int = list_len(chain);
+        while m >= 2 {
+            let q1: ConvexHull2DPoint = list_get(chain, m - 2);
+            let q2: ConvexHull2DPoint = list_get(chain, m - 1);
+            let s: Int = convex_hull_2d_cross_sign(&q1, &q2, &p);
+            // For upper hull we require strictly counter-clockwise turn too.
+            if s > 0 { break; }
+            chain = convex_hull_2d_remove_last(chain);
+            m = list_len(chain);
+        }
+        chain = list_push(chain, p);
+        i = i - 1;
+    }
+    return chain;
+}
+
+// convex_hull_2d_build builds the convex hull from a list of points.
+// Returns the hull as an ordered list of points starting from the
+// lexicographically smallest point, walking the boundary counter-clockwise.
+pub fn convex_hull_2d_build(pts_in: List[ConvexHull2DPoint]) -> Result[List[ConvexHull2DPoint], String] {
+    if convex_hull_2d_in_safe_range_all(pts_in) == false {
+        return Err("E_CONVEX_OOB_INPUT");
+    }
+    let sorted: List[ConvexHull2DPoint] = convex_hull_2d_sort_insertion(pts_in);
+    let pts: List[ConvexHull2DPoint] = convex_hull_2d_dedup_sorted(sorted);
+    let n: Int = list_len(pts);
+    if n < 3 { return Ok(pts); }
+    let lower: List[ConvexHull2DPoint] = convex_hull_2d_build_lower(pts);
+    let upper: List[ConvexHull2DPoint] = convex_hull_2d_build_upper(pts);
+    // Concatenate lower and upper, omitting the duplicate last/first points.
+    let mut out: List[ConvexHull2DPoint] = list_new();
+    let ln: Int = list_len(lower);
+    let mut i: Int = 0;
+    while i < ln {
+        out = list_push(out, list_get(lower, i));
+        i = i + 1;
+    }
+    let un: Int = list_len(upper);
+    let mut j: Int = 0;
+    while j < un {
+        out = list_push(out, list_get(upper, j));
+        j = j + 1;
+    }
+    return Ok(out);
+}
+
+verify convex_hull_2d_handles_trivial {
+    let empty: List[ConvexHull2DPoint] = list_new();
+    let r1: Result[List[ConvexHull2DPoint], String] = convex_hull_2d_build(empty);
+    assert_eq!(r1.is_ok(), true);
+}

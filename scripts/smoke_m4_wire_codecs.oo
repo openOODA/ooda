@@ -1,0 +1,248 @@
+// # Block B wire and codec smoke
+//
+// Logline: Drives QUIC headers, WebSocket masking, FLAC, WebP, DNS jump caps, HPACK, Brotli, and PCAP.
+//
+// Setup: Pure. Imports named Block B modules. Run from ooda/.
+//
+// Beats:
+//   1. Round-trip QUIC varints 1/2/4/8, parse ACK ranges, and parse long/short headers.
+//   2. Mask a WebSocket text frame, recover payload bytes, and reassemble a fragment.
+//   3. Exercise FLAC FIR, WebP Huffman, HPACK index, Brotli, and PCAP records.
+//   4. Reject DNS pointer bombs and truncated frames.
+
+import "std/net_wire/quic_framer.oo";
+import "std/net_wire/websocket_stream.oo";
+import "std/media_codecs/flac_decoder.oo";
+import "std/media_codecs/webp_lossless.oo";
+import "std/net_wire/dns_wire_codec.oo";
+import "std/net_wire/hpack_decoder.oo";
+import "std/compression/brotli_stream.oo";
+import "std/archive/pcap_reader.oo";
+
+fn must(flag: Int, err: String, msg: String) {
+    if flag < 1 {
+        println("FAIL " + msg + " " + err);
+        process_exit(1);
+    }
+}
+
+fn cat(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut o: List[Int] = a;
+    let mut i: Int = 0;
+    while i < list_len(b) {
+        o = list_push(o, list_get(b, i));
+        i = i + 1;
+    }
+    return o;
+}
+
+fn le32(v: Int) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    o = list_push(o, v & 255);
+    o = list_push(o, (v >> 8) & 255);
+    o = list_push(o, (v >> 16) & 255);
+    o = list_push(o, (v >> 24) & 255);
+    return o;
+}
+
+fn zeros(n: Int) -> List[Int] {
+    let mut o: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < n {
+        o = list_push(o, 0);
+        i = i + 1;
+    }
+    return o;
+}
+
+fn vround(v: Int, wantn: Int, msg: String) {
+    let e: QvOut = quic_framer_varint_enc(v);
+    must(quic_framer_flag(e), quic_framer_err(e), msg);
+    let d: QvOut = quic_framer_varint_dec(quic_framer_bytes(e));
+    must(quic_framer_flag(d), quic_framer_err(d), msg);
+    if list_get(quic_framer_bytes(d), 0) != v {
+        println("FAIL " + msg + " val");
+        process_exit(1);
+    }
+    if list_get(quic_framer_bytes(d), 1) != wantn {
+        println("FAIL " + msg + " n");
+        process_exit(1);
+    }
+}
+
+pub fn main() {
+    vround(10, 1, "v1");
+    vround(100, 2, "v2");
+    vround(20000, 4, "v4");
+    vround(1073741824, 8, "v8");
+    let a1: QvOut = quic_framer_varint_enc(9);
+    let a2: QvOut = quic_framer_varint_enc(1);
+    let a3: QvOut = quic_framer_varint_enc(0);
+    let a4: QvOut = quic_framer_varint_enc(3);
+    let ack: List[Int] = cat(cat(quic_framer_bytes(a1), quic_framer_bytes(a2)), cat(quic_framer_bytes(a3), quic_framer_bytes(a4)));
+    let ak: QuicAck = quic_framer_ack(ack);
+    must(quic_framer_ack_flag(ak), quic_framer_ack_err(ak), "ack");
+    let mut lh: List[Int] = list_new();
+    lh = list_push(lh, 192);
+    lh = list_push(lh, 0);
+    lh = list_push(lh, 0);
+    lh = list_push(lh, 0);
+    lh = list_push(lh, 1);
+    lh = list_push(lh, 0);
+    lh = list_push(lh, 0);
+    let hd: QuicHdr = quic_framer_header(lh);
+    must(quic_framer_hdr_flag(hd), quic_framer_hdr_err(hd), "long");
+    if quic_framer_hdr_form(hd) != 1 {
+        println("FAIL long form");
+        process_exit(1);
+    }
+    if quic_framer_hdr_version(hd) != 1 {
+        println("FAIL ver");
+        process_exit(1);
+    }
+    let mut shb: List[Int] = list_new();
+    shb = list_push(shb, 64);
+    let hs: QuicHdr = quic_framer_header(shb);
+    must(quic_framer_hdr_flag(hs), quic_framer_hdr_err(hs), "short");
+    if quic_framer_hdr_form(hs) != 0 {
+        println("FAIL short form");
+        process_exit(1);
+    }
+    println("QUIC varint 1/2/4/8 + ACK ranges");
+    let mut key: List[Int] = list_new();
+    key = list_push(key, 1);
+    key = list_push(key, 2);
+    key = list_push(key, 3);
+    key = list_push(key, 4);
+    let mut pay: List[Int] = list_new();
+    pay = list_push(pay, 104);
+    pay = list_push(pay, 105);
+    let we: WsEnc = websocket_stream_enc(1, 1, pay, key);
+    must(websocket_stream_enc_flag(we), websocket_stream_enc_err(we), "ws enc");
+    let wd: WsOut = websocket_stream_dec(websocket_stream_enc_bytes(we));
+    must(websocket_stream_flag(wd), websocket_stream_err(wd), "ws dec");
+    if websocket_stream_opcode(wd) != 1 {
+        println("FAIL ws op");
+        process_exit(1);
+    }
+    if websocket_stream_b0(wd) != 104 {
+        println("FAIL ws b0");
+        process_exit(1);
+    }
+    if websocket_stream_b1(wd) != 105 {
+        println("FAIL ws b1");
+        process_exit(1);
+    }
+    let mut p0: List[Int] = list_new();
+    let mut p1: List[Int] = list_new();
+    p0 = list_push(p0, 104);
+    p1 = list_push(p1, 105);
+    let wj: WsOut = websocket_stream_reasm(1, p0, 0, p1);
+    must(websocket_stream_flag(wj), websocket_stream_err(wj), "ws join");
+    if websocket_stream_n(wj) != 2 {
+        println("FAIL ws n");
+        process_exit(1);
+    }
+    println("WS mask XOR + UTF-8 + fragment");
+    let mut warm: List[Int] = list_new();
+    warm = list_push(warm, 1);
+    warm = list_push(warm, 4);
+    let mut bits: List[Int] = list_new();
+    bits = list_push(bits, 1);
+    bits = list_push(bits, 1);
+    let fl: FlacOut = flac_decoder_sub(10, warm, bits, 1);
+    must(flac_decoder_flag(fl), flac_decoder_err(fl), "flac");
+    if flac_decoder_s0(fl) != 8 {
+        println("FAIL flac fir");
+        process_exit(1);
+    }
+    println("FLAC Rice subframe");
+    let pr: Result[Int, String] = webp_lossless_predict(1, 9, 3);
+    match pr {
+        Ok(v) => {
+            if v != 9 {
+                println("FAIL pred");
+                process_exit(1);
+            }
+        },
+        Err(e) => {
+            println("FAIL pred " + e);
+            process_exit(1);
+        }
+    }
+    let mut lens: List[Int] = list_new();
+    lens = list_push(lens, 1);
+    let mut hb: List[Int] = list_new();
+    hb = list_push(hb, 0);
+    let hf: WpOut = webp_lossless_huff(lens, hb);
+    must(webp_lossless_flag(hf), webp_lossless_err(hf), "huff");
+    println("WebP predictor/Huffman");
+    let mut nm: List[Int] = list_new();
+    nm = list_push(nm, 1);
+    nm = list_push(nm, 97);
+    nm = list_push(nm, 0);
+    let dn: DnsOut = dns_wire_codec_name(nm, 0);
+    must(dns_wire_codec_flag(dn), dns_wire_codec_err(dn), "dns");
+    let mut lp: List[Int] = list_new();
+    lp = list_push(lp, 192);
+    lp = list_push(lp, 0);
+    let bomb: DnsOut = dns_wire_codec_name(lp, 0);
+    if dns_wire_codec_flag(bomb) > 0 {
+        println("FAIL dns loop");
+        process_exit(1);
+    }
+    println("DNS <=16 jumps, loop Err");
+    let mut hi: List[Int] = list_new();
+    hi = list_push(hi, 10);
+    let hp: HpOut = hpack_decoder_int(hi, 5);
+    must(hpack_decoder_flag(hp), hpack_decoder_err(hp), "hpack");
+    let ix: Result[Int, String] = hpack_decoder_index(2);
+    if ix.is_err() {
+        println("FAIL hpack idx");
+        process_exit(1);
+    }
+    println("HPACK integer+table");
+    let mut ln: List[Int] = list_new();
+    ln = list_push(ln, 1);
+    let mut bb: List[Int] = list_new();
+    bb = list_push(bb, 0);
+    let br: BrOut = brotli_stream_prefix(ln, bb);
+    must(brotli_stream_flag(br), brotli_stream_err(br), "brotli");
+    let bz: BrOut = brotli_stream_window(list_new(), 1, 0, 2);
+    if brotli_stream_flag(bz) > 0 {
+        println("FAIL brotli off");
+        process_exit(1);
+    }
+    println("Brotli prefix+window");
+    let pc: List[Int] = cat(le32(2712847316), zeros(20));
+    let ph: PcapOut = pcap_reader_header(pc);
+    must(pcap_reader_flag(ph), pcap_reader_err(ph), "pcap");
+    let pkt: List[Int] = cat(cat(le32(1), le32(2)), cat(cat(le32(1), le32(1)), hb));
+    let pp: PcapOut = pcap_reader_packet(pkt, 0);
+    must(pcap_reader_flag(pp), pcap_reader_err(pp), "pkt");
+    if pcap_reader_incl(pp) != 1 {
+        println("FAIL incl");
+        process_exit(1);
+    }
+    if pcap_reader_ts_ns(pp) != 2000 {
+        println("FAIL ns");
+        process_exit(1);
+    }
+    let png: PcapOut = pcap_reader_header(cat(le32(168627466), zeros(20)));
+    must(pcap_reader_flag(png), pcap_reader_err(png), "pcapng");
+    println("PCAP record + ns time");
+    let tr: List[Int] = list_new();
+    let tq: QvOut = quic_framer_varint_dec(tr);
+    if quic_framer_flag(tq) > 0 {
+        println("FAIL trunc quic");
+        process_exit(1);
+    }
+    let th: QuicHdr = quic_framer_header(tr);
+    if quic_framer_hdr_flag(th) > 0 {
+        println("FAIL trunc hdr");
+        process_exit(1);
+    }
+    println("truncated/oversize Err");
+    println("SUITE PASSED");
+    println("smoke_m4_wire_codecs: PASSED");
+}

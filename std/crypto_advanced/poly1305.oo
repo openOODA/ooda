@@ -1,0 +1,170 @@
+// # Poly1305 One-Time Authenticator
+//
+// Logline: Computes 16-byte Poly1305 MAC tags over arbitrary byte payloads using 32-byte one-time keys.
+//
+// Setup: Pure. Key is 32 bytes (r: 16 bytes clamped, s: 16 bytes). Output is 16 bytes.
+//
+// Beats:
+//   1. Clamp r parameter to 130-bit field coefficients.
+//   2. Process 16-byte message blocks via 26-bit limb radix arithmetic.
+//   3. Reduce modulo 2^130 - 5 with carry propagation.
+//   4. Add s parameter and format 16-byte little-endian tag.
+
+import "std/core/list.oo";
+fn p5_mask(x: Int) -> Int { return x & 4294967295; }
+
+fn p5_le32(b: List[Int], o: Int) -> Int {
+    return list_get(b, o) + list_get(b, o + 1) * 256 + list_get(b, o + 2) * 65536 + list_get(b, o + 3) * 16777216;
+}
+
+fn p5_put32(mut o: List[Int], w: Int) -> List[Int] {
+    o = list_push(o, w & 255);
+    o = list_push(o, (w >> 8) & 255);
+    o = list_push(o, (w >> 16) & 255);
+    o = list_push(o, (w >> 24) & 255);
+    return o;
+}
+
+fn p5_zero() -> List[Int] {
+    let mut h: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 5 { h = list_push(h, 0); i = i + 1; }
+    return h;
+}
+
+fn p5_carry(h: List[Int]) -> List[Int] {
+    let mut t: List[Int] = h;
+    let mut i: Int = 0;
+    while i < 4 {
+        let c: Int = list_get(t, i) >> 26;
+        list_set(t, i, list_get(t, i) & 67108863);
+        list_set(t, i + 1, list_get(t, i + 1) + c);
+        i = i + 1;
+    }
+    let c4: Int = list_get(t, 4) >> 26;
+    list_set(t, 4, list_get(t, 4) & 67108863);
+    list_set(t, 0, list_get(t, 0) + c4 * 5);
+    let c0: Int = list_get(t, 0) >> 26;
+    list_set(t, 0, list_get(t, 0) & 67108863);
+    list_set(t, 1, list_get(t, 1) + c0);
+    return t;
+}
+
+fn p5_mul(h: List[Int], r: List[Int]) -> List[Int] {
+    let r0: Int = list_get(r, 0);
+    let r1: Int = list_get(r, 1);
+    let r2: Int = list_get(r, 2);
+    let r3: Int = list_get(r, 3);
+    let r4: Int = list_get(r, 4);
+    let s1: Int = r1 * 5;
+    let s2: Int = r2 * 5;
+    let s3: Int = r3 * 5;
+    let s4: Int = r4 * 5;
+    let h0: Int = list_get(h, 0);
+    let h1: Int = list_get(h, 1);
+    let h2: Int = list_get(h, 2);
+    let h3: Int = list_get(h, 3);
+    let h4: Int = list_get(h, 4);
+    let mut t: List[Int] = list_new();
+    t = list_push(t, h0 * r0 + h1 * s4 + h2 * s3 + h3 * s2 + h4 * s1);
+    t = list_push(t, h0 * r1 + h1 * r0 + h2 * s4 + h3 * s3 + h4 * s2);
+    t = list_push(t, h0 * r2 + h1 * r1 + h2 * r0 + h3 * s4 + h4 * s3);
+    t = list_push(t, h0 * r3 + h1 * r2 + h2 * r1 + h3 * r0 + h4 * s4);
+    t = list_push(t, h0 * r4 + h1 * r3 + h2 * r2 + h3 * r1 + h4 * r0);
+    return p5_carry(t);
+}
+
+fn p5_add_block(h: List[Int], buf: List[Int], off: Int, n: Int) -> List[Int] {
+    let mut tmp: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 17 { tmp = list_push(tmp, 0); i = i + 1; }
+    i = 0;
+    while i < n {
+        list_set(tmp, i, list_get(buf, off + i) & 255);
+        i = i + 1;
+    }
+    list_set(tmp, n, 1);
+    let t0: Int = list_get(tmp, 0) + list_get(tmp, 1) * 256 + list_get(tmp, 2) * 65536 + list_get(tmp, 3) * 16777216;
+    let t1: Int = list_get(tmp, 4) + list_get(tmp, 5) * 256 + list_get(tmp, 6) * 65536 + list_get(tmp, 7) * 16777216;
+    let t2: Int = list_get(tmp, 8) + list_get(tmp, 9) * 256 + list_get(tmp, 10) * 65536 + list_get(tmp, 11) * 16777216;
+    let t3: Int = list_get(tmp, 12) + list_get(tmp, 13) * 256 + list_get(tmp, 14) * 65536 + list_get(tmp, 15) * 16777216;
+    let mut u: List[Int] = h;
+    list_set(u, 0, list_get(u, 0) + (t0 & 67108863));
+    list_set(u, 1, list_get(u, 1) + (((t0 >> 26) | (t1 << 6)) & 67108863));
+    list_set(u, 2, list_get(u, 2) + (((t1 >> 20) | (t2 << 12)) & 67108863));
+    list_set(u, 3, list_get(u, 3) + (((t2 >> 14) | (t3 << 18)) & 67108863));
+    list_set(u, 4, list_get(u, 4) + ((t3 >> 8) + list_get(tmp, 16) * 16777216));
+    return p5_carry(u);
+}
+
+fn p5_feed(h: List[Int], r: List[Int], buf: List[Int]) -> List[Int] {
+    let mut acc: List[Int] = h;
+    let mut off: Int = 0;
+    let n: Int = list_len(buf);
+    while off < n {
+        let mut take: Int = 16;
+        if off + take > n { take = n - off; }
+        acc = p5_mul(p5_add_block(acc, buf, off, take), r);
+        off = off + take;
+    }
+    return acc;
+}
+
+fn p5_le64(mut o: List[Int], n: Int) -> List[Int] {
+    let mut x: Int = n;
+    let mut i: Int = 0;
+    while i < 8 { o = list_push(o, x & 255); x = x >> 8; i = i + 1; }
+    return o;
+}
+
+pub fn poly1305_tag(otk: List[Int], aad: List[Int], ct: List[Int]) -> List[Int] {
+    let t0: Int = p5_le32(otk, 0);
+    let t1: Int = p5_le32(otk, 4);
+    let t2: Int = p5_le32(otk, 8);
+    let t3: Int = p5_le32(otk, 12);
+    let mut r: List[Int] = list_new();
+    r = list_push(r, t0 & 67108863);
+    r = list_push(r, ((t0 >> 26) | (t1 << 6)) & 67108611);
+    r = list_push(r, ((t1 >> 20) | (t2 << 12)) & 67092479);
+    r = list_push(r, ((t2 >> 14) | (t3 << 18)) & 66060287);
+    r = list_push(r, (t3 >> 8) & 1048575);
+    let mut h: List[Int] = p5_feed(p5_feed(p5_zero(), r, aad), r, ct);
+    let mut lens: List[Int] = p5_le64(list_new(), list_len(aad));
+    lens = p5_le64(lens, list_len(ct));
+    h = p5_mul(p5_add_block(h, lens, 0, 16), r);
+    h = p5_carry(h);
+    let mut g0: Int = list_get(h, 0) + 5;
+    let mut c: Int = g0 >> 26;
+    g0 = g0 & 67108863;
+    let mut g1: Int = list_get(h, 1) + c;
+    c = g1 >> 26;
+    g1 = g1 & 67108863;
+    let mut g2: Int = list_get(h, 2) + c;
+    c = g2 >> 26;
+    g2 = g2 & 67108863;
+    let mut g3: Int = list_get(h, 3) + c;
+    c = g3 >> 26;
+    g3 = g3 & 67108863;
+    let g4: Int = list_get(h, 4) + c;
+    if g4 >= 67108864 {
+        list_set(h, 0, g0);
+        list_set(h, 1, g1);
+        list_set(h, 2, g2);
+        list_set(h, 3, g3);
+        list_set(h, 4, g4 & 67108863);
+    }
+    let h0: Int = list_get(h, 0);
+    let h1: Int = list_get(h, 1);
+    let h2: Int = list_get(h, 2);
+    let h3: Int = list_get(h, 3);
+    let h4: Int = list_get(h, 4);
+    let mut f: Int = h0 + ((h1 & 63) << 26) + p5_le32(otk, 16);
+    let mut tag: List[Int] = p5_put32(list_new(), p5_mask(f));
+    f = (f >> 32) + (h1 >> 6) + ((h2 & 4095) << 20) + p5_le32(otk, 20);
+    tag = p5_put32(tag, p5_mask(f));
+    f = (f >> 32) + (h2 >> 12) + ((h3 & 262143) << 14) + p5_le32(otk, 24);
+    tag = p5_put32(tag, p5_mask(f));
+    f = (f >> 32) + (h3 >> 18) + ((h4 & 16777215) << 8) + p5_le32(otk, 28);
+    tag = p5_put32(tag, p5_mask(f));
+    return tag;
+}

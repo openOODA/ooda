@@ -1,0 +1,210 @@
+// # Safe Bencode parser
+//
+// Logline: Parses Bencode integers, strings, lists, and dictionaries and rejects leading zeros and unsorted keys.
+//
+// Setup: Pure. CRLF is not used. Input is List[Int] 0..255.
+//
+// Beats:
+//   1. Parse i…e with no leading zero and no i-0e.
+//   2. Parse len:bytes with no extra-width length.
+//   3. Walk l…e and d…e recursively.
+//   4. Require dictionary keys to be strictly lexicographic.
+
+import "std/byte_out.oo";
+
+fn be_at(buf: List[Int], pos: Int) -> Int {
+    if pos >= list_len(buf) {
+        return 0 - 1;
+    }
+    return list_get(buf, pos);
+}
+
+fn be_lex(buf: List[Int], a: Int, na: Int, b: Int, nb: Int) -> Int {
+    let mut i: Int = 0;
+    let mut n: Int = na;
+    if nb < n {
+        n = nb;
+    }
+    while i < n {
+        let da: Int = list_get(buf, a + i);
+        let db: Int = list_get(buf, b + i);
+        if da < db {
+            return 0 - 1;
+        }
+        if da > db {
+            return 1;
+        }
+        i = i + 1;
+    }
+    if na < nb {
+        return 0 - 1;
+    }
+    if na > nb {
+        return 1;
+    }
+    return 0;
+}
+
+fn be_item(buf: List[Int], pos: Int) -> ByteOut {
+    let t: Int = be_at(buf, pos);
+    if t < 0 {
+        return byte_out_err("bencode truncated");
+    }
+    if t == 105 {
+        return be_int(buf, pos);
+    }
+    if t == 108 {
+        return be_list(buf, pos);
+    }
+    if t == 100 {
+        return be_dict(buf, pos);
+    }
+    if t >= 48 {
+        if t <= 57 {
+            return be_str(buf, pos);
+        }
+    }
+    return byte_out_err("bencode type");
+}
+
+fn be_int(buf: List[Int], pos: Int) -> ByteOut {
+    let mut i: Int = pos + 1;
+    let mut neg: Int = 0;
+    if be_at(buf, i) == 45 {
+        neg = 1;
+        i = i + 1;
+    }
+    if i >= list_len(buf) {
+        return byte_out_err("bencode truncated");
+    }
+    let d0: Int = be_at(buf, i);
+    if d0 < 48 {
+        return byte_out_err("bencode int");
+    }
+    if d0 > 57 {
+        return byte_out_err("bencode int");
+    }
+    if d0 == 48 {
+        if be_at(buf, i + 1) != 101 {
+            return byte_out_err("bencode leading zero");
+        }
+        if neg == 1 {
+            return byte_out_err("bencode neg zero");
+        }
+    }
+    while i < list_len(buf) {
+        let c: Int = be_at(buf, i);
+        if c == 101 {
+            let mut rec: List[Int] = list_new();
+            rec = list_push(rec, 0);
+            rec = list_push(rec, i + 1);
+            return byte_out_ok(rec);
+        }
+        if c < 48 {
+            return byte_out_err("bencode int");
+        }
+        if c > 57 {
+            return byte_out_err("bencode int");
+        }
+        i = i + 1;
+    }
+    return byte_out_err("bencode truncated");
+}
+
+fn be_str(buf: List[Int], pos: Int) -> ByteOut {
+    let mut i: Int = pos;
+    let d0: Int = be_at(buf, i);
+    if d0 == 48 {
+        if be_at(buf, i + 1) != 58 {
+            return byte_out_err("bencode leading zero");
+        }
+    }
+    let mut n: Int = 0;
+    while i < list_len(buf) {
+        let c: Int = be_at(buf, i);
+        if c == 58 {
+            i = i + 1;
+            if i + n > list_len(buf) {
+                return byte_out_err("bencode truncated");
+            }
+            let mut rec: List[Int] = list_new();
+            rec = list_push(rec, n);
+            rec = list_push(rec, i + n);
+            rec = list_push(rec, i);
+            return byte_out_ok(rec);
+        }
+        if c < 48 {
+            return byte_out_err("bencode str");
+        }
+        if c > 57 {
+            return byte_out_err("bencode str");
+        }
+        n = n * 10 + (c - 48);
+        i = i + 1;
+    }
+    return byte_out_err("bencode truncated");
+}
+
+fn be_list(buf: List[Int], pos: Int) -> ByteOut {
+    let mut i: Int = pos + 1;
+    while i < list_len(buf) {
+        if be_at(buf, i) == 101 {
+            let mut rec: List[Int] = list_new();
+            rec = list_push(rec, 0);
+            rec = list_push(rec, i + 1);
+            return byte_out_ok(rec);
+        }
+        let ch: ByteOut = be_item(buf, i);
+        if ch.flag < 1 {
+            return ch;
+        }
+        i = list_get(ch.bytes, 1);
+    }
+    return byte_out_err("bencode truncated");
+}
+
+fn be_dict(buf: List[Int], pos: Int) -> ByteOut {
+    let mut i: Int = pos + 1;
+    let mut pk: Int = 0 - 1;
+    let mut pn: Int = 0 - 1;
+    while i < list_len(buf) {
+        if be_at(buf, i) == 101 {
+            let mut rec: List[Int] = list_new();
+            rec = list_push(rec, 0);
+            rec = list_push(rec, i + 1);
+            return byte_out_ok(rec);
+        }
+        let ks: ByteOut = be_str(buf, i);
+        if ks.flag < 1 {
+            return byte_out_err("bencode dict key");
+        }
+        let kn: Int = list_get(ks.bytes, 0);
+        let ke: Int = list_get(ks.bytes, 1);
+        let ks0: Int = list_get(ks.bytes, 2);
+        if pk >= 0 {
+            if be_lex(buf, pk, pn, ks0, kn) >= 0 {
+                return byte_out_err("bencode unsorted");
+            }
+        }
+        pk = ks0;
+        pn = kn;
+        let vs: ByteOut = be_item(buf, ke);
+        if vs.flag < 1 {
+            return vs;
+        }
+        i = list_get(vs.bytes, 1);
+    }
+    return byte_out_err("bencode truncated");
+}
+
+pub fn bencode_safe_parse_all(buf: List[Int]) -> ByteOut {
+    let r: ByteOut = be_item(buf, 0);
+    if r.flag < 1 {
+        return r;
+    }
+    let nxt: Int = list_get(r.bytes, 1);
+    if nxt != list_len(buf) {
+        return byte_out_err("bencode extra");
+    }
+    return r;
+}

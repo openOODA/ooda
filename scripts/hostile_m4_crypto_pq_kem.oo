@@ -1,0 +1,212 @@
+// # Adversarial Probe: Post-Quantum Kyber KEM & Dilithium DSA
+//
+// Logline: Hostile stress-test suite challenging post-quantum Kyber KEM, NTT arithmetic, Barrett modular reduction, and Dilithium.
+//
+// Setup: Pure cryptographic adversarial test harness asserting fail-closed invariants and algebraic boundary properties.
+//
+// Beats:
+//   1. Stress-test Kyber KEM encapsulation and decapsulation with invalid keys and corrupted ciphertexts.
+//   2. Stress-test Barrett modular reduction across negative inputs, multiples of 3329, and large overflows.
+//   3. Stress-test Kyber polynomial addition, subtraction, and compression bit-depth bounds.
+//   4. Stress-test Dilithium signature empty message rejection and infinity norm boundary violations.
+
+import "std/crypto_advanced/kyber_params.oo";
+import "std/crypto_advanced/kyber_poly.oo";
+import "std/crypto_advanced/kyber_ntt.oo";
+import "std/crypto_advanced/kyber_kem.oo";
+import "std/crypto_advanced/dilithium_params.oo";
+import "std/crypto_advanced/dilithium_poly.oo";
+import "std/crypto_advanced/dilithium_verify.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("===================================================================");
+    println(" HOSTILE PROBE: Post-Quantum Crypto (Kyber KEM & Dilithium)");
+    println("===================================================================");
+
+    // --- Probe 1: Kyber Encapsulation with Invalid Public Key ---
+    let params_768: KyberParams = kyber_params_768();
+    let invalid_pk: KyberPublicKey = KyberPublicKey {
+        pk_bytes: "corrupted_pk_bytes",
+        params: params_768,
+        is_valid: false
+    };
+    let enc_res: Result[KyberCiphertext, String] = kyber_encapsulate(&invalid_pk, 42);
+    match enc_res {
+        Ok(_) => { println("FAIL: accepted invalid pk"); process_exit(1); }
+        Err(e) => {
+            if !str_contains(e, "invalid public key") {
+                println("FAIL: Unexpected enc error: " + e);
+                process_exit(1);
+            }
+        }
+    }
+    println("  [PASS] 1. Invalid Kyber Public Key Rejected Fail-Closed");
+
+    // --- Probe 2: Kyber Decapsulation with Invalid Secret Key ---
+    let invalid_sk: KyberSecretKey = KyberSecretKey {
+        sk_bytes: "bad_sk",
+        pk_bytes: "bad_pk",
+        hpk: "bad_hpk",
+        z: "bad_z",
+        params: params_768,
+        is_valid: false
+    };
+    let valid_ct: KyberCiphertext = KyberCiphertext {
+        c1_bytes: "c1",
+        c2_bytes: "c2",
+        ct_bytes: "ct",
+        ss_token: "ss_valid_token",
+        params: params_768,
+        is_valid: true
+    };
+    let dec_res1: Result[String, String] = kyber_decapsulate(&invalid_sk, &valid_ct);
+    match dec_res1 {
+        Ok(_) => { println("FAIL: accepted invalid sk"); process_exit(1); }
+        Err(_) => {}
+    }
+    println("  [PASS] 2. Invalid Kyber Secret Key Rejected Fail-Closed");
+
+    // --- Probe 3: Kyber Decapsulation with Corrupted Ciphertext ---
+    let kp_res: Result[KyberKeypair, String] = kyber_keygen(100);
+    match kp_res {
+        Ok(kp) => {
+            let corrupted_ct: KyberCiphertext = KyberCiphertext {
+                c1_bytes: "c1",
+                c2_bytes: "c2",
+                ct_bytes: "ct",
+                ss_token: "ss_corrupted",
+                params: params_768,
+                is_valid: false
+            };
+            let dec_res2: Result[String, String] = kyber_decapsulate(&(kp).sk, &corrupted_ct);
+            match dec_res2 {
+                Ok(_) => { println("FAIL: accepted corrupted ct"); process_exit(1); }
+                Err(_) => {}
+            }
+        }
+        Err(e) => { println("FAIL: Keygen error: " + e); process_exit(1); }
+    }
+    println("  [PASS] 3. Corrupted Kyber Ciphertext Rejected Fail-Closed");
+
+    // --- Probe 4: Mod 3329 Barrett Modular Reduction Stress ---
+    if kyber_barrett_reduce(0) != 0 || kyber_barrett_reduce(3329) != 0 || kyber_barrett_reduce(3330) != 1 {
+        println("FAIL: Barrett reduction non-negative boundary error");
+        process_exit(1);
+    }
+    if kyber_barrett_reduce(-1) != 3328 || kyber_barrett_reduce(-3329) != 0 || kyber_barrett_reduce(-3330) != 3328 || kyber_barrett_reduce(3329007) != 7 {
+        println("FAIL: Barrett reduction negative/overflow error");
+        process_exit(1);
+    }
+    println("  [PASS] 4. Barrett Modular Reduction (q=3329) Exact Representatives Verified");
+
+    // --- Probe 5: Polynomial Addition & Subtraction Overflow Mod 3329 ---
+    let mut c_max: List[Int] = list_new();
+    let mut i: Int = 0;
+    while i < 256 {
+        c_max = list_push(c_max, 3328);
+        i = i + 1;
+    }
+    let p_max_res: Result[KyberPoly, String] = kyber_poly_from_list(c_max);
+    match p_max_res {
+        Ok(p_max) => {
+            let p_add_res: Result[KyberPoly, String] = kyber_poly_add(&p_max, &p_max);
+            match p_add_res {
+                Ok(p_add) => {
+                    if list_get((p_add).coeffs, 0) != 3327 {
+                        println("FAIL: Max poly addition overflow mismatch");
+                        process_exit(1);
+                    }
+                }
+                Err(e) => { println("FAIL: Poly add error: " + e); process_exit(1); }
+            }
+            let p_zero: KyberPoly = kyber_poly_zero();
+            let p_sub_res: Result[KyberPoly, String] = kyber_poly_sub(&p_zero, &p_max);
+            match p_sub_res {
+                Ok(p_sub) => {
+                    if list_get((p_sub).coeffs, 0) != 1 {
+                        println("FAIL: Poly subtraction underflow mismatch");
+                        process_exit(1);
+                    }
+                }
+                Err(e) => { println("FAIL: Poly sub error: " + e); process_exit(1); }
+            }
+        }
+        Err(e) => { println("FAIL: Poly from list error: " + e); process_exit(1); }
+    }
+    println("  [PASS] 5. Polynomial Ring Addition & Subtraction Modular Overflows Correct");
+
+    // --- Probe 6: Invalid Polynomial Size Rejection ---
+    let mut bad_len: List[Int] = list_new();
+    bad_len = list_push(bad_len, 10);
+    bad_len = list_push(bad_len, 20);
+    let bad_poly_res: Result[KyberPoly, String] = kyber_poly_from_list(bad_len);
+    match bad_poly_res {
+        Ok(_) => { println("FAIL: accepted list of len != 256"); process_exit(1); }
+        Err(_) => {}
+    }
+    println("  [PASS] 6. Non-256 Degree Polynomial Rejection Enforced");
+
+    // --- Probe 7: Poly Compression Invalid Bit Depths ---
+    let p_z: KyberPoly = kyber_poly_zero();
+    let comp_d0: Result[KyberPoly, String] = kyber_poly_compress(&p_z, 0);
+    let comp_d13: Result[KyberPoly, String] = kyber_poly_compress(&p_z, 13);
+    let comp_dneg: Result[KyberPoly, String] = kyber_poly_compress(&p_z, -1);
+    let mut comp_all_err: Bool = true;
+    match comp_d0 { Ok(_) => { comp_all_err = false; }, Err(_) => {} }
+    match comp_d13 { Ok(_) => { comp_all_err = false; }, Err(_) => {} }
+    match comp_dneg { Ok(_) => { comp_all_err = false; }, Err(_) => {} }
+    if !comp_all_err {
+        println("FAIL: accepted out-of-bounds bit depth");
+        process_exit(1);
+    }
+    println("  [PASS] 7. Invalid Compression Bit-Depths Rejected Fail-Closed");
+
+    // --- Probe 8: Dilithium Empty Message Rejection ---
+    let pk_d: DilithiumPublicKey = DilithiumPublicKey { rho: "rho_seed", t1_bytes: "t1_bytes" };
+    let sig_d: DilithiumSignature = DilithiumSignature { z_bytes: "z_poly", h_hint_bytes: "h_hint", c_tilde: "c_hash" };
+    let d_ver_empty: Result[Bool, String] = dilithium_verify_signature(&pk_d, "", &sig_d);
+    match d_ver_empty {
+        Ok(_) => { println("FAIL: accepted empty message"); process_exit(1); }
+        Err(e) => {
+            if !str_contains(e, "empty message") {
+                println("FAIL: Unexpected dilithium verify error: " + e);
+                process_exit(1);
+            }
+        }
+    }
+    println("  [PASS] 8. Dilithium Empty Message Verification Rejected Fail-Closed");
+
+    // --- Probe 9: Dilithium Infinity Norm Violations ---
+    let mut d_coeffs_ok: List[Int] = list_new();
+    let mut d_coeffs_bad: List[Int] = list_new();
+    let mut k: Int = 0;
+    while k < 256 {
+        d_coeffs_ok = list_push(d_coeffs_ok, 500);
+        let mut val_bad: Int = 500;
+        if k == 42 {
+            val_bad = 1500;
+        }
+        d_coeffs_bad = list_push(d_coeffs_bad, val_bad);
+        k = k + 1;
+    }
+    let d_poly_ok: DilithiumPoly = DilithiumPoly { coeffs: d_coeffs_ok };
+    let d_poly_bad: DilithiumPoly = DilithiumPoly { coeffs: d_coeffs_bad };
+
+    if !dilithium_poly_check_norm(&d_poly_ok, 1000) || dilithium_poly_check_norm(&d_poly_bad, 1000) {
+        println("FAIL: dilithium_poly_check_norm error");
+        process_exit(1);
+    }
+    println("  [PASS] 9. Dilithium Infinity Norm Boundary Checks Verified");
+
+    // --- Probe 10: Dilithium Barrett Reduction (q=8380417) ---
+    if dilithium_reduce(0) != 0 || dilithium_reduce(8380417) != 0 || dilithium_reduce(-1) != 8380416 {
+        println("FAIL: dilithium_reduce boundary values incorrect");
+        process_exit(1);
+    }
+    println("  [PASS] 10. Dilithium Field Modulus (q=8380417) Reduction Verified");
+
+    println("===================================================================");
+    println(" ALL 10 POST-QUANTUM CRYPTO ADVERSARIAL PROBES PASSED [100% OK]");
+    println("===================================================================");
+    println("hostile_m4_crypto_pq_kem: PASSED");
+}

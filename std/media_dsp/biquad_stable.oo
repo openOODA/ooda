@@ -1,0 +1,128 @@
+// # Zero-Trust Stable Biquad IIR Filter
+//
+// Logline: Second-order Direct Form II Transposed biquad filter with strict pole-stability validation and explicit fail-closed errors on every operation.
+//
+// Setup: Pure value-returning helpers, no IO. The pole-stability test rejects any coefficient set whose roots of A(z) fall outside the strict unit circle. Mathematically: |a2| < 1 and |a1| < 1 + a2 implies both poles lie inside the open unit disk.
+//
+// Beats:
+//   1. Construct Biquad coefficients and a BiquadFilter with zeroed state.
+//   2. Validate pole stability on construction; Err when the filter is unstable.
+//   3. Process a single sample using Direct Form II Transposed recurrence.
+//   4. Process a full signal list and reset the state.
+//
+// residual: only Direct Form II Transposed; no Type IV or lattice form
+
+// biquad_coefficients_t is the canonical 5-tuple of normalized biquad coefficients.
+type BiquadCoefficients = struct {
+    b0: Float,
+    b1: Float,
+    b2: Float,
+    a1: Float,
+    a2: Float
+};
+
+// biquad_filter_t holds the running state (s1, s2) and the coefficients.
+type BiquadFilter = struct {
+    coeffs: BiquadCoefficients,
+    s1: Float,
+    s2: Float
+};
+
+// Stability tolerance for float math; matches IEEE round-off safety margin.
+pub fn biquad_stable_eps() -> Float { return 0.000000000001; }
+
+// Float absolute value (no builtin fabs in the std path; we use it).
+pub fn biquad_stable_abs(x: Float) -> Float {
+    if x < 0.0 { return 0.0 - x; }
+    return x;
+}
+
+// biquad_stable_is_stable reports whether the (a1, a2) pair satisfies the strict
+// Schur stability conditions |a2| < 1 and |a1| < 1 + a2.
+pub fn biquad_stable_is_stable(a1: Float, a2: Float) -> Bool {
+    let abs_a2: Float = biquad_stable_abs(a2);
+    if abs_a2 >= 1.0 - biquad_stable_eps() { return false; }
+    let abs_a1: Float = biquad_stable_abs(a1);
+    let bound: Float = 1.0 + a2 - biquad_stable_eps();
+    if abs_a1 >= bound { return false; }
+    return true;
+}
+
+// biquad_stable_new builds a filter and returns Err when the coefficient set
+// would produce unstable poles; state is zeroed on success.
+pub fn biquad_stable_new(c: BiquadCoefficients) -> Result[BiquadFilter, String] {
+    if biquad_stable_is_stable((c).a1, (c).a2) == false {
+        return Err("E_BIQUAD_UNSTABLE_POLES");
+    }
+    return Ok(BiquadFilter {
+        coeffs: c,
+        s1: 0.0,
+        s2: 0.0
+    });
+}
+
+// biquad_stable_process runs the Direct Form II Transposed step and returns
+// the new state (s1, s2) and the output y. State is preserved between calls
+// by the caller; this is a pure step, no hidden state.
+pub fn biquad_stable_process(c: BiquadCoefficients, s1: Float, s2: Float, x: Float) -> Result[List[Float], String] {
+    if biquad_stable_is_stable((c).a1, (c).a2) == false {
+        return Err("E_BIQUAD_UNSTABLE_POLES");
+    }
+    let y: Float = (c).b0 * x + s1;
+    let next_s1: Float = (c).b1 * x - (c).a1 * y + s2;
+    let next_s2: Float = (c).b2 * x - (c).a2 * y;
+    let mut out: List[Float] = list_new();
+    out = list_push(out, next_s1);
+    out = list_push(out, next_s2);
+    out = list_push(out, y);
+    return Ok(out);
+}
+
+// biquad_stable_filter_signal runs the filter over a List[Float] signal and
+// returns the filtered output list. The filter state is mutated through the
+// provided &mut reference; the input signal is read-only.
+pub fn biquad_stable_filter_signal(mut_f: &mut BiquadFilter, signal: List[Float]) -> Result[List[Float], String] {
+    let c: BiquadCoefficients = (mut_f).coeffs;
+    if biquad_stable_is_stable((c).a1, (c).a2) == false {
+        return Err("E_BIQUAD_UNSTABLE_POLES");
+    }
+    let mut out: List[Float] = list_new();
+    let n: Int = list_len(signal);
+    let mut i: Int = 0;
+    while i < n {
+        let x: Float = list_get(signal, i);
+        let s1: Float = (mut_f).s1;
+        let s2: Float = (mut_f).s2;
+        let y: Float = (c).b0 * x + s1;
+        let next_s1: Float = (c).b1 * x - (c).a1 * y + s2;
+        let next_s2: Float = (c).b2 * x - (c).a2 * y;
+        (mut_f).s1 = next_s1;
+        (mut_f).s2 = next_s2;
+        out = list_push(out, y);
+        i = i + 1;
+    }
+    return Ok(out);
+}
+
+// biquad_stable_reset clears the filter state to zero without touching the
+// coefficients; useful for block-boundary alignment.
+pub fn biquad_stable_reset(mut_f: &mut BiquadFilter) -> Result[Void, String] {
+    (mut_f).s1 = 0.0;
+    (mut_f).s2 = 0.0;
+    return Ok(());
+}
+
+verify biquad_stable_rejects_unstable {
+    let c: BiquadCoefficients = BiquadCoefficients {
+        b0: 1.0, b1: 0.0, b2: 0.0,
+        a1: 0.0, a2: 1.5
+    };
+    let r1: Result[BiquadFilter, String] = biquad_stable_new(c);
+    assert_eq!(r1.is_err(), true);
+    let c2: BiquadCoefficients = BiquadCoefficients {
+        b0: 1.0, b1: 0.0, b2: 0.0,
+        a1: 0.0, a2: 0.5
+    };
+    let r2: Result[BiquadFilter, String] = biquad_stable_new(c2);
+    assert_eq!(r2.is_ok(), true);
+}

@@ -1,0 +1,147 @@
+// # Windows BMP header decoder
+//
+// Logline: Parses a 14-byte BITMAPFILEHEADER and 40-byte DIB header for uncompressed 24-bit and 32-bit RGB with 4-byte row padding.
+//
+// Setup: Pure. Bytes are List[Int] 0..255 little-endian. Compressed or truncated headers are Err.
+//
+// Beats:
+//   1. Require BM magic and a 40-byte info header.
+//   2. Accept bit counts 24 and 32 with compression 0.
+//   3. Compute the 4-byte padded row stride.
+//   4. Reject a short buffer or another bit count.
+
+import "std/byte_out.oo";
+
+pub type BmpOut = struct {
+    flag: Int,
+    err: String,
+    width: Int,
+    height: Int,
+    bits: Int,
+    stride: Int,
+    offset: Int
+};
+
+fn bmp_u16(buf: List[Int], o: Int) -> Int {
+    return list_get(buf, o) + list_get(buf, o + 1) * 256;
+}
+
+fn bmp_u32(buf: List[Int], o: Int) -> Int {
+    return list_get(buf, o) + list_get(buf, o + 1) * 256 + list_get(buf, o + 2) * 65536 + list_get(buf, o + 3) * 16777216;
+}
+
+fn bmp_i32(buf: List[Int], o: Int) -> Int {
+    let u: Int = bmp_u32(buf, o);
+    if list_get(buf, o + 3) >= 128 {
+        return u - 4294967296;
+    }
+    return u;
+}
+
+pub fn bmp_decoder_stride(width: Int, bits: Int) -> Int {
+    let bits_row: Int = width * bits;
+    return ((bits_row + 31) / 32) * 4;
+}
+
+pub fn bmp_decoder_make(width: Int, height: Int, bits: Int) -> ByteOut {
+    if width < 1 {
+        return byte_out_err("bmp dim");
+    }
+    if height < 1 {
+        return byte_out_err("bmp dim");
+    }
+    if bits != 24 {
+        if bits != 32 {
+            return byte_out_err("bmp bits");
+        }
+    }
+    let stride: Int = bmp_decoder_stride(width, bits);
+    let image: Int = stride * height;
+    let mut o: List[Int] = list_new();
+    o = list_push(o, 66);
+    o = list_push(o, 77);
+    let flen: Int = 54 + image;
+    o = list_push(o, flen & 255);
+    o = list_push(o, (flen >> 8) & 255);
+    o = list_push(o, (flen >> 16) & 255);
+    o = list_push(o, (flen >> 24) & 255);
+    o = list_push(o, 0);
+    o = list_push(o, 0);
+    o = list_push(o, 0);
+    o = list_push(o, 0);
+    o = list_push(o, 54);
+    o = list_push(o, 0);
+    o = list_push(o, 0);
+    o = list_push(o, 0);
+    o = list_push(o, 40);
+    o = list_push(o, 0);
+    o = list_push(o, 0);
+    o = list_push(o, 0);
+    o = list_push(o, width & 255);
+    o = list_push(o, (width >> 8) & 255);
+    o = list_push(o, (width >> 16) & 255);
+    o = list_push(o, (width >> 24) & 255);
+    o = list_push(o, height & 255);
+    o = list_push(o, (height >> 8) & 255);
+    o = list_push(o, (height >> 16) & 255);
+    o = list_push(o, (height >> 24) & 255);
+    o = list_push(o, 1);
+    o = list_push(o, 0);
+    o = list_push(o, bits & 255);
+    o = list_push(o, 0);
+    let mut z: Int = 0;
+    while z < 24 {
+        o = list_push(o, 0);
+        z = z + 1;
+    }
+    let mut p: Int = 0;
+    while p < image {
+        o = list_push(o, 0);
+        p = p + 1;
+    }
+    return byte_out_ok(o);
+}
+
+pub fn bmp_decoder_parse(buf: List[Int]) -> BmpOut {
+    if list_len(buf) < 54 {
+        return BmpOut { flag: 0, err: "bmp short", width: 0, height: 0, bits: 0, stride: 0, offset: 0 };
+    }
+    if list_get(buf, 0) != 66 {
+        return BmpOut { flag: 0, err: "bmp magic", width: 0, height: 0, bits: 0, stride: 0, offset: 0 };
+    }
+    if list_get(buf, 1) != 77 {
+        return BmpOut { flag: 0, err: "bmp magic", width: 0, height: 0, bits: 0, stride: 0, offset: 0 };
+    }
+    let dib: Int = bmp_u32(buf, 14);
+    if dib != 40 {
+        return BmpOut { flag: 0, err: "bmp dib", width: 0, height: 0, bits: 0, stride: 0, offset: 0 };
+    }
+    let w: Int = bmp_i32(buf, 18);
+    let h: Int = bmp_i32(buf, 22);
+    if w < 1 {
+        return BmpOut { flag: 0, err: "bmp dim", width: w, height: h, bits: 0, stride: 0, offset: 0 };
+    }
+    if h < 1 {
+        return BmpOut { flag: 0, err: "bmp dim", width: w, height: h, bits: 0, stride: 0, offset: 0 };
+    }
+    let bits: Int = bmp_u16(buf, 28);
+    if bits != 24 {
+        if bits != 32 {
+            return BmpOut { flag: 0, err: "bmp bits", width: w, height: h, bits: bits, stride: 0, offset: 0 };
+        }
+    }
+    let comp: Int = bmp_u32(buf, 30);
+    if comp != 0 {
+        return BmpOut { flag: 0, err: "bmp compressed", width: w, height: h, bits: bits, stride: 0, offset: 0 };
+    }
+    let off: Int = bmp_u32(buf, 10);
+    let stride: Int = bmp_decoder_stride(w, bits);
+    return BmpOut { flag: 1, err: "", width: w, height: h, bits: bits, stride: stride, offset: off };
+}
+
+pub fn bmp_decoder_stat(flag: Int, err: String) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(1);
+}

@@ -1,0 +1,166 @@
+// # Canonical CBOR decoder
+//
+// Logline: Parses definite CBOR with shortest-integer enforcement and a nest depth cap of 32.
+//
+// Setup: Pure. Truncated buffers, extra-width integers, and depth 33 fail closed.
+//
+// Beats:
+//   1. Read a header and additional-info argument.
+//   2. Reject a non-shortest integer argument.
+//   3. Walk arrays and maps while incrementing depth.
+//   4. Require the cursor to consume the whole buffer.
+
+import "std/byte_out.oo";
+
+fn cbor_need(buf: List[Int], pos: Int, n: Int) -> Int {
+    if pos + n > list_len(buf) {
+        return 0;
+    }
+    return 1;
+}
+
+fn cbor_u8(buf: List[Int], pos: Int) -> Int {
+    return list_get(buf, pos);
+}
+
+fn cbor_u16(buf: List[Int], pos: Int) -> Int {
+    return list_get(buf, pos) * 256 + list_get(buf, pos + 1);
+}
+
+fn cbor_u32(buf: List[Int], pos: Int) -> Int {
+    let hi: Int = list_get(buf, pos) * 256 + list_get(buf, pos + 1);
+    let lo: Int = list_get(buf, pos + 2) * 256 + list_get(buf, pos + 3);
+    return hi * 65536 + lo;
+}
+
+fn cbor_arg(buf: List[Int], pos: Int, ai: Int) -> ByteOut {
+    if ai < 24 {
+        let mut rec: List[Int] = list_new();
+        rec = list_push(rec, ai);
+        rec = list_push(rec, pos + 1);
+        return byte_out_ok(rec);
+    }
+    if ai == 24 {
+        if cbor_need(buf, pos + 1, 1) < 1 {
+            return byte_out_err("cbor truncated");
+        }
+        let v: Int = cbor_u8(buf, pos + 1);
+        if v < 24 {
+            return byte_out_err("cbor shortest");
+        }
+        let mut rec: List[Int] = list_new();
+        rec = list_push(rec, v);
+        rec = list_push(rec, pos + 2);
+        return byte_out_ok(rec);
+    }
+    if ai == 25 {
+        if cbor_need(buf, pos + 1, 2) < 1 {
+            return byte_out_err("cbor truncated");
+        }
+        let v2: Int = cbor_u16(buf, pos + 1);
+        if v2 < 256 {
+            return byte_out_err("cbor shortest");
+        }
+        let mut rec2: List[Int] = list_new();
+        rec2 = list_push(rec2, v2);
+        rec2 = list_push(rec2, pos + 3);
+        return byte_out_ok(rec2);
+    }
+    if ai == 26 {
+        if cbor_need(buf, pos + 1, 4) < 1 {
+            return byte_out_err("cbor truncated");
+        }
+        let v4: Int = cbor_u32(buf, pos + 1);
+        if v4 < 65536 {
+            return byte_out_err("cbor shortest");
+        }
+        let mut rec4: List[Int] = list_new();
+        rec4 = list_push(rec4, v4);
+        rec4 = list_push(rec4, pos + 5);
+        return byte_out_ok(rec4);
+    }
+    return byte_out_err("cbor ai");
+}
+
+fn cbor_item(buf: List[Int], pos: Int, depth: Int) -> ByteOut {
+    if pos >= list_len(buf) {
+        return byte_out_err("cbor truncated");
+    }
+    let h: Int = list_get(buf, pos);
+    let major: Int = h / 32;
+    let ai: Int = h - major * 32;
+    let ar: ByteOut = cbor_arg(buf, pos, ai);
+    if ar.flag < 1 {
+        return ar;
+    }
+    let n: Int = list_get(ar.bytes, 0);
+    let nxt: Int = list_get(ar.bytes, 1);
+    if major == 0 {
+        return byte_out_ok(ar.bytes);
+    }
+    if major == 1 {
+        return byte_out_ok(ar.bytes);
+    }
+    if major == 2 {
+        return cbor_take(buf, nxt, n);
+    }
+    if major == 3 {
+        return cbor_take(buf, nxt, n);
+    }
+    if major == 4 {
+        return cbor_agg(buf, nxt, n, 1, depth);
+    }
+    if major == 5 {
+        return cbor_agg(buf, nxt, n, 2, depth);
+    }
+    return byte_out_err("cbor major");
+}
+
+fn cbor_take(buf: List[Int], nxt: Int, n: Int) -> ByteOut {
+    if n < 0 {
+        return byte_out_err("cbor len");
+    }
+    if nxt + n > list_len(buf) {
+        return byte_out_err("cbor truncated");
+    }
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, n);
+    rec = list_push(rec, nxt + n);
+    return byte_out_ok(rec);
+}
+
+fn cbor_agg(buf: List[Int], nxt: Int, n: Int, mul: Int, depth: Int) -> ByteOut {
+    if depth > 32 {
+        return byte_out_err("cbor depth");
+    }
+    if n < 0 {
+        return byte_out_err("cbor len");
+    }
+    let mut pos: Int = nxt;
+    let mut i: Int = 0;
+    let need: Int = n * mul;
+    while i < need {
+        let ch: ByteOut = cbor_item(buf, pos, depth + 1);
+        if ch.flag < 1 {
+            return ch;
+        }
+        pos = list_get(ch.bytes, 1);
+        i = i + 1;
+    }
+    let mut rec: List[Int] = list_new();
+    rec = list_push(rec, n);
+    rec = list_push(rec, pos);
+    return byte_out_ok(rec);
+}
+
+pub fn cbor_strict_dec_parse(buf: List[Int]) -> ByteOut {
+    let r: ByteOut = cbor_item(buf, 0, 1);
+    if r.flag < 1 {
+        return r;
+    }
+    let nxt: Int = list_get(r.bytes, 1);
+    if nxt != list_len(buf) {
+        return byte_out_err("cbor extra");
+    }
+    return r;
+}

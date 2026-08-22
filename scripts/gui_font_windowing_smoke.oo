@@ -1,0 +1,129 @@
+// # Dedicated GUI Font, Glyph Cache, & Windowing Smoke Test
+//
+// Logline: End-to-end verification of TrueType font parsing, glyph caching, text rasterization, GPU canvas command streaming, and event dispatching.
+//
+// Setup: Validates openOODA std/gui font rendering and windowing pipeline on live binary execution under ProcessCap.
+//
+// Beats:
+//   1. Verify TrueType SFNT binary header parsing and table directory offset extraction.
+//   2. Verify glyph bitmap raster caching and baseline string text rendering.
+//   3. Verify GPU hardware canvas command recording, serialization, and pipeline submission.
+//   4. Verify desktop window and input event envelope queueing and FIFO polling.
+
+import "std/gui/render.oo";
+import "std/gui/gui_ttf_parser.oo";
+import "std/gui/gui_glyph_cache.oo";
+import "std/gui/gui_gpu_canvas.oo";
+import "std/gui/gui_event_dispatcher.oo";
+
+pub fn main(p: &ProcessCap) {
+    println("===================================================================");
+    println(" openOODA GUI Font, Glyph Cache, & Windowing Smoke");
+    println("===================================================================");
+
+    // 1. TrueType SFNT Binary Table Parsing
+    let mut fake_ttf: List[Int] = list_new();
+    // SFNT Header (version 1.0, num_tables = 1)
+    fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 1); fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0);
+    fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 1); // num_tables = 1
+    fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 16); // search_range
+    fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0); // entry_selector
+    fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0); // range_shift
+    // Table Record 'head'
+    fake_ttf = list_push(fake_ttf, 104); fake_ttf = list_push(fake_ttf, 101); fake_ttf = list_push(fake_ttf, 97); fake_ttf = list_push(fake_ttf, 100);
+    fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0); // checksum
+    fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 28); // offset = 28
+    fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 0); fake_ttf = list_push(fake_ttf, 54); // length = 54
+
+    let font: TtfFont = ttf_font_parse_header(fake_ttf);
+    if !font.is_loaded || font.num_tables != 1 || font.head_offset != 28 {
+        println("FAIL: TrueType SFNT binary header parsing mismatch");
+        process_exit(1);
+    }
+
+    let glyph: TtfGlyph = ttf_font_extract_glyph(&font, 65);
+    if glyph.glyph_index != 65 || (glyph.path).segment_count < 4 {
+        println("FAIL: TrueType glyph contour extraction mismatch");
+        process_exit(1);
+    }
+    println("  [PASS] 1. TrueType SFNT Header Parsing & Vector Glyph Outline Extraction");
+
+    // 2. Glyph Cache & String Text Rasterization
+    let mut cache: GlyphCache = glyph_cache_new(16);
+    let mut rctx: RenderContext = render_context_new(200, 50);
+    let c_text: Color = Color { r: 255, g: 255, b: 255, a: 255 };
+
+    rctx = glyph_cache_render_text(&mut cache, &font, "openOODA", 10, 10, c_text, rctx);
+    let n_cached: Int = list_len((cache).glyphs);
+    if n_cached < 6 {
+        println("FAIL: Glyph cache did not store unique codepoints for string run");
+        process_exit(1);
+    }
+    println("  [PASS] 2. Subpixel Glyph Bitmap Cache & Text Baseline Rasterization");
+
+    // 3. GPU Hardware Canvas Command Stream
+    let mut gcanvas: GpuCanvasContext = gpu_canvas_new(800, 600, 0); // 0: Vulkan
+    gpu_canvas_clear(&mut gcanvas, 10, 10, 20, 255);
+    gpu_canvas_fill_rect(&mut gcanvas, 50, 50, 200, 100, 255, 255, 255);
+    gpu_canvas_draw_line(&mut gcanvas, 0, 0, 800, 600, 255, 255, 255);
+
+    let serialized: String = gpu_canvas_serialize_commands(&gcanvas);
+    if !str_contains(serialized, "GPU_CMDS[3]") {
+        println("FAIL: GPU Canvas command serialization mismatch");
+        process_exit(1);
+    }
+
+    let submitted_count: Int = gpu_canvas_submit(&mut gcanvas);
+    if submitted_count != 3 || gcanvas.submitted_passes != 1 {
+        println("FAIL: GPU Canvas submission count mismatch");
+        process_exit(1);
+    }
+    println("  [PASS] 3. GPU Hardware Command Recording, Serialization, & Pipeline Submission");
+
+    // 4. Desktop Window and Input Event Dispatcher
+    let mut dispatcher: GuiDispatcher = gui_dispatcher_new();
+    let ev_click: GuiEventEnvelope = GuiEventEnvelope {
+        event_type: 2, // MouseDown
+        target_window_id: 1,
+        x: 150,
+        y: 200,
+        key_code: 0,
+        payload: "",
+        timestamp_ms: 1000
+    };
+    let ev_key: GuiEventEnvelope = GuiEventEnvelope {
+        event_type: 4, // KeyDown
+        target_window_id: 1,
+        x: 0,
+        y: 0,
+        key_code: 65, // 'A'
+        payload: "A",
+        timestamp_ms: 1050
+    };
+
+    gui_dispatcher_push_event(&mut dispatcher, ev_click);
+    gui_dispatcher_push_event(&mut dispatcher, ev_key);
+
+    let poll_res1: Result[GuiEventEnvelope, String] = gui_dispatcher_poll(&mut dispatcher);
+    match poll_res1 {
+        Ok(ev) => {
+            if ev.event_type != 2 || ev.x != 150 {
+                println("FAIL: Event dispatcher FIFO ordering mismatch");
+                process_exit(1);
+            }
+        }
+        Err(e) => {
+            println("FAIL: Event dispatcher poll error: " + e);
+            process_exit(1);
+        }
+    }
+
+    let remaining_dispatched: Int = gui_dispatcher_dispatch_all(&mut dispatcher);
+    if remaining_dispatched != 1 {
+        println("FAIL: Event dispatcher batch dispatch count mismatch");
+        process_exit(1);
+    }
+    println("  [PASS] 4. Window and Input Event Queueing & FIFO Polling");
+
+    println("gui_font_windowing_smoke: PASSED");
+}

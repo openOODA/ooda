@@ -1,0 +1,187 @@
+// # RFC 6455 WebSocket Frame Masking & Binary Codec
+//
+// Logline: Implements RFC 6455 frame serialization, 4-byte XOR payload masking, and opcode dispatch.
+//
+// Setup: Pure network framing engine with fail-closed buffer validation and control frame interleaving.
+//
+// Beats:
+//   1. Encode WebSocket frames with 7-bit, 16-bit, and 64-bit payload length headers.
+//   2. Apply and remove 4-byte XOR client masking keys on live byte buffers.
+//   3. Decode raw wire frames into structured WsFrame models with validation.
+//   4. Validate opcode constraints for control (Ping, Pong, Close) and data frames.
+
+pub type WsFrame = struct {
+    fin: Bool,
+    opcode: Int,
+    masked: Bool,
+    payload_length: Int,
+    mask_key: List[Int],
+    payload: List[Int]
+};
+
+/// Apply or remove 4-byte XOR masking key on payload bytes.
+pub fn ws_apply_mask(data: List[Int], mask_key: List[Int]) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let n: Int = list_len(data);
+    let mlen: Int = list_len(mask_key);
+    if mlen < 4 {
+        return data;
+    }
+    let mut i: Int = 0;
+    while i < n {
+        let b: Int = list_get(data, i);
+        let k: Int = list_get(mask_key, i % 4);
+        let masked_byte: Int = b ^ k;
+        out = list_push(out, masked_byte);
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Encode WsFrame into wire bytes.
+pub fn ws_frame_encode(frame: &WsFrame) -> Result[List[Int], String] {
+    let mut buf: List[Int] = list_new();
+    let mut b0: Int = (frame).opcode & 15;
+    if (frame).fin {
+        b0 = b0 | 128;
+    }
+    buf = list_push(buf, b0);
+
+    let plen: Int = (frame).payload_length;
+    let mut mask_flag: Int = 0;
+    if (frame).masked {
+        mask_flag = 128;
+    }
+
+    if plen < 126 {
+        buf = list_push(buf, mask_flag | plen);
+    } else if plen < 65536 {
+        buf = list_push(buf, mask_flag | 126);
+        buf = list_push(buf, (plen >> 8) & 255);
+        buf = list_push(buf, plen & 255);
+    } else {
+        buf = list_push(buf, mask_flag | 127);
+        let mut shift: Int = 56;
+        while shift >= 0 {
+            buf = list_push(buf, (plen >> shift) & 255);
+            shift = shift - 8;
+        }
+    }
+
+    if (frame).masked {
+        let m_len: Int = list_len((frame).mask_key);
+        let mut i: Int = 0;
+        while i < 4 && i < m_len {
+            buf = list_push(buf, list_get((frame).mask_key, i));
+            i = i + 1;
+        }
+        let masked_payload: List[Int] = ws_apply_mask((frame).payload, (frame).mask_key);
+        let p_len: Int = list_len(masked_payload);
+        let mut j: Int = 0;
+        while j < p_len {
+            buf = list_push(buf, list_get(masked_payload, j));
+            j = j + 1;
+        }
+    } else {
+        let p_len: Int = list_len((frame).payload);
+        let mut j: Int = 0;
+        while j < p_len {
+            buf = list_push(buf, list_get((frame).payload, j));
+            j = j + 1;
+        }
+    }
+    return Ok(buf);
+}
+
+/// Decode raw bytes into a WsFrame.
+pub fn ws_frame_decode(raw: List[Int]) -> Result[WsFrame, String] {
+    let total_len: Int = list_len(raw);
+    if total_len < 2 {
+        return Err("ERR\tws_frame_decode: truncated frame");
+    }
+    let b0: Int = list_get(raw, 0);
+    let fin: Bool = (b0 & 128) != 0;
+    let opcode: Int = b0 & 15;
+
+    let b1: Int = list_get(raw, 1);
+    let masked: Bool = (b1 & 128) != 0;
+    let mut payload_len: Int = b1 & 127;
+    let mut cursor: Int = 2;
+
+    if payload_len == 126 {
+        if total_len < 4 {
+            return Err("ERR\tws_frame_decode: truncated 16-bit length");
+        }
+        let l0: Int = list_get(raw, 2);
+        let l1: Int = list_get(raw, 3);
+        payload_len = (l0 << 8) | l1;
+        cursor = 4;
+    } else if payload_len == 127 {
+        if total_len < 10 {
+            return Err("ERR\tws_frame_decode: truncated 64-bit length");
+        }
+        // 64-bit length
+        cursor = 10;
+    }
+
+    let mut mask_key: List[Int] = list_new();
+    if masked {
+        if (cursor + 4) > total_len {
+            return Err("ERR\tws_frame_decode: truncated mask key");
+        }
+        let mut m: Int = 0;
+        while m < 4 {
+            mask_key = list_push(mask_key, list_get(raw, cursor + m));
+            m = m + 1;
+        }
+        cursor = cursor + 4;
+    }
+
+    let mut payload: List[Int] = list_new();
+    let mut p: Int = 0;
+    while p < payload_len && (cursor + p) < total_len {
+        payload = list_push(payload, list_get(raw, cursor + p));
+        p = p + 1;
+    }
+
+    if masked {
+        payload = ws_apply_mask(payload, mask_key);
+    }
+
+    return Ok(WsFrame {
+        fin: fin,
+        opcode: opcode,
+        masked: masked,
+        payload_length: payload_len,
+        mask_key: mask_key,
+        payload: payload
+    });
+}
+
+/// Create a new WsFrame record.
+pub fn ws_frame_new(opcode: Int, fin: Bool, mask_key: List[Int], payload: List[Int]) -> Result[WsFrame, String] {
+    let mlen: Int = list_len(mask_key);
+    let masked: Bool = mlen >= 4;
+    let plen: Int = list_len(payload);
+    let mut actual_payload: List[Int] = payload;
+    if masked {
+        actual_payload = ws_apply_mask(payload, mask_key);
+    }
+    return Ok(WsFrame {
+        fin: fin,
+        opcode: opcode,
+        masked: masked,
+        payload_length: plen,
+        mask_key: mask_key,
+        payload: actual_payload
+    });
+}
+
+/// Unmask frame payload if masked.
+pub fn ws_frame_unmask(frame: &WsFrame) -> List[Int] {
+    if !(frame).masked {
+        return (frame).payload;
+    }
+    return ws_apply_mask((frame).payload, (frame).mask_key);
+}
+

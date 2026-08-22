@@ -1,0 +1,95 @@
+// # Minimax Phase 3 Audit: SMT Inductive Theorem Prover Stress
+//
+// Logline: Hostile probe that exercises the contract prover engine with real linear-inequality propositions and asserts that the linear-relation evaluator returns the correct Boolean for the canonical "always true" and "sometimes false" cases, exposing whether the math is real or a constant stub.
+//
+// Setup: Pure .oo audit. Imports std/formal_verif/contract_prover_types.oo and uses the public LinTerm, RelAtom, rel_holds, rel_gt, rel_ge, and lin_eval surfaces. We do not exercise the higher-level SAT solver because the audit goal is to verify the underlying relation predicate is real.
+//
+// Beats:
+//   1. rel_holds(0 > -5, 0, 0) is true and rel_holds(0 > 5, 0, 0) is false (not a constant true stub).
+//   2. lin_eval returns the correct linear combination cx*x + cy*y + k.
+//   3. rel_negate flips the operator and rel_holds(neg(r)) is the Boolean negation of rel_holds(r).
+//   4. de Morgan-style arithmetic: 0 >= 0 is true and 0 >= 1 is false (real linear relation).
+
+import "std/formal_verif/contract_prover_types.oo";
+
+fn sm_assert(label: String, ok: Bool) {
+    if ok == false {
+        println("FAIL: " + label);
+        process_exit(1);
+    }
+}
+
+// Step 1: rel_holds is not a constant true stub. The relation is encoded
+// as `t(x, y) > 0` (or `>= 0`, `< 0`, `<= 0`). A trivial inequality 0 > -5
+// is encoded as t = 5 (so t(0,0) = 5 > 0, true). A contradicting inequality
+// 0 > 5 is encoded as t = -5 (so t(0,0) = -5 > 0, false).
+fn test_rel_holds_is_not_constant() {
+    // Encode "0 > -5" as LinTerm(0, 0, 5): at (0, 0), 5 > 0 is true.
+    let lt_true: LinTerm = lin_term(0, 0, 5);
+    let r_true: RelAtom = rel_gt(lt_true);
+    let holds_true: Bool = rel_holds(r_true, 0, 0);
+    sm_assert("rel_holds(0 > -5, 0, 0) encoded as 5 > 0 == true", holds_true);
+    // Encode "0 > 5" as LinTerm(0, 0, -5): at (0, 0), -5 > 0 is false.
+    let lt_false: LinTerm = lin_term(0, 0, 0 - 5);
+    let r_false: RelAtom = rel_gt(lt_false);
+    let holds_false: Bool = rel_holds(r_false, 0, 0);
+    let is_false: Bool = holds_false == false;
+    sm_assert("rel_holds(0 > 5, 0, 0) encoded as -5 > 0 == false (not a constant true stub)", is_false);
+}
+
+// Step 2: lin_eval returns the correct linear combination cx*x + cy*y + k.
+fn test_lin_eval() {
+    // 3*x + 4*y + 5 at (x=2, y=3) = 3*2 + 4*3 + 5 = 6 + 12 + 5 = 23.
+    let lt: LinTerm = lin_term(3, 4, 5);
+    let v: Int = lin_eval(lt, 2, 3);
+    sm_assert("lin_eval(3x+4y+5, 2, 3) == 23", v == 23);
+    // 0*x + 0*y + 7 at any (x, y) is 7.
+    let lt2: LinTerm = lin_term(0, 0, 7);
+    let v2: Int = lin_eval(lt2, 100, 200);
+    sm_assert("lin_eval(0x+0y+7, 100, 200) == 7", v2 == 7);
+}
+
+// Step 3: rel_negate flips the operator so that rel_holds(neg(r)) is the
+// Boolean negation of rel_holds(r) for the same point.
+fn test_rel_negate() {
+    // Rel: 3x + 0y + 1 > 2. At (x=1, y=0), 3*1+1 = 4 > 2 is true.
+    let lt: LinTerm = lin_term(3, 0, 1);
+    let r: RelAtom = rel_gt(lt);
+    let holds: Bool = rel_holds(r, 1, 0);
+    sm_assert("rel_holds(3x+1 > 2, 1, 0) == true", holds);
+    // Negate: 3x + 0y + 1 <= 2. At (1, 0): 4 <= 2 is false.
+    let rn: RelAtom = rel_negate(r);
+    let holds_n: Bool = rel_holds(rn, 1, 0);
+    let is_false: Bool = holds_n == false;
+    sm_assert("rel_holds(neg(3x+1 > 2), 1, 0) == false", is_false);
+}
+
+// Step 4: de Morgan-style arithmetic. 0 >= 0 is true; 0 >= 1 is false.
+fn test_de_morgan_arithmetic() {
+    // Rel 0*x + 0*y + 0 >= 0. At (0, 0): 0 >= 0 is true.
+    let lt_zero: LinTerm = lin_term(0, 0, 0);
+    let r_ge_zero: RelAtom = rel_ge(lt_zero);
+    let holds_zero: Bool = rel_holds(r_ge_zero, 0, 0);
+    sm_assert("rel_holds(0 >= 0, 0, 0) == true", holds_zero);
+    // To encode "0 >= 1" we use lin_term(0, 0, -1) and rel_ge with offset 0:
+    // the relation is "0 - 1 >= 0" which is true only when 0 >= 1. Since
+    // 0 is not >= 1, this is false.
+    let lt_neg1: LinTerm = lin_term(0, 0, 0 - 1);
+    let r_ge_one: RelAtom = rel_ge(lt_neg1);
+    let holds_one: Bool = rel_holds(r_ge_one, 0, 0);
+    let is_false: Bool = holds_one == false;
+    sm_assert("rel_holds(-1 >= 0, 0, 0) == false (real linear relation)", is_false);
+}
+
+pub fn main() {
+    println("audit_smt_deep: starting");
+    test_rel_holds_is_not_constant();
+    println("step1 ok");
+    test_lin_eval();
+    println("step2 ok");
+    test_rel_negate();
+    println("step3 ok");
+    test_de_morgan_arithmetic();
+    println("step4 ok");
+    println("audit_smt_deep: AUDIT COMPLETE (see findings in source)");
+}

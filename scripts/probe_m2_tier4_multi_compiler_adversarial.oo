@@ -1,0 +1,105 @@
+// # Adversarial Probe: Tier 4 Multi-Compiler Parity Matrix
+//
+// Logline: Hostile verification probe testing backend validity, target hash matching, non-zero exit code rejection, and divergence detection.
+//
+// Setup: ProcessCap granted to inject diverging outputs and assert bit-exact parity enforcement across 4 backends.
+//
+// Beats:
+//   1. Verify valid backend whitelist accepts sovereign targets and rejects foreign/unknown backends.
+//   2. Verify hash divergence detection (stdout hash mismatch or 0 hash).
+//   3. Verify non-zero exit code rejection.
+//   4. Verify tier4_multi_compiler_evaluate_all fails closed on invalid module counts.
+
+import "std/prove/tier4_multi_compiler.oo";
+
+fn assert_err(label: String, is_err: Bool) {
+    if !is_err {
+        println("FAIL: " + label + " expected Err but got Ok");
+        process_exit(1);
+    }
+}
+
+fn assert_ok(label: String, is_ok: Bool) {
+    if !is_ok {
+        println("FAIL: " + label + " expected Ok but got Err");
+        process_exit(1);
+    }
+}
+
+fn test_backend_whitelist() {
+    // Valid backends
+    let b1: Bool = tier4_is_valid_backend("c99_gcc");
+    let b2: Bool = tier4_is_valid_backend("x86_64_elf");
+    let b3: Bool = tier4_is_valid_backend("aarch64_elf");
+    let b4: Bool = tier4_is_valid_backend("wasm_wasi");
+    if (!b1 || !b2 || !b3 || !b4) {
+        println("FAIL: valid backends not accepted");
+        process_exit(1);
+    }
+
+    // Invalid backends
+    let ib1: Bool = tier4_is_valid_backend("llvm_opt");
+    let ib2: Bool = tier4_is_valid_backend("clang_o3");
+    let ib3: Bool = tier4_is_valid_backend("rustc");
+    let ib4: Bool = tier4_is_valid_backend("");
+    if (ib1 || ib2 || ib3 || ib4) {
+        println("FAIL: invalid backends incorrectly accepted");
+        process_exit(1);
+    }
+}
+
+fn test_backend_target_checks() {
+    let gold_hash: Int = 187654321;
+
+    // Valid target
+    let ok_tgt: Bool = tier4_check_backend_target("c99_gcc", gold_hash, 0, gold_hash);
+    if !ok_tgt { println("FAIL: valid target rejected"); process_exit(1); }
+
+    // Hash mismatch
+    let bad_hash: Bool = tier4_check_backend_target("c99_gcc", 999999, 0, gold_hash);
+    if bad_hash { println("FAIL: hash mismatch accepted"); process_exit(1); }
+
+    // Zero hash (uninitialized or empty stdout)
+    let zero_hash: Bool = tier4_check_backend_target("c99_gcc", 0, 0, 0);
+    if zero_hash { println("FAIL: zero hash accepted"); process_exit(1); }
+
+    // Non-zero exit code (process crashed or error)
+    let err_exit: Bool = tier4_check_backend_target("c99_gcc", gold_hash, 1, gold_hash);
+    if err_exit { println("FAIL: non-zero exit code accepted"); process_exit(1); }
+
+    let segv_exit: Bool = tier4_check_backend_target("x86_64_elf", gold_hash, 139, gold_hash);
+    if segv_exit { println("FAIL: segfault exit code accepted"); process_exit(1); }
+
+    // Invalid backend name in target check
+    let bad_name: Bool = tier4_check_backend_target("unknown_backend", gold_hash, 0, gold_hash);
+    if bad_name { println("FAIL: unknown backend accepted in target check"); process_exit(1); }
+}
+
+fn test_multi_compiler_evaluate_all() {
+    // Valid module count
+    let r_valid: Result[Tier4MultiCompilerReport, String] = tier4_multi_compiler_evaluate_all(4539);
+    match r_valid {
+        Ok(rep) => {
+            assert_ok("eval_all_4539", rep.is_tier4_certified && rep.is_bit_exact_parity && rep.divergences_detected == 0);
+        },
+        Err(_) => { assert_ok("eval_all_4539", false); }
+    }
+
+    // Invalid module count (0 or negative)
+    let r_zero: Result[Tier4MultiCompilerReport, String] = tier4_multi_compiler_evaluate_all(0);
+    match r_zero { Ok(_) => { assert_err("eval_all_0", false); }, Err(_) => { assert_err("eval_all_0", true); } }
+
+    let r_neg: Result[Tier4MultiCompilerReport, String] = tier4_multi_compiler_evaluate_all(-50);
+    match r_neg { Ok(_) => { assert_err("eval_all_neg", false); }, Err(_) => { assert_err("eval_all_neg", true); } }
+}
+
+pub fn main(p: &ProcessCap) {
+    println("--- probe_m2_tier4_multi_compiler_adversarial: starting ---");
+    test_backend_whitelist();
+    println("  [PASS] Sovereign backend whitelist enforced (foreign backends rejected)");
+    test_backend_target_checks();
+    println("  [PASS] Hash mismatch, zero hash, non-zero exit, and segfaults strictly rejected");
+    test_multi_compiler_evaluate_all();
+    println("  [PASS] Multi-compiler evaluation matrix bit-exact parity certified");
+    println("probe_m2_tier4_multi_compiler_adversarial: PASSED");
+}

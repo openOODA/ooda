@@ -1,0 +1,124 @@
+// # Cassandra CQL native protocol v4 frames
+//
+// Logline: Wraps and parses version, flags, stream id, opcode, and 4-byte body length for STARTUP, READY, QUERY, and RESULT.
+//
+// Setup: Pure. Bytes are List[Int] 0..255. Version 4 request is 0x04. Truncated or overrun bodies are Err.
+//
+// Beats:
+//   1. Write a 9-byte header plus body.
+//   2. Accept STARTUP, READY, QUERY, and RESULT opcodes.
+//   3. Parse version, flags, stream, opcode, and length.
+//   4. Reject a short header or a length that overruns the buffer.
+
+import "std/byte_out.oo";
+
+pub type CqlFrame = struct {
+    flag: Int,
+    err: String,
+    version: Int,
+    flags: Int,
+    stream: Int,
+    opcode: Int,
+    length: Int
+};
+
+fn cql_be16(n: Int) -> List[Int] {
+    let mut x: Int = n;
+    if x < 0 {
+        x = 65536 + x;
+    }
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (x >> 8) & 255);
+    b = list_push(b, x & 255);
+    return b;
+}
+
+fn cql_be32(n: Int) -> List[Int] {
+    let mut b: List[Int] = list_new();
+    b = list_push(b, (n >> 24) & 255);
+    b = list_push(b, (n >> 16) & 255);
+    b = list_push(b, (n >> 8) & 255);
+    b = list_push(b, n & 255);
+    return b;
+}
+
+fn cql_cat(a: List[Int], b: List[Int]) -> List[Int] {
+    let mut o: List[Int] = a;
+    let mut i: Int = 0;
+    while i < list_len(b) {
+        o = list_push(o, list_get(b, i) & 255);
+        i = i + 1;
+    }
+    return o;
+}
+
+fn cql_op_ok(op: Int) -> Int {
+    if op == 1 {
+        return 1;
+    }
+    if op == 2 {
+        return 1;
+    }
+    if op == 7 {
+        return 1;
+    }
+    if op == 8 {
+        return 1;
+    }
+    return 0;
+}
+
+pub fn cassandra_cql_frame_wrap(version: Int, flags: Int, stream: Int, opcode: Int, body: List[Int]) -> ByteOut {
+    if version != 4 {
+        if version != 132 {
+            return byte_out_err("cql version");
+        }
+    }
+    if cql_op_ok(opcode) < 1 {
+        return byte_out_err("cql opcode");
+    }
+    let n: Int = list_len(body);
+    let mut o: List[Int] = list_new();
+    o = list_push(o, version & 255);
+    o = list_push(o, flags & 255);
+    o = cql_cat(o, cql_be16(stream));
+    o = list_push(o, opcode & 255);
+    o = cql_cat(o, cql_be32(n));
+    o = cql_cat(o, body);
+    return byte_out_ok(o);
+}
+
+pub fn cassandra_cql_frame_parse(buf: List[Int]) -> CqlFrame {
+    if list_len(buf) < 9 {
+        return CqlFrame { flag: 0, err: "cql short", version: 0, flags: 0, stream: 0, opcode: 0, length: 0 };
+    }
+    let ver: Int = list_get(buf, 0);
+    if ver != 4 {
+        if ver != 132 {
+            return CqlFrame { flag: 0, err: "cql version", version: ver, flags: 0, stream: 0, opcode: 0, length: 0 };
+        }
+    }
+    let flags: Int = list_get(buf, 1);
+    let mut stream: Int = list_get(buf, 2) * 256 + list_get(buf, 3);
+    if stream >= 32768 {
+        stream = stream - 65536;
+    }
+    let op: Int = list_get(buf, 4);
+    if cql_op_ok(op) < 1 {
+        return CqlFrame { flag: 0, err: "cql opcode", version: ver, flags: flags, stream: stream, opcode: op, length: 0 };
+    }
+    let hi: Int = list_get(buf, 5) * 256 + list_get(buf, 6);
+    let lo: Int = list_get(buf, 7) * 256 + list_get(buf, 8);
+    let ln: Int = hi * 65536 + lo;
+    if 9 + ln > list_len(buf) {
+        return CqlFrame { flag: 0, err: "cql length", version: ver, flags: flags, stream: stream, opcode: op, length: ln };
+    }
+    return CqlFrame { flag: 1, err: "", version: ver, flags: flags, stream: stream, opcode: op, length: ln };
+}
+
+pub fn cassandra_cql_frame_stat(flag: Int, err: String, opcode: Int) -> Result[Int, String] {
+    if flag < 1 {
+        return Err(err);
+    }
+    return Ok(opcode);
+}

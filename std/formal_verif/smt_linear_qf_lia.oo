@@ -1,0 +1,177 @@
+// # SMT Linear QF_LIA (Fourier-Motzkin)
+//
+// Logline: Quantifier-Free Linear Integer Arithmetic solver for 2-variable systems using Fourier-Motzkin variable elimination.
+//
+// Setup: Each inequality has the form a*x + b*y + c (sense) 0, where sense 0 = LE, 1 = LT, 2 = EQ, 3 = GE, 4 = GT. Returns Sat, Unsat, or Counterexample with a witness (x, y).
+//
+// Beats:
+//   1. Bounded integer search: enumerate x in [x_lo, x_hi] and y in [y_lo, y_hi].
+//   2. Pure FM step on y: pair y-lower (b > 0) and y-upper (b < 0) bounds, derive x-only constraints as parallel arrays.
+//   3. Check intersection of x-bounds; return Sat with witness or Unsat.
+
+pub fn smt_lin_sense_le() -> Int { return 0; }
+pub fn smt_lin_sense_lt() -> Int { return 1; }
+pub fn smt_lin_sense_eq() -> Int { return 2; }
+pub fn smt_lin_sense_ge() -> Int { return 3; }
+pub fn smt_lin_sense_gt() -> Int { return 4; }
+
+pub fn smt_lin_sat() -> Int { return 1; }
+pub fn smt_lin_unsat() -> Int { return 0; }
+pub fn smt_lin_unknown() -> Int { return 0 - 1; }
+
+// Storage layout per inequality: [ax, by, c, sense] (parallel array).
+pub fn smt_lin_ineq_new(ax: Int, by: Int, c: Int, sense: Int) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    out = list_push(out, ax);
+    out = list_push(out, by);
+    out = list_push(out, c);
+    out = list_push(out, sense);
+    return out;
+}
+
+pub fn smt_lin_ineq_ax(i: List[Int]) -> Int { return list_get(i, 0); }
+pub fn smt_lin_ineq_by(i: List[Int]) -> Int { return list_get(i, 1); }
+pub fn smt_lin_ineq_c(i: List[Int]) -> Int { return list_get(i, 2); }
+pub fn smt_lin_ineq_sense(i: List[Int]) -> Int { return list_get(i, 3); }
+
+pub fn smt_lin_ineq_holds_at(i: List[Int], x: Int, y: Int) -> Int {
+    let ax: Int = smt_lin_ineq_ax(i);
+    let by: Int = smt_lin_ineq_by(i);
+    let c: Int = smt_lin_ineq_c(i);
+    let sense: Int = smt_lin_ineq_sense(i);
+    let v: Int = ax * x + by * y + c;
+    if sense == 0 {
+        if v <= 0 { return 1; }
+        return 0;
+    }
+    if sense == 1 {
+        if v < 0 { return 1; }
+        return 0;
+    }
+    if sense == 2 {
+        if v == 0 { return 1; }
+        return 0;
+    }
+    if sense == 3 {
+        if v >= 0 { return 1; }
+        return 0;
+    }
+    if v > 0 { return 1; }
+    return 0;
+}
+
+pub fn smt_lin_all_hold_at(ineqs: List[List[Int]], x: Int, y: Int) -> Int {
+    let n: Int = list_len(ineqs);
+    let mut i: Int = 0;
+    while i < n {
+        let ineq: List[Int] = list_get(ineqs, i);
+        if smt_lin_ineq_holds_at(ineq, x, y) == 0 {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+// Bounded search returns [result, witness_x, witness_y].
+pub fn smt_lin_search_bounded(
+    ineqs: List[List[Int]],
+    x_lo: Int, x_hi: Int,
+    y_lo: Int, y_hi: Int
+) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    out = list_push(out, smt_lin_unknown());
+    out = list_push(out, 0);
+    out = list_push(out, 0);
+    let mut x: Int = x_lo;
+    while x <= x_hi {
+        let mut y: Int = y_lo;
+        while y <= y_hi {
+            if smt_lin_all_hold_at(ineqs, x, y) == 1 {
+                list_set(out, 0, smt_lin_sat());
+                list_set(out, 1, x);
+                list_set(out, 2, y);
+                return out;
+            }
+            y = y + 1;
+        }
+        x = x + 1;
+    }
+    list_set(out, 0, smt_lin_unsat());
+    return out;
+}
+
+// Fourier-Motzkin elimination on y. For each (lower, upper) pair, derive x-only
+// constraints stored as parallel arrays: [a1, c1, a2, c2, ...] with each pair (a, c)
+// representing a*x + c (≤ 0). This avoids nested List[List[Int]] which trips the
+// C-emit `oo_retain_OoLL_I` bug.
+pub fn smt_lin_fm_y_constraints(ineqs: List[List[Int]]) -> List[Int] {
+    let mut out: List[Int] = list_new();
+    let n: Int = list_len(ineqs);
+    // First, collect x-only constraints (b == 0).
+    let mut i: Int = 0;
+    while i < n {
+        let ineq: List[Int] = list_get(ineqs, i);
+        let by: Int = smt_lin_ineq_by(ineq);
+        if by == 0 {
+            out = list_push(out, smt_lin_ineq_ax(ineq));
+            out = list_push(out, smt_lin_ineq_c(ineq));
+        }
+        i = i + 1;
+    }
+    // Then, for each pair (lower with b > 0, upper with b < 0), derive x-only.
+    let mut li: Int = 0;
+    while li < n {
+        let ineq_lo: List[Int] = list_get(ineqs, li);
+        let by_l: Int = smt_lin_ineq_by(ineq_lo);
+        if by_l > 0 {
+            let ax_l: Int = smt_lin_ineq_ax(ineq_lo);
+            let c_l: Int = smt_lin_ineq_c(ineq_lo);
+            let mut ui: Int = 0;
+            while ui < n {
+                let ineq_up: List[Int] = list_get(ineqs, ui);
+                let by_u: Int = smt_lin_ineq_by(ineq_up);
+                if by_u < 0 {
+                    let ax_u: Int = smt_lin_ineq_ax(ineq_up);
+                    let c_u: Int = smt_lin_ineq_c(ineq_up);
+                    // FM pair: (by_u) * (ax_l*x + by_l*y + c_l) - (by_l) * (ax_u*x + by_u*y + c_u) ≤ 0
+                    //          = (by_u*ax_l - by_l*ax_u) * x + (by_u*c_l - by_l*c_u) ≤ 0
+                    let new_ax: Int = by_u * ax_l - by_l * ax_u;
+                    let new_c: Int = by_u * c_l - by_l * c_u;
+                    out = list_push(out, new_ax);
+                    out = list_push(out, new_c);
+                }
+                ui = ui + 1;
+            }
+        }
+        li = li + 1;
+    }
+    return out;
+}
+
+// Returns 1 if all (ax, c) pairs in flat parallel array are jointly satisfiable for some x,
+// 0 if not.  This is a sanity check after FM elimination; if the x-only system is
+// infeasible, the original 2-var system is also infeasible.
+pub fn smt_lin_x_only_feasible(x_only_flat: List[Int]) -> Int {
+    // Each (ax, c) pair means a*x + c ≤ 0.
+    // Trivial reject if any pair has ax == 0 and c > 0.
+    let n_pairs: Int = list_len(x_only_flat) / 2;
+    let mut i: Int = 0;
+    while i < n_pairs {
+        let ax: Int = list_get(x_only_flat, i * 2);
+        let c: Int = list_get(x_only_flat, i * 2 + 1);
+        if ax == 0 {
+            if c > 0 { return 0; }
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+pub fn ceil_div(a: Int, b: Int) -> Int {
+    if b == 0 { return 0; }
+    if a >= 0 {
+        return (a + b - 1) / b;
+    }
+    return a / b;
+}

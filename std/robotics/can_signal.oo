@@ -1,0 +1,97 @@
+// # CAN DBC Signal Bit Unpacker & Physical Scaler
+//
+// Logline: Extracts Intel (little-endian) and Motorola (big-endian) bit fields and applies linear scale and offset.
+//
+// Setup: Pure automotive signal decoding engine converting raw bus bit slices to physical engineering units.
+//
+// Beats:
+//   1. Extract arbitrary bit slices spanning multiple CAN frame data bytes.
+//   2. Apply linear physical conversion: physical_val = raw_val * scale + offset.
+//   3. Handle signed two's complement integer decoding.
+//   4. Validate signal bit spans against CAN payload byte limits.
+
+import "./can_types.oo";
+
+fn int_to_float(n: Int) -> Float {
+    let mut f: Float = 0.0;
+    let mut count: Int = n;
+    if count < 0 { count = 0 - count; }
+    while count >= 1000000 { f = f + 1000000.0; count = count - 1000000; }
+    while count >= 10000 { f = f + 10000.0; count = count - 10000; }
+    while count >= 1000 { f = f + 1000.0; count = count - 1000; }
+    while count >= 100 { f = f + 100.0; count = count - 100; }
+    while count >= 10 { f = f + 10.0; count = count - 10; }
+    while count >= 1 { f = f + 1.0; count = count - 1; }
+    if n < 0 { return 0.0 - f; }
+    return f;
+}
+
+/// Extract and scale a DBC signal from a CAN frame.
+pub fn can_extract_signal(frame: &CanFrame, sig: &CanSignalDef) -> Result[CanDecodedSignal, String] {
+    let dlen: Int = (frame).dlc;
+    if dlen <= 0 || dlen > 8 {
+        return Err("ERR\tcan_signal: invalid CAN frame DLC");
+    }
+    let s_bit: Int = (sig).start_bit;
+    let b_len: Int = (sig).bit_length;
+    if s_bit < 0 || b_len <= 0 || b_len > 64 {
+        return Err("ERR\tcan_signal: invalid start_bit or bit_length specification");
+    }
+
+    let max_bits: Int = dlen * 8;
+    let mut raw_val: Int = 0;
+
+    if !(sig).is_big_endian {
+        // Intel (Little-Endian) Bit Unpacking
+        if (s_bit + b_len) > max_bits {
+            return Err("ERR\tcan_signal: signal bit span exceeds frame DLC boundary");
+        }
+        let mut k: Int = 0;
+        while k < b_len {
+            let bit_pos: Int = s_bit + k;
+            let byte_idx: Int = bit_pos / 8;
+            let bit_in_byte: Int = bit_pos % 8;
+            let byte_val: Int = list_get((frame).data, byte_idx);
+            let bit: Int = (byte_val >> bit_in_byte) & 1;
+            raw_val = raw_val | (bit << k);
+            k = k + 1;
+        }
+    } else {
+        // Motorola (Big-Endian) Forward Bit Unpacking
+        let mut curr_bit: Int = s_bit;
+        let mut k: Int = 0;
+        while k < b_len {
+            let byte_idx: Int = curr_bit / 8;
+            let bit_in_byte: Int = curr_bit % 8;
+            if byte_idx < 0 || byte_idx >= dlen {
+                return Err("ERR\tcan_signal: Motorola bit position exceeds frame DLC");
+            }
+            let byte_val: Int = list_get((frame).data, byte_idx);
+            let bit: Int = (byte_val >> bit_in_byte) & 1;
+            raw_val = (raw_val << 1) | bit;
+
+            if bit_in_byte == 0 {
+                curr_bit = curr_bit + 15;
+            } else {
+                curr_bit = curr_bit - 1;
+            }
+            k = k + 1;
+        }
+    }
+
+    // Two's complement signed integer decoding
+    if (sig).is_signed && b_len < 63 {
+        let sign_bit: Int = 1 << (b_len - 1);
+        if (raw_val & sign_bit) != 0 {
+            let max_val: Int = 1 << b_len;
+            raw_val = raw_val - max_val;
+        }
+    }
+
+    let phys: Float = int_to_float(raw_val) * (sig).scale + (sig).offset;
+    return Ok(CanDecodedSignal {
+        name: (sig).name,
+        raw_val: raw_val,
+        physical_val: phys
+    });
+}

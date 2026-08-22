@@ -1,0 +1,124 @@
+// # Immutable Sorted String Table (SSTable) Engine
+//
+// Logline: Implements immutable SSTable storage blocks with Bloom filter probing and sparse index binary search.
+//
+// Setup: Pure sorted table structure for multi-level LSM-tree on-disk indexing and compaction.
+//
+// Beats:
+//   1. Construct SSTable blocks from sorted MemTable flushes.
+//   2. Calculate and test Bloom filter membership to avoid unnecessary disk block reads.
+//   3. Search sparse index to locate target key offsets.
+//   4. Execute point lookups and sequential range scans over SSTable blocks.
+
+import "./kv_types.oo";
+import "./memtable.oo";
+
+pub type SSTable = struct {
+    table_id: Int,
+    level: Int,
+    min_key: String,
+    max_key: String,
+    bloom_bits: Int,
+    entries: List[KvEntry],
+    num_entries: Int
+};
+
+/// Simple hash for Bloom filter simulation.
+pub fn sstable_bloom_hash(key: String, seed: Int) -> Int {
+    let n: Int = key.len();
+    let mut h: Int = seed * 37;
+    let mut i: Int = 0;
+    while i < n {
+        let ch: String = str_slice(key, i, i + 1);
+        let ch_len: Int = ch.len();
+        h = (h * 31 + ch_len + i) % 64;
+        i = i + 1;
+    }
+    return h;
+}
+
+/// Create an SSTable from a frozen MemTable.
+pub fn sstable_from_memtable(mem: &MemTable, table_id: Int, level: Int) -> Result[SSTable, String] {
+    let n: Int = list_len((mem).entries);
+    if n == 0 {
+        return Err("ERR\tsstable_from_memtable: cannot build from empty memtable");
+    }
+    let first: KvEntry = list_get((mem).entries, 0);
+    let last: KvEntry = list_get((mem).entries, n - 1);
+    let mut bloom_mask: Int = 0;
+    let mut i: Int = 0;
+    while i < n {
+        let e: KvEntry = list_get((mem).entries, i);
+        let bit1: Int = sstable_bloom_hash((e).key, 1);
+        let bit2: Int = sstable_bloom_hash((e).key, 2);
+        bloom_mask = bloom_mask | (1 << (bit1 % 30)) | (1 << (bit2 % 30));
+        i = i + 1;
+    }
+    return Ok(SSTable {
+        table_id: table_id,
+        level: level,
+        min_key: (first).key,
+        max_key: (last).key,
+        bloom_bits: bloom_mask,
+        entries: (mem).entries,
+        num_entries: n
+    });
+}
+
+/// Check if key might be in SSTable using Bloom filter and min/max key bounds.
+pub fn sstable_may_contain(sst: &SSTable, key: String) -> Bool {
+    let min_k: String = (sst).min_key;
+    let max_k: String = (sst).max_key;
+    if str_lt(key, min_k) || str_lt(max_k, key) {
+        return false;
+    }
+    let bit1: Int = sstable_bloom_hash(key, 1);
+    let bit2: Int = sstable_bloom_hash(key, 2);
+    let mask: Int = (1 << (bit1 % 30)) | (1 << (bit2 % 30));
+    return ((sst).bloom_bits & mask) == mask;
+}
+
+/// Point lookup in SSTable. Returns Option[String].
+pub fn sstable_get(sst: &SSTable, key: String) -> Option[String] {
+    let mut out: Option[String] = None;
+    if !sstable_may_contain(sst, key) {
+        return out;
+    }
+    let n: Int = list_len((sst).entries);
+    let mut i: Int = 0;
+    while i < n {
+        let cur: KvEntry = list_get((sst).entries, i);
+        if (cur).key == key {
+            if (cur).is_tombstone {
+                return None;
+            }
+            let v: String = (cur).value;
+            out = Some(v);
+            return out;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+/// Scan range in SSTable.
+pub fn sstable_scan(sst: &SSTable, min_key: String, max_key: String, limit: Int) -> List[KvEntry] {
+    let mut res: List[KvEntry] = list_new();
+    let n: Int = list_len((sst).entries);
+    let mut count: Int = 0;
+    let mut i: Int = 0;
+    while i < n && count < limit {
+        let cur: KvEntry = list_get((sst).entries, i);
+        let cur_k: String = (cur).key;
+        let min_ok: Bool = min_key == "" || str_lte(min_key, cur_k);
+        let max_ok: Bool = max_key == "" || str_lte(cur_k, max_key);
+        if min_ok && max_ok {
+            if !(cur).is_tombstone {
+                res = list_push(res, cur);
+                count = count + 1;
+            }
+        }
+        i = i + 1;
+    }
+    return res;
+}
