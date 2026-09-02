@@ -1,0 +1,112 @@
+// # ooda token ingest subcommand
+//
+// Logline: Parse a JSONL transcript file, populate a SessionTokenLedger, and emit a versioned JSON envelope with the totals.
+//
+// Setup: FsCap reads the file. Pure .oo.
+//
+// Beats:
+//   1. Read the JSONL file from disk.
+//   2. Run the strict parser to count lines and detect failures.
+//   3. Extract step fields and aggregate into a SessionTokenLedger.
+//   4. Emit a versioned JSON envelope with totals.
+
+import "std/compile/token_opt/jsonl_strict.oo";
+import "std/compile/token_opt/token_telemetry.oo";
+import "std/compile/token_opt/json_envelope.oo";
+
+fn cmd_token_extract_field(line: String, key: String) -> String {
+    let needle: String = "\"" + key + "\":";
+    let n: Int = chars_len(line);
+    let klen: Int = chars_len(needle);
+    let mut i: Int = 0;
+    while i + klen <= n {
+        if str_slice(line, i, i + klen) == needle {
+            let mut j: Int = i + klen;
+            let mut buf: String = "";
+            let mut in_str: Bool = false;
+            while j < n {
+                let c: String = char_at(line, j);
+                if in_str {
+                    if c == "\"" {
+                        return buf;
+                    }
+                    if c == "\\" {
+                        if j + 1 < n {
+                            let nxt: String = char_at(line, j + 1);
+                            if nxt == "\"" { buf = buf + "\""; }
+                            else if nxt == "\\" { buf = buf + "\\"; }
+                            else if nxt == "n" { buf = buf + "\n"; }
+                            else { buf = buf + nxt; }
+                            j = j + 1;
+                        }
+                    } else {
+                        buf = buf + c;
+                    }
+                } else {
+                    if c == "\"" { in_str = true; }
+                }
+                j = j + 1;
+            }
+            return buf;
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+pub fn run_ooda_token_ingest(fr: &FsReadCap, args: List[String]) {
+    if list_len(args) < 1 {
+        let m: String = "{\"ok\":false,\"error\":\"usage: ooda token ingest <file.jsonl>\"}\n";
+        println(m);
+        return;
+    }
+    let path: String = list_get(args, 1);
+    let tr: Result[String, String] = read_file(fr, path);
+    if tr.is_err() {
+        let m: String = "{\"ok\":false,\"error\":\"cannot read: " + path + "\"}\n";
+        println(m);
+        return;
+    }
+    let text: String = match tr { Ok(s) => s, Err(m) => m };
+    let stats: ParseStats = jsonl_strict_parse_transcript(text);
+    let mut ledger: SessionTokenLedger = session_token_ledger_new(path);
+    let mut idx: Int = 0;
+    let n: Int = chars_len(text);
+    let mut start: Int = 0;
+    let mut i: Int = 0;
+    while i <= n {
+        if i == n || char_at(text, i) == "\n" {
+            if i > start {
+                let raw: String = str_slice(text, start, i);
+                let stype: String = cmd_token_extract_field(raw, "type");
+                let prompt_v: String = cmd_token_extract_field(raw, "prompt");
+                let completion_v: String = cmd_token_extract_field(raw, "completion");
+                let tool_v: String = cmd_token_extract_field(raw, "tool_payload");
+                let prompt_b: Int = chars_len(prompt_v);
+                let completion_b: Int = chars_len(completion_v);
+                let tool_b: Int = chars_len(tool_v);
+                let mut m: TokenTurnMetric = token_turn_metric_zero(idx, stype);
+                m = token_turn_metric_record(m, prompt_b, completion_b, 100, 1, tool_b, 1500000);
+                ledger = session_ledger_ingest(ledger, m);
+                idx = idx + 1;
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    let total: Int = session_ledger_total_tokens(ledger);
+    let mut body: String = "{";
+    body = body + "\"file\":\"" + json_escape(path) + "\"";
+    body = body + ",\"lines_parsed\":" + (stats).lines_parsed.to_string();
+    body = body + ",\"lines_failed\":" + (stats).lines_failed.to_string();
+    body = body + ",\"session_id\":\"" + json_escape(path) + "\"";
+    body = body + ",\"prompt_tokens\":" + (ledger).total_prompt_tokens.to_string();
+    body = body + ",\"completion_tokens\":" + (ledger).total_completion_tokens.to_string();
+    body = body + ",\"tool_payload_bytes\":" + (ledger).total_tool_payload_bytes.to_string();
+    body = body + ",\"thinking_ms\":" + (ledger).total_thinking_ms.to_string();
+    body = body + ",\"total_tokens\":" + total.to_string();
+    body = body + ",\"steps\":" + idx.to_string();
+    body = body + "}";
+    let out: String = envelope_wrap("ingest", path, 0, body);
+    println(out);
+}

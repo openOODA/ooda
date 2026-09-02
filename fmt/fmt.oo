@@ -1,0 +1,172 @@
+// # CLI Fmt ◈ ZERO-DRAG — Sovereign Direct
+
+// Logline: Implements ooda fmt, --check, --all with explicit OCap and fail-closed traversal.
+
+// Setup: Requires &FsReadCap for read, &FsWriteCap for write, &AllocCap for builder, EnvCap via Fs caps. No heuristics. No compat.
+
+// Beats:
+//   1. Parse argv for file, --check, --all with typed flags.
+//   2. Validate path traversal (..) and .oo extension fail-closed.
+//   3. Run fmt_check or fmt_print via alloc and verify idempotence.
+
+// ## CAPs
+//   FsReadCap:  read file, walk dir
+//   FsWriteCap: write file
+//   AllocCap:   builder alloc
+
+import "oodac/lex/oodac_fmt.oo";
+import "std/fmt/fmt_parser.oo";
+import "std/fmt/fmt_printer.oo";
+import "std/fmt/fmt_verify.oo";
+import "std/compile/token_opt/caps_audit.oo";
+import "std/os/fs.oo";
+
+fn fmt_caps_ok(src: String, path: String) -> Bool {
+  let lines: List[String] = fmt_parse(src);
+  let mut rep: CapsAuditReport = caps_audit_report_new();
+  rep = caps_audit_check_file(rep, path, lines);
+  if rep.functions_scanned == 0 { return true; }
+  if rep.missing_count > 0 { return false; }
+  if rep.no_header_count > 0 { return false; }
+  return true;
+}
+
+fn fmt_file_ok(fsR: &FsReadCap, path: String) -> Bool {
+  if str_contains(path, "..") {
+    println("ERR\tfmt\trejected traversal: " + path);
+    return false;
+  }
+  let tr: Result[String, String] = read_file(fsR, path);
+  if tr.is_err() {
+    println("ERR\tfmt\tunreadable: " + path);
+    return false;
+  }
+  let src: String = match tr { Ok(s) => s, Err(_) => "" };
+  if !fmt_check_all(src) { return false; }
+  if !fmt_caps_ok(src, path) { return false; }
+  if !fmt_verify_idempotent(src) { return false; }
+  return true;
+}
+
+fn fmt_rewrite_one(
+  fsR: &FsReadCap,
+  fsW: &FsWriteCap,
+  alloc: &AllocCap,
+  path: String
+) -> Bool {
+  if str_contains(path, "..") {
+    println("ERR\tfmt\trejected traversal: " + path);
+    return false;
+  }
+  let tr: Result[String, String] = read_file(fsR, path);
+  if tr.is_err() {
+    println("ERR\tfmt\tunreadable: " + path);
+    return false;
+  }
+  let src: String = match tr { Ok(s) => s, Err(_) => "" };
+  let out: String = fmt_print(src);
+  if out == src { return true; }
+  if !fmt_verify_identical(out, fmt_print(out)) {
+    println("ERR\tfmt\tnot idempotent: " + path);
+    return false;
+  }
+  let wr: Result[Void, String] = write_file(fsW, path, out);
+  if wr.is_err() {
+    println("ERR\tfmt\twrite fail: " + path);
+    return false;
+  }
+  println("OK\tfmt\t" + path);
+  return true;
+}
+
+pub fn run_ooda_fmt(
+  fsR: &FsReadCap,
+  fsW: &FsWriteCap,
+  alloc: &AllocCap,
+  args: List[String]
+) -> Int {
+  let n: Int = list_len(args);
+  if n == 0 {
+    println("usage: ooda fmt [--check] [--all] <file>");
+    return 1;
+  }
+  let mut do_check: Bool = false;
+  let mut do_all: Bool = false;
+  let mut file: String = "";
+  let mut i: Int = 0;
+  while i < n {
+    let a: String = list_get(args, i);
+    if a == "--check" { do_check = true;
+    } else if a == "--all" { do_all = true;
+    } else if a == "--help" || a == "-h" {
+      println("usage: ooda fmt [--check] [--all] <file>");
+      return 0;
+    } else if str_starts_with(a, "-") {
+      println("ooda fmt: unknown flag " + a);
+      return 2;
+    } else {
+      if file == "" { file = a; }
+    }
+    i = i + 1;
+  }
+  if do_all {
+    let all: List[String] = fs_walk(fsR, ".");
+    let mut fails: Int = 0;
+    let mut total: Int = 0;
+    let m: Int = list_len(all);
+    let mut idx: Int = 0;
+    while idx < m {
+      let p: String = list_get(all, idx);
+      if str_ends_with(p, ".oo") && !str_contains(p, "..") && !str_contains(p, ".ooda-cache") && !str_contains(p, ".git") {
+        total = total + 1;
+        if do_check {
+          if !fmt_file_ok(fsR, p) {
+            println("FAIL\tfmt\t" + p);
+            fails = fails + 1;
+          }
+        } else {
+          if !fmt_rewrite_one(fsR, fsW, alloc, p) { fails = fails + 1; }
+        }
+      }
+      idx = idx + 1;
+    }
+    if do_check {
+      if fails > 0 {
+        println("fmt --check: " + fails.to_string() + "/" + total.to_string() + " files failed");
+        return 1;
+      }
+      println("fmt --check --all: " + total.to_string() + " files ok");
+      return 0;
+    }
+    if fails > 0 { return 1; }
+    println("fmt --all: " + total.to_string() + " files");
+    return 0;
+  }
+  if file == "" {
+    println("ooda fmt: missing file (use --all or <file>)");
+    println("usage: ooda fmt [--check] [--all] <file>");
+    return 2;
+  }
+  if str_contains(file, "..") {
+    println("ERR\tfmt\trejected traversal: " + file);
+    return 2;
+  }
+  if !path_exists(fsR, file) {
+    println("ERR\tfmt\tmissing file: " + file);
+    return 2;
+  }
+  if !str_ends_with(file, ".oo") {
+    println("ERR\tfmt\tnot .oo file: " + file);
+    return 2;
+  }
+  if do_check {
+    if !fmt_file_ok(fsR, file) {
+      println("FAIL\tfmt\t" + file);
+      return 1;
+    }
+    println("OK\tfmt\t" + file);
+    return 0;
+  }
+  if fmt_rewrite_one(fsR, fsW, alloc, file) { return 0; }
+  return 1;
+}

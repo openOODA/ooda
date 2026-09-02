@@ -1,0 +1,92 @@
+// # Ooda Main — argv Router
+//
+// Logline: Parse argv under the ooda binary and dispatch to one of the 4 in-process subdirs (build, fix, fmt, token) or spawn one of the 3 external binaries (opm, lsp, mcp).
+//
+// Setup: argv[0] is the subcommand. argv[1..] are its args. The 4 in-process subdirs handle 12+ subcommands; the 3 spawn entries keep version decoupling — the ooda binary does not link opm, lsp, or mcp.
+//
+// Beats:
+//   1. The 4 in-process subdirs and their subcommands:
+//        build:  build, run, gen, test, install, bench, init, context, health
+//        fix:    fix, digest
+//        fmt:    fmt
+//        token:  token (with 12 token sub-subcommands)
+//   2. The 3 spawn entries: opm (any subcommand), lsp (--stdio or file), mcp (--stdio, --file, --socket, or mcp-merge).
+//   3. spawn() resolves via $OODACODEX/bin/<name> first, then $PATH. Stdio is inherited.
+//   4. Unknown subcommand prints help and exits 2.
+
+import "build/ANCHOR.oo";
+import "fix/ANCHOR.oo";
+import "fmt/ANCHOR.oo";
+import "token/ANCHOR.oo";
+import "std/process/sys.oo";
+import "std/fs/path.oo";
+import "std/os/env.oo";
+
+fn spawn(name: String, args: List[String]) -> Result[Int, String] {
+    let mut bin_path: String = "";
+    if env_has("OODACODEX") {
+        bin_path = env_get("OODACODEX").unwrap_or("") + "/bin/" + name;
+        if path_exists(bin_path) {
+            return sys_exec_wait(bin_path, args);
+        }
+    }
+    return sys_exec_wait(name, args);
+}
+
+fn print_help() {
+    println("ooda — openOODA tactical toolchain CLI");
+    println("usage: ooda <subcommand> [args]");
+    println("");
+    println("in-process subcommands:");
+    println("  build, run, gen, test, install, bench, init, context, health, fix, digest, fmt, token");
+    println("");
+    println("external packages (spawned):");
+    println("  opm <subcmd>  — package manager (add, audit, ingest, launch, etc.)");
+    println("  lsp           — LSP server over stdio JSON-RPC");
+    println("  mcp           — MCP server over stdio JSON-RPC");
+    println("");
+    println("see `ooda <subcommand> --help` for per-subcommand help.");
+}
+
+pub fn main(bind: &BindCap, fs_r: &FsReadCap, sys: &ProcessCap, sys_cap: &SysCap, env: &EnvCap, time: &TimeCap, fs_w: &FsWriteCap, alloc: &AllocCap, args: List[String]) -> Result<Int, String] {
+    if list_len(args) < 1 {
+        print_help();
+        return Err("ooda: missing subcommand");
+    }
+    let sub: String = list_get(args, 0);
+    let rest: List[String] = list_slice(args, 1, list_len(args));
+
+    // build cluster (most return void; we wrap to Ok(0))
+    if sub == "build"   { run_oodac_build(fs_r, fs_w, sys, env, rest); return Ok(0); }
+    if sub == "run"     { run_oodac_run(fs_r, fs_w, sys, env, rest); return Ok(0); }
+    if sub == "gen"     { run_ooda_gen(fs_w, rest); return Ok(0); }
+    if sub == "test"    { run_ooda_test(fs_r, fs_w, sys, env, time, rest); return Ok(0); }
+    if sub == "install" { run_ooda_install_cmd(fs_r, sys, env, fs_w, rest); return Ok(0); }
+    if sub == "bench"   { run_ooda_bench(fs_r, sys, env, time, rest); return Ok(0); }
+    if sub == "context" { run_ooda_context(fs_r, rest); return Ok(0); }
+    if sub == "health"  { run_ooda_health(fs_r, rest); return Ok(0); }
+    if sub == "init" {
+        // init takes a project name, not free args
+        let name: String = if list_len(rest) > 0 { list_get(rest, 0) } else { "myproject" };
+        return cli_init_project(fs_r, fs_w, name);
+    }
+
+    // fix cluster
+    if sub == "fix"    { run_ooda_fix(fs_r, fs_w, sys, env, rest); return Ok(0); }
+    if sub == "digest" { run_ooda_digest(fs_r, rest); return Ok(0); }
+
+    // fmt cluster (returns Int; wrap in Ok)
+    if sub == "fmt" { return Ok(run_ooda_fmt(fs_r, fs_w, alloc, rest)); }
+
+    // token cluster (12 sub-subcommands)
+    if sub == "token" { run_ooda_token(fs_r, sys, time, fs_w, rest); return Ok(0); }
+
+    // external packages — spawn, do not link
+    if sub == "opm" { return spawn("opm", rest); }
+    if sub == "lsp" { return spawn("lsp", rest); }
+    if sub == "mcp" { return spawn("mcp", rest); }
+
+    // unknown
+    print_help();
+    return Err("ooda: unknown subcommand: " + sub);
+}

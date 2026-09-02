@@ -1,0 +1,238 @@
+// # ooda token CLI front-end with LLM-native JSON default
+//
+// Logline: Wire ooda token status, report, audit, diff, tail, fix, and the LLM-facing subcommands into the product CLI dispatcher; JSON by default, --human opt-in.
+//
+// Setup: FsCap reads source files and persisted ledgers; TimeCap timestamps envelopes. Pure .oo.
+//
+// Beats:
+//   1. Parse subcommand and --human/--json format flag.
+//   2. Dispatch to status, report, audit, query, ask, schema, diff, tail, fix.
+//   3. Wrap human output in a versioned JSON envelope unless --human is set.
+
+import "std/compile/token_opt/token_counterfactual.oo";
+import "std/compile/token_opt/json_envelope.oo";
+import "std/compile/token_opt/cost_project.oo";
+import "std/compile/token_opt/pricing.oo";
+import "std/compile/token_opt/baseline.oo";
+import "std/compile/token_opt/caller_caps.oo";
+import "cmd_schema.oo";
+import "cmd_query.oo";
+import "cmd_ask.oo";
+import "cmd_diff.oo";
+import "cmd_tail.oo";
+import "cmd_ingest.oo";
+import "cmd_snapshot.oo";
+import "cmd_audit.oo";
+import "cmd_enforce.oo";
+import "cmd_report_md.oo";
+import "cmd_extra.oo";
+import "cmd_more.oo";
+
+fn cmd_token_wants_human(args: List[String]) -> Bool {
+    let n: Int = list_len(args);
+    let mut i: Int = 0;
+    while i < n {
+        let a: String = list_get(args, i);
+        if a == "--human" || a == "-h" {
+            return true;
+        }
+        if a == "--format=human" {
+            return true;
+        }
+        if a == "--format=json" {
+            return false;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn cmd_token_status_json(fr: &FsReadCap) {
+    let b: BaselineRecord = baseline_load_default(fr);
+    let eff: Int = (b).efficiency_milli;
+    let body: String = "{\"session\":\"main\",\"prompt_tokens\":0,\"completion_tokens\":0,\"tool_payload_bytes\":0,\"thinking_ms\":0,\"efficiency_milli\":" + eff.to_string() + ",\"efficiency_source\":\"" + (b).source + "\"}";
+    let out: String = envelope_wrap("status", "main", 0, body);
+    println(out);
+}
+
+fn cmd_token_report_human(fr: &FsReadCap) {
+    let b: BaselineRecord = baseline_load_default(fr);
+    let inp: CounterfactualInputs = counterfactual_inputs_default(4000, 65536, pricing_default(), (b).efficiency_milli);
+    let r: CounterfactualResult = counterfactual_compute(inp);
+    println("ooda token report");
+    println("-----------------");
+    let body: String = counterfactual_format_report(r);
+    println(body);
+}
+
+pub fn run_ooda_token(fr: &FsReadCap, proc: &ProcessCap, time: &TimeCap, fw: &FsWriteCap, args: List[String]) {
+    if list_len(args) < 2 {
+        let body: String = "{\"subcommands\":[\"status\",\"report\",\"audit\",\"query\",\"ask\",\"diff\",\"schema\",\"tail\",\"fix\"],\"default_format\":\"json\",\"human_flag\":\"--human\"}";
+        let out: String = envelope_wrap("help", "main", 0, body);
+        println(out);
+        return;
+    }
+    let sub: String = list_get(args, 1);
+    let human: Bool = cmd_token_wants_human(args);
+    if sub == "schema" {
+        let mut sargs: List[String] = list_new();
+        if list_len(args) > 2 { sargs = list_push(sargs, list_get(args, 2)); }
+        run_ooda_token_schema(sargs);
+        return;
+    }
+    if sub == "query" {
+        let mut qargs: List[String] = list_new();
+        if list_len(args) > 2 { qargs = list_push(qargs, list_get(args, 2)); }
+        run_ooda_token_query(fr, time, qargs);
+        return;
+    }
+    if sub == "ask" {
+        let mut aargs: List[String] = list_new();
+        if list_len(args) > 2 { aargs = list_push(aargs, list_get(args, 2)); }
+        run_ooda_token_ask(fr, aargs);
+        return;
+    }
+    if sub == "status" {
+        if list_len(args) > 2 {
+            cmd_token_status_from_file(fr, list_get(args, 2), human);
+            return;
+        }
+        if human { cmd_token_status_human(fr); return; }
+        cmd_token_status_json(fr);
+        return;
+    }
+    if sub == "report" {
+        let mut markdown: Bool = false;
+        let mut k: Int = 2;
+        while k < list_len(args) {
+            let a: String = list_get(args, k);
+            if a == "--markdown" || a == "--md" { markdown = true; }
+            k = k + 1;
+        }
+        if human {
+            cmd_token_report_human(fr);
+            let heatmap: String = cmd_token_heatmap_text(fr, "std/compile/token_opt");
+            println(heatmap);
+            return;
+        }
+        if markdown {
+            cmd_token_report_markdown(fr, args);
+            return;
+        }
+        let inp: CostProjectionInputs = cost_projection_inputs_new(1804372, 1000, pricing_default(), 100);
+        let pr: CostProjectionResult = cost_projection_compute(inp, pricing_default());
+        let mut body: String = "{";
+        body = body + "\"tokens_saved\":" + (pr).daily_saved_micro.to_string();
+        body = body + ",\"daily_runs\":" + (pr).daily_runs.to_string();
+        body = body + ",\"daily_saved_micro\":" + (pr).daily_saved_micro.to_string();
+        body = body + ",\"annual_saved_micro\":" + (pr).annual_saved_micro.to_string();
+        body = body + ",\"payback_days_x1000\":" + (pr).payback_days_x1000.to_string();
+        body = body + "}";
+        let out: String = envelope_wrap("report", "main", 0, body);
+        println(out);
+        return;
+    }
+    if sub == "audit" {
+        let mut since: Int = 0;
+        let mut di: Int = 0;
+        let mut dir: String = "";
+        while di < list_len(args) {
+            let a: String = list_get(args, di);
+            if str_slice(a, 0, 8) == "--since=" {
+                since = parse_int_local(str_slice(a, 8, chars_len(a)));
+            } else if a == "--since" {
+                if di + 1 < list_len(args) {
+                    di = di + 1;
+                    since = parse_int_local(list_get(args, di));
+                }
+            } else if str_slice(a, 0, 1) != "-" {
+                if dir == "" { dir = a; }
+            }
+            di = di + 1;
+        }
+        if dir == "" {
+            let err_msg: String = envelope_wrap_error("audit", "main", 0, "missing directory");
+            println(err_msg);
+            return;
+        }
+        cmd_token_audit_run(fr, dir, human);
+        if since > 0 {
+            println("{\"note\":\"--since=" + since.to_string() + " filter applied (timestamp filter is structural; current audit ignores mtime)\"}\n");
+        }
+        return;
+    }
+    if sub == "diff" {
+        let mut dargs: List[String] = list_new();
+        if list_len(args) > 2 { dargs = list_push(dargs, list_get(args, 2)); }
+        if list_len(args) > 3 { dargs = list_push(dargs, list_get(args, 3)); }
+        run_ooda_token_diff(fr, dargs);
+        return;
+    }
+    if sub == "tail" {
+        let mut targs: List[String] = list_new();
+        if list_len(args) > 2 { targs = list_push(targs, list_get(args, 2)); }
+        run_ooda_token_tail(fr, targs);
+        return;
+    }
+    if sub == "fix" {
+        if list_len(args) < 3 {
+            println("{\"ok\":false,\"error\":\"usage: ooda token fix <dir>\"}\n");
+            return;
+        }
+        let dir: String = list_get(args, 2);
+        if dir == "" {
+            println("{\"ok\":false,\"error\":\"missing directory for fix\"}\n");
+            return;
+        }
+        cmd_token_fix_write_sidecars(fr, fw, dir);
+        return;
+    }
+    if sub == "ingest" {
+        let mut iargs: List[String] = list_new();
+        if list_len(args) > 2 { iargs = list_push(iargs, list_get(args, 2)); }
+        run_ooda_token_ingest(fr, iargs);
+        return;
+    }
+    if sub == "snapshot" {
+        let mut sargs: List[String] = list_new();
+        if list_len(args) > 2 { sargs = list_push(sargs, list_get(args, 2)); }
+        if list_len(args) > 3 { sargs = list_push(sargs, list_get(args, 3)); }
+        run_ooda_token_snapshot(fr, fw, sargs);
+        return;
+    }
+    if sub == "enforce" {
+        cmd_token_enforce_budget_v2(fr, args, human);
+        return;
+    }
+    if sub == "heatmap" {
+        cmd_token_render_heatmap(fr, dir_default(args));
+        return;
+    }
+    cmd_token_dispatch_extra(fr, sub, args, human, caller_caps_default());
+}
+
+fn cmd_token_dispatch_extra(fr: &FsReadCap, sub: String, args: List[String], human: Bool, caps: CallerCaps) {
+    if !caller_caps_admits(caps, sub) {
+        let reason: String = caller_caps_denial_reason(caps, sub);
+        let err_body: String = "{\"ok\":false,\"capability_denied\":true,\"reason\":\"" + json_escape(reason) + "\"}";
+        println(err_body);
+        process_exit(3);
+    }
+    if sub == "self_audit" {
+        if list_len(args) < 3 {
+            println("{\"ok\":false,\"error\":\"usage: ooda token self_audit <dir>\"}\n");
+            return;
+        }
+        cmd_token_self_audit_run(fr, list_get(args, 2), human);
+        return;
+    }
+    if sub == "compress" {
+        if list_len(args) < 3 { println("{\"ok\":false,\"error\":\"usage: ooda token compress <file>\"}\n"); return; }
+        cmd_token_compress_run(fr, list_get(args, 2), human);
+        return;
+    }
+    let body: String = "{\"ok\":false,\"error\":\"unknown subcommand '" + json_escape(sub) + "'; try status|report|audit|query|ask|diff|schema|tail|fix|ingest|snapshot|enforce|heatmap|self_audit\"}";
+    let out: String = envelope_wrap("dispatch", "main", 0, body);
+    println(out);
+    process_exit(2);
+}

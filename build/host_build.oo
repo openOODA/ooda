@@ -1,0 +1,183 @@
+// # CLI Build & Run Execution Driver
+//
+// Logline: Orchestrates argument parsing and subprocess execution for ooda build and run commands.
+//
+// Setup: FsReadCap inspects target sources; FsWriteCap writes the binary; EnvCap resolves the compiler; ProcessCap invokes compiler pipelines via host_run.
+//
+// Beats:
+//   1. Parse target, backend, optimization, LTO, and sanitizer flags for build commands.
+//   2. Forward engine and execution parameters for run commands.
+//   3. Dispatch invocations to oodac compiler binaries.
+
+import "host_run.oo";
+
+pub fn run_oodac_build(fr: &FsReadCap, fw: &FsWriteCap, proc: &ProcessCap, env: &EnvCap, bargs: List[String]) {
+    if list_len(bargs) < 1 { println("ooda build: missing file"); process_exit(2); }
+    let file: String = list_get(bargs, 0);
+    if !path_exists(fr, file) { println("ERR\tbuild\tunreadable file: " + file); process_exit(2); }
+    let mut target: String = "native";
+    let mut out: String = "";
+    let mut opt_level: String = "";
+    let mut lto = false;
+    let mut release = false;
+    let mut pgo_gen = false;
+    let mut pgo_use: String = "";
+    let mut san_list: List[String] = list_new();
+    let mut i = 1;
+    while i < list_len(bargs) {
+        let a: String = list_get(bargs, i);
+        if a == "--target" {
+            i = i + 1;
+            if i < list_len(bargs) { target = list_get(bargs, i); }
+        } else if a == "-o" {
+            i = i + 1;
+            if i < list_len(bargs) { out = list_get(bargs, i); }
+        } else if a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Oz" { opt_level = a; }
+        else if a == "-Opgo" { opt_level = "pgo"; }
+        else if a == "--lto" { lto = true; }
+        else if a == "--release" { release = true; }
+        else if a == "--pgo-generate" || a == "-fprofile-generate" { pgo_gen = true; }
+        else if a == "--pgo-use" || a == "-fprofile-use" { i = i + 1; if i < list_len(bargs) { pgo_use = list_get(bargs, i); } }
+        else if chars_len(a) >= 10 && str_slice(a, 0, 10) == "--pgo-use=" { pgo_use = str_slice(a, 10, chars_len(a)); }
+        else if chars_len(a) >= 15 && str_slice(a, 0, 15) == "-fprofile-use=" { pgo_use = str_slice(a, 15, chars_len(a)); }
+        else if chars_len(a) >= 12 && str_slice(a, 0, 12) == "-fsanitize=" { san_list = list_push(san_list, a); }
+        else if chars_len(a) >= 11 && str_slice(a, 0, 11) == "--sanitize=" { san_list = list_push(san_list, "-fsanitize=" + str_slice(a, 11, chars_len(a))); }
+        else if a == "--fuzz" { san_list = list_push(san_list, "-fsanitize=fuzzer"); }
+        i = i + 1;
+    }
+    let mut backend: String = "c";
+    if target == "llvm" || target == "aarch64" || target == "x86_64-elf" || target == "wasm" || target == "wasm-gc" || target == "wasm-linear" || target == "wasm-dual" || target == "x86" { backend = target; }
+    let mut argv: List[String] = list_new();
+    argv = list_push(argv, "--backend");
+    argv = list_push(argv, backend);
+    if opt_level != "" { argv = list_push(argv, opt_level); }
+    if lto { argv = list_push(argv, "--lto"); }
+    if release { argv = list_push(argv, "--release"); }
+    if pgo_gen { argv = list_push(argv, "--pgo-generate"); }
+    if pgo_use != "" { argv = list_push(argv, "--pgo-use=" + pgo_use); }
+    let mut sidx = 0;
+    while sidx < list_len(san_list) {
+        argv = list_push(argv, list_get(san_list, sidx));
+        sidx = sidx + 1;
+    }
+    argv = list_push(argv, "build");
+    argv = list_push(argv, file);
+    if out != "" { argv = list_push(argv, out); }
+    run_oodac(fr, fw, proc, env, argv);
+}
+
+// Parse ooda run argv. args[0] is the command. Residual --json-errors is refused.
+pub fn cli_run_args(args: List[String]) -> List[String] {
+    let mut engine = "native";
+    let mut rargs: List[String] = list_new();
+    let mut i = 1;
+    let mut skip_dd = false;
+    while i < list_len(args) {
+        let a = list_get(args, i);
+        if a == "--json-errors" {
+            println("ERR\tcli\t--json-errors residual on pure run");
+            process_exit(2);
+        }
+        if skip_dd == false && a == "--engine" {
+            if i + 1 >= list_len(args) {
+                println("ERR\tcli\t--engine needs value");
+                process_exit(2);
+            }
+            engine = list_get(args, i + 1);
+            i = i + 2;
+        } else if skip_dd == false && chars_len(a) >= 9 && str_slice(a, 0, 9) == "--engine=" {
+            engine = str_slice(a, 9, chars_len(a));
+            i = i + 1;
+        } else if a == "--" && skip_dd == false {
+            skip_dd = true;
+            i = i + 1;
+        } else {
+            rargs = list_push(rargs, a);
+            i = i + 1;
+        }
+    }
+    if engine != "bc" && engine != "native" {
+        println("ERR\tcli\tinvalid engine: " + engine + " (want bc|native)");
+        process_exit(2);
+    }
+    if list_len(rargs) < 1 {
+        println("ooda run: missing file");
+        process_exit(2);
+    }
+    let mut fwd: List[String] = list_new();
+    fwd = list_push(fwd, "--engine");
+    fwd = list_push(fwd, engine);
+    let mut j = 0;
+    while j < list_len(rargs) {
+        if j == 1 {
+            fwd = list_push(fwd, "--");
+        }
+        fwd = list_push(fwd, list_get(rargs, j));
+        j = j + 1;
+    }
+    return fwd;
+}
+
+pub fn run_oodac_run(fr: &FsReadCap, fw: &FsWriteCap, proc: &ProcessCap, env: &EnvCap, rargs: List[String]) {
+    let mut engine: String = "native";
+    let mut target: String = "native";
+    let mut path: String = "";
+    let mut opt_level: String = "";
+    let mut lto = false;
+    let mut release = false;
+    let mut i = 0;
+    while i < list_len(rargs) {
+        let a: String = list_get(rargs, i);
+        if a == "--fuzz" || (chars_len(a) >= 6 && str_slice(a, 0, 6) == "--fuzz") {
+            println("ERR\trun\t--fuzz residual");
+            process_exit(2);
+        }
+        if a == "--engine" {
+            i = i + 1;
+            if i < list_len(rargs) { engine = list_get(rargs, i); }
+        } else if a == "--target" {
+            i = i + 1;
+            if i < list_len(rargs) { target = list_get(rargs, i); }
+        } else if a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Oz" {
+            opt_level = a;
+            target = "llvm";
+        } else if a == "-Opgo" {
+            opt_level = "pgo";
+            target = "llvm";
+        } else if a == "--lto" {
+            lto = true;
+            target = "llvm";
+        } else if a == "--release" {
+            release = true;
+            target = "llvm";
+        } else if a != "--" {
+            if str_slice(a, 0, 1) != "-" {
+                if path == "" { path = a; }
+            }
+        }
+        i = i + 1;
+    }
+    if engine == "bc" {
+        println("ERR\trun\t--engine bc residual");
+        process_exit(2);
+    }
+    if path == "" {
+        println("ooda run: missing file");
+        process_exit(2);
+    }
+    if !path_exists(fr, path) {
+        println("ERR\trun\tunreadable file: " + path);
+        process_exit(2);
+    }
+    let mut backend: String = "c";
+    if target == "llvm" || target == "wasm" || target == "wasm-gc" || target == "wasm-linear" || target == "wasm-dual" || target == "x86_64-elf" || target == "aarch64" { backend = target; }
+    let mut argv: List[String] = list_new();
+    argv = list_push(argv, "--backend");
+    argv = list_push(argv, backend);
+    if opt_level != "" { argv = list_push(argv, opt_level); }
+    if lto { argv = list_push(argv, "--lto"); }
+    if release { argv = list_push(argv, "--release"); }
+    argv = list_push(argv, "run");
+    argv = list_push(argv, path);
+    run_oodac(fr, fw, proc, env, argv);
+}

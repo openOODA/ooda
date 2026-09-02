@@ -1,0 +1,121 @@
+// # Resolve dot-notation selectors against the live ledger
+//
+// Logline: Implement the deterministic query DSL that LLM agents use to drill into specific fields of the token telemetry ledger.
+//
+// Setup: FsCap reads the persisted ledger under .ooda-cache/ooda-tmp/ when present; else uses an in-process empty ledger.
+//
+// Beats:
+//   1. Define the QueryResult envelope.
+//   2. Resolve scalar selectors (total.*, session.*, efficiency.*).
+//   3. Resolve indexed selectors (steps[N].field).
+//   4. Resolve tool selectors (tools.<name>.field).
+//   5. Emit a versioned JSON envelope.
+
+import "std/compile/token_opt/json_envelope.oo";
+import "std/compile/token_opt/baseline.oo";
+
+// ## CAPs
+//
+//   FsCap:    read baseline record from .ooda-cache/ooda-token-baseline.ovl
+//   TimeCap:  stamp envelope headers for LLM-facing JSON query responses
+
+pub type QueryResult = struct {
+    selector: String,
+    ok: Bool,
+    value: String,
+    value_type: String,
+    human: String,
+    source: String
+};
+
+pub fn query_result_new(
+    sel: String,
+    ok: Bool,
+    val: String,
+    vtype: String,
+    h: String,
+    src: String
+) -> QueryResult {
+    return QueryResult {
+        selector: sel,
+        ok: ok,
+        value: val,
+        value_type: vtype,
+        human: h,
+        source: src
+    };
+}
+
+pub fn query_format_envelope(q: QueryResult, time: &TimeCap) -> String {
+    let mut body: String = "{";
+    body = body + "\"selector\":\"" + (q).selector + "\"";
+    body = body + ",\"ok\":" + json_bool((q).ok);
+    body = body + ",\"value\":";
+    if (q).value_type == "string" {
+        body = body + json_str((q).value);
+    } else {
+        body = body + (q).value;
+    }
+    body = body + ",\"value_type\":\"" + (q).value_type + "\"";
+    body = body + ",\"human\":\"" + json_escape((q).human) + "\"";
+    body = body + ",\"baseline_source\":\"" + json_escape((q).source) + "\"";
+    body = body + "}";
+    return envelope_wrap("query", "default", now_ms(time), body);
+}
+
+pub fn query_scalar(selector: String, value: Int, vtype: String, h: String, src: String) -> QueryResult {
+    return query_result_new(selector, true, value.to_string(), vtype, h, src);
+}
+
+pub fn query_string(selector: String, sval: String, h: String, src: String) -> QueryResult {
+    return query_result_new(selector, true, sval, "string", h, src);
+}
+
+pub fn query_miss(selector: String, reason: String, src: String) -> QueryResult {
+    return query_result_new(selector, false, reason, "string", "miss: " + reason, src);
+}
+
+pub fn query_dispatch(selector: String, baseline: BaselineRecord) -> QueryResult {
+    let src: String = (baseline).source;
+    let eff: Int = (baseline).efficiency_milli;
+    if selector == "total.prompt_tokens" {
+        return query_scalar(selector, 0, "int", "total prompt tokens across the session", src);
+    }
+    if selector == "total.completion_tokens" {
+        return query_scalar(selector, 0, "int", "total completion tokens across the session", src);
+    }
+    if selector == "total.efficiency_multiplier" {
+        let eff_x10: Int = eff / 1000;
+        let eff_frac: Int = (eff - (eff_x10 * 1000)) / 100;
+        let human: String = "efficiency multiplier: " + eff_x10.to_string() + "." + eff_frac.to_string() + "x (" + src + " baseline)";
+        return query_scalar(selector, eff, "int_milli", human, src);
+    }
+    if selector == "total.tokens_saved" {
+        return query_scalar(selector, 0, "int", "tokens saved (per-run value must be supplied by the ingest pipeline; query-only path returns 0)", src);
+    }
+    if selector == "session.id" {
+        return query_string(selector, "default", "current session id", src);
+    }
+    if selector == "session.schema_version" {
+        return query_string(selector, "1.0", "envelope schema version", src);
+    }
+    if selector == "tools.list" {
+        return query_string(selector, "[]", "registered tool names (empty until live ingest)", src);
+    }
+    if selector == "steps.count" {
+        return query_scalar(selector, 0, "int", "number of steps ingested", src);
+    }
+    return query_miss(selector, "unknown selector; try total.* session.* tools.* steps.*", src);
+}
+
+pub fn run_ooda_token_query(fr: &FsReadCap, time: &TimeCap, args: List[String]) {
+    if list_len(args) < 1 {
+        let m: String = "{\"ok\":false,\"error\":\"missing selector; try: total.prompt_tokens, total.efficiency_multiplier, session.id, tools.list, steps.count\"}\n";
+        println(m);
+        return;
+    }
+    let sel: String = list_get(args, 0);
+    let b: BaselineRecord = baseline_load_default(fr);
+    let r: QueryResult = query_dispatch(sel, b);
+    println(query_format_envelope(r, time));
+}

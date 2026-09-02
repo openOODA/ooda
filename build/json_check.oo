@@ -1,0 +1,174 @@
+// # Convert oodac check text to JSON
+//
+// Logline: Run a plain check and reprint ERR lines as a JSON array.
+//
+// Setup: FsReadCap + EnvCap resolve the compiler. ProcessCap runs oodac check and captures its output.
+//
+// Beats:
+//   1. Invoke oodac check directly under ProcessCap and capture the combined output.
+//   2. Map capability, type, and parse lines to stable codes.
+//   3. Print the array and exit 1 when any object was found.
+
+import "find_compiler.oo";
+import "host_run.oo";
+import "std/os/fs.oo";
+
+fn je_has(s: String, sub: String) -> Bool {
+    let n = chars_len(s);
+    let m = chars_len(sub);
+    if m > n { return false; }
+    let mut i = 0;
+    while i + m <= n {
+        if str_slice(s, i, i + m) == sub { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn je_esc(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut out = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = char_at(s, i);
+        if c == "\\" { out = out + "\\\\"; }
+        else if c == "\"" { out = out + "\\\""; }
+        else if c == "\n" { out = out + "\\n"; }
+        else if c == "\r" { out = out + "\\r"; }
+        else if c == "\t" { out = out + "\\t"; }
+        else { out = out + c; }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn je_code(line: String) -> String {
+    if je_has(line, "capability") { return "E_CAP"; }
+    if je_has(line, "undefined variable") { return "E_TC"; }
+    if je_has(line, "ERR\ttype\t") { return "E_TC"; }
+    if je_has(line, "ERR\tparse\t") { return "E_PARSE"; }
+    if je_has(line, "ERR\t") { return "E_OTHER"; }
+    return "";
+}
+
+fn je_digits(s: String, start: Int) -> String {
+    let n = chars_len(s);
+    let mut i = start;
+    let mut out = "";
+    while i < n {
+        let c: String = char_at(s, i);
+        if char_is_digit(c) {
+            out = out + c;
+            i = i + 1;
+        } else {
+            break;
+        }
+    }
+    if out == "" { return "0"; }
+    return out;
+}
+
+fn je_loc(line: String) -> String {
+    let tag_tc = "Type error at ";
+    let tcl = chars_len(tag_tc);
+    let n = chars_len(line);
+    let mut a = -1;
+    let mut i = 0;
+    while i + tcl <= n {
+        if str_slice(line, i, i + tcl) == tag_tc { a = i; break; }
+        i = i + 1;
+    }
+    if a >= 0 {
+        let ls = a + 14;
+        let ln: String = je_digits(line, ls);
+        let p = ls + chars_len(ln);
+        let mut col = "0";
+        if p < n {
+            if char_at(line, p) == ":" { col = je_digits(line, p + 1); }
+        }
+        return ln + "\t" + col;
+    }
+    let tag_line = " at line ";
+    let tll = chars_len(tag_line);
+    let mut b = -1;
+    let mut j = 0;
+    while j + tll <= n {
+        if str_slice(line, j, j + tll) == tag_line { b = j; break; }
+        j = j + 1;
+    }
+    if b >= 0 {
+        let ls2 = b + 9;
+        let ln2: String = je_digits(line, ls2);
+        let tag_col = ", col ";
+        let tcl2 = chars_len(tag_col);
+        let mut cpos = -1;
+        let mut k = 0;
+        while k + tcl2 <= n {
+            if str_slice(line, k, k + tcl2) == tag_col { cpos = k; break; }
+            k = k + 1;
+        }
+        let mut col2 = "0";
+        if cpos >= 0 { col2 = je_digits(line, cpos + 6); }
+        return ln2 + "\t" + col2;
+    }
+    return "0\t0";
+}
+
+pub fn run_check_json(fr: &FsReadCap, fw: &FsWriteCap, proc: &ProcessCap, env: &EnvCap, path: String) {
+    let oodac: String = find_oodac(fr, env);
+    refuse_cli(proc, oodac);
+    let mk: Result[Void, String] = fs_mkdir_p(fw, ".ooda-cache/ooda-tmp");
+    if mk.is_err() { println("ERR\tcheck\tmkdir .ooda-cache/ooda-tmp failed"); process_exit(1); }
+    let r: Result[String, String] = sys_exec(proc, oodac, "check", path);
+    let mut acc: String = match r { Ok(s) => s, Err(e) => e };
+    let mut json = "[";
+    let mut nobj = 0;
+    let mut ls = 0;
+    let n = chars_len(acc);
+    let mut i = 0;
+    while i <= n {
+        if i == n || char_at(acc, i) == "\n" {
+            let line: String = str_slice(acc, ls, i);
+            let code: String = je_code(line);
+            if code != "" {
+                if nobj > 0 { json = json + ","; }
+                let hint = "See openOODA/SHIPPED.oot and ROADMAP.oot.";
+                let mut extra = "";
+                if code == "E_CAP" {
+                    extra = ",\"kind\":\"CapabilitySecurityViolation\",\"suggested_fix\":\"Add a matching &Cap parameter\"";
+                }
+                let loc: String = je_loc(line);
+                let locn = chars_len(loc);
+                let mut tab = -1;
+                let mut ti = 0;
+                while ti < locn {
+                    if char_at(loc, ti) == "\t" { tab = ti; break; }
+                    ti = ti + 1;
+                }
+                let mut ln: String = loc;
+                let mut col: String = "0";
+                if tab >= 0 {
+                    ln = str_slice(loc, 0, tab);
+                    col = str_slice(loc, tab + 1, locn);
+                }
+                json = json + "{\"code\":\"" + code + "\",\"line\":" + ln + ",\"col\":" + col + ",\"msg\":\""
+                    + je_esc(line) + "\",\"path\":\"" + je_esc(path)
+                    + "\",\"fix_hint\":\"" + hint + "\"" + extra + "}";
+                nobj = nobj + 1;
+            }
+            ls = i + 1;
+        }
+        i = i + 1;
+    }
+    json = json + "]";
+    println(json);
+    if nobj > 0 { process_exit(1); }
+}
+
+pub fn json_check_run(fr: &FsReadCap, fw: &FsWriteCap, proc: &ProcessCap, env: &EnvCap, path: String) {
+    run_check_json(fr, fw, proc, env, path);
+}
+
+pub fn json_check_version() -> String {
+    return "1.0";
+}

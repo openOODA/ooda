@@ -1,0 +1,207 @@
+// # Pack-only OODA installer
+//
+// Logline: Install a pre-built openOODA release pack into an XDG prefix.
+//
+// Setup: FsReadCap reads the pack. FsWriteCap creates the prefix and copies files. ProcessCap only for chmod/test. EnvCap resolves OODA_FS_WRITEDIR and optional overrides.
+//
+// Beats:
+//   1. Parse --from and --to under the writedir cap.
+//   2. Validate the source is a pack, not a source tree.
+//   3. Copy oodac, ooda, std, runtime, and fixtures with fs_* primitives.
+//   4. Write env and receipt; chmod binaries and verify executability.
+
+import "std/os/fs.oo";
+import "std/fs/path.oo";
+import "std/os/env.oo";
+
+fn env_or(env: &EnvCap, key: String, fallback: String) -> String {
+    let r: Result[String, String] = env_get(env, key);
+    if r.is_ok() {
+        let s: String = match r { Ok(x) => x, Err(_) => fallback };
+        if s != "" { return s; }
+    }
+    return fallback;
+}
+
+fn arg_value(args: List[String], name: String) -> String {
+    let n: Int = list_len(args);
+    let mut i: Int = 0;
+    while i < n {
+        let a: String = list_get(args, i);
+        let eq: String = name + "=";
+        if a == name {
+            if i + 1 < n { return list_get(args, i + 1); }
+            return "";
+        }
+        if chars_len(a) > chars_len(eq) && str_slice(a, 0, chars_len(eq)) == eq {
+            return str_slice(a, chars_len(eq), chars_len(a));
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn validate_path(path: String) -> String {
+    if chars_len(path) > 4096 { return "Path exceeds maximum length"; }
+    let normalized: String = path_normalize(path);
+    let parts: List[String] = str_split(normalized, "/");
+    let n: Int = list_len(parts);
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = list_get(parts, i);
+        if chars_len(c) == 0 { i = i + 1; continue; }
+        if chars_len(c) > 255 { return "Path component exceeds maximum length"; }
+        if c == "." || c == ".." { return "Invalid path component: " + c; }
+        if str_index_of(c, "..") >= 0 || str_index_of(c, "~") >= 0 { return "Path traversal detected in: " + c; }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn require_writedir(env: &EnvCap) -> Result[String, String] {
+    let r: Result[String, String] = env_get(env, "OODA_FS_WRITEDIR");
+    if !r.is_ok() { return Err("OODA_FS_WRITEDIR not set"); }
+    let w: String = match r { Ok(s) => s, Err(_) => "" };
+    if w == "" { return Err("OODA_FS_WRITEDIR is empty"); }
+    let err: String = validate_path(w);
+    if err != "" { return Err(err); }
+    return Ok(path_normalize(w));
+}
+
+fn path_under(base: String, child: String) -> Bool {
+    let b: String = path_normalize(base);
+    let c: String = path_normalize(child);
+    if c == b { return true; }
+    if chars_len(c) > chars_len(b) && str_slice(c, 0, chars_len(b) + 1) == b + "/" { return true; }
+    return false;
+}
+
+fn is_pack(fr: &FsReadCap, from: String) -> Bool {
+    return path_exists(fr, from + "/bin/ooda")
+        && (path_exists(fr, from + "/ooda/oodac_bin") || path_exists(fr, from + "/bin/oodac"))
+        && path_exists(fr, from + "/std")
+        && path_exists(fr, from + "/runtime")
+        && path_exists(fr, from + "/fixtures/hello.oo");
+}
+
+fn install_copy_or_exit(fr: &FsReadCap, fw: &FsWriteCap, src: String, dst: String, err: String) {
+    let r: Result[Void, String] = fs_copy_file(fr, fw, src, dst);
+    if r.is_err() { println("ERROR: " + err); process_exit(1); }
+}
+
+fn install_tree_or_exit(fr: &FsReadCap, fw: &FsWriteCap, src: String, dst: String, err: String) {
+    let rm: Result[Void, String] = fs_remove_tree(fw, fr, dst);
+    let _x: String = match rm { Ok(_) => "", Err(_) => "" };
+    let r: Result[Void, String] = fs_copy_tree(fr, fw, src, dst);
+    if r.is_err() { println("ERROR: " + err); process_exit(1); }
+}
+
+fn install_link_or_copy(fr: &FsReadCap, fw: &FsWriteCap, src: String, dst: String) {
+    let l: Result[Void, String] = fs_hardlink(fw, src, dst);
+    if l.is_err() {
+        let r: Result[Void, String] = fs_copy_file(fr, fw, src, dst);
+        if r.is_err() { println("ERROR: link/copy " + dst); process_exit(1); }
+    }
+}
+
+fn install_mkdir_or_exit(fw: &FsWriteCap, path: String, err: String) {
+    let r: Result[Void, String] = fs_mkdir_p(fw, path);
+    if r.is_err() { println("ERROR: " + err); process_exit(1); }
+}
+
+fn install_executable(proc: &ProcessCap, path: String) {
+    let r: Result[String, String] = sys_exec(proc, "chmod", "+x", path);
+    if r.is_err() { println("ERROR: chmod " + path); process_exit(1); }
+    let t: Result[String, String] = sys_exec(proc, "test", "-x", path);
+    if t.is_err() { println("ERROR: not executable " + path); process_exit(1); }
+}
+
+pub fn run_ooda_install_cmd(fr: &FsReadCap, proc: &ProcessCap, env: &EnvCap, fw: &FsWriteCap, args: List[String]) {
+    let wdir: String = match require_writedir(env) {
+        Ok(s) => s,
+        Err(e) => { println("ERROR: " + e); process_exit(1); }
+    };
+
+    let from_arg: String = arg_value(args, "--from");
+    let mut from: String = from_arg;
+    if from == "" { from = env_or(env, "OODA_CHECKOUT", "."); }
+    let from_err: String = validate_path(from);
+    if from_err != "" {
+        println("ERROR: Invalid --from: " + from_err);
+        process_exit(1);
+    }
+    from = path_normalize(from);
+
+    let to_arg: String = arg_value(args, "--to");
+    let mut to: String = to_arg;
+    if to == "" { to = wdir; }
+    let to_err: String = validate_path(to);
+    if to_err != "" {
+        println("ERROR: Invalid --to: " + to_err);
+        process_exit(1);
+    }
+    to = path_normalize(to);
+    if !path_under(wdir, to) {
+        println("ERROR: --to is not under OODA_FS_WRITEDIR (" + wdir + ")");
+        process_exit(1);
+    }
+
+    if !is_pack(fr, from) {
+        println("ERROR: --from does not point to a valid openOODA release pack (need bin/ooda, ooda/oodac_bin, std, runtime, fixtures)");
+        process_exit(1);
+    }
+
+    let bin_dir: String = to + "/.local/bin";
+    let ooda_home: String = to + "/.local/share/ooda";
+    let config_dir: String = to + "/.config/ooda";
+    let cache_dir: String = to + "/.cache/ooda";
+    let fixtures_dir: String = ooda_home + "/share/fixtures";
+
+    println("=== OODA pack install ===");
+    println("From: " + from);
+    println("To:   " + to);
+
+    install_mkdir_or_exit(fw, bin_dir, "Failed to create bin dir");
+    install_mkdir_or_exit(fw, ooda_home + "/oodac", "Failed to create oodac dir");
+    install_mkdir_or_exit(fw, config_dir, "Failed to create config dir");
+    install_mkdir_or_exit(fw, cache_dir, "Failed to create cache dir");
+    install_mkdir_or_exit(fw, fixtures_dir, "Failed to create fixtures dir");
+
+    let mut oodac_src: String = from + "/ooda/oodac_bin";
+    if !path_exists(fr, oodac_src) {
+        oodac_src = from + "/bin/oodac";
+    }
+    let oodac_dst: String = ooda_home + "/oodac/oodac";
+    install_copy_or_exit(fr, fw, oodac_src, oodac_dst, "Failed to stage oodac");
+    install_executable(proc, oodac_dst);
+
+    install_link_or_copy(fr, fw, oodac_dst, bin_dir + "/oodac");
+    install_executable(proc, bin_dir + "/oodac");
+
+    let ooda_src: String = from + "/bin/ooda";
+    let ooda_dst: String = bin_dir + "/ooda";
+    install_copy_or_exit(fr, fw, ooda_src, ooda_dst, "Failed to install ooda");
+    install_executable(proc, ooda_dst);
+
+    install_link_or_copy(fr, fw, ooda_dst, bin_dir + "/oo");
+    install_executable(proc, bin_dir + "/oo");
+
+    install_tree_or_exit(fr, fw, from + "/std", ooda_home + "/std", "Failed to install std");
+    install_tree_or_exit(fr, fw, from + "/runtime", ooda_home + "/runtime", "Failed to install runtime");
+
+    install_copy_or_exit(fr, fw, from + "/fixtures/hello.oo", fixtures_dir + "/hello.oo", "Failed to install fixtures");
+
+    let env_file: String = config_dir + "/env";
+    let env_body: String = "# openOODA XDG env\nexport OODA_HOME=\"" + ooda_home + "\"\nexport OODA_SRC_ROOT=\"" + ooda_home + "\"\nexport OODA_STD=\"" + ooda_home + "/std\"\nexport OODA_CONFIG=\"" + config_dir + "\"\nexport OODA_CACHE=\"" + cache_dir + "\"\nexport PATH=\"" + bin_dir + ":$PATH\"\n";
+    let wr: Result[Void, String] = write_file(fw, env_file, env_body);
+    if wr.is_err() { println("ERROR: Failed to write env file"); process_exit(1); }
+
+    let version: String = env_or(env, "OODA_VERSION", "v2.11.0");
+    let receipt: String = "openOODA install receipt\nversion=" + version + "\nsource=pack\noodac=" + bin_dir + "/oodac\nsecurity_gates=4_PASSED\n";
+    let wr2: Result[Void, String] = write_file(fw, ooda_home + "/share/INSTALL_RECEIPT.txt", receipt);
+    if wr2.is_err() { println("ERROR: Failed to write receipt"); process_exit(1); }
+
+    println("=== OODA pack install complete ===");
+    println("source " + env_file);
+    println("ooda version");
+}

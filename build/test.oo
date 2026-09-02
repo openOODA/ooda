@@ -1,0 +1,92 @@
+// # ooda test — Sovereign Test Execution Harness
+//
+// Logline: Compile and execute a single .oo test file under oodac, capture the actual outcome, and emit either real JSON or human-readable result; reject vacuous flags.
+//
+// Setup: Requires &FsReadCap for path validation, &FsWriteCap for cache dir, &EnvCap to resolve oodac, &ProcessCap for oodac invocation, &TimeCap for unique per-invocation output naming.
+//
+// Beats:
+//   1. Parse argv strictly — accept tpath, --engine=bc, and --json; reject every other flag with exit 2.
+//   2. Validate tpath under &FsReadCap and require the file to exist.
+//   3. Engine-bc dispatch — direct sys_exec oodac run <path>.
+//   4. Default dispatch — compile to a unique .ooda-cache/test-<epoch_ms>.oo.bin and run the binary.
+//   5. Emit real JSON when --json is set; exit 0 only on actual pass.
+
+import "find_compiler.oo";
+import "host_run.oo";
+import "std/os/fs.oo";
+
+fn json_escape(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = str_slice(s, i, i + 1);
+        if c == "\"" { out = out + "\\\""; }
+        else if c == "\\" { out = out + "\\\\"; }
+        else if c == "\n" { out = out + "\\n"; }
+        else if c == "\r" { out = out + "\\r"; }
+        else if c == "\t" { out = out + "\\t"; }
+        else { out = out + c; }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn run_oodac_test_real(fr: &FsReadCap, proc: &ProcessCap, env: &EnvCap, path: String, out_bin: String) -> Bool {
+    let oodac: String = find_oodac(fr, env);
+    refuse_cli(proc, oodac);
+    let r: Result[String, String] = sys_exec(proc, oodac, "run", path, "-o", out_bin);
+    return r.is_ok();
+}
+
+pub fn run_ooda_test(fr: &FsReadCap, fw: &FsWriteCap, proc: &ProcessCap, env: &EnvCap, time: &TimeCap, args: List[String]) {
+    if list_len(args) < 2 { println("ooda test: missing file"); process_exit(2); }
+    let mut tpath: String = "";
+    let mut saw_engine_bc: Bool = false;
+    let mut saw_json: Bool = false;
+    let mut ti: Int = 1;
+    while ti < list_len(args) {
+        let ta: String = list_get(args, ti);
+        if ta == "--json" || ta == "-json" { saw_json = true; }
+        else if ta == "--engine=bc" || ta == "-bc" { saw_engine_bc = true; }
+        else if ta == "--engine" && ti + 1 < list_len(args) {
+            if list_get(args, ti + 1) == "bc" { saw_engine_bc = true; ti = ti + 1; }
+        }
+        else if str_slice(ta, 0, 1) == "-" { println("ERR\ttest\tunknown flag: " + ta); process_exit(2); }
+        else { if tpath == "" { tpath = ta; } }
+        ti = ti + 1;
+    }
+    if tpath == "" { println("ooda test: missing file"); process_exit(2); }
+    if !path_exists(fr, tpath) { println("ERR\ttest\tunreadable file: " + tpath); process_exit(2); }
+
+    if saw_engine_bc {
+        let oodac: String = find_oodac(fr, env);
+        refuse_cli(proc, oodac);
+        let r: Result[String, String] = sys_exec(proc, oodac, "run", tpath);
+        if r.is_ok() {
+            let out_str: String = match r { Ok(s) => s, Err(_) => "" };
+            if saw_json { println("{\"success\":true,\"command\":\"test\",\"target\":\"" + json_escape(tpath) + "\",\"engine\":\"bc\",\"passed\":true}"); }
+            else { println(out_str); println("test " + tpath + " passed (engine=bc)"); }
+            process_exit(0);
+        }
+        let err_str: String = match r { Ok(_) => "", Err(e) => e };
+        if saw_json { println("{\"success\":false,\"command\":\"test\",\"target\":\"" + json_escape(tpath) + "\",\"engine\":\"bc\",\"passed\":false,\"error\":\"" + json_escape(err_str) + "\"}"); }
+        else { println(err_str); }
+        process_exit(1);
+    }
+
+    let mk: Result[Void, String] = fs_mkdir_p(fw, ".ooda-cache/test");
+    if mk.is_err() { println("ERR\ttest\tmkdir .ooda-cache/test failed"); process_exit(1); }
+    let now: Int = now_ms(time);
+    let out_bin: String = ".ooda-cache/test/test-" + now.to_string() + ".oo.bin";
+    let passed: Bool = run_oodac_test_real(fr, proc, env, tpath, out_bin);
+    if saw_json {
+        if passed { println("{\"success\":true,\"command\":\"test\",\"target\":\"" + json_escape(tpath) + "\",\"passed\":true,\"artifact\":\"" + out_bin + "\"}"); }
+        else { println("{\"success\":false,\"command\":\"test\",\"target\":\"" + json_escape(tpath) + "\",\"passed\":false}"); }
+    } else {
+        if passed { println("test " + tpath + " passed"); }
+        else { println("test " + tpath + " FAILED"); }
+    }
+    if passed { process_exit(0); }
+    process_exit(1);
+}

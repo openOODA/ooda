@@ -1,0 +1,197 @@
+// # Parse product build flags
+//
+// Logline: Walk argv after the command and emit product_sh args starting with file --target.
+//
+// Setup: args[0] is the command; remaining tokens are flags and one file.
+//
+// Beats:
+//   1. Read --target, --emit-llvm, -o, --verbose, --backend, --release, and PGO flags.
+//   2. Read -fsanitize=address/thread/undefined/fuzzer and --sanitize=/--fuzz aliases.
+//   3. Reject missing file, bad target, conflicting PGO, and non-llvm flags.
+//   4. Return [file, --target, target, optional -o/verbose/emit-llvm/release/pgo/sanitizers].
+
+pub fn cli_build_args(args: List[String]) -> List[String] {
+    let mut target: String = "native";
+    let mut file: String = "";
+    let mut out_path: String = "";
+    let mut emit_llvm = false;
+    let mut target_set = false;
+    let mut verbose = false;
+    let mut release = false;
+    let mut opt_level: String = "";
+    let mut lto = false;
+    let mut pgo_gen = false;
+    let mut pgo_use: String = "";
+    let mut san_flags: List[String] = list_new();
+    let mut hermetic: Bool = false;
+    let mut want_repro: Bool = false;
+    let mut i = 1;
+    while i < list_len(args) {
+        let a = list_get(args, i);
+        if a == "--target" {
+            i = i + 1;
+            if i >= list_len(args) { println("ooda build: --target needs value"); process_exit(2); }
+            let tv = list_get(args, i);
+            if (emit_llvm && tv != "llvm") || (target_set && target != tv) { println("ERR\tcli\tconflicting target flags"); process_exit(2); }
+            target = tv;
+            target_set = true;
+        } else if str_slice(a, 0, 9) == "--target=" {
+            let tv = str_slice(a, 9, chars_len(a));
+            if (emit_llvm && tv != "llvm") || (target_set && target != tv) { println("ERR\tcli\tconflicting target flags"); process_exit(2); }
+            target = tv;
+            target_set = true;
+        } else if a == "--emit-llvm" {
+            if target_set && target != "llvm" { println("ERR\tcli\tconflicting target flags"); process_exit(2); }
+            emit_llvm = true;
+            target = "llvm";
+            target_set = true;
+        } else if a == "-o" {
+            i = i + 1;
+            if i >= list_len(args) { println("ooda build: -o needs value"); process_exit(2); }
+            out_path = list_get(args, i);
+        } else if str_slice(a, 0, 3) == "-o=" {
+            out_path = str_slice(a, 3, chars_len(a));
+        } else if a == "--verbose" {
+            verbose = true;
+        } else if a == "--backend" {
+            i = i + 1;
+            if i >= list_len(args) { println("ERR\tbackend\tmissing value"); process_exit(2); }
+            let bv = list_get(args, i);
+            if bv != "c" && bv != "llvm" && bv != "wasm" && bv != "wasm-gc" && bv != "wasm-linear" && bv != "wasm-dual" && bv != "x86_64-elf" && bv != "aarch64" && bv != "x86" { println("ERR\tbackend\tresidual"); process_exit(2); }
+            target = bv;
+            target_set = true;
+        } else if a == "--prefer-llvm" {
+            // P5.48: flip the default target to "llvm" unless --target/--backend
+            // was already set explicitly. Same flip rules as -O*, --lto, --release.
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-O0" || a == "-O1" || a == "-O2" || a == "-O3" || a == "-Oz" {
+            opt_level = a;
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-Opgo" {
+            // P4.37: -Opgo opt-in. opt_level "pgo" reaches cli_build_targets.oo
+            // where it dispatches to run_build_pgo (full gcc PGO cycle). The
+            // target stays "llvm" so the dispatch in run_build_llvm can fire.
+            opt_level = "pgo";
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "--lto" {
+            lto = true;
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "--release" {
+            release = true;
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fprofile-generate" || a == "--pgo-generate" {
+            pgo_gen = true;
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fprofile-use" || a == "--pgo-use" {
+            if i + 1 < list_len(args) {
+                let next_a = list_get(args, i + 1);
+                if str_slice(next_a, 0, 1) != "-" {
+                    pgo_use = next_a;
+                    i = i + 1;
+                } else {
+                    pgo_use = "default.profdata";
+                }
+            } else {
+                pgo_use = "default.profdata";
+            }
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if chars_len(a) >= 15 && str_slice(a, 0, 15) == "-fprofile-use=" {
+            pgo_use = str_slice(a, 15, chars_len(a));
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if chars_len(a) >= 10 && str_slice(a, 0, 10) == "--pgo-use=" {
+            pgo_use = str_slice(a, 10, chars_len(a));
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fsanitize=address" || a == "--sanitize=address" {
+            san_flags = list_push(san_flags, "-fsanitize=address");
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fsanitize=thread" || a == "--sanitize=thread" {
+            san_flags = list_push(san_flags, "-fsanitize=thread");
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fsanitize=undefined" || a == "--sanitize=undefined" {
+            san_flags = list_push(san_flags, "-fsanitize=undefined");
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "-fsanitize=fuzzer" || a == "--fuzz" || a == "--sanitize=fuzzer" {
+            san_flags = list_push(san_flags, "-fsanitize=fuzzer");
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if chars_len(a) >= 12 && str_slice(a, 0, 12) == "-fsanitize=" {
+            san_flags = list_push(san_flags, a);
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if chars_len(a) >= 11 && str_slice(a, 0, 11) == "--sanitize=" {
+            let sname = str_slice(a, 11, chars_len(a));
+            san_flags = list_push(san_flags, "-fsanitize=" + sname);
+            if !target_set { target = "llvm"; target_set = true; }
+        } else if a == "--json" || a == "-json" {
+            // Handled for machine output
+        } else if a == "--hermetic" {
+            hermetic = true;
+        } else if a == "--reproducible" {
+            want_repro = true;
+        } else if a == "--verify-reproducible" {
+            want_repro = true;
+        } else if str_slice(a, 0, 1) != "-" {
+            file = a;
+        } else {
+            println("ERR\tcli\tunsupported system feature: " + a);
+            process_exit(2);
+        }
+        i = i + 1;
+    }
+    if file == "" { println("ooda build: missing file"); process_exit(2); }
+    if target != "c" && target != "chs" && target != "native" && target != "llvm" && target != "wasm" && target != "wasm-gc" && target != "wasm-linear" && target != "wasm-dual" && target != "x86_64-elf" && target != "aarch64" && target != "x86" {
+        println("ERR\tcli\tinvalid target: " + target);
+        process_exit(2);
+    }
+
+    let is_valid_target = target == "llvm" || target == "c" || target == "chs" || target == "native";
+    if release && !is_valid_target {
+        println("ERR\tcli\t--release only with --target llvm or c");
+        process_exit(2);
+    }
+    if lto && !is_valid_target {
+        println("ERR\tcli\t--lto only with --target llvm or c");
+        process_exit(2);
+    }
+    if opt_level != "" && !is_valid_target {
+        println("ERR\tcli\toptimization flags only with --target llvm or c");
+        process_exit(2);
+    }
+    if pgo_gen && !is_valid_target {
+        println("ERR\tcli\tprofile generation only with --target llvm or c");
+        process_exit(2);
+    }
+    if pgo_use != "" && !is_valid_target {
+        println("ERR\tcli\tprofile use only with --target llvm or c");
+        process_exit(2);
+    }
+    if pgo_gen && pgo_use != "" {
+        println("ERR\tcli\tcannot both generate and use profile");
+        process_exit(2);
+    }
+    if list_len(san_flags) > 0 && !is_valid_target {
+        println("ERR\tcli\tsanitizer flags only with --target llvm or c");
+        process_exit(2);
+    }
+    let mut bargs: List[String] = list_new();
+    bargs = list_push(bargs, file);
+    bargs = list_push(bargs, "--target");
+    bargs = list_push(bargs, target);
+    if out_path != "" {
+        bargs = list_push(bargs, "-o");
+        bargs = list_push(bargs, out_path);
+    }
+    if verbose { bargs = list_push(bargs, "--verbose"); }
+    if emit_llvm { bargs = list_push(bargs, "--emit-llvm"); }
+    if release { bargs = list_push(bargs, "--release"); }
+    if opt_level != "" { bargs = list_push(bargs, opt_level); }
+    if lto { bargs = list_push(bargs, "--lto"); }
+    if pgo_gen { bargs = list_push(bargs, "--pgo-generate"); }
+    if pgo_use != "" { bargs = list_push(bargs, "--pgo-use=" + pgo_use); }
+    let mut si = 0;
+    while si < list_len(san_flags) {
+        bargs = list_push(bargs, list_get(san_flags, si));
+        si = si + 1;
+    }
+    if hermetic { bargs = list_push(bargs, "--hermetic"); }
+    if want_repro { bargs = list_push(bargs, "--verify-reproducible"); }
+    return bargs;
+}

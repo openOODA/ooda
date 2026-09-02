@@ -1,0 +1,239 @@
+// # Hermetic and reproducible ooda build
+//
+// Logline: Compile through one pinned emit-c+gcc path, store the .bin in CAS, and dual-run under two work dirs.
+//
+// Setup: FsReadCap finds oodac via OODA_FS_READDIR. ProcessCap runs unshare, gcc, ln, and the verifier. Cache dir comes from OODA_FS_WRITEDIR.
+//
+// Beats:
+//   1. Detect --hermetic and --verify-reproducible on the build arg list.
+//   2. Key the .bin by AST hash, full compiler hash, and flags; reuse a CAS hit via hardlink.
+//   3. On a miss, hermetic-compile into a private work dir then cas_put_file the .bin.
+
+import "find_compiler.oo";
+import "host_run.oo";
+import "std/os/env.oo";
+import "std/compile/reproducible_build/build_hermetic_sandbox.oo";
+import "std/compile/reproducible_build/artifact_cas_store.oo";
+import "std/compile/reproducible_build/cas_identity.oo";
+import "std/compile/reproducible_build/reproducibility_verifier.oo";
+
+pub fn cli_bargs_has_repro(bargs: List[String]) -> Bool {
+    let mut i: Int = 0;
+    while i < list_len(bargs) {
+        let a: String = list_get(bargs, i);
+        if a == "--hermetic" || a == "--reproducible" || a == "--verify-reproducible" {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn bargs_flag(bargs: List[String], name: String) -> Bool {
+    let mut i: Int = 0;
+    while i < list_len(bargs) {
+        if list_get(bargs, i) == name {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn bargs_file(bargs: List[String]) -> String {
+    if list_len(bargs) < 1 {
+        return "";
+    }
+    return list_get(bargs, 0);
+}
+
+fn bargs_out(bargs: List[String]) -> String {
+    let mut i: Int = 0;
+    while i < list_len(bargs) {
+        if list_get(bargs, i) == "-o" {
+            if i + 1 < list_len(bargs) {
+                return list_get(bargs, i + 1);
+            }
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+pub fn run_build_reproducible(fr: &FsReadCap, proc: &ProcessCap, sys: &SysCap, env: &EnvCap, bargs: List[String]) {
+    let file: String = bargs_file(bargs);
+    if file == "" {
+        println("ooda build: missing file");
+        process_exit(2);
+    }
+    if !path_exists(fr, file) {
+        println("ERR\tbuild\tunreadable file: " + file);
+        process_exit(2);
+    }
+    let _rdir_probe: List[String] = oo_fs_read_dir(fr, ".");
+    let oodac: String = find_oodac(fr, env);
+    if chars_len(oodac) == 0 {
+        println("ERR\tcli\tno oodac via OODA_FS_READDIR");
+        process_exit(1);
+    }
+    refuse_cli(proc, oodac);
+    let src_root: String = find_src_root(env);
+    let out: String = bargs_out(bargs);
+    let hermetic: Bool = bargs_flag(bargs, "--hermetic");
+    let want_repro: Bool = bargs_flag(bargs, "--verify-reproducible");
+    if str_contains(file, "..") || str_contains(file, ";") || str_contains(file, "`") || str_contains(file, "$") || str_contains(file, "'") {
+        println("ERR\tbuild\trejected traversal in file");
+        process_exit(1);
+    }
+    let mut dest: String = file + ".bin";
+    if out != "" {
+        if str_contains(out, "..") || str_contains(out, ";") || str_contains(out, "`") || str_contains(out, "$") || str_contains(out, "'") {
+            println("ERR\tbuild\trejected traversal in out");
+            process_exit(1);
+        }
+        dest = out;
+    }
+    if str_contains(dest, "..") || str_contains(dest, ";") || str_contains(dest, "`") || str_contains(dest, "$") || str_contains(dest, "'") {
+        println("ERR\tbuild\trejected traversal in dest");
+        process_exit(1);
+    }
+    let _sq_dest: String = hermetic_sq(dest);
+    let wdr: Result[String, String] = hermetic_writedir(proc, fr);
+    if wdr.is_err() {
+        println("ERR\thermetic\twritedir");
+        process_exit(1);
+    }
+    let wd: String = match wdr { Ok(s) => s, Err(_) => "" };
+    let casr: String = wd + "/repro-cas";
+    let work: String = wd + "/repro-work";
+    if str_contains(casr, "..") || str_contains(casr, ";") || str_contains(casr, "`") || str_contains(casr, "$") || str_contains(casr, "'") {
+        println("ERR\tbuild\trejected traversal in casr");
+        process_exit(1);
+    }
+    if str_contains(work, "..") || str_contains(work, ";") || str_contains(work, "`") || str_contains(work, "$") || str_contains(work, "'") {
+        println("ERR\tbuild\trejected traversal in work");
+        process_exit(1);
+    }
+    let _sq_casr: String = hermetic_sq(casr);
+    let _sq_work: String = hermetic_sq(work);
+    let _mk: Result[String, String] = hermetic_prepare(proc, casr);
+    let ns: Result[String, String] = hermetic_apply_namespaces(proc);
+    if ns.is_err() {
+        println("ERR\thermetic\tnamespace unavailable");
+        process_exit(1);
+    }
+    let cwb: Result[String, String] = env_get(env, "PWD");
+    if !cwb.is_ok() {
+        println("ERR\thermetic\tPWD not set");
+        process_exit(1);
+    }
+    let mut cwd: String = match cwb { Ok(s) => s, Err(_) => "" };
+    let cn: Int = chars_len(cwd);
+    if cn > 0 {
+        if char_at(cwd, cn - 1) == "\n" {
+            cwd = str_slice(cwd, 0, cn - 1);
+        }
+    }
+    if cwd == "" {
+        println("ERR\thermetic\tPWD empty");
+        process_exit(1);
+    }
+    let asth: Result[String, String] = cas_ast_hash(fr, proc, oodac, file, casr);
+    let ch: Result[String, String] = cas_compiler_hash(fr, proc, oodac, casr);
+    if asth.is_err() {
+        println("ERR\tcas\tast");
+        process_exit(1);
+    }
+    if ch.is_err() {
+        println("ERR\tcas\tcompiler");
+        process_exit(1);
+    }
+    let rt_c: String = src_root + "/runtime/chs_rt.c";
+    let rth: Result[String, String] = cas_runtime_hash(fr, rt_c);
+    let gh: Result[String, String] = cas_tool_hash(fr, proc, "gcc", casr);
+    let ah: Result[String, String] = cas_tool_hash(fr, proc, "as", casr);
+    let lh: Result[String, String] = cas_tool_hash(fr, proc, "ld", casr);
+    if rth.is_err() || gh.is_err() || ah.is_err() || lh.is_err() {
+        println("ERR\tcas\ttoolchain");
+        process_exit(1);
+    }
+    let asts: String = match asth { Ok(s) => s, Err(_) => "" };
+    let chs: String = match ch { Ok(s) => s, Err(_) => "" };
+    let rts: String = match rth { Ok(s) => s, Err(_) => "" };
+    let ghs: String = match gh { Ok(s) => s, Err(_) => "" };
+    let ahs: String = match ah { Ok(s) => s, Err(_) => "" };
+    let lhs: String = match lh { Ok(s) => s, Err(_) => "" };
+    let flags: String = cas_flags_full("c", hermetic, want_repro, ghs, ahs, lhs, rts);
+    let key: String = cas_key(asts, chs, flags);
+    if cas_hit_valid(proc, fr, casr, key) {
+        let lk: Result[String, String] = cas_link(proc, cas_path(casr, key), dest);
+        if lk.is_err() {
+            println("ERR\tcas\tlink");
+            process_exit(1);
+        }
+        println("ooda build: cas hit");
+    } else {
+        let rt: String = src_root + "/runtime";
+        let br: Result[String, String] = repro_build_one(proc, file, work, oodac, rt, dest);
+        if br.is_err() {
+            println("ERR\tbuild\thermetic");
+            process_exit(1);
+        }
+        if !path_exists(fr, dest) {
+            println("ERR\tcas\tno bin");
+            process_exit(1);
+        }
+        let put: Result[String, String] = cas_put_file(proc, fr, casr, key, dest);
+        if put.is_err() {
+            println("ERR\tcas\tput");
+            process_exit(1);
+        }
+    }
+    if hermetic {
+        println("ooda build: hermetic ok");
+    }
+    if want_repro {
+        let dir_a: String = wd + "/repro-cli-a";
+        let dir_b: String = wd + "/repro-cli-b";
+        let rt2: String = src_root + "/runtime";
+        let vr: Result[String, String] = repro_dual_run(proc, fr, file, dir_a, dir_b, oodac, rt2);
+        if vr.is_err() {
+            println("ERR\trepro\tmismatch");
+            process_exit(1);
+        }
+        println("ooda build: verify-reproducible ok");
+    }
+    let ll: Result[String, String] = hermetic_apply_landlock(sys, wd + ":" + cwd + ":/dev:/proc");
+    if ll.is_err() {
+        println("ERR\thermetic\tlandlock");
+        process_exit(1);
+    }
+}
+
+pub fn run_hermetic_landlock(fr: &FsReadCap, proc: &ProcessCap, sys: &SysCap, script: String) {
+    let wdr: Result[String, String] = hermetic_writedir(proc, fr);
+    if wdr.is_err() {
+        println("ERR\thermetic\twritedir");
+        process_exit(1);
+    }
+    let wd: String = match wdr { Ok(s) => s, Err(_) => "" };
+    let cwd_p: String = wd + "/jail-cwd.txt";
+    let _cw: Result[String, String] = sys_exec(proc, "sh", "-c", "pwd > " + hermetic_sq(cwd_p));
+    let cwb: Result[String, String] = read_file(fr, cwd_p);
+    let mut cwd: String = match cwb { Ok(s) => s, Err(_) => "" };
+    let cn: Int = chars_len(cwd);
+    if cn > 0 {
+        if char_at(cwd, cn - 1) == "\n" {
+            cwd = str_slice(cwd, 0, cn - 1);
+        }
+    }
+    let ll: Result[String, String] = hermetic_apply_landlock(sys, wd + ":" + cwd + ":/dev:/proc");
+    if ll.is_err() {
+        println("ERR\thermetic\tlandlock");
+        process_exit(1);
+    }
+    let r: Result[String, String] = sys_exec(proc, "sh", "-c", hermetic_wrap_cmd("exec sh " + hermetic_sq(script)));
+    if r.is_err() {
+        process_exit(1);
+    }
+}

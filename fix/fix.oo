@@ -1,0 +1,180 @@
+// # Drive ooda fix in the product CLI
+//
+// Logline: Check a file, ask a person, then apply one E_CAP, E_TC, E_PARSE, E_IMP, or E_MUST edit.
+// Setup: SysCap runs oodac. EnvCap resolves the compiler. FsCap reads and writes the source. No .py and no .sh file.
+// Beats:
+//   1. Parse path, --yes, and --dry-run.
+//   2. Read check text. Ask unless --yes. Refuse with no TTY.
+//   3. Apply at most eight edits. Host sh -c only starts oodac and the TTY read.
+
+import "text.oo";
+import "apply.oo";
+import "imp.oo";
+import "must.oo";
+import "diag.oo";
+import "build/find_compiler.oo";
+import "build/host_run.oo";
+
+pub fn run_ooda_fix(fs_r: &FsReadCap, fs_w: &FsWriteCap, sys: &ProcessCap, env: &EnvCap, args: List[String]) {
+    let mut path = "";
+    let mut yes = false;
+    let mut dry = false;
+    let mut i = 0;
+    while i < list_len(args) {
+        let a: String = list_get(args, i);
+        if a == "--yes" {
+            yes = true;
+        } else if a == "--dry-run" {
+            dry = true;
+        } else if chars_len(a) > 0 {
+            if str_slice(a, 0, 1) != "-" {
+                if path == "" {
+                    path = a;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    if path == "" {
+        println("ooda fix: missing file");
+        process_exit(2);
+    }
+    if path_bad(path) {
+        println("ERR\tfix\tbad path");
+        process_exit(2);
+    }
+    if !path_exists(fs_r, path) {
+        println("ERR\tfix\tunreadable file: " + path);
+        process_exit(2);
+    }
+    let oodac: String = find_oodac(fs_r, env); refuse_cli(sys, oodac);
+    let mut asked = false;
+    let mut applied = 0;
+    let mut rnd = 0;
+    while rnd < 8 {
+        let log: String = check_text(sys, oodac, path);
+        let mut kind: String = classify(log);
+        if kind == "" {
+            let logn = chars_len(log);
+            let mut has_ok = false;
+            let mut ki = 0;
+            while ki + 2 <= logn {
+                if str_slice(log, ki, ki + 2) == "OK" { has_ok = true; break; }
+                ki = ki + 1;
+            }
+            if has_ok || applied > 0 {
+                if applied == 0 {
+                    println("ERR\tfix\tcheck passed (nothing to fix)");
+                    process_exit(1);
+                }
+                println("OK\tfix\tmulti-pass clean after " + applied.to_string() + " apply step(s)");
+                process_exit(0);
+            }
+            println("ERR\tfix\tno supported diagnostic class (want E_CAP, E_TC, E_PARSE, E_IMP, or E_MUST)");
+            process_exit(1);
+        }
+        let mut what: String = "insert a missing let for an undefined name";
+        if kind == "ecap" {
+            what = "add a missing capability token";
+        }
+        if kind == "eparse" {
+            what = "insert missing closing braces";
+        }
+        if kind == "emust" {
+            what = "handle a discarded Result call";
+        }
+        let ispec: String = infer_import_spec(fs_r, log);
+        if kind == "etc" {
+            if ispec != "" {
+                kind = "eimp";
+                what = "insert a missing import";
+            }
+        }
+        if kind == "eimp" {
+            if ispec != "" {
+                what = "insert a missing import";
+            }
+        }
+        if !dry {
+            if !yes {
+                if !asked {
+                    let msg: String = "ooda fix will change " + path + " (" + what + ").\nApply? [y/N] ";
+                    let cmd: String = "if [ -t 0 ]; then printf %s " + sq(msg) + " >&2; read ans; case \"$ans\" in y|Y|yes|YES) exit 0;; *) exit 1;; esac; else exit 2; fi";
+                    let r: Result[String, String] = sys_exec(sys, "sh", "-c", cmd);
+                    if !r.is_ok() {
+                        let tty_check: Result[String, String] = sys_exec(sys, "sh", "-c", "if [ -t 0 ]; then exit 0; else exit 1; fi");
+                        if tty_check.is_ok() {
+                            println("ERR\tfix\tdenied");
+                            process_exit(1);
+                        }
+                        println("ERR\tfix\tneed a person or --yes (no TTY)");
+                        process_exit(1);
+                    }
+                    asked = true;
+                }
+            }
+        }
+        let cur: Result[String, String] = read_file(fs_r, path);
+        if !cur.is_ok() {
+            println("ERR\tfix\tcannot read " + path);
+            process_exit(1);
+        }
+        let text: String = match cur { Ok(s) => s, Err(m) => m };
+        let mut next: String = text;
+        if kind == "ecap" {
+            let op: String = between(log, "builtin '", "'");
+            let cap: String = between(log, "requires a &", " ");
+            if op == "" || cap == "" {
+                println("ERR\tfix\tcould not infer Cap from check text");
+                process_exit(1);
+            }
+            next = apply_ecap(text, op, cap);
+        } else if kind == "eparse" {
+            next = apply_eparse(text);
+        } else if kind == "eimp" {
+            next = apply_eimp(text, ispec);
+        } else if kind == "emust" {
+            let name: String = between(log, "do not discard ", ")");
+            if name == "" {
+                println("ERR\tfix\tno discarded call name");
+                process_exit(1);
+            }
+            let loc: String = between(log, "Type error at ", ":");
+            let line: Int = fix_parse_int_digits(loc);
+            next = apply_emust(text, name, line);
+        } else {
+            let name: String = between(log, "undefined variable '", "'");
+            if name == "" {
+                println("ERR\tfix\tno undefined-variable E_TC");
+                process_exit(1);
+            }
+            if !is_ident_name(name) {
+                println("ERR\tfix\tbad undefined name");
+                process_exit(1);
+            }
+            let loc: String = between(log, "Type error at ", ":");
+            let line: Int = fix_parse_int_digits(loc);
+            next = apply_etc(text, name, line);
+        }
+        if dry {
+            println(next);
+            process_exit(0);
+        }
+        write_src(fs_r, fs_w, env, path, next);
+        if kind == "ecap" {
+            println("OK\tfix\tapplied E_CAP structural fix to " + path);
+        } else if kind == "eparse" {
+            println("OK\tfix\tapplied E_PARSE brace fix to " + path);
+        } else if kind == "eimp" {
+            println("OK\tfix\tapplied E_IMP import fix to " + path);
+        } else if kind == "emust" {
+            println("OK\tfix\tapplied E_MUST Result handle to " + path);
+        } else {
+            println("OK\tfix\tapplied E_TC undefined-var let to " + path);
+        }
+        applied = applied + 1;
+        rnd = rnd + 1;
+    }
+    println("ERR\tfix\tmulti-pass hit max rounds after " + applied.to_string() + " steps");
+    process_exit(1);
+}
