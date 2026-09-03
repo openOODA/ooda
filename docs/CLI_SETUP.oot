@@ -2,36 +2,82 @@
 
 File: cli/docs/CLI_SETUP.oot
 
-The `ooda` binary is the unified meta-router for the openOODA tactical toolchain. It has 4 in-process command groups and 3 external package spawns.
+The `ooda` binary is the unified meta-router for the openOODA tactical toolchain. It is one program with one stable name and one argv surface. Editors, agents, CI scripts, and humans all call the same binary. This file documents what you need to make `ooda` run on a host.
 
-## In-process subcommands
+## What ooda is
 
-| Subcommand | File | Purpose |
+`ooda` is the cli/ repo's single deliverable. The source tree has 4 in-process command groups (build, fix, fmt, token) and 3 external-package spawns (opm, lsp, mcp). The compiled binary is small and has no shared library state at runtime beyond the spawned subprocesses. The dispatch table lives in `cli/main.oo` and totals under 100 lines.
+
+## How ooda is installed
+
+There are two install paths. Both are acceptable; pick the one that matches the deployment model.
+
+### Install path A — pack install (the standard)
+
+The cli/ repo ships an `ooda install` command. It is the post-build step that takes a pre-built openOODA release pack and lays it out under an XDG-style prefix.
+
+```sh
+# After building a pack
+ooda install --from ./build/pack --to $HOME
+source $HOME/.config/ooda/env
+```
+
+The install command requires `OODA_FS_WRITEDIR` to be set. It refuses paths outside that writedir. It also refuses `--from` paths that fail the pack validation check (need `bin/ooda`, `ooda/oodac_bin`, `std`, `runtime`, `fixtures/hello.oo`).
+
+### Install path B — packaging layer (the canonical)
+
+The cross-repo packaging layer has its own `install.sh` that pulls cli/, oodac, std, runtime, and fixtures, then calls the same `ooda install` command internally. This is the path the website CI uses.
+
+In both paths the post-condition is identical: the host has `$PREFIX/.local/bin/ooda` on `$PATH` and a `$PREFIX/.config/ooda/env` file that exports the 5 OODA_* vars. Editors and shells should `source` that env file.
+
+## Cap requirements
+
+The `ooda` binary is granted 8 caps by its host at startup: `BindCap`, `FsReadCap`, `ProcessCap`, `SysCap`, `EnvCap`, `TimeCap`, `FsWriteCap`, `AllocCap`. Each subcommand requests only the caps it needs; the runtime enforces a least-privilege gate at the call site.
+
+| Cap        | Granted | Used by |
+|------------|---------|---------|
+| BindCap    | yes     | startup; one-shot |
+| FsReadCap  | yes     | every subcommand that reads source, configs, or tree listings |
+| ProcessCap | yes     | build, run, test, bench, install, fix, token (any command that invokes oodac or chmod) |
+| SysCap     | yes     | main entry only; reserved for future low-level syscalls |
+| EnvCap     | yes     | every subcommand that resolves the compiler or reads OODA_* |
+| TimeCap    | yes     | bench, test (for unique per-invocation artifact names), token |
+| FsWriteCap | yes     | build, run, install, fix, gen, init, fmt, token, digest |
+| AllocCap   | yes     | fmt (for builder alloc), reserved for others |
+
+Commands that do not need a cap simply do not take it. The current main signature in `cli/main.oo` takes all 8 because the compile-time type system does not yet let you split the cap list per branch.
+
+## Environment at runtime
+
+The 5 vars ooda reads at startup are the prefix vars set by the install step: `OODA_HOME`, `OODA_SRC_ROOT`, `OODA_STD`, `OODA_CONFIG`, `OODA_CACHE`. Beyond those, the runtime reads:
+
+- `OODACODEX` — optional override for the spawned-binary search dir.
+- `OODA_COMPILER` — explicit compiler path (overrides discovery).
+- `OODA_FS_WRITEDIR` — required by `install`; gates the install writedir.
+- `OODA_FS_READDIR` — readonly source dir for the reproducible-build path.
+- `OODA_HOME`, `OODA_SRC_ROOT` — required by `find_oodac` when the compiler is not on `$PATH`.
+- `OODA_CHECKOUT` — fallback for `--from` in `install` when the arg is absent.
+- `OODA_VERSION` — written into the install receipt.
+
+See `docs/ENV.oot` for the full env-var table.
+
+## The 4 in-process subdirs
+
+The cli/ tree is 4 subdirs. Each subdir groups one family of commands. The `ooda` binary is the only host for the in-process commands; nothing else in the polyrepo runs them.
+
+| Subdir | Subcommands | Purpose |
 |---|---|---|
-| `ooda build` | `cli/build/host_build.oo::run_oodac_build` | Compile a .oo file with oodac |
-| `ooda run`   | `cli/build/host_build.oo::run_oodac_run`   | Compile and run a .oo file |
-| `ooda gen`   | `cli/build/gen.oo::run_ooda_gen`           | Scaffold new .oo files |
-| `ooda test`  | `cli/build/test.oo::run_ooda_test`         | Compile and run a single .oo test |
-| `ooda install` | `cli/build/install.oo::run_ooda_install_cmd` | Install a pre-built pack |
-| `ooda bench` | `cli/build/bench.oo::run_ooda_bench`       | Time oodac check/run |
-| `ooda init`  | `cli/build/init.oo::cli_init_project`      | Bootstrap a project layout |
-| `ooda context` | `cli/build/context.oo::run_ooda_context`  | List .oo files + emit AI codex |
-| `ooda health`  | `cli/build/health.oo::run_ooda_health`    | Print ooda health: ok |
-| `ooda fix`   | `cli/fix/fix.oo::run_ooda_fix`             | Check, ask, apply E_CAP/E_TC/E_PARSE/E_IMP/E_MUST edits |
-| `ooda digest` | `cli/fix/digest.oo::run_ooda_digest`      | SHA-256 of a file |
-| `ooda fmt`   | `cli/fmt/fmt.oo::run_ooda_fmt`             | Format .oo files in place |
-| `ooda token` | `cli/token/cmd_token.oo::run_ooda_token`   | 12 token sub-subcommands (status, report, audit, query, ask, schema, diff, tail, fix, snapshot, enforce, extra) |
+| build/ | build, run, gen, test, install, bench, init, context, health | toolchain driver + project lifecycle |
+| fix/   | fix, digest  | text-level edit + sha256 |
+| fmt/   | fmt          | idempotent in-place formatter |
+| token/ | token (12 sub-subcommands) | capability-token accounting |
 
-## External packages (spawned)
+## The 3 external packages (spawned)
 
 | Subcommand | Binary | Purpose |
 |---|---|---|
-| `ooda opm <sub>` | `opm` (from /opm/ repo) | Package manager (add, audit, ingest, launch, etc.) |
-| `ooda lsp`        | `lsp` (from /lsp/ repo) | LSP server over stdio JSON-RPC |
-| `ooda mcp`        | `mcp` (from /mcp/ repo) | MCP server over stdio JSON-RPC |
+| `ooda opm <sub>` | `opm` | package manager (add, audit, ingest, launch) |
+| `ooda lsp`       | `lsp` | LSP server over stdio JSON-RPC |
+| `ooda mcp`       | `mcp` | MCP server over stdio JSON-RPC |
 
-The `ooda` binary does NOT link these packages. It spawns them as subprocesses. The spawn lookup order is:
-1. `$OODACODEX/bin/<name>` (the opm-managed install dir)
-2. `$PATH` (system install)
-
-Stdio is inherited. Editor stdio flows through to `lsp` and `mcp` transparently.
+The spawn lookup order is `$OODACODEX/bin/<name>` first, then `$PATH`. Stdio is inherited. See `docs/dispatch.oot` for the full lifecycle.

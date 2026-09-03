@@ -2,20 +2,7 @@
 
 File: cli/docs/dispatch.oot
 
-The ooda CLI is a 30-line argv router. The full dispatch table fits in cli/main.oo and looks like:
-
-```oo
-match sub {
-    "build"   => run_oodac_build(...)
-    "run"     => run_oodac_run(...)
-    "gen"     => run_ooda_gen(...)
-    ...
-    "opm"     => spawn("opm", rest)
-    "lsp"     => spawn("lsp", rest)
-    "mcp"     => spawn("mcp", rest)
-    _         => print_help(); Err("unknown: " + sub)
-}
-```
+The ooda CLI is a 30-line argv router in `cli/main.oo`. The full dispatch table is a cascade of `if sub == "<name>"` branches followed by the 3 spawn entries. There is no dynamic plugin loader; the dispatch is hard-coded and readable.
 
 ## The mental model
 
@@ -35,10 +22,76 @@ user types:  ooda opm add foo
         ooda exits with the same code
 ```
 
-## Why is this the right pattern?
+The same pattern applies to every subcommand, in-process or spawned. The router is the only place that decides which handler runs. Every handler trusts that the router already validated the subcommand name.
+
+## The dispatch shape
+
+```oo
+pub fn main(...args: List[String]) -> Result<Int, String> {
+    if list_len(args) < 1 { print_help(); return Err("missing subcommand"); }
+    let sub: String = list_get(args, 0);
+    let rest: List[String] = list_slice(args, 1, list_len(args));
+
+    // build cluster — most return void; we wrap to Ok(0)
+    if sub == "build"   { run_oodac_build(...);  return Ok(0); }
+    if sub == "run"     { run_oodac_run(...);    return Ok(0); }
+    if sub == "gen"     { run_ooda_gen(...);     return Ok(0); }
+    ...
+    if sub == "fmt"     { return Ok(run_ooda_fmt(...)); }
+
+    // token cluster — 12 sub-subcommands
+    if sub == "token"   { run_ooda_token(...);   return Ok(0); }
+
+    // external packages — spawn, do not link
+    if sub == "opm"     { return spawn("opm", rest); }
+    if sub == "lsp"     { return spawn("lsp", rest); }
+    if sub == "mcp"     { return spawn("mcp", rest); }
+
+    // unknown
+    print_help();
+    return Err("ooda: unknown subcommand: " + sub);
+}
+```
+
+The cascade is `if`-not-`match` because some branches (init) want to inspect `rest[0]` before falling through. A pure `match` would force every branch to extract the same args, which clutters the read.
+
+## The lifecycle: parse, validate, execute, report
+
+Every ooda invocation passes through the same 4 stages, regardless of subcommand.
+
+### 1. Parse
+
+`main.oo` reads `argv[0]` as the subcommand and slices `argv[1..]` as the per-command tail. The slice is the boundary between the router and the handler. Handlers never see `argv[0]`.
+
+### 2. Validate
+
+Each handler validates its own argv. The validation includes: path traversal checks, file existence checks under `FsReadCap`, flag set checks, and cap-aware checks (e.g. the install handler refuses any `--to` outside `OODA_FS_WRITEDIR`). Failures print `ERR\t<cluster>\t<msg>` and `process_exit(2)`.
+
+### 3. Execute
+
+The handler does its work. For in-process commands, this is plain in-memory ooda code. For spawned commands, `spawn()` in `main.oo` invokes `sys_exec_wait` with the resolved binary path. Stdio is inherited from the parent process.
+
+### 4. Report
+
+The handler returns. In-process handlers return `Result[Int, String]` or `void`; `main.oo` wraps a `void` return into `Ok(0)`. Spawned handlers return the subprocess's exit code via `Result`. The process exits with that code; the host shell or editor sees it directly.
+
+## The cmd_* naming convention
+
+Inside each subdir, the public entry point follows `run_ooda_<verb>` or `cli_<verb>_<noun>`. The prefix is the file's domain.
+
+| Prefix | Files | Examples |
+|--------|-------|----------|
+| `run_ooda_<verb>` | every per-command file | `run_oodac_build`, `run_ooda_fix`, `run_ooda_token` |
+| `cli_<verb>_<noun>` | init, args | `cli_init_project`, `cli_run_args` |
+| `cmd_<noun>` | token sub-subcommand files | `cmd_token_status`, `cmd_token_report` |
+| `find_` / `refuse_` / `require_` | helper entry points | `find_oodac`, `refuse_cli`, `require_writedir` |
+
+The `cmd_*` pattern in `token/` is the closest the cli/ tree comes to a generic dispatcher: `cmd_token.oo` reads `args[1]`, picks one of 12 names, and calls the matching `cmd_*.oo` function. The names are stable; the dispatch is a string compare.
+
+## Why subprocess for opm, lsp, mcp?
 
 | Question | Answer |
-|---|---|
+|----------|--------|
 | Why subprocess? | Version decoupling. opm, lsp, mcp each have their own VERSION. No lockstep. |
 | Why stdio-inherited? | Editors connect their stdio to ooda; lsp/mcp need that stdio. Subprocess stdio is inherited by default. |
 | Why is ooda the meta-router? | One command, many packages. No need to remember `opm`, `lsp`, `mcp`, `ooda build` separately. |
@@ -46,12 +99,12 @@ user types:  ooda opm add foo
 
 ## What goes into cli/ (in-process)
 
-- Build, deliver, and introspect commands: build, run, gen, test, install, bench, init, context, health
+- Build, deliver, introspect: build, run, gen, test, install, bench, init, context, health
 - Text operations: fix, digest
 - Formatter: fmt
 - Token subsystem: token (12 sub-subcommands)
 
-These all run in-process because they don't have their own packages. The ooda binary is the only home for them.
+These all run in-process because they do not have their own packages. The ooda binary is the only home for them.
 
 ## What gets spawned (external packages)
 
@@ -59,4 +112,16 @@ These all run in-process because they don't have their own packages. The ooda bi
 - `lsp` (from /lsp/ repo)
 - `mcp` (from /mcp/ repo)
 
-These all run as subprocesses. ooda doesn't link them.
+These all run as subprocesses. ooda does not link them.
+
+## Failure paths
+
+| Failure | Source | Exit code | Output |
+|---------|--------|-----------|--------|
+| missing subcommand | `main.oo` | 2 | help text + `Err("ooda: missing subcommand")` |
+| unknown subcommand | `main.oo` | 2 | help text + `Err("ooda: unknown subcommand: <name>")` |
+| missing file arg | per-command | 2 | `ERR\t<cluster>\t<msg>` |
+| unreadable file | per-command | 2 | `ERR\t<cluster>\tunreadable file: <path>` |
+| traversal / unsafe path | per-command | 1 or 2 | `ERR\t<cluster>\trejected traversal: <path>` |
+| cap denied | runtime | 1 | `E_CAP: ...` |
+| subprocess failure | spawn | 1 | whatever the subprocess printed |

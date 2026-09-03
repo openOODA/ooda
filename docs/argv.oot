@@ -1,29 +1,128 @@
-# Ooda CLI — argv Dispatch
+# Ooda CLI — argv Parsing
 
 File: cli/docs/argv.oot
 
-The `ooda` binary parses argv in `cli/main.oo` and dispatches to one of 13+ subcommands. The dispatch is a single match expression:
+The `ooda` binary parses argv in `cli/main.oo` and dispatches to one of 16 subcommands. The parsing is intentionally minimal: `main.oo` reads `argv[0]` as the subcommand, slices `argv[1..]` as the per-command tail, and hands that tail to the per-command parser.
 
-| argv[0]      | Calls into                                  | Result |
-|--------------|---------------------------------------------|--------|
-| `build`      | `cli/build/host_build.oo::run_oodac_build`  | Ok(0)  |
-| `run`        | `cli/build/host_build.oo::run_oodac_run`    | Ok(0)  |
-| `gen`        | `cli/build/gen.oo::run_ooda_gen`            | Ok(0)  |
-| `test`       | `cli/build/test.oo::run_ooda_test`          | Ok(0)  |
-| `install`    | `cli/build/install.oo::run_ooda_install_cmd`| Ok(0)  |
-| `bench`      | `cli/build/bench.oo::run_ooda_bench`        | Ok(0)  |
-| `init`       | `cli/build/init.oo::cli_init_project`       | Result |
-| `context`    | `cli/build/context.oo::run_ooda_context`    | Ok(0)  |
-| `health`     | `cli/build/health.oo::run_ooda_health`      | Ok(0)  |
-| `fix`        | `cli/fix/fix.oo::run_ooda_fix`              | Ok(0)  |
-| `digest`     | `cli/fix/digest.oo::run_ooda_digest`        | Ok(0)  |
-| `fmt`        | `cli/fmt/fmt.oo::run_ooda_fmt`              | Ok(Int)|
-| `token`      | `cli/token/cmd_token.oo::run_ooda_token`    | Ok(0)  |
-| `opm`        | spawn `opm` (subprocess)                    | Result |
-| `lsp`        | spawn `lsp` (subprocess)                    | Result |
-| `mcp`        | spawn `mcp` (subprocess)                    | Result |
-| (other)      | print help                                  | Err    |
+## Two-tier parse
 
-## Why spawn (not link)?
+The parse happens in two tiers. Tier 1 is in `main.oo` and decides the subcommand. Tier 2 is in the per-command file (e.g. `build/host_build.oo`, `fix/fix.oo`) and decides the subcommand's own flags.
 
-Spawning keeps the 3 packages (opm, lsp, mcp) version-independent. The `ooda` binary does NOT need to be re-released when one of them updates. Each package has its own VERSION and its own release cadence.
+| Tier | Where | Parses | Sees |
+|------|-------|--------|------|
+| 1 | `cli/main.oo` | `argv[0]` only | subcommand name; errors on missing or unknown |
+| 2 | per-command | the rest of argv | the per-command flag set |
+
+There is no global flag layer. `ooda --help` is the same as `ooda` with no args. `ooda --version` does not exist; use `ooda health` instead. This is a deliberate choice: a global flag layer would have to be threaded through every per-command parser, and the 8 caps already cover what flags would do.
+
+## Per-command flag set
+
+Each subcommand owns its own argv parse loop. The loop walks `args`, checks `str_slice(a, 0, 1) == "-"`, and dispatches by exact match or `=`-form prefix. Below is the full per-command flag table, derived from the source.
+
+### build
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `--target {native,llvm,aarch64,wasm,...}` | str | set the backend |
+| `-o <path>` | path | output binary path |
+| `-O0`-`-O3`, `-Oz` | str | opt level (passed to oodac) |
+| `-Opgo` | str | PGO mode |
+| `--lto` | bool | enable LTO |
+| `--release` | bool | release build |
+| `--pgo-generate` / `-fprofile-generate` | bool | emit PGO profile |
+| `--pgo-use=<p>` / `-fprofile-use=<p>` | path | reuse PGO profile |
+| `-fsanitize=<a>` | list | add sanitizer |
+| `--sanitize=<a>` | list | add sanitizer (with prefix) |
+| `--fuzz` | bool | fuzzer sanitizer |
+| `--hermetic` | bool | hermetic compile path |
+| `--verify-reproducible` | bool | dual-run in 2 work dirs |
+
+### run
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `--engine {native,bc,...}` | str | engine selector (residual `--json-errors` is refused) |
+
+### test
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `--engine=bc` / `-bc` | str | use the BC engine |
+| `--json` / `-json` | bool | emit JSON instead of human output |
+
+### bench
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `--run` | bool | also time `oodac run` after `oodac check` |
+
+### init
+
+Takes one positional arg (project name). Defaults to `myproject` when missing. No flags.
+
+### context
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `--llm` | bool | stream the codex file instead of listing .oo files |
+| `--json` | bool | emit the listing as JSON |
+
+### health
+
+No flags. Always prints `ooda health: ok` and probes `./oodac/oodac`.
+
+### fix
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `--yes` | bool | skip the TTY confirmation prompt |
+| `--dry-run` | bool | print proposed edits without writing |
+
+### digest
+
+Takes one positional arg (file path). No flags.
+
+### fmt
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `--check` | bool | report but do not rewrite |
+| `--all` | bool | walk the dir; default is one file |
+
+### token (and 12 sub-subcommands)
+
+The `ooda token` subcommand takes one of 12 sub-subcommand names plus a global format flag.
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `--human` / `-h` | bool | switch output from JSON (default) to human |
+| `--format=human` | str | same as `--human` |
+| `--format=json` | str | explicit JSON (the default) |
+
+The 12 sub-subcommands are: `status`, `report`, `audit`, `query`, `ask`, `schema`, `diff`, `tail`, `fix`, `snapshot`, `enforce`, `extra`. Each is parsed inside `cli/token/cmd_token.oo` and dispatched to its own `cmd_*.oo` file.
+
+### install
+
+| Flag | Type | Effect |
+|------|------|--------|
+| `--from <path>` | path | source pack dir; falls back to `OODA_CHECKOUT` or `.` |
+| `--to <path>` | path | install root; falls back to `OODA_FS_WRITEDIR` |
+
+Both must validate as safe paths (no traversal, no `..`, no `;`). `--to` must be under `OODA_FS_WRITEDIR`.
+
+### opm, lsp, mcp (spawned)
+
+The whole rest of argv is passed verbatim to the spawned binary. No flag layer on the ooda side. The spawned binary does its own parse.
+
+## How to add a new flag
+
+The convention is local. Pick the file that owns the subcommand (e.g. `build/host_build.oo` for build flags) and add a branch to its argv loop. Use `=`-form for values that look like paths, plain `-flag` for booleans, and reject unknown flags loudly with `process_exit(2)`. Never silently ignore a flag.
+
+## How to add a new subcommand
+
+1. Add the file in the right subdir (e.g. `build/whatever.oo`).
+2. Add a `pub fn run_ooda_whatever(...)` with the right cap set.
+3. Add a new branch in `cli/main.oo` that calls it.
+4. Add the new subcommand to the `print_help()` string in `main.oo`.
+5. Add the new entry to the in-process subcommand table in `docs/COMMANDS.oot`.
+6. Update the subdir's `ANCHOR.oo` to import the new file.
