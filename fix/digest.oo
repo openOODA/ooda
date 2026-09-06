@@ -1,31 +1,100 @@
-// # SHA-256 digest of a file
+// # Cryptographic digest of a file
 //
-// Logline: Print the sha256 of a given file via crypto_sha256_internal.
+// Logline: Print the digest of a given file using sha256, blake3, sha3, or sha512.
 //
 // Setup: FsReadCap reads the file. No shell, no fallback.
 //
 // Beats:
-//   1. Require a file path after the command; print usage when missing.
-//   2. Hash file bytes with crypto_sha256_internal when readable.
-//   3. Fail closed if the file is missing or the hash is not 64 hex digits.
+//   1. Parse --algo flag supporting sha256, blake3, sha3, and sha512.
+//   2. Extract positional file path and fail closed if missing or unreadable.
+//   3. Compute hash and verify expected digest hex length.
+
+import "std/sec/hash/blake3.oo";
+
+pub fn digest_argv_algo(args: List[String]) -> String {
+    let mut algo: String = "";
+    let mut i: Int = 0;
+    let n: Int = list_len(args);
+    while i < n {
+        let a: String = list_get(args, i);
+        if a == "--algo" {
+            if i + 1 < n {
+                algo = list_get(args, i + 1);
+                i = i + 1;
+            } else {
+                algo = "none";
+            }
+        } else if chars_len(a) >= 7 && str_slice(a, 0, 7) == "--algo=" {
+            algo = str_slice(a, 7, chars_len(a));
+        }
+        i = i + 1;
+    }
+    if algo == "" {
+        return "sha256";
+    }
+    let low: String = (algo).to_lowercase();
+    if low == "blake3" || low == "sha3" || low == "sha512" || low == "sha256" {
+        return low;
+    }
+    return "INVALID:" + algo;
+}
 
 pub fn digest_argv_file(args: List[String]) -> String {
     let mut path: String = "";
     let mut i: Int = 0;
-    while i < list_len(args) {
+    let n: Int = list_len(args);
+    while i < n {
         let a: String = list_get(args, i);
-        if str_slice(a, 0, 1) != "-" {
-            if path == "" { path = a; }
+        if a == "--algo" {
+            i = i + 2;
+        } else if chars_len(a) >= 7 && str_slice(a, 0, 7) == "--algo=" {
+            i = i + 1;
+        } else if chars_len(a) > 0 && str_slice(a, 0, 1) == "-" {
+            i = i + 1;
+        } else {
+            if path == "" {
+                path = a;
+            }
+            i = i + 1;
         }
-        i = i + 1;
     }
     return path;
+}
+
+pub fn compute_digest(algo: String, text: String) -> Result[String, String] {
+    if algo == "sha256" {
+        let h: String = crypto_sha256_internal(text);
+        if chars_len(h) == 64 { return Ok(h); }
+        return Err("sha256 failed");
+    }
+    if algo == "blake3" {
+        let h: String = blake3(text);
+        if chars_len(h) == 64 { return Ok(h); }
+        return Err("blake3 failed");
+    }
+    if algo == "sha3" {
+        let h: String = crypto_sha3_256_internal(text);
+        if chars_len(h) == 64 { return Ok(h); }
+        return Err("sha3 failed");
+    }
+    if algo == "sha512" {
+        let h: String = crypto_sha512_internal(text);
+        if chars_len(h) == 128 { return Ok(h); }
+        return Err("sha512 failed");
+    }
+    return Err("unsupported algorithm: " + algo);
 }
 
 pub fn run_ooda_digest(fr: &FsReadCap, args: List[String]) {
     let path: String = digest_argv_file(args);
     if path == "" {
-        println("usage: ooda digest <file>");
+        println("usage: ooda digest <file> [--algo blake3|sha3|sha512|sha256]");
+        process_exit(2);
+    }
+    let algo: String = digest_argv_algo(args);
+    if chars_len(algo) >= 8 && str_slice(algo, 0, 8) == "INVALID:" {
+        let bad: String = str_slice(algo, 8, chars_len(algo));
+        println("ERR\tdigest\tunsupported algorithm: " + bad);
         process_exit(2);
     }
     if !path_exists(fr, path) {
@@ -38,11 +107,11 @@ pub fn run_ooda_digest(fr: &FsReadCap, args: List[String]) {
         process_exit(2);
     }
     let text: String = match tr { Ok(s) => s, Err(m) => m };
-    let h: String = crypto_sha256_internal(text);
-    if chars_len(h) == 64 {
-        println(h);
-        return;
+    let res: Result[String, String] = compute_digest(algo, text);
+    if !res.is_ok() {
+        println("ERR\tdigest\thash failed for: " + path);
+        process_exit(1);
     }
-    println("ERR\tdigest\thash failed for: " + path);
-    process_exit(1);
+    let h: String = match res { Ok(s) => s, Err(_) => "" };
+    println(h);
 }
