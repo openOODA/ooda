@@ -1,13 +1,13 @@
 // # External Tool Spawner
 //
-// Logline: Resolve binary path under OODACODEX/bin and execute external CLI tools.
+// Logline: Resolve binary path under OODACODEX/bin or ~/.openooda/bin and execute it.
 //
-// Setup: Requires OODACODEX environment variable. ProcessCap execs tool.
+// Setup: Requires OODACODEX or OODA_CODEX. A .oot file uses its parent dir. ProcessCap execs tool.
 //
 // Beats:
-//   1. Validate codex path and tool name.
-//   2. Form OODACODEX/bin/<name> binary path.
-//   3. Spawn tool subprocess with inherited capabilities.
+//   1. Validate codex path and tool name. Reject slash and traversal.
+//   2. Prefer $codex/bin/<name>. Also try ooda-lsp/ooda-mcp and ~/.openooda/bin.
+//   3. Spawn tool subprocess with inherited capabilities. Never PATH.
 
 import "std/fs/file/path.oo";
 import "std/fs/process/env.oo";
@@ -22,22 +22,54 @@ pub fn spawn_codex_bin(codex: String, name: String) -> Result[String, String] {
     return Ok(codex + "/bin/" + name);
 }
 
+fn spawn_root(codex: String) -> String {
+    let base: String = path_basename(codex);
+    if str_index_of(base, ".") >= 0 { return path_parent(codex); }
+    return codex;
+}
+
+fn spawn_alias(name: String) -> String {
+    if name == "lsp" { return "ooda-lsp"; }
+    if name == "mcp" { return "ooda-mcp"; }
+    return "";
+}
+
+fn spawn_exist(fs: &FsReadCap, root: String, name: String) -> String {
+    if root == "" || name == "" { return ""; }
+    let p: String = root + "/bin/" + name;
+    if path_exists(fs, p) { return p; }
+    return "";
+}
+
+fn spawn_resolve(fs: &FsReadCap, env: &EnvCap, name: String, codex: String) -> Result[String, String] {
+    let br: Result[String, String] = spawn_codex_bin(codex, name);
+    if br.is_err() { return br; }
+    let formed: String = match br { Ok(p) => p, Err(_) => "" };
+    if path_exists(fs, formed) { return Ok(formed); }
+    let root: String = spawn_root(codex);
+    let mut path: String = spawn_exist(fs, root, name);
+    let alias: String = spawn_alias(name);
+    if path == "" { path = spawn_exist(fs, root, alias); }
+    let hr: Result[String, String] = env_get(env, "HOME");
+    let home: String = match hr { Ok(s) => s, Err(_) => "" };
+    if path == "" { path = spawn_exist(fs, home + "/.openooda", name); }
+    if path == "" { path = spawn_exist(fs, home + "/.openooda", alias); }
+    if path == "" { return Err("missing binary: " + formed); }
+    return Ok(path);
+}
+
 pub fn spawn(fs: &FsReadCap, env: &EnvCap, sys: &ProcessCap, name: String, args: List[String]) -> Result[Int, String] {
     let cr0: Result[String, String] = env_get(env, "OODA_CODEX");
     let codex0: String = match cr0 { Ok(s) => s, Err(_) => "" };
     let cr: Result[String, String] = env_get(env, "OODACODEX");
     let codex: String = if chars_len(codex0) > 0 { codex0 } else { match cr { Ok(s) => s, Err(_) => "" } };
-    let br: Result[String, String] = spawn_codex_bin(codex, name);
+    let br: Result[String, String] = spawn_resolve(fs, env, name, codex);
     if br.is_err() {
         let msg: String = match br { Ok(_) => "", Err(e) => e };
         println("ERR\tspawn\t" + msg);
         return Err(msg);
     }
     let path: String = match br { Ok(p) => p, Err(_) => "" };
-    if !path_exists(fs, path) {
-        println("ERR\tspawn\tmissing binary: " + path);
-        return Err("missing binary: " + path);
-    }
     let mut argv: List[String] = list_new();
     let n: Int = list_len(args);
     let mut i: Int = 0;
