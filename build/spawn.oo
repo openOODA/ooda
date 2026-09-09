@@ -7,7 +7,10 @@
 // Beats:
 //   1. Validate codex path and tool name. Reject slash and traversal.
 //   2. Prefer $codex/bin/<name>. Also try ooda-lsp/ooda-mcp and ~/.openooda/bin.
-//   3. Spawn tool subprocess with inherited capabilities. Never PATH.
+//   3. Last resort: dirname(OODA_COMPILER|OODAC_BIN)/<alias> without a
+//      jail-gated exists check (the jail may not cover the toolchain dir;
+//      exec fails closed when absent).
+//   4. Spawn tool subprocess with inherited capabilities. Never PATH.
 
 import "std/fs/file/path.oo";
 import "std/fs/process/env.oo";
@@ -41,6 +44,16 @@ fn spawn_exist(fs: &FsReadCap, root: String, name: String) -> String {
     return "";
 }
 
+pub fn spawn_compiler_cand(compiler: String, name: String) -> String {
+    if name == "" || str_contains(name, "/") || str_contains(name, "..") { return ""; }
+    if compiler == "" { return ""; }
+    let cdir: String = path_parent(compiler);
+    if chars_len(cdir) == 0 { return ""; }
+    let mut want: String = spawn_alias(name);
+    if want == "" { want = name; }
+    return cdir + "/" + want;
+}
+
 fn spawn_resolve(fs: &FsReadCap, env: &EnvCap, name: String, codex: String) -> Result[String, String] {
     let br: Result[String, String] = spawn_codex_bin(codex, name);
     if br.is_err() { return br; }
@@ -54,7 +67,17 @@ fn spawn_resolve(fs: &FsReadCap, env: &EnvCap, name: String, codex: String) -> R
     let home: String = match hr { Ok(s) => s, Err(_) => "" };
     if path == "" { path = spawn_exist(fs, home + "/.openooda", name); }
     if path == "" { path = spawn_exist(fs, home + "/.openooda", alias); }
-    if path == "" { return Err("missing binary: " + formed); }
+    if path == "" {
+        let cr2: Result[String, String] = env_get(env, "OODA_COMPILER");
+        let mut comp: String = match cr2 { Ok(s) => s, Err(_) => "" };
+        if comp == "" {
+            let cr3: Result[String, String] = env_get(env, "OODAC_BIN");
+            comp = match cr3 { Ok(s) => s, Err(_) => "" };
+        }
+        let cand: String = spawn_compiler_cand(comp, name);
+        if chars_len(cand) > 0 { return Ok(cand); }
+        return Err("missing binary: " + formed);
+    }
     return Ok(path);
 }
 
@@ -79,8 +102,9 @@ pub fn spawn(fs: &FsReadCap, env: &EnvCap, sys: &ProcessCap, name: String, args:
     }
     let r: Result[Int, String] = sys_exec_wait(sys, path, argv);
     if r.is_err() {
-        println("ERR\tspawn\texec failed: " + path);
-        return Err("exec failed: " + path);
+        let why: String = match r { Ok(_) => "", Err(e) => e };
+        println("ERR\tspawn\t" + path + ": " + why);
+        return Err(path + ": " + why);
     }
     let code: Int = match r { Ok(c) => c, Err(_) => 1 };
     return Ok(code);
