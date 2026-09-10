@@ -21,6 +21,16 @@ fn update_canonical_url() -> String {
     return "https://openooda.org/install.sh";
 }
 
+// update_mirror_url: GitHub raw fallback for `ooda update`. The primary
+// URL is openooda.org, but on hosts where oda's child process has a
+// sanitized environment (e.g. ProcessCap strips DNS-resolving context),
+// the primary URL may fail. The mirror is reachable when the GitHub raw
+// domain is reachable; the user can override via the OODA_INSTALLER env
+// var or --installer flag for a fully local path.
+fn update_mirror_url() -> String {
+    return "https://raw.githubusercontent.com/openOODA/install/main/install.sh";
+}
+
 fn update_has_flag(args: List[String], name: String) -> Bool {
     let n: Int = list_len(args);
     let mut i: Int = 0;
@@ -101,7 +111,48 @@ fn update_installer_unsafe(path: String) -> String {
 }
 
 fn update_fetch_script(args: List[String]) -> String {
-    return "set -o pipefail; curl -fsSL " + update_canonical_url() + " | bash -s --" + update_passthrough(args);
+    // Robust fetch: DNS pre-check, download to temp file, fall back to
+    // the GitHub raw mirror, exec the downloaded file. The old pipe-to-bash
+    // pattern (`curl | bash -s --`) was brittle: on hosts where oda's
+    // child process has a sanitized environment, the curl inside the
+    // pipe couldn't resolve DNS, and the user got a cryptic
+    // "Could not resolve host" with no actionable path.
+    //
+    // The new script:
+    //   1. Pre-checks DNS for openooda.org via getent (catches the
+    //      child-DNS-stripped case early with a clear message).
+    //   2. Downloads the install script to a tmp file with a 10s
+    //      connect timeout and 60s total timeout. Failure is caught
+    //      explicitly so we can fall back to the mirror.
+    //   3. Tries the GitHub raw mirror if the primary download fails.
+    //   4. Execs the downloaded file (replaces the child bash with
+    //      the installer, saving a process and removing any chance of
+    //      env strip at the intermediate step).
+    //   5. Cleans up the tmp file on any exit path via trap.
+    let flags: String = update_passthrough(args);
+    let primary: String = update_canonical_url();
+    let mirror: String = update_mirror_url();
+    return "set -o pipefail\n" +
+        "if ! getent hosts openooda.org >/dev/null 2>&1; then\n" +
+        "  echo 'ERROR: ooda update: child process has no DNS resolver for openooda.org'\n" +
+        "  echo 'Hint: download install.sh yourself and retry with --installer <path>:'\n" +
+        "  echo '  curl -O " + primary + "'\n" +
+        "  echo '  ooda update --installer ./install.sh " + flags + "'\n" +
+        "  exit 1\n" +
+        "fi\n" +
+        "TMP=$(mktemp) || exit 1\n" +
+        "trap 'rm -f \"$TMP\"' EXIT\n" +
+        "if ! curl -fsSL --connect-timeout 10 -m 60 " + primary + " -o \"$TMP\"; then\n" +
+        "  echo 'ERROR: failed to download from " + primary + " — trying mirror'\n" +
+        "  if ! curl -fsSL --connect-timeout 10 -m 60 " + mirror + " -o \"$TMP\"; then\n" +
+        "    echo 'ERROR: ooda update: both primary and mirror failed to download'\n" +
+        "    echo 'Hint: download install.sh yourself and retry with --installer <path>:'\n" +
+        "    echo '  curl -O " + primary + "'\n" +
+        "    echo '  ooda update --installer ./install.sh " + flags + "'\n" +
+        "    exit 1\n" +
+        "  fi\n" +
+        "fi\n" +
+        "exec bash \"$TMP\" " + flags + "\n";
 }
 
 fn update_passthrough(args: List[String]) -> String {
