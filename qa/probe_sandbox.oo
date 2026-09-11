@@ -1,0 +1,202 @@
+// # Ooda CLI Kernel Sandbox Sovereign Blackbox Probe
+//
+// Logline: Verify ooda sandbox subcommands, containment, and --sandbox evaluator integration under negative-trust invariants.
+//
+// Setup: ProcessCap, FsReadCap, EnvCap, FsWriteCap. Spawns ~/.openooda/bin/ooda release binary externally. Zero in-memory mocks.
+//
+// Beats:
+//   1. Resolve binary path (~/.openooda/bin/ooda).
+//   2. Check sandbox status outputs Linux Landlock LSM + seccomp-bpf with exit 0.
+//   3. Verify allowlist containment permitting writes to /tmp.
+//   4. Verify hostile out-of-sandbox write denial to ~/.ooda-cache.
+//   5. Verify transparent evaluation under --sandbox containment.
+//   6. Verify negative-trust CLI falsification with fail-closed exit code 2.
+
+import "std/fs/process/env.oo";
+import "std/fs/os/fs.oo";
+
+fn one(a: String) -> List[String] {
+    let mut l: List[String] = list_new();
+    return list_push(l, a);
+}
+
+fn two(a: String, b: String) -> List[String] {
+    let mut l: List[String] = list_new();
+    l = list_push(l, a);
+    return list_push(l, b);
+}
+
+fn three(a: String, b: String, c: String) -> List[String] {
+    let mut l: List[String] = list_new();
+    l = list_push(l, a);
+    l = list_push(l, b);
+    return list_push(l, c);
+}
+
+fn exec_code(p: &ProcessCap, bin: String, argv: List[String]) -> Int {
+    let r: Result[Int, String] = sys_exec_wait(p, bin, argv);
+    return r.val;
+}
+
+fn assert_exit(p: &ProcessCap, bin: String, args: List[String], exp: Int, tag: String) -> Result[Int, String] {
+    let code: Int = exec_code(p, bin, args);
+    if code != exp {
+        println("ERR\tExit code violation for " + tag + ": expected " + exp.to_string() + ", got " + code.to_string());
+        return Err("Exit code violation for " + tag + ": expected " + exp.to_string() + ", got " + code.to_string());
+    }
+    return Ok(0);
+}
+
+fn assert_exit_nonzero(p: &ProcessCap, bin: String, args: List[String], tag: String) -> Result[Int, String] {
+    let code: Int = exec_code(p, bin, args);
+    if code == 0 {
+        println("ERR\tFail-closed violation for " + tag + ": expected non-zero, got 0");
+        return Err("Fail-closed violation for " + tag + ": expected non-zero, got 0");
+    }
+    return Ok(0);
+}
+
+pub fn main(
+    p: &ProcessCap,
+    fs_r: &FsReadCap,
+    sys: &SysCap,
+    env: &EnvCap,
+    time: &TimeCap,
+    fs_w: &FsWriteCap,
+    alloc: &AllocCap,
+    args: List[String]
+) -> Result[Int, String] {
+    // 1. Binary path resolution
+    let mut hr: Result[String, String] = env_get(env, "OODA_HOME");
+    if hr.is_err() { hr = env_get(env, "OO_HOME"); }
+    if hr.is_err() { hr = env_get(env, "HOME"); }
+    let home: String = match hr { Ok(s) => s, Err(_) => "/home/jeryd" };
+    let bin_path: String = home + "/.openooda/bin/ooda";
+    if !path_exists(fs_r, bin_path) {
+        println("ERR\tBinary missing at: " + bin_path);
+        return Err("Binary missing at: " + bin_path);
+    }
+    println("  [PASS] Section 1: binary path resolved at " + bin_path);
+
+    // 2. ooda sandbox status inspection
+    let s_exit: Result[Int, String] = assert_exit(p, bin_path, two("sandbox", "status"), 0, "sandbox status exit");
+    if s_exit.is_err() { return s_exit; }
+
+    let s_res: Result[String, String] = sys_exec(p, bin_path, "sandbox", "status");
+    if s_res.is_err() {
+        println("ERR\tsandbox status execution failed");
+        return Err("sandbox status execution failed");
+    }
+    let s_out: String = match s_res { Ok(s) => s, Err(_) => "" };
+    if !str_contains(s_out, "Active kernel sandbox backend: Linux Landlock LSM + seccomp-bpf") {
+        println("ERR\tsandbox status expected 'Active kernel sandbox backend: Linux Landlock LSM + seccomp-bpf', got: " + s_out);
+        return Err("sandbox status expected 'Active kernel sandbox backend: Linux Landlock LSM + seccomp-bpf', got: " + s_out);
+    }
+    println("  [PASS] Section 2: ooda sandbox status backend verified");
+
+    // 3. Allowlist containment
+    let probe_file: String = "/tmp/sb_m3_probe.tmp";
+    let _rm_probe: Result[String, String] = sys_exec(p, "rm", "-f", probe_file);
+
+    let mut allow_args: List[String] = list_new();
+    allow_args = list_push(allow_args, "sandbox");
+    allow_args = list_push(allow_args, "run");
+    allow_args = list_push(allow_args, "--write-dirs");
+    allow_args = list_push(allow_args, "/tmp");
+    allow_args = list_push(allow_args, "touch");
+    allow_args = list_push(allow_args, probe_file);
+
+    let r_allow: Result[Int, String] = assert_exit(p, bin_path, allow_args, 0, "sandbox run allowlisted write");
+    if r_allow.is_err() { return r_allow; }
+    let chk_probe: Int = exec_code(p, "ls", one(probe_file));
+    if chk_probe != 0 {
+        println("ERR\tsandbox run failed to create allowlisted file: " + probe_file);
+        return Err("sandbox run failed to create allowlisted file: " + probe_file);
+    }
+    let _del_probe: Result[String, String] = sys_exec(p, "rm", "-f", probe_file);
+    println("  [PASS] Section 3: allowlist containment write permitted");
+
+    // 4. Out-of-sandbox hostile write denial
+    let denied_file: String = home + "/.ooda-cache/sb_m3_denied.tmp";
+    let _rm_denied: Result[String, String] = sys_exec(p, "rm", "-f", denied_file);
+
+    let mut deny_args: List[String] = list_new();
+    deny_args = list_push(deny_args, "sandbox");
+    deny_args = list_push(deny_args, "run");
+    deny_args = list_push(deny_args, "--write-dirs");
+    deny_args = list_push(deny_args, "/tmp");
+    deny_args = list_push(deny_args, "touch");
+    deny_args = list_push(deny_args, denied_file);
+
+    let r_deny: Result[Int, String] = assert_exit_nonzero(p, bin_path, deny_args, "sandbox hostile write denial");
+    if r_deny.is_err() {
+        let _cl: Result[String, String] = sys_exec(p, "rm", "-f", denied_file);
+        return r_deny;
+    }
+    let chk_denied: Int = exec_code(p, "ls", one(denied_file));
+    if chk_denied == 0 {
+        let _clean: Result[String, String] = sys_exec(p, "rm", "-f", denied_file);
+        println("ERR\tSECURITY VIOLATION: denied file was created on disk!");
+        return Err("SECURITY VIOLATION: denied file was created on disk!");
+    }
+    println("  [PASS] Section 4: hostile out-of-sandbox write denied by Landlock LSM");
+
+    // 5. Transparent evaluator under --sandbox containment
+    let ev1_res: Result[String, String] = sys_exec(p, bin_path, "eval", "--sandbox", "1 + 2");
+    if ev1_res.is_err() {
+        println("ERR\teval --sandbox 1 + 2 failed");
+        return Err("eval --sandbox 1 + 2 failed");
+    }
+    let raw1: String = match ev1_res { Ok(s) => s, Err(_) => "" };
+    let out1: String = str_trim(raw1);
+    if out1 != "3" {
+        println("ERR\teval --sandbox expected '3', got: " + out1);
+        return Err("eval --sandbox expected '3', got: " + out1);
+    }
+
+    let ev2_res: Result[String, String] = sys_exec(p, bin_path, "eval", "--sandbox", "str_slice(\"openOODA\", 0, 4)");
+    if ev2_res.is_err() {
+        println("ERR\teval --sandbox string slice failed");
+        return Err("eval --sandbox string slice failed");
+    }
+    let raw2: String = match ev2_res { Ok(s) => s, Err(_) => "" };
+    let out2: String = str_trim(raw2);
+    if out2 != "open" {
+        println("ERR\teval --sandbox expected 'open', got: " + out2);
+        return Err("eval --sandbox expected 'open', got: " + out2);
+    }
+
+    // Adversarial: assert fail-closed when eval attempts unauthorized write outside Landlock allowlist
+    let mut ev_deny_args: List[String] = list_new();
+    ev_deny_args = list_push(ev_deny_args, "sandbox");
+    ev_deny_args = list_push(ev_deny_args, "run");
+    ev_deny_args = list_push(ev_deny_args, "--read-dirs");
+    ev_deny_args = list_push(ev_deny_args, "/home");
+    ev_deny_args = list_push(ev_deny_args, "--write-dirs");
+    ev_deny_args = list_push(ev_deny_args, "/tmp");
+    ev_deny_args = list_push(ev_deny_args, bin_path);
+    ev_deny_args = list_push(ev_deny_args, "eval");
+    ev_deny_args = list_push(ev_deny_args, "--sandbox");
+    ev_deny_args = list_push(ev_deny_args, "1 + 2");
+    let r_ev_deny: Result[Int, String] = assert_exit_nonzero(p, bin_path, ev_deny_args, "eval Landlock write containment denial");
+    if r_ev_deny.is_err() { return r_ev_deny; }
+
+    println("  [PASS] Section 5: transparent evaluator and Landlock confinement verified");
+
+    // 6. Negative-trust CLI falsification (fail-closed exit code 2)
+    let e_bogus: Result[Int, String] = assert_exit(p, bin_path, two("sandbox", "--bogus"), 2, "sandbox --bogus");
+    if e_bogus.is_err() { return e_bogus; }
+
+    let e_missing_cmd: Result[Int, String] = assert_exit(p, bin_path, two("sandbox", "run"), 2, "sandbox run (missing cmd)");
+    if e_missing_cmd.is_err() { return e_missing_cmd; }
+
+    let e_eval_no_expr: Result[Int, String] = assert_exit(p, bin_path, two("eval", "--sandbox"), 2, "eval --sandbox (missing expr)");
+    if e_eval_no_expr.is_err() { return e_eval_no_expr; }
+
+    let e_bad_flag: Result[Int, String] = assert_exit(p, bin_path, three("sandbox", "run", "--unknown-flag"), 2, "sandbox run --unknown-flag");
+    if e_bad_flag.is_err() { return e_bad_flag; }
+    println("  [PASS] Section 6: negative-trust fail-closed CLI falsifications verified (exit 2)");
+
+    println("probe_sandbox: ALL ASSERTIONS PASSED (100% verified)");
+    return Ok(0);
+}

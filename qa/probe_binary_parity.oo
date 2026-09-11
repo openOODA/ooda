@@ -1,0 +1,199 @@
+// # Ooda CLI Binary Parity & Negative-Trust Falsification Probe
+//
+// Logline: Verify user-installed binary matches release artifact digest and fails closed on hostile inputs across raw OS process boundaries.
+//
+// Setup: ProcessCap, FsReadCap, EnvCap, FsWriteCap. Spawns ~/.openooda/bin/ooda via sys_exec_wait and sys_exec. Zero in-memory mocks.
+//
+// Beats:
+//   1. Resolve user binary (~/.openooda/bin/ooda) and optional release artifact (dist/ooda).
+//   2. Verify cryptographic SHA-256 bit-parity between installed binary and build target.
+//   3. Assert exit code 0 on positive CLI operations (version, help, digest).
+//   4. Assert exit code 2 on syntax, missing arguments, invalid flags, and unreadable paths.
+//   5. Assert exit code 3 and JSON capability denial envelope on unauthorized capability calls.
+//   6. Assert fail-closed termination on boundary conditions (0-byte file, oversized >256-line file).
+
+import "std/fs/process/env.oo";
+
+fn exec_code(p: &ProcessCap, bin: String, argv: List[String]) -> Int {
+    let r: Result[Int, String] = sys_exec_wait(p, bin, argv);
+    return r.val;
+}
+
+fn one(a: String) -> List[String] {
+    let mut l: List[String] = list_new();
+    return list_push(l, a);
+}
+
+fn two(a: String, b: String) -> List[String] {
+    let mut l: List[String] = list_new();
+    l = list_push(l, a);
+    return list_push(l, b);
+}
+
+fn three(a: String, b: String, c: String) -> List[String] {
+    let mut l: List[String] = list_new();
+    l = list_push(l, a);
+    l = list_push(l, b);
+    return list_push(l, c);
+}
+
+fn assert_exit(p: &ProcessCap, bin: String, args: List[String], exp: Int, tag: String) -> Result[Int, String] {
+    let code: Int = exec_code(p, bin, args);
+    if code != exp {
+        return Err("Exit code violation for " + tag + ": expected " + exp.to_string() + ", got " + code.to_string());
+    }
+    return Ok(0);
+}
+
+fn assert_exit_nonzero(p: &ProcessCap, bin: String, args: List[String], tag: String) -> Result[Int, String] {
+    let code: Int = exec_code(p, bin, args);
+    if code == 0 {
+        return Err("Fail-closed violation for " + tag + ": expected non-zero, got 0");
+    }
+    return Ok(0);
+}
+
+pub fn main(
+    p: &ProcessCap,
+    fs_r: &FsReadCap,
+    sys: &SysCap,
+    env: &EnvCap,
+    time: &TimeCap,
+    fs_w: &FsWriteCap,
+    alloc: &AllocCap,
+    args: List[String]
+) -> Result[Int, String] {
+    let mut hr: Result[String, String] = env_get(env, "OODA_HOME");
+    if hr.is_err() { hr = env_get(env, "OO_HOME"); }
+    let home: String = match hr { Ok(s) => s, Err(_) => "/home/jeryd" };
+    let bin_path: String = home + "/.openooda/bin/ooda";
+    if !path_exists(fs_r, bin_path) {
+        return Err("Binary Parity Violation: user binary not installed at " + bin_path);
+    }
+
+    // 1. Cryptographic Binary Parity Check (Bit-for-bit SHA-256 against release artifact)
+    let mut dist_path: String = "";
+    if path_exists(fs_r, "dist/ooda") {
+        dist_path = "dist/ooda";
+    } else if path_exists(fs_r, "ooda/dist/ooda") {
+        dist_path = "ooda/dist/ooda";
+    } else if path_exists(fs_r, "dist/ooda-linux-x86_64") {
+        dist_path = "dist/ooda-linux-x86_64";
+    } else if path_exists(fs_r, "ooda/dist/ooda-linux-x86_64") {
+        dist_path = "ooda/dist/ooda-linux-x86_64";
+    }
+
+    if dist_path != "" {
+        let hd1_res: Result[String, String] = sys_exec(p, bin_path, "digest", bin_path);
+        let hd2_res: Result[String, String] = sys_exec(p, bin_path, "digest", dist_path);
+        if hd1_res.is_err() || hd2_res.is_err() {
+            return Err("Binary parity digest execution failed");
+        }
+        let hd1: String = match hd1_res { Ok(s) => str_trim(s), Err(_) => "" };
+        let hd2: String = match hd2_res { Ok(s) => str_trim(s), Err(_) => "" };
+        if hd1 != hd2 {
+            return Err("Cryptographic Binary Parity Violation: " + bin_path + " (" + hd1 + ") != " + dist_path + " (" + hd2 + ")");
+        }
+        println("parity: " + bin_path + " == " + dist_path + " (" + hd1 + ")");
+    }
+
+    // 2. Positive Executions (Exit Code 0)
+    let mut r: Result[Int, String] = assert_exit(p, bin_path, one("version"), 0, "version");
+    if r.is_err() { return r; }
+    let v_res: Result[String, String] = sys_exec(p, bin_path, "version");
+    let v_out: String = match v_res { Ok(s) => s, Err(s) => s };
+    if str_slice(v_out, 0, 6) != "ooda v" {
+        return Err("version stdout violation: expected 'ooda v', got: " + v_out);
+    }
+
+    r = assert_exit(p, bin_path, one("help"), 0, "help");
+    if r.is_err() { return r; }
+    let h_res: Result[String, String] = sys_exec(p, bin_path, "help");
+    let h_out: String = match h_res { Ok(s) => s, Err(s) => s };
+    if !str_contains(h_out, "usage: ooda") {
+        return Err("help stdout violation: expected 'usage: ooda', got: " + h_out);
+    }
+
+    r = assert_exit(p, bin_path, two("digest", bin_path), 0, "digest bin");
+    if r.is_err() { return r; }
+    let d_res: Result[String, String] = sys_exec(p, bin_path, "digest", bin_path);
+    let d_out: String = match d_res { Ok(s) => s, Err(s) => s };
+    if chars_len(str_trim(d_out)) != 64 {
+        return Err("digest output format violation: expected 64-char hex, got: " + d_out);
+    }
+
+    // 3. Syntax & Flag Falsification (Exit Code 2)
+    // Missing arguments
+    r = assert_exit(p, bin_path, list_new(), 2, "empty args");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, one("build"), 2, "build missing arg");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, one("test"), 2, "test missing arg");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, one("bench"), 2, "bench missing arg");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, one("digest"), 2, "digest missing arg");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, one("gen"), 2, "gen missing arg");
+    if r.is_err() { return r; }
+
+    // Invalid flags
+    r = assert_exit(p, bin_path, one("--bogus"), 2, "top-level --bogus");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, two("build", "--bogus"), 2, "build --bogus");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, two("test", "--bogus"), 2, "test --bogus");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, two("fmt", "--bogus"), 2, "fmt --bogus");
+    if r.is_err() { return r; }
+
+    // Non-existent files
+    r = assert_exit(p, bin_path, two("build", "/nonexistent.oo"), 2, "build /nonexistent.oo");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, two("test", "/nonexistent.oo"), 2, "test /nonexistent.oo");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, two("digest", "/nonexistent.oo"), 2, "digest /nonexistent.oo");
+    if r.is_err() { return r; }
+
+    // 4. Capability Denial Falsification (Exit Code 3)
+    r = assert_exit(p, bin_path, two("token", "calibrate"), 3, "token calibrate");
+    if r.is_err() { return r; }
+    let tc_res: Result[String, String] = sys_exec(p, bin_path, "token", "calibrate");
+    let tc_out: String = match tc_res { Ok(s) => s, Err(s) => s };
+    if !str_contains(tc_out, "capability_denied") {
+        return Err("token calibrate denial envelope violation: expected 'capability_denied', got: " + tc_out);
+    }
+
+    // 5. Boundary Edge Falsification
+    let _mkdir: Result[String, String] = sys_exec(p, "mkdir", "-p", ".ooda-cache");
+
+    // 0-byte file: assert test fails closed
+    let empty_path: String = ".ooda-cache/probe_empty.oo";
+    let _w0: Result[Void, String] = write_file(fs_w, empty_path, "");
+    r = assert_exit_nonzero(p, bin_path, two("test", empty_path), "test empty file");
+    let _del0: Result[String, String] = sys_exec(p, "rm", "-f", empty_path);
+    if r.is_err() { return r; }
+
+    // >256 lines file: assert fmt --check fails closed
+    let over_path: String = ".ooda-cache/probe_oversized.oo";
+    let mut over_src: String = "";
+    let mut oi: Int = 0;
+    while oi < 260 {
+        over_src = over_src + "// line " + oi.to_string() + "\n";
+        oi = oi + 1;
+    }
+    over_src = over_src + "pub fn bad() -> Int {\nreturn 0;\n}\n";
+    let _w1: Result[Void, String] = write_file(fs_w, over_path, over_src);
+    r = assert_exit_nonzero(p, bin_path, three("fmt", "--check", over_path), "fmt --check oversized file");
+    let _del1: Result[String, String] = sys_exec(p, "rm", "-f", over_path);
+    if r.is_err() { return r; }
+
+    // Unreadable directory path: build . and digest . fail closed
+    r = assert_exit_nonzero(p, bin_path, two("build", "."), "build .");
+    if r.is_err() { return r; }
+    r = assert_exit(p, bin_path, two("digest", "."), 2, "digest .");
+    if r.is_err() { return r; }
+
+    println("probe: binary parity and negative-trust falsification ok");
+    return Ok(0);
+}

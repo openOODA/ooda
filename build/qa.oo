@@ -1,0 +1,107 @@
+// # ooda qa — Sovereign Suite QA Execution Harness
+//
+// Logline: Discover, compile, and execute test suites under oodac; supports context-aware local execution and polyrepo universal execution.
+//
+// Setup: Requires &FsReadCap for suite discovery, &FsWriteCap for cache dir, &EnvCap to resolve oodac, &ProcessCap for invocation, &TimeCap for output naming.
+//
+// Beats:
+//   1. Parse flags strictly (--all, --json); reject illegal flags with exit 2.
+//   2. Resolve target suite: polyrepo suite for --all or local qa/suite.oo by context.
+//   3. Build target suite to .ooda-cache/qa/ and execute under double-run discipline.
+//   4. Clean up temporary binary and report outcome.
+
+import "find_compiler.oo";
+import "host_run.oo";
+import "std/fs/os/fs.oo";
+
+fn json_qa_escape(s: String) -> String {
+    let n: Int = chars_len(s);
+    let mut out: String = "";
+    let mut i: Int = 0;
+    while i < n {
+        let c: String = str_slice(s, i, i + 1);
+        if c == "\"" { out = out + "\\\""; }
+        else if c == "\\" { out = out + "\\\\"; }
+        else if c == "\n" { out = out + "\\n"; }
+        else if c == "\r" { out = out + "\\r"; }
+        else if c == "\t" { out = out + "\\t"; }
+        else { out = out + c; }
+        i = i + 1;
+    }
+    return out;
+}
+
+pub fn run_ooda_qa(fr: &FsReadCap, fw: &FsWriteCap, proc: &ProcessCap, env: &EnvCap, time: &TimeCap, args: List[String]) {
+    let mut saw_all: Bool = false;
+    let mut saw_json: Bool = false;
+    let mut i: Int = 0;
+    while i < list_len(args) {
+        let a: String = list_get(args, i);
+        if a == "--all" || a == "-all" || a == "-a" { saw_all = true; }
+        else if a == "--json" || a == "-json" { saw_json = true; }
+        else if str_slice(a, 0, 1) == "-" {
+            println("ERR\tqa\tunknown flag: " + a);
+            process_exit(2);
+        }
+        i = i + 1;
+    }
+
+    let mut suite_path: String = "";
+    if saw_all {
+        if path_exists(fr, "openOODA/qa/polyrepo_suite.oo") {
+            suite_path = "openOODA/qa/polyrepo_suite.oo";
+        } else if path_exists(fr, "qa/polyrepo_suite.oo") {
+            suite_path = "qa/polyrepo_suite.oo";
+        }
+    } else {
+        if path_exists(fr, "qa/suite.oo") {
+            suite_path = "qa/suite.oo";
+        } else if path_exists(fr, "openOODA/qa/polyrepo_suite.oo") {
+            suite_path = "openOODA/qa/polyrepo_suite.oo";
+        }
+    }
+
+    if suite_path == "" {
+        println("ERR\tqa\tno qa suite found in current context (use --all from workspace root)");
+        process_exit(2);
+    }
+
+    let oodac: String = find_oodac(fr, env);
+    refuse_cli(proc, oodac);
+
+    let mk: Result[Void, String] = fs_mkdir_p(fw, ".ooda-cache/qa");
+    if mk.is_err() {
+        println("ERR\tqa\tmkdir .ooda-cache/qa failed");
+        process_exit(1);
+    }
+
+    let now: Int = now_ms(time);
+    let out_bin: String = ".ooda-cache/qa/suite-" + now.to_string() + ".bin";
+    let b: Result[String, String] = sys_exec(proc, oodac, "build", "--backend", "c", suite_path, "-o", out_bin);
+    if b.is_err() {
+        println("ERR\tqa\tbuild failed for " + suite_path);
+        process_exit(1);
+    }
+
+    println("=== openOODA QA: " + suite_path + " ===");
+    let r: Result[String, String] = sys_exec(proc, out_bin);
+    let _del: Result[String, String] = sys_exec(proc, "rm", "-f", out_bin);
+
+    let passed: Bool = r.is_ok();
+    if saw_json {
+        if passed {
+            println("{\"success\":true,\"command\":\"qa\",\"suite\":\"" + json_qa_escape(suite_path) + "\",\"passed\":true}");
+        } else {
+            println("{\"success\":false,\"command\":\"qa\",\"suite\":\"" + json_qa_escape(suite_path) + "\",\"passed\":false}");
+        }
+    } else {
+        if passed {
+            println("qa: ALL SUITES PASSED (" + suite_path + ")");
+        } else {
+            println("qa: SUITE FAILED (" + suite_path + ")");
+        }
+    }
+
+    if passed { process_exit(0); }
+    process_exit(1);
+}

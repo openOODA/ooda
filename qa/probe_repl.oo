@@ -1,0 +1,148 @@
+// # Ooda CLI REPL & Evaluator Sovereign Black-Box Probe
+//
+// Logline: Verify ooda eval and ooda repl against user release binary under strict negative-trust and double-run invariants.
+//
+// Setup: ProcessCap, FsReadCap, EnvCap, FsWriteCap. Spawns ~/.openooda/bin/ooda externally. Zero in-memory mocks.
+//
+// Beats:
+//   1. Verify headless math and string evaluations match expected output.
+//   2. Verify meta-commands (:caps, :type) in headless mode.
+//   3. Verify negative-trust edge cases (missing arg, unclosed delimiter, invalid flags).
+//   4. Verify scripted interactive REPL over piped stdin with variable accumulation, multi-line balancing, and error recovery.
+
+import "std/fs/process/env.oo";
+
+fn one(a: String) -> List[String] {
+    let mut l: List[String] = list_new();
+    return list_push(l, a);
+}
+
+fn two(a: String, b: String) -> List[String] {
+    let mut l: List[String] = list_new();
+    l = list_push(l, a);
+    return list_push(l, b);
+}
+
+fn assert_exit(p: &ProcessCap, bin: String, args: List[String], exp: Int, tag: String) -> Result[Int, String] {
+    let r: Result[Int, String] = sys_exec_wait(p, bin, args);
+    let code: Int = r.val;
+    if code != exp {
+        return Err("Exit code violation for " + tag + ": expected " + exp.to_string() + ", got " + code.to_string());
+    }
+    return Ok(0);
+}
+
+pub fn main(
+    p: &ProcessCap,
+    fs_r: &FsReadCap,
+    sys: &SysCap,
+    env: &EnvCap,
+    time: &TimeCap,
+    fs_w: &FsWriteCap,
+    alloc: &AllocCap,
+    args: List[String]
+) -> Result[Int, String] {
+    let mut hr: Result[String, String] = env_get(env, "OODA_HOME");
+    if hr.is_err() { hr = env_get(env, "OO_HOME"); }
+    let home: String = match hr { Ok(s) => s, Err(_) => "/home/jeryd" };
+    let bin_path: String = home + "/.openooda/bin/ooda";
+    if !path_exists(fs_r, bin_path) {
+        return Err("Binary missing at: " + bin_path);
+    }
+
+    let _mk: Result[String, String] = sys_exec(p, "mkdir", "-p", ".ooda-cache");
+
+    // 1. Headless Expression Evaluation (Positive)
+    let e1_res: Result[String, String] = sys_exec(p, bin_path, "eval", "1 + 2");
+    if e1_res.is_err() { return Err("eval 1 + 2 failed"); }
+    let s1: String = match e1_res { Ok(s) => s, Err(_) => "" };
+    let o1: String = str_trim(s1);
+    if o1 != "3" { return Err("eval '1 + 2' expected '3', got '" + o1 + "'"); }
+
+    let e2_res: Result[String, String] = sys_exec(p, bin_path, "eval", "str_slice(\"openOODA\", 0, 4)");
+    if e2_res.is_err() { return Err("eval str_slice failed"); }
+    let s2: String = match e2_res { Ok(s) => s, Err(_) => "" };
+    let o2: String = str_trim(s2);
+    if o2 != "open" { return Err("eval str_slice expected 'open', got '" + o2 + "'"); }
+
+    // 2. Meta-commands via eval
+    let ec_res: Result[String, String] = sys_exec(p, bin_path, "eval", ":caps");
+    if ec_res.is_err() { return Err("eval :caps failed"); }
+    let oc: String = match ec_res { Ok(s) => s, Err(_) => "" };
+    if !str_contains(oc, "&FsReadCap") || !str_contains(oc, "Active session capabilities") {
+        return Err("eval :caps output violation: " + oc);
+    }
+
+    let et1_res: Result[String, String] = sys_exec(p, bin_path, "eval", ":type 40 + 2");
+    if et1_res.is_err() { return Err("eval :type 40 + 2 failed"); }
+    let ot1: String = match et1_res { Ok(s) => s, Err(_) => "" };
+    if !str_contains(ot1, "Int") {
+        return Err("eval :type 40 + 2 output violation, expected 'Int': " + ot1);
+    }
+
+    let et2_res: Result[String, String] = sys_exec(p, bin_path, "eval", ":type (1 + 2)");
+    if et2_res.is_err() { return Err("eval :type (1 + 2) failed"); }
+    let ot2: String = match et2_res { Ok(s) => s, Err(_) => "" };
+    if !str_contains(ot2, "Int") {
+        return Err("eval :type (1 + 2) output violation, expected 'Int': " + ot2);
+    }
+
+    // 3. Negative-Trust Falsification (Exit code 2)
+    let mut r: Result[Int, String] = assert_exit(p, bin_path, one("eval"), 2, "eval missing expression");
+    if r.is_err() { return r; }
+
+    r = assert_exit(p, bin_path, two("eval", "1 + (2 *"), 2, "eval unclosed delimiter");
+    if r.is_err() { return r; }
+
+    r = assert_exit(p, bin_path, two("eval", "--bogus"), 2, "eval invalid flag");
+    if r.is_err() { return r; }
+
+    r = assert_exit(p, bin_path, two("repl", "--bogus"), 2, "repl invalid flag");
+    if r.is_err() { return r; }
+
+    // 4. Scripted Interactive REPL Session via Piped Stdin
+    let script: String = "let a = 100;\nlet b = 200;\na + b\n:vars\n:quit\n";
+    let script_path: String = ".ooda-cache/probe_repl_script.txt";
+    let _ws: Result[Void, String] = write_file(fs_w, script_path, script);
+    let pipe_cmd: String = bin_path + " repl < " + script_path;
+    let repl_res: Result[String, String] = sys_exec(p, "sh", "-c", pipe_cmd);
+    let _ds: Result[String, String] = sys_exec(p, "rm", "-f", script_path);
+    if repl_res.is_err() { return Err("scripted repl execution failed"); }
+    let r_out: String = match repl_res { Ok(s) => s, Err(_) => "" };
+    if !str_contains(r_out, "300") {
+        return Err("repl scripted eval failed: missing '300' in stdout: " + r_out);
+    }
+    if !str_contains(r_out, "a : Int") {
+        return Err("repl scripted :vars failed: missing 'a : Int' in stdout: " + r_out);
+    }
+    if !str_contains(r_out, "Goodbye.") {
+        return Err("repl scripted :quit failed: missing 'Goodbye.' in stdout: " + r_out);
+    }
+
+    // 5. Multi-line Delimiter Balancing in Interactive REPL
+    let ml_script: String = "(10 +\n20)\n:quit\n";
+    let ml_path: String = ".ooda-cache/probe_repl_multiline.txt";
+    let _wm: Result[Void, String] = write_file(fs_w, ml_path, ml_script);
+    let ml_res: Result[String, String] = sys_exec(p, "sh", "-c", bin_path + " repl < " + ml_path);
+    let _dm: Result[String, String] = sys_exec(p, "rm", "-f", ml_path);
+    if ml_res.is_err() { return Err("repl multiline execution failed"); }
+    let ml_out: String = match ml_res { Ok(s) => s, Err(_) => "" };
+    if !str_contains(ml_out, "30") {
+        return Err("repl multiline failed: missing '30' in stdout: " + ml_out);
+    }
+
+    // 6. Non-Destructive Error Recovery in Interactive REPL
+    let rec_script: String = "let score = 99;\nthis_is_an_undeclared_symbol;\nscore + 1\n:quit\n";
+    let rec_path: String = ".ooda-cache/probe_repl_recovery.txt";
+    let _wr: Result[Void, String] = write_file(fs_w, rec_path, rec_script);
+    let rec_res: Result[String, String] = sys_exec(p, "sh", "-c", bin_path + " repl < " + rec_path);
+    let _dr: Result[String, String] = sys_exec(p, "rm", "-f", rec_path);
+    if rec_res.is_err() { return Err("repl recovery execution failed"); }
+    let rec_out: String = match rec_res { Ok(s) => s, Err(_) => "" };
+    if !str_contains(rec_out, "100") {
+        return Err("repl recovery failed: context corrupted after error; missing '100': " + rec_out);
+    }
+
+    println("probe_repl: all positive, negative, and interactive REPL invariants verified");
+    return Ok(0);
+}

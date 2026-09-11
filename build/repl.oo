@@ -1,0 +1,185 @@
+// # Ooda REPL — Interactive Read-Eval-Print Loop Driver
+//
+// Logline: Terminal loop reading stdin chunkwise, emitting live prompt, accumulating multi-line inputs, and executing turns.
+//
+// Setup: Requires FsReadCap for stdin, FsWriteCap for cache probes, ProcessCap for compiler execution, SysCap for sandbox lockdown, TimeCap for session IDs.
+//
+// Beats:
+//   1. Parse arguments and support --sandbox Landlock lockdown.
+//   2. Initialize ReplSession under explicit capabilities.
+//   3. Read stdin chunkwise using oo_read_stdin_chunk with non-blocking polling.
+//   4. Handle multi-line accumulation, live ooda> prompt, and EOF detection.
+//   5. Execute turn via repl_eval_turn and report diagnostics cleanly without context corruption.
+
+import "std/app/agent/repl_engine.oo";
+import "std/sec/sandbox/config.oo";
+import "std/sec/sandbox/engine.oo";
+import "std/fs/os/fs.oo";
+
+pub fn run_ooda_repl(
+    fr: &FsReadCap,
+    fw: &FsWriteCap,
+    proc: &ProcessCap,
+    sys_cap: &SysCap,
+    time: &TimeCap,
+    args: List[String]
+) -> Result[Int, String] {
+    let mut use_sandbox: Bool = false;
+    let mut i: Int = 0;
+    while i < list_len(args) {
+        let a: String = list_get(args, i);
+        if a == "--help" || a == "-h" {
+            println("usage: ooda repl [--sandbox]");
+            println("interactive Read-Eval-Print Loop for openOODA.");
+            process_exit(0);
+            return Ok(0);
+        }
+        if a == "--sandbox" {
+            use_sandbox = true;
+        } else if str_starts_with(a, "-") {
+            println("ERR\trepl\tunknown flag: " + a);
+            process_exit(2);
+            return Err("unknown flag: " + a);
+        } else {
+            println("ERR\trepl\tunexpected argument: " + a);
+            process_exit(2);
+            return Err("unexpected argument: " + a);
+        }
+        i = i + 1;
+    }
+
+    if use_sandbox {
+        let _mk0: Result[Void, String] = fs_mkdir_p(fw, "/home/jeryd/.ooda-cache/ooda-tmp");
+        let _mk1: Result[Void, String] = fs_mkdir_p(fw, "/home/jeryd/Projects/openOODA/.ooda-cache/repl");
+        let _mk2: Result[Void, String] = fs_mkdir_p(fw, "/home/jeryd/Projects/openOODA/.ooda-cache/ooda-tmp");
+        let mut scfg: SandboxConfig = sandbox_config_default();
+        scfg = sandbox_config_with_read(scfg, "/usr");
+        scfg = sandbox_config_with_read(scfg, "/lib");
+        scfg = sandbox_config_with_read(scfg, "/lib64");
+        scfg = sandbox_config_with_read(scfg, "/bin");
+        scfg = sandbox_config_with_read(scfg, "/usr/lib");
+        scfg = sandbox_config_with_read(scfg, "/usr/bin");
+        scfg = sandbox_config_with_read(scfg, "/etc");
+        scfg = sandbox_config_with_read(scfg, "/dev");
+        scfg = sandbox_config_with_read(scfg, "/proc");
+        scfg = sandbox_config_with_read(scfg, "/tmp");
+        scfg = sandbox_config_with_read(scfg, "/home");
+        scfg = sandbox_config_with_write(scfg, "/tmp");
+        scfg = sandbox_config_with_write(scfg, "/home/jeryd/.ooda-cache");
+        scfg = sandbox_config_with_write(scfg, "/home/jeryd/Projects/openOODA/.ooda-cache");
+
+        let p_res: Result[String, String] = sys_exec(proc, "pwd");
+        let raw_pwd: String = match p_res { Ok(s) => s, Err(_) => "" };
+        let cwd: String = str_trim(raw_pwd);
+        if chars_len(cwd) > 0 {
+            let cwd_cache: String = cwd + "/.ooda-cache";
+            let _mk3: Result[Void, String] = fs_mkdir_p(fw, cwd_cache + "/repl");
+            let _mk4: Result[Void, String] = fs_mkdir_p(fw, cwd_cache + "/ooda-tmp");
+            scfg = sandbox_config_with_write(scfg, cwd_cache);
+        }
+
+        scfg = sandbox_config_with_caps_mask(scfg, 126);
+
+        let s_res: Result[Int, String] = sandbox_apply_matrix(sys_cap, scfg);
+        if s_res.is_err() {
+            let se: String = match s_res { Ok(_) => "", Err(e) => e };
+            println("ERR\trepl\t" + se);
+            process_exit(1);
+            return Err(se);
+        }
+    }
+
+
+    let mut sess: ReplSession = repl_session_new(fr, fw, proc, time);
+    println("openOODA REPL (type :help for commands, :quit to exit)");
+
+    let mut buf: String = "";
+    let mut multiline: String = "";
+    let mut in_multiline: Bool = false;
+
+    while sess.is_active {
+        if in_multiline {
+            print("... ");
+        } else {
+            print("ooda> ");
+        }
+
+        while str_index_of(buf, "\n") < 0 {
+            let r: Result[String, String] = oo_read_stdin_chunk(fr, 100);
+            if !r.is_ok() {
+                sess.is_active = false;
+                break;
+            }
+            let chunk: String = match r { Ok(s) => s, Err(_) => "" };
+            if chars_len(chunk) > 0 {
+                buf = buf + chunk;
+            }
+        }
+
+        let nl: Int = str_index_of(buf, "\n");
+        let mut line: String = "";
+        if nl >= 0 {
+            line = str_slice(buf, 0, nl);
+            buf = str_slice(buf, nl + 1, chars_len(buf));
+            if str_ends_with(line, "\r") {
+                line = str_slice(line, 0, chars_len(line) - 1);
+            }
+        } else {
+            line = buf;
+            buf = "";
+        }
+
+        let trimmed: String = str_trim(line);
+        if !sess.is_active && chars_len(trimmed) == 0 {
+            break;
+        }
+
+        if str_starts_with(trimmed, ":") {
+            let out: ReplOutput = repl_eval_turn(&mut sess, fr, fw, proc, time, trimmed);
+            if out.is_exit {
+                if chars_len(out.output_text) > 0 { println(out.output_text); }
+                process_exit(0);
+                return Ok(0);
+            }
+            if out.is_error {
+                println("ERR: " + out.error_msg);
+            } else if chars_len(out.output_text) > 0 {
+                println(out.output_text);
+            }
+            multiline = "";
+            in_multiline = false;
+            continue;
+        }
+
+        if chars_len(trimmed) == 0 || str_starts_with(trimmed, "//") {
+            continue;
+        }
+
+        if in_multiline {
+            multiline = multiline + "\n" + line;
+        } else {
+            multiline = line + "";
+        }
+
+        if !sess.is_active || (repl_check_balanced(multiline) && !repl_has_trailing_op(multiline)) {
+            let out: ReplOutput = repl_eval_turn(&mut sess, fr, fw, proc, time, multiline);
+            if out.is_exit {
+                if chars_len(out.output_text) > 0 { println(out.output_text); }
+                process_exit(0);
+                return Ok(0);
+            }
+            if out.is_error {
+                println("ERR: " + out.error_msg);
+            } else if chars_len(out.output_text) > 0 {
+                println(out.output_text);
+            }
+            multiline = "";
+            in_multiline = false;
+        } else {
+            in_multiline = true;
+        }
+    }
+
+    process_exit(0);
+    return Ok(0);
+}

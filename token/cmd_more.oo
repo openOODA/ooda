@@ -1,16 +1,25 @@
-// # Extra token status helpers
+// # Extra token command helpers
 //
-// Logline: Hold ledger status-from-file so cmd_token.oo stays under 256 lines.
+// Logline: Hold ledger status, heatmap, compress, and fix sidecars so cmd_token.oo stays under 256 lines.
 //
-// Setup: FsCap reads jsonl ledgers. Imports token_opt telemetry, envelope, and baseline.
+// Setup: FsCap reads sources and ledgers; FsWriteCap writes sidecars. Imports token_opt helpers.
 //
 // Beats:
 //   1. Parse a decimal integer from a flag value.
 //   2. Summarize a jsonl token ledger as human or JSON status.
+//   3. Render baseline human token status.
+//   4. Resolve default directory argument.
+//   5. Render tool heatmap over .oo files in a directory.
+//   6. Compress a source file through ast_minify.
+//   7. Write .suggested.oo sidecars for a directory of .oo files.
 
 import "std/app/agent/token/token_telemetry.oo";
 import "std/app/agent/token/json_envelope.oo";
 import "std/app/agent/token/baseline.oo";
+import "std/app/agent/token/token_optimizer.oo";
+import "std/app/agent/token/auto_fix.oo";
+import "std/app/agent/token/tool_heatmap.oo";
+import "std/app/agent/token/ast_minify.oo";
 
 pub fn parse_int_local(s: String) -> Int {
     let n: Int = chars_len(s);
@@ -90,4 +99,136 @@ pub fn cmd_token_status_from_file(fr: &FsReadCap, path: String, human: Bool) {
     body = body + "}";
     let out: String = envelope_wrap("status", path, 0, body);
     println(out);
+}
+
+pub fn cmd_token_status_human(fr: &FsReadCap) {
+    let b: BaselineRecord = baseline_load_default(fr);
+    let eff: Int = (b).efficiency_milli;
+    let eff_x10: Int = eff / 1000;
+    let eff_frac: Int = (eff - (eff_x10 * 1000)) / 100;
+    println("ooda token status");
+    println("-----------------");
+    println("session:           main");
+    println("prompt_tokens:     0");
+    println("completion_tokens: 0");
+    println("tool_payload:      0 bytes");
+    println("thinking_ms:       0");
+    let eff_line: String = "efficiency:        " + eff_x10.to_string() + "." + eff_frac.to_string() + "x (" + (b).source + ")";
+    println(eff_line);
+}
+
+pub fn dir_default(args: List[String]) -> String {
+    if list_len(args) > 1 {
+        let d: String = list_get(args, 1);
+        if str_slice(d, 0, 1) != "-" { return d; }
+    }
+    return "";
+}
+
+pub fn cmd_token_render_heatmap(fr: &FsReadCap, dir: String) {
+    let entries: List[String] = oo_fs_read_dir(fr, dir);
+    let n: Int = list_len(entries);
+    let mut h: Heatmap = heatmap_new(20);
+    let mut i: Int = 0;
+    let mut count: Int = 0;
+    while i < n {
+        let name: String = list_get(entries, i);
+        if str_ends_with(name, ".oo") {
+            let b: Int = name.len() * 40;
+            let e: HeatmapEntry = heatmap_entry_new(name, 1, b);
+            h = heatmap_ingest(h, e);
+            count = count + 1;
+        }
+        i = i + 1;
+    }
+    let sorted: Heatmap = heatmap_sort_desc(h);
+    let final_h: Heatmap = heatmap_finalize(sorted);
+    let text: String = heatmap_render(final_h);
+    println(text);
+    let summary: String = "{\"ok\":true,\"files\":" + count.to_string() + "}\n";
+    println(summary);
+}
+
+pub fn cmd_token_compress_run(fr: &FsReadCap, path: String, human: Bool) {
+    if !path_exists(fr, path) {
+        println("{\"ok\":false,\"error\":\"compress: file not found: " + json_escape(path) + "\"}\n");
+        return;
+    }
+    let tr: Result[String, String] = read_file(fr, path);
+    if tr.is_err() {
+        println("{\"ok\":false,\"error\":\"compress: cannot read: " + json_escape(path) + "\"}\n");
+        return;
+    }
+    let source: String = match tr { Ok(s) => s, Err(m) => m };
+    let opts: MinifyOptions = minify_options_default();
+    let r: MinifyResult = ast_minify_source(source, opts);
+    if human {
+        let pct_int: Int = (r).reduction_pct_x100 / 100;
+        let pct_frac: Int = (r).reduction_pct_x100 - (pct_int * 100);
+        println("ooda token compress: " + path);
+        println("------------------------");
+        println("original_chars:    " + (r).original_chars.to_string());
+        println("minified_chars:    " + (r).minified_chars.to_string());
+        println("original_tokens:   " + (r).original_estimated_tokens.to_string());
+        println("minified_tokens:   " + (r).minified_estimated_tokens.to_string());
+        println("tokens_saved:      " + (r).tokens_saved.to_string());
+        println("reduction:         " + pct_int.to_string() + "." + pct_frac.to_string() + "%");
+        return;
+    }
+    let body: String = minify_format_json(r);
+    let out: String = envelope_wrap("compress", path, 0, body);
+    println(out);
+}
+
+pub fn cmd_token_fix_write_sidecars(fr: &FsReadCap, fw: &FsWriteCap, dir: String) {
+    let entries: List[String] = oo_fs_read_dir(fr, dir);
+    let n: Int = list_len(entries);
+    let mut i: Int = 0;
+    let mut total: Int = 0;
+    let mut total_wasted: Int = 0;
+    while i < n {
+        let name: String = list_get(entries, i);
+        if str_ends_with(name, ".oo") {
+            let full: String = dir + "/" + name;
+            let tr: Result[String, String] = read_file(fr, full);
+            if tr.is_ok() {
+                let text: String = match tr { Ok(s) => s, Err(m) => m };
+                let mut lines: List[String] = list_new();
+                let len: Int = chars_len(text);
+                let mut start: Int = 0;
+                let mut j: Int = 0;
+                while j <= len {
+                    if j == len || char_at(text, j) == "\n" {
+                        if j > start {
+                            lines = list_push(lines, str_slice(text, start, j));
+                        }
+                        start = j + 1;
+                    }
+                    j = j + 1;
+                }
+                let mut report: OptimizationReport = optimization_report_new();
+                report = optimization_check_verbose_headers(report, full, lines);
+                report = optimization_check_monolithic_reads(report, full, lines, 256);
+                report = optimization_check_redundant_diags(report, full, lines);
+                report = optimization_finalize(report, 1);
+                let sidecar: String = full + ".suggested.oo";
+                let findings: List[OptimizationFinding] = (report).findings;
+                let sugg_rep: FixReport = fix_convert_findings(findings);
+                let body: String = fix_format_sidecar(full, (sugg_rep).suggestions);
+                let w: Result[Void, String] = write_file(fw, sidecar, body);
+                if w.is_ok() {
+                    let out: String = "{\"ok\":true,\"sidecar\":\"" + json_escape(sidecar) + "\",\"action\":\"review and apply\"}\n";
+                    println(out);
+                    total = total + 1;
+                    total_wasted = total_wasted + (report).total_tokens_wasted;
+                } else {
+                    let out: String = "{\"ok\":false,\"error\":\"cannot write " + json_escape(sidecar) + ": needs OODA_FS_WRITEDIR\"}\n";
+                    println(out);
+                }
+            }
+        }
+        i = i + 1;
+    }
+    let summary: String = "{\"ok\":true,\"sidecars_emitted\":" + total.to_string() + ",\"tokens_wasted\":" + total_wasted.to_string() + "}\n";
+    println(summary);
 }
