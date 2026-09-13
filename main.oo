@@ -1,92 +1,61 @@
-// # Ooda Main — argv Router
+// # Ooda Main — Backward-Compat Router
 //
-// Logline: Parse argv under the ooda binary and dispatch to one of the 4 in-process subdirs (build, fix, fmt, token) or spawn one of the 3 external binaries (opm, lsp, mcp).
+// Logline: Parse argv under the ooda binary and forward to cli, opm, lsp, or mcp. The ooda binary is no longer a workflow driver — it routes to the new drivers.
 //
-// Setup: argv[0] is the subcommand. argv[1..] (rest) are its args. Handlers see rest only. Spawn requires OODACODEX. No PATH.
+// Setup: argv[0] is the subcommand. Language verbs (build, run, test, fmt, install, update, upgrade, init, qa, context, fix, token) forward to cli. opm/lsp/mcp spawn unchanged. mcp-merge forwards to ooda-mcp mcp-merge. Spawn requires OODACODEX.
 //
 // Beats:
-//   1. The 4 in-process subdirs: build, fix, fmt, token.
-//   2. The 3 spawn entries: opm, lsp, mcp. Also version, help, and mcp-merge.
-//   3. spawn() fails closed when OODACODEX is unset, the name is unsafe, or the bin is missing.
-//   4. Unknown subcommand prints diagnostic, usage, and exits with code 2.
+//   1. The 12 forwarded language verbs route to cli via spawn("cli", [sub, ...args]).
+//   2. The 4 spawn entries: opm, lsp, mcp, mcp-merge (unchanged from the legacy router).
+//   3. version, help, --help, -h print the router table.
+//   4. Deprecated verbs (eval, repl, bench, gen, health, digest, sandbox, swarm) reject with a "moved" error.
+//   5. spawn() fails closed when OODACODEX is unset, the name is unsafe, or the bin is missing.
 
-import "build/ANCHOR.oo";
-import "fix/ANCHOR.oo";
-import "fmt/ANCHOR.oo";
-import "token/ANCHOR.oo";
+import "build/anchor.oo";
 import "std/fs/process/cmd.oo";
 import "std/fs/file/path.oo";
 import "std/fs/process/env.oo";
 
-
-fn print_help() {
-    println("ooda — openOODA tactical toolchain CLI");
+fn router_help() {
+    println("ooda — openOODA back-compat router (forwards to cli, opm, lsp, mcp)");
     println("usage: ooda <subcommand> [args]");
     println("");
-    println("in-process subcommands:");
-    println("  build, run, gen, test, qa, install, update, upgrade, bench, init,");
-    println("  context, health, fix, digest, fmt, token, repl, eval, sandbox, swarm");
+    println("language CLI (forwarded to `cli <sub>`):");
+    println("  build, run, test, fmt, install, update, upgrade, init, qa, context, fix, token, version, help");
     println("");
-    println("external packages (spawned; require OODACODEX):");
-    println("  opm <subcmd>  — package manager");
-    println("  lsp           — LSP server over stdio JSON-RPC");
-    println("  mcp           — MCP server over stdio JSON-RPC");
-    println("  mcp-merge     — merge openooda into an MCP client config");
-    println("  version       — print ooda version (OODA_VERSION env, fallback v0.2.16)");
+    println("external drivers (spawned):");
+    println("  opm <subcmd>       — package manager");
+    println("  lsp                — LSP server over stdio JSON-RPC");
+    println("  mcp                — MCP server over stdio JSON-RPC");
+    println("  mcp-merge <path>   — merge openooda into an MCP client config");
     println("");
-    println("see `ooda <subcommand> --help` for per-subcommand help.");
+    println("see `cli <subcommand> --help` for per-subcommand help.");
+}
+
+fn forward_to_cli(fs_r: &FsReadCap, env: &EnvCap, sys: &ProcessCap, sub: String, rest: List[String]) -> Result[Int, String] {
+    let mut margs: List[String] = list_new();
+    margs = list_push(margs, sub);
+    let mut i: Int = 0;
+    while i < list_len(rest) {
+        margs = list_push(margs, list_get(rest, i));
+        i = i + 1;
+    }
+    return spawn(fs_r, env, sys, "cli", margs);
 }
 
 pub fn main(bind: &BindCap, fs_r: &FsReadCap, sys: &ProcessCap, sys_cap: &SysCap, env: &EnvCap, time: &TimeCap, fs_w: &FsWriteCap, alloc: &AllocCap, thread: &ThreadCap, args: List[String]) -> Result[Int, String] {
     if list_len(args) < 1 {
-        print_help();
+        router_help();
         process_exit(2);
         return Err("ooda: missing subcommand");
     }
     let sub: String = list_get(args, 0);
     let rest: List[String] = list_slice(args, 1, list_len(args));
 
-    if sub == "build"   { run_oodac_build(fs_r, fs_w, sys, env, rest); return Ok(0); }
-    if sub == "run"     { run_oodac_run(fs_r, fs_w, sys, env, rest); return Ok(0); }
-    if sub == "gen"     { run_ooda_gen(fs_w, rest); return Ok(0); }
-    if sub == "test" {
-        if list_len(rest) < 1 { println("ooda test: missing file"); process_exit(2); return Ok(2); }
-        run_ooda_test(fs_r, fs_w, sys, env, time, rest);
-        return Ok(0);
-    }
-    if sub == "qa"      { run_ooda_qa(fs_r, fs_w, sys, env, time, rest); return Ok(0); }
-    if sub == "install" { run_ooda_install_cmd(fs_r, sys, env, fs_w, rest); return Ok(0); }
-    if sub == "update" || sub == "upgrade" { run_ooda_update(fs_r, sys, env, rest); return Ok(0); }
-    if sub == "bench"   { run_ooda_bench(fs_r, sys, env, time, rest); return Ok(0); }
-    if sub == "context" { run_ooda_context(fs_r, rest); return Ok(0); }
-    if sub == "health"  { run_ooda_health(fs_r, env, rest); return Ok(0); }
-    if sub == "init" {
-        let name: String = if list_len(rest) > 0 { list_get(rest, 0) } else { "myproject" };
-        let r: Result[String, String] = cli_init_project(fs_r, fs_w, name);
-        if r.is_err() {
-            let e: String = match r { Ok(_) => "", Err(m) => m };
-            return Err(e);
-        }
-        let msg: String = match r { Ok(m) => m, Err(_) => "" };
-        println(msg);
-        return Ok(0);
-    }
-
-    if sub == "fix"    { run_ooda_fix(fs_r, fs_w, sys, env, rest); return Ok(0); }
-    if sub == "digest" { run_ooda_digest(fs_r, rest); return Ok(0); }
-
-    if sub == "fmt" { return Ok(run_ooda_fmt(fs_r, fs_w, alloc, rest)); }
-
-    if sub == "token" { run_ooda_token(fs_r, sys, time, fs_w, rest); return Ok(0); }
-    if sub == "eval" { return run_ooda_eval(fs_r, fs_w, sys, sys_cap, time, rest); }
-    if sub == "repl" { return run_ooda_repl(fs_r, fs_w, sys, sys_cap, time, rest); }
-    if sub == "sandbox" { return run_ooda_sandbox(fs_r, fs_w, sys, sys_cap, env, time, rest); }
-    if sub == "swarm" { return run_ooda_swarm(fs_r, fs_w, sys, sys_cap, time, thread, rest); }
-
-
-    if sub == "opm" { return spawn(fs_r, env, sys, "opm", rest); }
-    if sub == "lsp" { return spawn(fs_r, env, sys, "lsp", rest); }
-    if sub == "mcp" { return spawn(fs_r, env, sys, "mcp", rest); }
+    if sub == "cli"      { return spawn(fs_r, env, sys, "cli", rest); }
+    if sub == "opm"      { return spawn(fs_r, env, sys, "opm", rest); }
+    if sub == "lsp"      { return spawn(fs_r, env, sys, "lsp", rest); }
+    if sub == "mcp"      { return spawn(fs_r, env, sys, "mcp", rest); }
     if sub == "mcp-merge" {
         let mut margs: List[String] = list_new();
         margs = list_push(margs, "mcp-merge");
@@ -97,25 +66,41 @@ pub fn main(bind: &BindCap, fs_r: &FsReadCap, sys: &ProcessCap, sys_cap: &SysCap
         }
         return spawn(fs_r, env, sys, "mcp", margs);
     }
+
+    if sub == "build"   { return forward_to_cli(fs_r, env, sys, "build", rest); }
+    if sub == "run"     { return forward_to_cli(fs_r, env, sys, "run", rest); }
+    if sub == "test"    { return forward_to_cli(fs_r, env, sys, "test", rest); }
+    if sub == "fmt"     { return forward_to_cli(fs_r, env, sys, "fmt", rest); }
+    if sub == "install" { return forward_to_cli(fs_r, env, sys, "install", rest); }
+    if sub == "update" || sub == "upgrade" { return forward_to_cli(fs_r, env, sys, "update", rest); }
+    if sub == "init"    { return forward_to_cli(fs_r, env, sys, "init", rest); }
+    if sub == "qa"      { return forward_to_cli(fs_r, env, sys, "qa", rest); }
+    if sub == "context" { return forward_to_cli(fs_r, env, sys, "context", rest); }
+    if sub == "fix"     { return forward_to_cli(fs_r, env, sys, "fix", rest); }
+    if sub == "token"   { return forward_to_cli(fs_r, env, sys, "token", rest); }
+
+    if sub == "eval"   { println("ooda: eval moved to `ooda-tui` (/eval slash)."); process_exit(2); return Err("ooda: eval moved"); }
+    if sub == "repl"   { println("ooda: repl moved to `ooda-tui` (interactive shell)."); process_exit(2); return Err("ooda: repl moved"); }
+    if sub == "bench"  { println("ooda: bench moved to `bb bench <file>`."); process_exit(2); return Err("ooda: bench moved"); }
+    if sub == "gen"    { println("ooda: gen moved to `opm gen <Kind> <Name>`."); process_exit(2); return Err("ooda: gen moved"); }
+    if sub == "health" { println("ooda: health moved to `bb health`."); process_exit(2); return Err("ooda: health moved"); }
+    if sub == "digest" { println("ooda: digest moved to `bb digest <file>`."); process_exit(2); return Err("ooda: digest moved"); }
+    if sub == "sandbox" { println("ooda: sandbox moved (`status` -> `bb sandbox status`, `run` -> `ooda-tui /sandbox run`)."); process_exit(2); return Err("ooda: sandbox moved"); }
+    if sub == "swarm" { println("ooda: swarm moved (`status` -> `bb swarm status`, `init|run` -> `ooda-tui /teamwork init|run`)."); process_exit(2); return Err("ooda: swarm moved"); }
+
     if sub == "version" || sub == "--version" || sub == "-v" {
-        // Source of truth: OODA_VERSION env var (RULES.oot §1.21).
-        // Fallback to the build-time literal when unset; refresh
-        // on next release.
         let vr: Result[String, String] = env_get(env, "OODA_VERSION");
-        let v: String = match vr {
-            Ok(s) => s,
-            Err(_) => "v0.2.16",
-        };
-        println("ooda " + v);
+        let v: String = match vr { Ok(s) => s, Err(_) => "v0.2.16" };
+        println("ooda " + v + " (router; forwards to cli/opm/lsp/mcp)");
         return Ok(0);
     }
     if sub == "help" || sub == "--help" || sub == "-h" {
-        print_help();
+        router_help();
         return Ok(0);
     }
 
     println("ooda: unknown subcommand: " + sub);
-    print_help();
+    router_help();
     process_exit(2);
     return Err("ooda: unknown subcommand: " + sub);
 }
