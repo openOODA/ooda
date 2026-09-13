@@ -18,7 +18,9 @@
 
 ## This repo: ooda
 
-The `ooda` workflow driver (compile, run, build, test, install).
+Thin back-compat router. Language verbs (`build`, `run`, `test`, `fmt`,
+`install`, `update`, …) spawn the `cli` binary. `opm` / `lsp` / `mcp`
+spawn those drivers. Install `cli` from [openOODA/cli](https://github.com/openOODA/cli).
 
 ## Install
 
