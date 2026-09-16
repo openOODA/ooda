@@ -1,127 +1,143 @@
-# Ooda CLI — Dispatch Pattern
-
+# Ooda Router — Dispatch Pattern
 File: ooda/docs/dispatch.oot
 
-The ooda CLI is a 30-line argv router in `ooda/main.oo`. The full dispatch table is a cascade of `if sub == "<name>"` branches followed by the 3 spawn entries. There is no dynamic plugin loader; the dispatch is hard-coded and readable.
+The ooda binary is a thin argv router in `ooda/main.oo`. Language verbs
+spawn `cli`. Package drivers spawn `opm`, `lsp`, `mcp`, or `tui`.
+Deprecated verbs print a moved error and exit 2. `help` and `version`
+stay in-process. There is no in-process `run_oodac_build` in this tree.
 
 ## The mental model
 
 ```
-user types:  ooda opm add foo
+user types:  ooda build src/main.oo
                 │
                 ▼
         ooda/main.oo argv router
                 │
                 ▼
-        spawn("opm", ["add", "foo"])  ← subprocess, stdio inherited
+        spawn("cli", ["build", "src/main.oo"])
                 │
                 ▼
-        /opm/ binary runs, does its work, exits
+        cli binary runs run_oodac_build
                 │
                 ▼
         ooda exits with the same code
 ```
 
-The same pattern applies to every subcommand, in-process or spawned. The router is the only place that decides which handler runs. Every handler trusts that the router already validated the subcommand name.
+`ooda qa` is the same path: the router forwards to `cli qa`, and cli
+builds `qa/suite.oo`. The router does not run probes itself.
+
+The router is the only place that decides which binary runs. Spawned
+handlers never see `argv[0]` as a router name; they receive the
+subcommand rest (language verbs prepend the verb for cli).
 
 ## The dispatch shape
 
 ```oo
-pub fn main(...args: List[String]) -> Result<Int, String> {
-    if list_len(args) < 1 { print_help(); return Err("missing subcommand"); }
+pub fn main(...args: List[String]) -> Result[Int, String] {
+    if list_len(args) < 1 {
+        return spawn(fs_r, env, sys, "tui", list_new());
+    }
     let sub: String = list_get(args, 0);
     let rest: List[String] = list_slice(args, 1, list_len(args));
 
-    // build cluster — most return void; we wrap to Ok(0)
-    if sub == "build"   { run_oodac_build(...);  return Ok(0); }
-    if sub == "run"     { run_oodac_run(...);    return Ok(0); }
-    if sub == "gen"     { run_ooda_gen(...);     return Ok(0); }
-    ...
-    if sub == "fmt"     { return Ok(run_ooda_fmt(...)); }
+    if sub == "opm" { return spawn(fs_r, env, sys, "opm", rest); }
+    if sub == "lsp" { return spawn(fs_r, env, sys, "lsp", rest); }
+    if sub == "mcp" { return spawn(fs_r, env, sys, "mcp", rest); }
+    if sub == "tui" { return spawn(fs_r, env, sys, "tui", rest); }
 
-    // token cluster — 12 sub-subcommands
-    if sub == "token"   { run_ooda_token(...);   return Ok(0); }
+    if sub == "build" { return forward_to_cli(fs_r, env, sys, "build", rest); }
+    if sub == "qa"    { return forward_to_cli(fs_r, env, sys, "qa", rest); }
 
-    // external packages — spawn, do not link
-    if sub == "opm"     { return spawn("opm", rest); }
-    if sub == "lsp"     { return spawn("lsp", rest); }
-    if sub == "mcp"     { return spawn("mcp", rest); }
+    if sub == "digest" {
+        println("ooda: digest moved to `bb digest <file>`.");
+        process_exit(2);
+        return Err("ooda: digest moved");
+    }
 
-    // unknown
-    print_help();
+    if sub == "help" { router_help(); return Ok(0); }
+    router_help();
+    process_exit(2);
     return Err("ooda: unknown subcommand: " + sub);
 }
 ```
 
-The cascade is `if`-not-`match` because some branches (init) want to inspect `rest[0]` before falling through. A pure `match` would force every branch to extract the same args, which clutters the read.
+`forward_to_cli` prepends `sub` and calls `spawn(..., "cli", margs)`.
+The cascade is `if`, not `match`, so upgrade can alias update and
+mcp-merge can prepend its own verb before spawn.
 
-## The lifecycle: parse, validate, execute, report
-
-Every ooda invocation passes through the same 4 stages, regardless of subcommand.
+## The lifecycle: parse, route, spawn, report
 
 ### 1. Parse
 
-`main.oo` reads `argv[0]` as the subcommand and slices `argv[1..]` as the per-command tail. The slice is the boundary between the router and the handler. Handlers never see `argv[0]`.
+`main.oo` reads `argv[0]` as the subcommand and slices `argv[1..]` as
+the tail. Empty argv opens ooda-tui.
 
-### 2. Validate
+### 2. Route
 
-Each handler validates its own argv. The validation includes: path traversal checks, file existence checks under `FsReadCap`, flag set checks, and cap-aware checks (e.g. the install handler refuses any `--to` outside `OODA_FS_WRITEDIR`). Failures print `ERR\t<cluster>\t<msg>` and `process_exit(2)`.
+Language verbs go to cli. Driver verbs go to that package binary.
+Deprecated verbs (eval, repl, bench, gen, health, digest, sandbox,
+swarm) print a moved line and exit 2. Unknown names print help and
+exit 2.
 
-### 3. Execute
+### 3. Spawn
 
-The handler does its work. For in-process commands, this is plain in-memory ooda code. For spawned commands, `spawn()` in `main.oo` invokes `sys_exec_wait` with the resolved binary path. Stdio is inherited from the parent process.
+`build/spawn.oo` resolves `$OODACODEX/bin/<name>` (or `OODA_CODEX`,
+`~/.openooda/bin`, or dirname of `OODA_COMPILER`). Names with `/` or
+`..` fail closed. There is no `$PATH` lookup. Stdio is inherited.
 
 ### 4. Report
 
-The handler returns. In-process handlers return `Result[Int, String]` or `void`; `main.oo` wraps a `void` return into `Ok(0)`. Spawned handlers return the subprocess's exit code via `Result`. The process exits with that code; the host shell or editor sees it directly.
+Spawned handlers return the child exit code. In-process help and
+version return `Ok(0)`. Moved and unknown paths call `process_exit(2)`.
 
-## The cmd_* naming convention
+## Naming
 
-Inside each subdir, the public entry point follows `run_ooda_<verb>` or `cli_<verb>_<noun>`. The prefix is the file's domain.
+| Name | Where | Role |
+|------|-------|------|
+| `forward_to_cli` | `main.oo` | spawn cli with `[sub, ...rest]` |
+| `spawn` | `build/spawn.oo` | resolve and exec an external binary |
+| `router_help` | `main.oo` | print the router table |
+| `run_oodac_build` | `cli/build/host_build.oo` | not called from ooda/main.oo |
 
-| Prefix | Files | Examples |
-|--------|-------|----------|
-| `run_ooda_<verb>` | every per-command file | `run_oodac_build`, `run_ooda_fix`, `run_ooda_token` |
-| `cli_<verb>_<noun>` | init | `cli_init_project` |
-| `cmd_<noun>` | token sub-subcommand files | `cmd_token_status`, `cmd_token_report` |
-| `find_` / `refuse_` / `require_` | helper entry points | `find_oodac`, `refuse_cli`, `require_writedir` |
-
-The `cmd_*` pattern in `token/` is the closest the ooda/ tree comes to a generic dispatcher: `cmd_token.oo` reads rest[0] as the sub-subcommand and calls the matching `cmd_*.oo` function. The names are stable; the dispatch is a string compare.
-
-## Why subprocess for opm, lsp, mcp?
+## Why subprocess for cli, opm, lsp, mcp, tui?
 
 | Question | Answer |
 |----------|--------|
-| Why subprocess? | Version decoupling. opm, lsp, mcp each have their own VERSION. No lockstep. |
-| Why stdio-inherited? | Editors connect their stdio to ooda; lsp/mcp need that stdio. Subprocess stdio is inherited by default. |
-| Why is ooda the meta-router? | One command, many packages. No need to remember `opm`, `lsp`, `mcp`, `ooda build` separately. |
-| Why no library link? | Linking creates a hard version dep. opm 0.8 would force ooda to re-release. |
+| Why subprocess? | Version decoupling. Each driver has its own VERSION. |
+| Why stdio-inherited? | Editors connect stdio to ooda; lsp/mcp need that stdio. |
+| Why is ooda the meta-router? | One command, many packages. |
+| Why no library link? | Linking creates a hard version dep. |
 
-## What goes into ooda/ (in-process)
+## What stays in-process
 
-- Build, deliver, introspect: build, run, gen, test, install, update, bench, init, context, health
-- Text operations: fix, digest
-- Formatter: fmt
-- Token subsystem: token (12 sub-subcommands)
+- `help`, `--help`, `-h`
+- `version`, `--version`, `-v`
+- Moved-error printers (exit 2)
 
-These all run in-process because they do not have their own packages. The ooda binary is the only home for them.
+These do not have their own packages. The ooda binary is the only home.
 
-## What gets spawned (external packages)
+## What gets spawned
 
-- `opm` (from /opm/ repo)
-- `lsp` (from /lsp/ repo)
-- `mcp` (from /mcp/ repo)
+Language CLI (forwarded as `cli <sub>`):
 
-These all run as subprocesses at `$OODACODEX/bin/<name>`. ooda does not link them. OODACODEX is required.
+- build, run, test, fmt, install, update, upgrade, init, qa, context, fix, token
+
+External drivers:
+
+- `opm`, `lsp`, `mcp`, `tui`
+- `mcp-merge` spawns `mcp` with a leading `mcp-merge` verb
+
+`run_oodac_build` lives in cli. `bb digest` / `bb bench` / `bb health`
+live in bb. `opm gen` lives in opm. eval/repl and sandbox/swarm run
+paths live in ooda-tui.
 
 ## Failure paths
 
 | Failure | Source | Exit code | Output |
 |---------|--------|-----------|--------|
-| missing subcommand | `main.oo` | 2 | help text + `Err("ooda: missing subcommand")` |
+| empty argv | `main.oo` | child | opens ooda-tui |
 | unknown subcommand | `main.oo` | 2 | help text + `Err("ooda: unknown subcommand: <name>")` |
-| missing file arg | per-command | 2 | `ERR\t<cluster>\t<msg>` |
-| unreadable file | per-command | 2 | `ERR\t<cluster>\tunreadable file: <path>` |
-| traversal / unsafe path | per-command | 1 or 2 | `ERR\t<cluster>\trejected traversal: <path>` |
-| cap denied | runtime | 1 | `E_CAP: ...` |
-| subprocess failure | spawn | 1 | whatever the subprocess printed |
+| moved verb | `main.oo` | 2 | `ooda: <verb> moved ...` |
+| missing spawn binary | `build/spawn.oo` | 1 | `ERR spawn <msg>` |
+| subprocess failure | spawn | child | whatever the child printed |
