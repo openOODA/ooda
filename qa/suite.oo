@@ -14,14 +14,14 @@ import "std/fs/process/env.oo";
 import "std/fs/file/glob.oo";
 import "std/core/text/natural_sort.oo";
 
-fn run_probe_once(p: &ProcessCap, oodac: String, path: String) -> Result[Int, String] {
+fn run_probe_once(p: &ProcessCap, oodac: String, path: String, home: String) -> Result[Int, String] {
     let tmp_bin: String = path + ".tmp.bin";
     let b: Result[String, String] = sys_exec(p, oodac, "build", path, "-o", tmp_bin);
     if b.is_err() {
         let e: String = match b { Ok(_) => "", Err(m) => m };
         return Err("compile fail " + path + ": " + e);
     }
-    let r: Result[String, String] = sys_exec(p, "env", "OODA_COMPILER=" + oodac, tmp_bin);
+    let r: Result[String, String] = sys_exec(p, "env", "OODA_COMPILER=" + oodac, "OODA_HOME=" + home, tmp_bin);
     let _del: Result[String, String] = sys_exec(p, "rm", "-f", tmp_bin);
     if r.is_err() {
         let e: String = match r { Ok(_) => "", Err(m) => m };
@@ -30,15 +30,32 @@ fn run_probe_once(p: &ProcessCap, oodac: String, path: String) -> Result[Int, St
     return Ok(0);
 }
 
-fn run_probe_twice(p: &ProcessCap, oodac: String, path: String) -> Result[Int, String] {
-    let r1: Result[Int, String] = run_probe_once(p, oodac, path);
+fn run_probe_twice(p: &ProcessCap, oodac: String, path: String, home: String) -> Result[Int, String] {
+    let r1: Result[Int, String] = run_probe_once(p, oodac, path, home);
     if r1.is_err() { return r1; }
-    let r2: Result[Int, String] = run_probe_once(p, oodac, path);
+    let r2: Result[Int, String] = run_probe_once(p, oodac, path, home);
     if r2.is_err() { return r2; }
     return Ok(0);
 }
 
 pub fn main(p: &ProcessCap, fs_r: &FsReadCap, env: &EnvCap, args: List[String]) -> Result[Int, String] {
+    let hr: Result[String, String] = env_get(env, "HOME");
+    let mut home: String = match hr { Ok(s) => s, Err(_) => "" };
+    if home == "" {
+        let ohr: Result[String, String] = env_get(env, "OODA_HOME");
+        home = match ohr { Ok(s) => s, Err(_) => "" };
+    }
+    if home == "" {
+        let oor: Result[String, String] = env_get(env, "OO_HOME");
+        home = match oor { Ok(s) => s, Err(_) => "" };
+    }
+    if home == "" {
+        if path_exists(fs_r, "/home/ubermetroid/.openooda") {
+            home = "/home/ubermetroid";
+        } else if path_exists(fs_r, "/home/runner/.openooda") {
+            home = "/home/runner";
+        }
+    }
     let cr: Result[String, String] = env_get(env, "OODA_COMPILER");
     let mut oodac: String = match cr { Ok(s) => s, Err(_) => "" };
     if oodac == "" {
@@ -47,16 +64,26 @@ pub fn main(p: &ProcessCap, fs_r: &FsReadCap, env: &EnvCap, args: List[String]) 
         if th != "" { oodac = th + "/bin/oodac"; }
     }
     if oodac == "" {
-        let hr: Result[String, String] = env_get(env, "HOME");
-        let home: String = match hr { Ok(s) => s, Err(_) => "" };
         if home != "" { oodac = home + "/.openooda/bin/oodac"; }
     }
     if oodac == "" || !path_exists(fs_r, oodac) {
         return Err("no compiler (OODA_COMPILER, OODA_TOOLCHAIN, or HOME layout)");
     }
 
-    let found: List[String] = glob_scan_dir(fs_r, "qa", "probe_*.oo");
-    let ps: List[String] = natural_sort_list(found);
+    let found1: List[String] = glob_scan_dir(fs_r, "qa/driver", "probe_*.oo");
+    let found2: List[String] = glob_scan_dir(fs_r, "qa/runtime", "probe_*.oo");
+    let mut combined: List[String] = list_new();
+    let mut gi: Int = 0;
+    while gi < list_len(found1) {
+        combined = list_push(combined, list_get(found1, gi));
+        gi = gi + 1;
+    }
+    gi = 0;
+    while gi < list_len(found2) {
+        combined = list_push(combined, list_get(found2, gi));
+        gi = gi + 1;
+    }
+    let ps: List[String] = natural_sort_list(combined);
     if list_len(ps) < 13 {
         return Err("probe floor violated: found " + list_len(ps).to_string() + ", need >= 13 under qa/");
     }
@@ -68,7 +95,7 @@ pub fn main(p: &ProcessCap, fs_r: &FsReadCap, env: &EnvCap, args: List[String]) 
     while i < list_len(ps) {
         let path: String = list_get(ps, i);
         println("  Running " + path);
-        let r: Result[Int, String] = run_probe_twice(p, oodac, path);
+        let r: Result[Int, String] = run_probe_twice(p, oodac, path, home);
         if r.is_err() {
             let msg: String = match r { Ok(_) => "", Err(e) => e };
             println("ERR " + path + ": " + msg);
